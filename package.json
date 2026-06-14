@@ -1,0 +1,33 @@
+{
+  "name": "@fro-bot/dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Read-only Fro Bot monitoring dashboard",
+  "type": "module",
+  "scripts": {
+    "bootstrap": "pnpm install",
+    "dev": "node --watch src/server.ts",
+    "start": "node src/server.ts",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.4",
+    "hono": "^4.7.11"
+  },
+  "devDependencies": {
+    "@bfra.me/eslint-config": "0.51.0",
+    "@bfra.me/tsconfig": "0.13.0",
+    "@types/node": "24.12.0",
+    "eslint": "10.4.0",
+    "eslint-plugin-erasable-syntax-only": "0.4.0",
+    "jiti": "2.7.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.4"
+  },
+  "packageManager": "pnpm@11.5.0",
+  "engines": {
+    "node": ">=24"
+  }
+}
