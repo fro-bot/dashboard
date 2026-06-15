@@ -9,7 +9,7 @@ on:
   issues:
     types: [opened, edited]
   pull_request:
-    types: [synchronize, ready_for_review, reopened, review_requested]
+    types: [opened, synchronize, ready_for_review, reopened, review_requested]
   schedule:
     - cron: '0 0 * * *'
   workflow_dispatch:
@@ -38,6 +38,15 @@ env:
     read-only monitoring dashboard (Node 24 native TS, pnpm, no build step).
     Focus on correctness, security, and breaking changes. Prefer false positives
     over false negatives for security issues.
+
+    Review the diff directly. Do NOT invoke `ce:review` or any other `ce:*`
+    skill (ce:work, ce:plan, ce:brainstorm, ce:compound, etc.). Those are
+    heavy multi-agent workflows meant for authoring changes, not reviewing
+    them — `ce:review` in particular is run by the author before pushing, so
+    repeating it here is redundant and makes the review take far too long.
+    Read the changed files yourself and form your own assessment with the
+    standard tools (read, grep, git diff). A focused single-pass review is
+    the goal.
 
     Scope:
     - Correctness and edge cases: verify logic handles error paths, empty
