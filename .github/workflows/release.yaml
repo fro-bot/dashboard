@@ -55,12 +55,16 @@ jobs:
           # Persist the App token so `git push` of the CalVer tag is authored by fro-bot[bot].
           token: ${{ steps.app-token.outputs.token }}
 
+      # GHCR only accepts GITHUB_TOKEN (same-repo packages) or a classic PAT — NOT a
+      # GitHub App installation token. The job's packages:write permission scopes this
+      # GITHUB_TOKEN to push ghcr.io/<this repo>. The App token is still used for the
+      # identity-sensitive git tag push + GitHub Release below (fro-bot[bot] authorship).
       - name: 🔑 Log in to GHCR
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           registry: ghcr.io
-          username: x-access-token
-          password: ${{ steps.app-token.outputs.token }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 🔧 Set up Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
@@ -90,10 +94,13 @@ jobs:
             if curl -fsS http://127.0.0.1:8080/api/healthz >/dev/null 2>&1; then ok=1; break; fi
             sleep 1
           done
-          # sibling-container reachability (mimics Caddy -> app over docker network)
+          # sibling-container reachability: run a throwaway container on the same smoke-net
+          # network hitting the service by container name — mimics Caddy -> app over docker
+          # network (catches a 127.0.0.1-only bind that passes the host-port poll but would
+          # cause 502s from a reverse proxy reaching the app by service name).
           sib=0
-          if docker exec dashboard-smoke node -e \
-              "fetch('http://localhost:3000/api/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" \
+          if docker run --rm --network smoke-net "$IMG" node -e \
+              "fetch('http://dashboard-smoke:3000/api/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" \
               >/dev/null 2>&1; then sib=1; fi
           if [ "$ok" != 1 ] || [ "$sib" != 1 ]; then
             echo "SMOKE FAILED (host_port_ok=$ok sibling_ok=$sib)"
