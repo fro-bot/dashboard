@@ -273,13 +273,11 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
-          # Check out PR code for PR-attached events; otherwise the workflow ref.
-          ref: >-
-            ${{
-              (github.event.issue.pull_request && format('refs/pull/{0}/head', github.event.issue.number))
-              || github.event.pull_request.head.sha
-              || ''
-            }}
+          # Always check out the default/workflow ref — never PR-head code. On
+          # issue_comment the fork guard cannot see PR fork status (the event has
+          # no github.event.pull_request), so checking out refs/pull/<n>/head would
+          # run fork-controlled code with FRO_BOT_PAT present. Default checkout
+          # closes that secret-exfiltration vector.
           token: ${{ secrets.FRO_BOT_PAT }}
 
       - name: 📦 Setup
