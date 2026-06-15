@@ -5,7 +5,8 @@
  * Accepts an optional config object for testability (inject fake OAuth client,
  * cookie key, operator login). When called with no args, reads from env.
  *
- * `createDashboardServer()` — binds the app to 127.0.0.1:3000.
+ * `createDashboardServer()` — binds the app to `DASHBOARD_HOST:DASHBOARD_PORT`
+ * (default `0.0.0.0:3000`) so a sibling reverse-proxy container can reach it.
  *
  * Mirrors the gateway's buildAnnounceApp/createAnnounceServer split for future
  * @fro.bot/runtime extraction.
@@ -430,9 +431,49 @@ export function buildSnapshotProvider(deps: SnapshotProviderDeps): {
   }
 }
 
+/** Resolved server bind address. */
+export interface ServerBindConfig {
+  readonly host: string
+  readonly port: number
+}
+
 /**
- * Binds the app to 127.0.0.1:3000 via @hono/node-server.
- * Loads the cookie key asynchronously before starting.
+ * Resolve the server bind host/port from the environment.
+ *
+ * Defaults to `0.0.0.0:3000`. The dashboard runs inside a container behind a
+ * reverse proxy (Caddy) in a sibling container, so it MUST bind a non-loopback
+ * address to be reachable across the Compose network — `127.0.0.1` only accepts
+ * connections from inside the app's own network namespace, which makes the
+ * container's own healthcheck pass while every proxied request 502s.
+ *
+ * Binding `0.0.0.0` does not expose the app publicly: the container only
+ * publishes the port to the internal Compose network, and Caddy terminates TLS
+ * and fronts auth. Override with `DASHBOARD_HOST` (e.g. `127.0.0.1` for a
+ * non-containerized local run) and `DASHBOARD_PORT`.
+ *
+ * Extracted so the bind behavior is testable without opening a real port.
+ * Throws on an invalid `DASHBOARD_PORT` (fail loud rather than bind a surprise port).
+ */
+export function readServerBindConfig(env: NodeJS.ProcessEnv = process.env): ServerBindConfig {
+  const rawHost = env.DASHBOARD_HOST?.trim()
+  const host = rawHost !== undefined && rawHost !== '' ? rawHost : '0.0.0.0'
+
+  const rawPort = env.DASHBOARD_PORT?.trim()
+  let port = 3000
+  if (rawPort !== undefined && rawPort !== '') {
+    const parsed = Number(rawPort)
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+      throw new Error(`DASHBOARD_PORT must be an integer in 1-65535, got: ${rawPort}`)
+    }
+    port = parsed
+  }
+
+  return {host, port}
+}
+
+/**
+ * Binds the app to `DASHBOARD_HOST:DASHBOARD_PORT` (default `0.0.0.0:3000`) via
+ * @hono/node-server. Loads the cookie key asynchronously before starting.
  */
 async function createDashboardServer(): Promise<ServerType> {
   const cookieKey = await loadCookieKey()
@@ -465,11 +506,12 @@ async function createDashboardServer(): Promise<ServerType> {
 
   const app = buildDashboardApp({cookieKey, getSnapshot})
 
+  const {host, port} = readServerBindConfig()
   const server = serve(
     {
       fetch: app.fetch,
-      hostname: '127.0.0.1',
-      port: 3000,
+      hostname: host,
+      port,
     },
     info => {
       console.warn(`Dashboard listening on http://${info.address}:${info.port}`)
