@@ -72,6 +72,12 @@ export interface RepoRecord {
   readonly owner: string
   readonly name: string
   readonly full_name: string
+  /**
+   * The installation ID that produced this repo record.
+   * Required for per-repo GraphQL authentication — each repo must be queried
+   * with a token minted for the installation that can see it.
+   */
+  readonly installation_id: number
 }
 
 export interface InstallationRecord {
@@ -106,12 +112,13 @@ export interface InstallationsClient {
    */
   readonly mintInstallationToken: (
     installationId: number,
-    permissions: Record<string, string>,
+    permissions: Record<string, 'read'>,
   ) => Promise<string>
   /**
    * List all repos accessible to the given installation token.
+   * Returns records without installation_id — enumerateRepos attaches it.
    */
-  readonly listInstallationRepos: (token: string) => Promise<readonly RepoRecord[]>
+  readonly listInstallationRepos: (token: string) => Promise<readonly Omit<RepoRecord, 'installation_id'>[]>
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +162,7 @@ function setCachedToken(installationId: number, token: string, expiresAt: Date |
  */
 export async function mintReadOnlyToken(
   installationId: number,
-  mintFn: (installationId: number, permissions: Record<string, string>) => Promise<string>,
+  mintFn: (installationId: number, permissions: Record<string, 'read'>) => Promise<string>,
 ): Promise<string> {
   // Check cache first
   const cached = getCachedToken(installationId)
@@ -219,7 +226,7 @@ export async function enumerateRepos(
       continue
     }
 
-    let repos: readonly RepoRecord[]
+    let repos: readonly Omit<RepoRecord, 'installation_id'>[]
     try {
       repos = await client.listInstallationRepos(token)
     } catch (repoError) {
@@ -232,7 +239,10 @@ export async function enumerateRepos(
 
     for (const repo of repos) {
       if (!reposByNodeId.has(repo.node_id)) {
-        reposByNodeId.set(repo.node_id, repo)
+        // Attach the producing installation's id — required for per-repo GraphQL auth.
+        // First-seen-wins dedupe: the retained record's installation_id is always an
+        // installation that actually saw this repo.
+        reposByNodeId.set(repo.node_id, {...repo, installation_id: installation.id})
       }
     }
   }
@@ -247,10 +257,10 @@ export async function enumerateRepos(
 // Real client factory (uses DashboardAppClient)
 // ---------------------------------------------------------------------------
 
-async function listInstallationReposWithToken(token: string): Promise<readonly RepoRecord[]> {
+async function listInstallationReposWithToken(token: string): Promise<readonly Omit<RepoRecord, 'installation_id'>[]> {
   const installOctokit = new Octokit({auth: token})
 
-  const repos: RepoRecord[] = []
+  const repos: Omit<RepoRecord, 'installation_id'>[] = []
   let page = 1
   while (true) {
     const response = await installOctokit.request('GET /installation/repositories', {

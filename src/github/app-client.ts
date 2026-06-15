@@ -36,16 +36,20 @@ export interface AppClientOptions {
 export interface DashboardAppClient {
   /**
    * The underlying Octokit instance authenticated as the App (JWT-level).
-   * Use for App-level endpoints like `apps.listInstallations`.
+   * Use for App-level endpoints like `apps.listInstallations` and
+   * `GET /repos/{owner}/{repo}/installation`.
    */
   readonly octokit: InstanceType<typeof ThrottledOctokit>
   /**
    * Mint a read-only installation token for the given installation ID.
    * Returns the raw token string. NEVER log this value.
+   *
+   * The permissions type is `Record<string, 'read'>` — write/admin scopes are
+   * unrepresentable at the dashboard boundary by construction.
    */
   readonly mintInstallationToken: (
     installationId: number,
-    permissions: Record<string, string>,
+    permissions: Record<string, 'read'>,
   ) => Promise<string>
 }
 
@@ -79,12 +83,12 @@ export function createDashboardAppClient(options: AppClientOptions): DashboardAp
 
   async function mintInstallationToken(
     installationId: number,
-    permissions: Record<string, string>,
+    permissions: Record<string, 'read'>,
   ): Promise<string> {
     const installAuth = createAppAuth({appId, privateKey, installationId})
     const result = await installAuth({
       type: 'installation',
-      permissions: permissions as Record<string, 'read' | 'write' | 'admin'>,
+      permissions: permissions as unknown as Record<string, 'read' | 'write' | 'admin'>,
     })
     return result.token
   }

@@ -35,8 +35,22 @@ import {isErr, isOk} from '../result.ts'
 /**
  * A single GraphQL query function. Accepts a query string and variables,
  * returns the raw response data. Injectable so tests never hit the network.
+ *
+ * @deprecated Use GraphqlQueryForInstallationFn instead — this type is kept
+ * for backward compatibility with existing tests that inject graphqlQuery.
  */
 export type GraphqlQueryFn = (query: string, variables: Record<string, unknown>) => Promise<unknown>
+
+/**
+ * Per-installation GraphQL query function. Accepts an installationId so the
+ * implementation can mint the correct credential for each repo.
+ * Injectable so tests never hit the network.
+ */
+export type GraphqlQueryForInstallationFn = (
+  installationId: number,
+  query: string,
+  variables: Record<string, unknown>,
+) => Promise<unknown>
 
 // ---------------------------------------------------------------------------
 // Phase-1 signal types
@@ -143,6 +157,40 @@ const REPO_STATUS_QUERY = `
   }
 `
 
+/**
+ * Fallback query variant without vulnerabilityAlerts — used when the token
+ * lacks the security_events/vulnerability_alerts scope. openAlertCount is set
+ * to null (not stale) when this variant is used.
+ */
+const REPO_STATUS_QUERY_NO_ALERTS = `
+  query RepoStatusNoAlerts($owner: String!, $name: String!) {
+    repository(owner: $owner, name: $name) {
+      defaultBranchRef {
+        target {
+          ... on Commit {
+            statusCheckRollup {
+              state
+            }
+            checkSuites(first: 10) {
+              nodes {
+                checkRuns(first: 50, filterBy: { status: COMPLETED, conclusions: [FAILURE, TIMED_OUT, CANCELLED, ACTION_REQUIRED, STARTUP_FAILURE] }) {
+                  totalCount
+                }
+              }
+            }
+          }
+        }
+      }
+      pullRequests(states: OPEN) {
+        totalCount
+      }
+      issues(states: OPEN) {
+        totalCount
+      }
+    }
+  }
+`
+
 interface GraphqlRepoResponse {
   repository: {
     defaultBranchRef: {
@@ -155,7 +203,7 @@ interface GraphqlRepoResponse {
     } | null
     pullRequests: {totalCount: number}
     issues: {totalCount: number}
-    vulnerabilityAlerts: {totalCount: number} | null
+    vulnerabilityAlerts?: {totalCount: number} | null
   } | null
 }
 
@@ -196,14 +244,23 @@ export interface AggregatorDeps {
   readonly enumerate: (client: InstallationsClient) => Promise<Result<EnumerateReposResult, unknown>>
   /** Read repo metadata + denylist */
   readonly readMetadata: (reader: MetadataReader) => Promise<Result<MetadataResult, MetadataError>>
-  /** Injectable GraphQL query function — tests inject a fake */
-  readonly graphqlQuery: GraphqlQueryFn
+  /**
+   * Per-installation GraphQL query function — tests inject a fake.
+   * The installationId is used to mint the correct credential for each repo.
+   */
+  readonly graphqlQueryForInstallation: GraphqlQueryForInstallationFn
   /** Injectable clock (defaults to Date.now) */
   readonly now?: () => number
   /** Injectable setInterval (defaults to global setInterval) */
   readonly setIntervalFn?: (fn: () => void, ms: number) => ReturnType<typeof setInterval>
   /** Injectable clearInterval (defaults to global clearInterval) */
   readonly clearIntervalFn?: (id: ReturnType<typeof setInterval>) => void
+  /**
+   * Optional: resolve the installation ID for a repo by owner/name.
+   * Used for metadata-only public repos that have no installation_id from the
+   * enumeration channel. If absent, such repos are skipped (not queried).
+   */
+  readonly resolveInstallationIdForRepo?: (owner: string, name: string) => Promise<number>
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +273,12 @@ interface WorkingSetEntry {
   readonly name: string
   readonly full_name: string
   readonly discovery_channel: string
+  /**
+   * The installation ID that can authenticate GraphQL queries for this repo.
+   * INTERNAL ONLY — never exposed in DashboardRepo or AggregatorSnapshot.
+   * null means no installation was found; the repo will be skipped or marked stale.
+   */
+  readonly installation_id: number | null
 }
 
 /**
@@ -257,7 +320,7 @@ interface WorkingSetEntry {
  *   denylistComplete indicates whether ALL redacted entries contributed a databaseId.
  */
 function buildWorkingSet(
-  installRepos: readonly {node_id: string; database_id: number; owner: string; name: string; full_name: string}[],
+  installRepos: readonly {node_id: string; database_id: number; owner: string; name: string; full_name: string; installation_id: number}[],
   metadata: MetadataResult,
 ): {workingSet: WorkingSetEntry[]; driftCount: number; denylistComplete: boolean} {
   const {publicRepos, redactedNodeIds, redactedDatabaseIds} = metadata
@@ -283,26 +346,39 @@ function buildWorkingSet(
     }
   }
 
-  // Index publicRepos by node_id for O(1) lookup
-  const publicByNodeId = new Map<string, (typeof publicRepos)[number]>()
-  for (const pub of publicRepos) {
-    publicByNodeId.set(pub.node_id, pub)
+  // Index install repos by node_id AND database_id for O(1) lookup.
+  // This is the auth-context index: when a metadata publicRepo matches an install
+  // repo, we use the install repo's installation_id (the only valid auth context).
+  const installByNodeId = new Map<string, (typeof installRepos)[number]>()
+  const installByDatabaseId = new Map<number, (typeof installRepos)[number]>()
+  for (const repo of installRepos) {
+    installByNodeId.set(repo.node_id, repo)
+    installByDatabaseId.set(repo.database_id, repo)
   }
 
-  // Union: start with publicRepos (they have authoritative channel labels)
+  // Union: start with publicRepos (they have authoritative channel labels).
+  // For each publicRepo, look up the matching install repo to get installation_id.
+  // If no match, installation_id is null (will be resolved later or skipped).
   const unionByNodeId = new Map<string, WorkingSetEntry>()
   for (const pub of publicRepos) {
     // *** DENYLIST CHECK — publicRepos should never contain redacted entries,
     // but we double-check here for defense-in-depth ***
-    if (!redactedNodeIds.has(pub.node_id)) {
-      unionByNodeId.set(pub.node_id, {
-        node_id: pub.node_id,
-        owner: pub.owner,
-        name: pub.name,
-        full_name: `${pub.owner}/${pub.name}`,
-        discovery_channel: pub.discovery_channel,
-      })
+    if (redactedNodeIds.has(pub.node_id)) {
+      continue
     }
+
+    // Look up the install repo to get the installation_id (auth context).
+    const installRepo = installByNodeId.get(pub.node_id)
+    const installationId = installRepo?.installation_id ?? null
+
+    unionByNodeId.set(pub.node_id, {
+      node_id: pub.node_id,
+      owner: pub.owner,
+      name: pub.name,
+      full_name: `${pub.owner}/${pub.name}`,
+      discovery_channel: pub.discovery_channel,
+      installation_id: installationId,
+    })
   }
 
   // Add installation repos not already in the union
@@ -327,6 +403,7 @@ function buildWorkingSet(
         name: repo.name,
         full_name: repo.full_name,
         discovery_channel: 'discovered',
+        installation_id: repo.installation_id,
       })
       driftCount++
     }
@@ -339,41 +416,102 @@ function buildWorkingSet(
 // Per-repo GraphQL fetch
 // ---------------------------------------------------------------------------
 
+/**
+ * Detect whether a GraphQL error is specifically about the vulnerabilityAlerts
+ * field being inaccessible (permission/scope error).
+ */
+function isVulnerabilityAlertsPermissionError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const msg = error.message.toLowerCase()
+  // GitHub GraphQL returns errors like:
+  //   "Must have push access to view vulnerability alerts."
+  //   "Resource not accessible by integration"
+  //   "Field 'vulnerabilityAlerts' doesn't exist on type 'Repository'"
+  return (
+    msg.includes('vulnerabilityalerts') ||
+    msg.includes('vulnerability_alerts') ||
+    msg.includes('vulnerability alerts') ||
+    (msg.includes('push access') && msg.includes('vulnerability'))
+  )
+}
+
+/**
+ * Parse a GraphQL response into a RepoCiStatus, with openAlertCount from the response
+ * (or null if the field is absent/null).
+ */
+function parseRepoResponse(raw: unknown, fetchedAt: number, openAlertCount: number | null): RepoCiStatus {
+  const data = raw as GraphqlRepoResponse
+
+  const repo = data.repository
+  if (repo === null || repo === undefined) {
+    return {rollupState: 'unknown', failingChecks: 0, openPrCount: 0, openIssueCount: 0, openAlertCount: null, stale: false, fetchedAt}
+  }
+
+  const target = repo.defaultBranchRef?.target
+  const rollupRaw = target?.statusCheckRollup?.state
+  const rollupState = mapRollupState(rollupRaw)
+
+  // Sum failing check runs across all check suites
+  let failingChecks = 0
+  if (target?.checkSuites?.nodes) {
+    for (const suite of target.checkSuites.nodes) {
+      failingChecks += suite.checkRuns.totalCount
+    }
+  }
+
+  const openPrCount = repo.pullRequests.totalCount
+  const openIssueCount = repo.issues.totalCount
+
+  // Use the provided openAlertCount (may be from the response or null if no-alerts variant)
+  const alertCount = openAlertCount ?? (repo.vulnerabilityAlerts?.totalCount ?? null)
+
+  return {rollupState, failingChecks, openPrCount, openIssueCount, openAlertCount: alertCount, stale: false, fetchedAt}
+}
+
 async function fetchRepoStatus(
   entry: WorkingSetEntry,
-  graphqlQuery: GraphqlQueryFn,
+  graphqlQueryForInstallation: GraphqlQueryForInstallationFn,
   now: () => number,
 ): Promise<RepoCiStatus> {
   const fetchedAt = now()
+
+  // installation_id must be present — if null, we cannot authenticate the query
+  if (entry.installation_id === null) {
+    logger.warning('No installation_id for repo; marking stale', {
+      owner: entry.owner,
+      name: entry.name,
+    })
+    return {rollupState: 'unknown', failingChecks: 0, openPrCount: 0, openIssueCount: 0, openAlertCount: null, stale: true, fetchedAt}
+  }
+
+  const installationId = entry.installation_id
+  const vars = {owner: entry.owner, name: entry.name}
+
   try {
-    const raw = await graphqlQuery(REPO_STATUS_QUERY, {owner: entry.owner, name: entry.name})
-    const data = raw as GraphqlRepoResponse
-
-    const repo = data.repository
-    if (repo === null || repo === undefined) {
-      return {rollupState: 'unknown', failingChecks: 0, openPrCount: 0, openIssueCount: 0, openAlertCount: null, stale: false, fetchedAt}
-    }
-
-    const target = repo.defaultBranchRef?.target
-    const rollupRaw = target?.statusCheckRollup?.state
-    const rollupState = mapRollupState(rollupRaw)
-
-    // Sum failing check runs across all check suites
-    let failingChecks = 0
-    if (target?.checkSuites?.nodes) {
-      for (const suite of target.checkSuites.nodes) {
-        failingChecks += suite.checkRuns.totalCount
+    const raw = await graphqlQueryForInstallation(installationId, REPO_STATUS_QUERY, vars)
+    return parseRepoResponse(raw, fetchedAt, null)
+  } catch (error) {
+    // P1 #11: if the error is specifically about vulnerabilityAlerts permission,
+    // retry without that field and set openAlertCount = null (not stale).
+    if (isVulnerabilityAlertsPermissionError(error)) {
+      logger.warning('vulnerabilityAlerts permission error; retrying without alerts field', {
+        owner: entry.owner,
+        name: entry.name,
+      })
+      try {
+        const raw = await graphqlQueryForInstallation(installationId, REPO_STATUS_QUERY_NO_ALERTS, vars)
+        // Parse with openAlertCount=null (alerts unavailable, not stale)
+        return parseRepoResponse(raw, fetchedAt, null)
+      } catch (retryError) {
+        logger.warning('Per-repo GraphQL fetch failed (no-alerts retry); marking stale', {
+          owner: entry.owner,
+          name: entry.name,
+          error: sanitizeErrorMessage(retryError instanceof Error ? retryError.message : String(retryError)),
+        })
+        return {rollupState: 'unknown', failingChecks: 0, openPrCount: 0, openIssueCount: 0, openAlertCount: null, stale: true, fetchedAt}
       }
     }
 
-    const openPrCount = repo.pullRequests.totalCount
-    const openIssueCount = repo.issues.totalCount
-
-    // Security alerts: may be null if permission unavailable — handle gracefully
-    const openAlertCount = repo.vulnerabilityAlerts?.totalCount ?? null
-
-    return {rollupState, failingChecks, openPrCount, openIssueCount, openAlertCount, stale: false, fetchedAt}
-  } catch (error) {
     logger.warning('Per-repo GraphQL fetch failed; marking stale', {
       owner: entry.owner,
       name: entry.name,
@@ -401,7 +539,7 @@ export function createAggregator(
   metadataReader: MetadataReader,
   deps: AggregatorDeps,
 ) {
-  const {graphqlQuery} = deps
+  const {graphqlQueryForInstallation} = deps
   const now = deps.now ?? (() => Date.now())
   const setIntervalFn = deps.setIntervalFn ?? ((fn, ms) => setInterval(fn, ms))
   const clearIntervalFn = deps.clearIntervalFn ?? (id => clearInterval(id))
@@ -451,7 +589,7 @@ export function createAggregator(
     // 2. Enumerate installation repos
     const enumerateResult = await deps.enumerate(installationsClient)
 
-    let installRepos: readonly {node_id: string; database_id: number; owner: string; name: string; full_name: string}[] = []
+    let installRepos: readonly {node_id: string; database_id: number; owner: string; name: string; full_name: string; installation_id: number}[] = []
     let enumerationFailed = false
     if (isOk(enumerateResult)) {
       installRepos = enumerateResult.data.repos
@@ -463,7 +601,39 @@ export function createAggregator(
     }
 
     // 3. Build working set — DENYLIST-BEFORE-QUERY applied here
-    const {workingSet, driftCount, denylistComplete} = buildWorkingSet(installRepos, metadata)
+    const {workingSet: rawWorkingSet, driftCount, denylistComplete} = buildWorkingSet(installRepos, metadata)
+
+    // Resolve installation_id for metadata-only repos (those with installation_id=null).
+    // These are public repos in metadata that weren't found in the installation channel.
+    // We use resolveInstallationIdForRepo (App JWT endpoint) to find the right installation.
+    // If unavailable or resolution fails, the repo is skipped (not queried without auth context).
+    let workingSet: WorkingSetEntry[]
+    if (deps.resolveInstallationIdForRepo === undefined) {
+      // No resolver: filter out repos with no installation_id (cannot query safely)
+      workingSet = rawWorkingSet.filter(e => e.installation_id !== null)
+    } else {
+      const resolveInstallation = deps.resolveInstallationIdForRepo
+      const resolvedEntries: WorkingSetEntry[] = []
+      for (const entry of rawWorkingSet) {
+        if (entry.installation_id !== null) {
+          resolvedEntries.push(entry)
+          continue
+        }
+        // Metadata-only repo: resolve installation_id via App JWT
+        try {
+          const resolvedId = await resolveInstallation(entry.owner, entry.name)
+          resolvedEntries.push({...entry, installation_id: resolvedId})
+        } catch (resolveError) {
+          logger.warning('Could not resolve installation for metadata-only repo; skipping', {
+            owner: entry.owner,
+            name: entry.name,
+            error: sanitizeErrorMessage(resolveError instanceof Error ? resolveError.message : String(resolveError)),
+          })
+          // Skip: no valid auth context — do NOT query with an ambient token
+        }
+      }
+      workingSet = resolvedEntries
+    }
 
     // Warn if cross-format denylist protection is partial (new-format node_ids that
     // couldn't be decoded to a databaseId). The primary node_id guard still applies;
@@ -500,7 +670,7 @@ export function createAggregator(
         continue
       }
 
-      const status = await fetchRepoStatus(entry, graphqlQuery, now)
+      const status = await fetchRepoStatus(entry, graphqlQueryForInstallation, now)
       cache.set(entry.node_id, {fetchedAt: status.fetchedAt, payload: status})
       dashboardRepos.push({
         node_id: entry.node_id,

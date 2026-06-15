@@ -29,6 +29,7 @@ function makeRepo(overrides: Partial<RepoRecord> = {}): RepoRecord {
     owner: 'fro-bot',
     name: 'agent',
     full_name: 'fro-bot/agent',
+    installation_id: 1,
     ...overrides,
   }
 }

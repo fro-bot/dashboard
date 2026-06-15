@@ -9,7 +9,7 @@
  * All tests inject fakes — no network calls, no real timers.
  */
 
-import type {AggregatorDeps, GraphqlQueryFn} from '../src/github/aggregator.ts'
+import type {AggregatorDeps, GraphqlQueryForInstallationFn} from '../src/github/aggregator.ts'
 import type {EnumerateReposResult} from '../src/github/installations.ts'
 import type {MetadataResult} from '../src/github/metadata.ts'
 import type {Result} from '../src/result.ts'
@@ -24,7 +24,7 @@ import {err, ok} from '../src/result.ts'
 // Fixtures + helpers
 // ---------------------------------------------------------------------------
 
-function makeRepo(overrides: {node_id?: string; database_id?: number; owner?: string; name?: string; full_name?: string} = {}) {
+function makeRepo(overrides: {node_id?: string; database_id?: number; owner?: string; name?: string; full_name?: string; installation_id?: number} = {}) {
   const owner = overrides.owner ?? 'fro-bot'
   const name = overrides.name ?? 'agent'
   return {
@@ -33,6 +33,7 @@ function makeRepo(overrides: {node_id?: string; database_id?: number; owner?: st
     owner,
     name,
     full_name: overrides.full_name ?? `${owner}/${name}`,
+    installation_id: overrides.installation_id ?? 1,
   }
 }
 
@@ -115,7 +116,7 @@ function makeDeps(overrides: Partial<AggregatorDeps> = {}): AggregatorDeps {
   return {
     enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([])),
     readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult())),
-    graphqlQuery: vi.fn().mockResolvedValue(makeGraphqlResponse()),
+    graphqlQueryForInstallation: vi.fn().mockResolvedValue(makeGraphqlResponse()),
     now: () => {
       t += 1
       return t
@@ -136,7 +137,7 @@ describe('aggregator — happy path: CI state mapping', () => {
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
         publicRepos: [makePublicRepo({node_id: 'NODE_A', owner: 'org', name: 'repo-a'})],
       }))),
-      graphqlQuery: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'})),
+      graphqlQueryForInstallation: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'})),
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -155,7 +156,7 @@ describe('aggregator — happy path: CI state mapping', () => {
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
         publicRepos: [makePublicRepo({node_id: 'NODE_B', owner: 'org', name: 'repo-b'})],
       }))),
-      graphqlQuery: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'FAILURE'})),
+      graphqlQueryForInstallation: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'FAILURE'})),
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -172,7 +173,7 @@ describe('aggregator — happy path: CI state mapping', () => {
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
         publicRepos: [makePublicRepo({node_id: 'NODE_C', owner: 'org', name: 'repo-c'})],
       }))),
-      graphqlQuery: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'PENDING'})),
+      graphqlQueryForInstallation: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'PENDING'})),
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -189,7 +190,7 @@ describe('aggregator — happy path: CI state mapping', () => {
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
         publicRepos: [makePublicRepo({node_id: 'NODE_D', owner: 'org', name: 'repo-d'})],
       }))),
-      graphqlQuery: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'ERROR'})),
+      graphqlQueryForInstallation: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'ERROR'})),
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -206,7 +207,7 @@ describe('aggregator — happy path: CI state mapping', () => {
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
         publicRepos: [makePublicRepo({node_id: 'NODE_E', owner: 'org', name: 'repo-e'})],
       }))),
-      graphqlQuery: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: undefined})),
+      graphqlQueryForInstallation: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: undefined})),
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -223,7 +224,7 @@ describe('aggregator — happy path: CI state mapping', () => {
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
         publicRepos: [makePublicRepo({node_id: 'NODE_F', owner: 'org', name: 'repo-f'})],
       }))),
-      graphqlQuery: vi.fn().mockResolvedValue(makeGraphqlResponse({
+      graphqlQueryForInstallation: vi.fn().mockResolvedValue(makeGraphqlResponse({
         rollupState: 'SUCCESS',
         openPrCount: 3,
         openIssueCount: 7,
@@ -250,7 +251,7 @@ describe('aggregator — happy path: attention-first sorting', () => {
     const repoHealthy = makeRepo({node_id: 'NODE_HEALTHY', owner: 'org', name: 'healthy'})
     const repoFailing = makeRepo({node_id: 'NODE_FAILING', owner: 'org', name: 'failing'})
 
-    const graphqlQuery: GraphqlQueryFn = vi.fn().mockImplementation(async (_query, vars) => {
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockImplementation(async (_installId, _query, vars) => {
       if ((vars as {name: string}).name === 'failing') {
         return makeGraphqlResponse({rollupState: 'FAILURE', failingChecks: 3})
       }
@@ -265,7 +266,7 @@ describe('aggregator — happy path: attention-first sorting', () => {
           makePublicRepo({node_id: 'NODE_FAILING', owner: 'org', name: 'failing'}),
         ],
       }))),
-      graphqlQuery,
+      graphqlQueryForInstallation,
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -281,7 +282,7 @@ describe('aggregator — happy path: attention-first sorting', () => {
     const repoHealthy = makeRepo({node_id: 'NODE_H2', owner: 'org', name: 'healthy2'})
     const repoAlerts = makeRepo({node_id: 'NODE_ALERTS', owner: 'org', name: 'alerts'})
 
-    const graphqlQuery: GraphqlQueryFn = vi.fn().mockImplementation(async (_query, vars) => {
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockImplementation(async (_installId, _query, vars) => {
       if ((vars as {name: string}).name === 'alerts') {
         return makeGraphqlResponse({rollupState: 'SUCCESS', openAlertCount: 5})
       }
@@ -296,7 +297,7 @@ describe('aggregator — happy path: attention-first sorting', () => {
           makePublicRepo({node_id: 'NODE_ALERTS', owner: 'org', name: 'alerts'}),
         ],
       }))),
-      graphqlQuery,
+      graphqlQueryForInstallation,
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -311,7 +312,7 @@ describe('aggregator — happy path: attention-first sorting', () => {
     const repoNoPr = makeRepo({node_id: 'NODE_NOPR', owner: 'org', name: 'no-pr'})
     const repoPr = makeRepo({node_id: 'NODE_PR', owner: 'org', name: 'has-pr'})
 
-    const graphqlQuery: GraphqlQueryFn = vi.fn().mockImplementation(async (_query, vars) => {
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockImplementation(async (_installId, _query, vars) => {
       if ((vars as {name: string}).name === 'has-pr') {
         return makeGraphqlResponse({rollupState: 'SUCCESS', openPrCount: 2})
       }
@@ -326,7 +327,7 @@ describe('aggregator — happy path: attention-first sorting', () => {
           makePublicRepo({node_id: 'NODE_PR', owner: 'org', name: 'has-pr'}),
         ],
       }))),
-      graphqlQuery,
+      graphqlQueryForInstallation,
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -347,7 +348,7 @@ describe('aggregator — edge cases', () => {
     const deps = makeDeps({
       enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([])),
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult())),
-      graphqlQuery: vi.fn(),
+      graphqlQueryForInstallation: vi.fn(),
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -358,7 +359,7 @@ describe('aggregator — edge cases', () => {
     expect(snap.staleBanner).toBe(false)
     expect(snap.driftCount).toBe(0)
     // GraphQL should never be called for empty set
-    expect(deps.graphqlQuery).not.toHaveBeenCalled()
+    expect(deps.graphqlQueryForInstallation).not.toHaveBeenCalled()
   })
 
   it('repo with no PRs/issues/alerts → shown healthy', async () => {
@@ -368,7 +369,7 @@ describe('aggregator — edge cases', () => {
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
         publicRepos: [makePublicRepo({node_id: 'NODE_CLEAN', owner: 'org', name: 'clean'})],
       }))),
-      graphqlQuery: vi.fn().mockResolvedValue(makeGraphqlResponse({
+      graphqlQueryForInstallation: vi.fn().mockResolvedValue(makeGraphqlResponse({
         rollupState: 'SUCCESS',
         openPrCount: 0,
         openIssueCount: 0,
@@ -406,7 +407,7 @@ describe('aggregator — edge cases', () => {
         publicRepos: [], // not in metadata
         redactedNodeIds: [],
       }))),
-      graphqlQuery: vi.fn().mockResolvedValue(makeGraphqlResponse()),
+      graphqlQueryForInstallation: vi.fn().mockResolvedValue(makeGraphqlResponse()),
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -425,7 +426,7 @@ describe('aggregator — edge cases', () => {
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
         publicRepos: [makePublicRepo({node_id: 'NODE_COLLAB', owner: 'org', name: 'collab-repo', discovery_channel: 'collab'})],
       }))),
-      graphqlQuery: vi.fn().mockResolvedValue(makeGraphqlResponse()),
+      graphqlQueryForInstallation: vi.fn().mockResolvedValue(makeGraphqlResponse()),
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -442,7 +443,7 @@ describe('aggregator — edge cases', () => {
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
         publicRepos: [makePublicRepo({node_id: 'NODE_NOALERT', owner: 'org', name: 'no-alert'})],
       }))),
-      graphqlQuery: vi.fn().mockResolvedValue(makeGraphqlResponse({openAlertCount: null})),
+      graphqlQueryForInstallation: vi.fn().mockResolvedValue(makeGraphqlResponse({openAlertCount: null})),
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -462,7 +463,7 @@ describe('aggregator — error paths', () => {
     const repoA = makeRepo({node_id: 'NODE_OK', owner: 'org', name: 'ok-repo'})
     const repoB = makeRepo({node_id: 'NODE_FAIL', owner: 'org', name: 'fail-repo'})
 
-    const graphqlQuery: GraphqlQueryFn = vi.fn().mockImplementation(async (_query, vars) => {
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockImplementation(async (_installId, _query, vars) => {
       if ((vars as {name: string}).name === 'fail-repo') {
         throw new Error('GraphQL timeout')
       }
@@ -477,7 +478,7 @@ describe('aggregator — error paths', () => {
           makePublicRepo({node_id: 'NODE_FAIL', owner: 'org', name: 'fail-repo'}),
         ],
       }))),
-      graphqlQuery,
+      graphqlQueryForInstallation,
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -496,13 +497,15 @@ describe('aggregator — error paths', () => {
     expect(snap.staleBanner).toBe(false)
   })
 
-  it('installation enumeration failure → uses empty install set, still queries metadata publicRepos, staleBanner=true', async () => {
+  it('installation enumeration failure → uses empty install set, still queries metadata publicRepos (with resolver), staleBanner=true', async () => {
     const deps = makeDeps({
       enumerate: vi.fn().mockResolvedValue(err(new FetchInstallationsError('network down'))),
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
         publicRepos: [makePublicRepo({node_id: 'NODE_META', owner: 'org', name: 'meta-repo'})],
       }))),
-      graphqlQuery: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'})),
+      graphqlQueryForInstallation: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'})),
+      // Provide a resolver so metadata-only repos can be queried even when enumeration fails
+      resolveInstallationIdForRepo: vi.fn().mockResolvedValue(1),
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -532,7 +535,7 @@ describe('aggregator — cache refresh with fake timers', () => {
 
   it('cache refresh replaces stale payload after interval', async () => {
     let callCount = 0
-    const graphqlQuery: GraphqlQueryFn = vi.fn().mockImplementation(async () => {
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockImplementation(async () => {
       callCount++
       if (callCount === 1) {
         return makeGraphqlResponse({rollupState: 'SUCCESS'})
@@ -548,7 +551,7 @@ describe('aggregator — cache refresh with fake timers', () => {
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
         publicRepos: [makePublicRepo({node_id: 'NODE_TIMER', owner: 'org', name: 'timer-repo'})],
       }))),
-      graphqlQuery,
+      graphqlQueryForInstallation,
       now: () => {
         nowMs += 70_000 // advance past 60s TTL on each call
         return nowMs
@@ -591,7 +594,7 @@ describe('security — denylist-before-query', () => {
     })
     const publicRepo = makeRepo({node_id: 'NODE_PUBLIC', owner: 'org', name: 'public'})
 
-    const graphqlQuery: GraphqlQueryFn = vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'}))
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'}))
 
     const deps = makeDeps({
       enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([privateRepo, publicRepo])),
@@ -599,21 +602,22 @@ describe('security — denylist-before-query', () => {
         publicRepos: [makePublicRepo({node_id: 'NODE_PUBLIC', owner: 'org', name: 'public'})],
         redactedNodeIds: [REDACTED_NODE_ID], // private repo is denylisted
       }))),
-      graphqlQuery,
+      graphqlQueryForInstallation,
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
     await agg.refresh()
 
     // Assert: GraphQL was called (for the public repo)
-    expect(graphqlQuery).toHaveBeenCalled()
+    expect(graphqlQueryForInstallation).toHaveBeenCalled()
 
     // Assert: GraphQL was NEVER called with the denylisted node_id as owner/name
     // (We check call args — the query uses owner+name, not node_id directly,
     // but the denylisted repo's owner/name must never appear in any call)
-    const calls = (graphqlQuery as ReturnType<typeof vi.fn>).mock.calls
+    // Note: args are (installationId, query, vars) — vars is at index 2
+    const calls = (graphqlQueryForInstallation as ReturnType<typeof vi.fn>).mock.calls
     for (const call of calls) {
-      const vars = call[1] as {owner: string; name: string}
+      const vars = call[2] as {owner: string; name: string}
       // The private repo's owner and name must never appear in any GraphQL call
       expect(vars.owner).not.toBe('private-org')
       expect(vars.name).not.toBe('secret-repo')
@@ -639,7 +643,7 @@ describe('security — denylist-before-query', () => {
         publicRepos: [makePublicRepo({node_id: 'NODE_PUB2', owner: 'org', name: 'pub2'})],
         redactedNodeIds: [REDACTED_NODE_ID],
       }))),
-      graphqlQuery: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'})),
+      graphqlQueryForInstallation: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'})),
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -669,7 +673,7 @@ describe('security — denylist-before-query', () => {
     })
     const publicRepo = makeRepo({node_id: 'NODE_PUBLIC_FM', database_id: 9999, owner: 'org', name: 'public-fm'})
 
-    const graphqlQuery: GraphqlQueryFn = vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'}))
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'}))
 
     const deps = makeDeps({
       enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([privateRepo, publicRepo])),
@@ -680,19 +684,20 @@ describe('security — denylist-before-query', () => {
         // But metadata also has the database_id — this IS the format-independent match
         redactedDatabaseIds: [SHARED_DATABASE_ID],
       }))),
-      graphqlQuery,
+      graphqlQueryForInstallation,
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
     await agg.refresh()
 
     // GraphQL was called (for the public repo)
-    expect(graphqlQuery).toHaveBeenCalled()
+    expect(graphqlQueryForInstallation).toHaveBeenCalled()
 
     // GraphQL was NEVER called for the private repo — database_id match caught it
-    const calls = (graphqlQuery as ReturnType<typeof vi.fn>).mock.calls
+    // Note: args are (installationId, query, vars) — vars is at index 2
+    const calls = (graphqlQueryForInstallation as ReturnType<typeof vi.fn>).mock.calls
     for (const call of calls) {
-      const vars = call[1] as {owner: string; name: string}
+      const vars = call[2] as {owner: string; name: string}
       expect(vars.owner).not.toBe('private-org')
       expect(vars.name).not.toBe('format-mismatch-repo')
     }
@@ -717,7 +722,7 @@ describe('security — denylist-before-query', () => {
     })
     const publicRepo = makeRepo({node_id: 'NODE_SAFE_SF', database_id: 88888, owner: 'org', name: 'safe-sf'})
 
-    const graphqlQuery: GraphqlQueryFn = vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'}))
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'}))
 
     const deps = makeDeps({
       enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([privateRepo, publicRepo])),
@@ -726,16 +731,17 @@ describe('security — denylist-before-query', () => {
         redactedNodeIds: [REDACTED_NODE_ID], // same format — primary match
         redactedDatabaseIds: [], // no database_id in metadata
       }))),
-      graphqlQuery,
+      graphqlQueryForInstallation,
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
     await agg.refresh()
 
     // Only 1 call — for the safe public repo
-    expect(graphqlQuery).toHaveBeenCalledTimes(1)
-    const call = (graphqlQuery as ReturnType<typeof vi.fn>).mock.calls[0]
-    const vars = call?.[1] as {owner: string; name: string}
+    // Note: args are (installationId, query, vars) — vars is at index 2
+    expect(graphqlQueryForInstallation).toHaveBeenCalledTimes(1)
+    const call = (graphqlQueryForInstallation as ReturnType<typeof vi.fn>).mock.calls[0]
+    const vars = call?.[2] as {owner: string; name: string}
     expect(vars.name).toBe('safe-sf')
   })
 
@@ -746,7 +752,7 @@ describe('security — denylist-before-query', () => {
     )
     const publicRepo = makeRepo({node_id: 'NODE_SAFE', owner: 'org', name: 'safe'})
 
-    const graphqlQuery: GraphqlQueryFn = vi.fn().mockResolvedValue(makeGraphqlResponse())
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockResolvedValue(makeGraphqlResponse())
 
     const deps = makeDeps({
       enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([...privateRepos, publicRepo])),
@@ -754,16 +760,17 @@ describe('security — denylist-before-query', () => {
         publicRepos: [makePublicRepo({node_id: 'NODE_SAFE', owner: 'org', name: 'safe'})],
         redactedNodeIds: REDACTED_IDS,
       }))),
-      graphqlQuery,
+      graphqlQueryForInstallation,
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
     await agg.refresh()
 
     // Only 1 call — for the safe public repo
-    expect(graphqlQuery).toHaveBeenCalledTimes(1)
-    const call = (graphqlQuery as ReturnType<typeof vi.fn>).mock.calls[0]
-    const vars = call?.[1] as {owner: string; name: string}
+    // Note: args are (installationId, query, vars) — vars is at index 2
+    expect(graphqlQueryForInstallation).toHaveBeenCalledTimes(1)
+    const call = (graphqlQueryForInstallation as ReturnType<typeof vi.fn>).mock.calls[0]
+    const vars = call?.[2] as {owner: string; name: string}
     expect(vars.owner).toBe('org')
     expect(vars.name).toBe('safe')
   })
@@ -776,19 +783,19 @@ describe('security — denylist-before-query', () => {
 describe('security — fail-closed on denylist unavailability', () => {
   it('when readMetadata returns err, GraphQL is NOT called for installation repos', async () => {
     const installRepo = makeRepo({node_id: 'NODE_INSTALL', owner: 'org', name: 'install-repo'})
-    const graphqlQuery: GraphqlQueryFn = vi.fn()
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn()
 
     const deps = makeDeps({
       enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([installRepo])),
       readMetadata: vi.fn().mockResolvedValue(err(new MetadataUnavailableError('data branch missing'))),
-      graphqlQuery,
+      graphqlQueryForInstallation,
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
     await agg.refresh()
 
     // GraphQL must NEVER be called — no fresh union was built
-    expect(graphqlQuery).not.toHaveBeenCalled()
+    expect(graphqlQueryForInstallation).not.toHaveBeenCalled()
   })
 
   it('when readMetadata returns err on cold start, snapshot is empty with staleBanner=true', async () => {
@@ -797,7 +804,7 @@ describe('security — fail-closed on denylist unavailability', () => {
         makeRepo({node_id: 'NODE_WOULD_LEAK', owner: 'org', name: 'would-leak'}),
       ])),
       readMetadata: vi.fn().mockResolvedValue(err(new MetadataUnavailableError('data branch missing'))),
-      graphqlQuery: vi.fn(),
+      graphqlQueryForInstallation: vi.fn(),
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -822,7 +829,7 @@ describe('security — fail-closed on denylist unavailability', () => {
     const deps = makeDeps({
       enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([repo])),
       readMetadata,
-      graphqlQuery: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'})),
+      graphqlQueryForInstallation: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'})),
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -842,19 +849,19 @@ describe('security — fail-closed on denylist unavailability', () => {
   })
 
   it('fail-closed works for MetadataTransportError variant', async () => {
-    const graphqlQuery: GraphqlQueryFn = vi.fn()
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn()
     const deps = makeDeps({
       enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([
         makeRepo({node_id: 'NODE_TRANSPORT', owner: 'org', name: 'transport-repo'}),
       ])),
       readMetadata: vi.fn().mockResolvedValue(err(new MetadataTransportError('network error'))),
-      graphqlQuery,
+      graphqlQueryForInstallation,
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
     await agg.refresh()
 
-    expect(graphqlQuery).not.toHaveBeenCalled()
+    expect(graphqlQueryForInstallation).not.toHaveBeenCalled()
     expect(agg.getSnapshot().staleBanner).toBe(true)
   })
 
@@ -867,7 +874,7 @@ describe('security — fail-closed on denylist unavailability', () => {
         makeRepo({node_id: WOULD_LEAK_NODE, owner: 'org', name: WOULD_LEAK_NAME}),
       ])),
       readMetadata: vi.fn().mockResolvedValue(err(new MetadataUnavailableError('unavailable'))),
-      graphqlQuery: vi.fn(),
+      graphqlQueryForInstallation: vi.fn(),
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -903,7 +910,7 @@ describe('security — cross-format gap closure via derived databaseId from lega
     })
     const publicRepo = makeRepo({node_id: 'NODE_PUBLIC_LEGACY', database_id: 9999, owner: 'org', name: 'public-legacy'})
 
-    const graphqlQuery: GraphqlQueryFn = vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'}))
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'}))
 
     const deps = makeDeps({
       enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([privateRepo, publicRepo])),
@@ -916,19 +923,20 @@ describe('security — cross-format gap closure via derived databaseId from lega
         // Here we inject it directly to test the aggregator's secondary guard.
         redactedDatabaseIds: [SHARED_DATABASE_ID],
       }))),
-      graphqlQuery,
+      graphqlQueryForInstallation,
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
     await agg.refresh()
 
     // GraphQL was called (for the public repo)
-    expect(graphqlQuery).toHaveBeenCalled()
+    expect(graphqlQueryForInstallation).toHaveBeenCalled()
 
     // GraphQL was NEVER called for the private repo — derived databaseId match caught it
-    const calls = (graphqlQuery as ReturnType<typeof vi.fn>).mock.calls
+    // Note: args are (installationId, query, vars) — vars is at index 2
+    const calls = (graphqlQueryForInstallation as ReturnType<typeof vi.fn>).mock.calls
     for (const call of calls) {
-      const vars = call[1] as {owner: string; name: string}
+      const vars = call[2] as {owner: string; name: string}
       expect(vars.owner).not.toBe('marcusrbrown')
       expect(vars.name).not.toBe('dotfiles')
     }
@@ -953,7 +961,7 @@ describe('aggregator — enumeration failure sets staleBanner=true', () => {
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
         publicRepos: [],
       }))),
-      graphqlQuery: vi.fn(),
+      graphqlQueryForInstallation: vi.fn(),
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -964,13 +972,15 @@ describe('aggregator — enumeration failure sets staleBanner=true', () => {
     expect(snap.staleBanner).toBe(true)
   })
 
-  it('enumeration err with metadata publicRepos → repos shown but staleBanner=true', async () => {
+  it('enumeration err with metadata publicRepos → repos shown (with resolver) but staleBanner=true', async () => {
     const deps = makeDeps({
       enumerate: vi.fn().mockResolvedValue(err(new FetchInstallationsError('timeout'))),
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
         publicRepos: [makePublicRepo({node_id: 'NODE_PUB_ENUM_FAIL', owner: 'org', name: 'pub-enum-fail'})],
       }))),
-      graphqlQuery: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'})),
+      graphqlQueryForInstallation: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'})),
+      // Provide a resolver so metadata-only repos can be queried even when enumeration fails
+      resolveInstallationIdForRepo: vi.fn().mockResolvedValue(1),
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -994,7 +1004,7 @@ describe('security — error log sanitization', () => {
     const FAKE_TOKEN = 'ghs_FAKEFAKEFAKEFAKEFAKE123456'
     const repo = makeRepo({node_id: 'NODE_SANITIZE_GQL', owner: 'org', name: 'sanitize-gql'})
 
-    const graphqlQuery: GraphqlQueryFn = vi.fn().mockImplementation(async () => {
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockImplementation(async () => {
       throw new Error(`GraphQL auth failed: ${FAKE_TOKEN}`)
     })
 
@@ -1003,7 +1013,7 @@ describe('security — error log sanitization', () => {
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
         publicRepos: [makePublicRepo({node_id: 'NODE_SANITIZE_GQL', owner: 'org', name: 'sanitize-gql'})],
       }))),
-      graphqlQuery,
+      graphqlQueryForInstallation,
     })
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -1034,7 +1044,7 @@ describe('security — error log sanitization', () => {
     const FAKE_PEM_FRAGMENT = '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Z3VS5JJ\n-----END RSA PRIVATE KEY-----'
     const repo = makeRepo({node_id: 'NODE_SANITIZE_PEM', owner: 'org', name: 'sanitize-pem'})
 
-    const graphqlQuery: GraphqlQueryFn = vi.fn().mockImplementation(async () => {
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockImplementation(async () => {
       throw new Error(`Auth error: ${FAKE_PEM_FRAGMENT}`)
     })
 
@@ -1043,7 +1053,7 @@ describe('security — error log sanitization', () => {
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
         publicRepos: [makePublicRepo({node_id: 'NODE_SANITIZE_PEM', owner: 'org', name: 'sanitize-pem'})],
       }))),
-      graphqlQuery,
+      graphqlQueryForInstallation,
     })
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -1075,7 +1085,7 @@ describe('security — error log sanitization', () => {
       readMetadata: vi.fn().mockResolvedValue(
         err({message: `Metadata fetch failed: ${FAKE_TOKEN}`, name: 'MetadataTransportError'} as unknown as import('../src/github/metadata.ts').MetadataError),
       ),
-      graphqlQuery: vi.fn(),
+      graphqlQueryForInstallation: vi.fn(),
     })
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -1107,7 +1117,7 @@ describe('security — error log sanitization', () => {
         err(new FetchInstallationsError(`Network error: ${FAKE_TOKEN}`)),
       ),
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult())),
-      graphqlQuery: vi.fn(),
+      graphqlQueryForInstallation: vi.fn(),
     })
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -1149,7 +1159,7 @@ describe('security — source-channel labels', () => {
         publicRepos: [], // none in metadata
         redactedNodeIds: [],
       }))),
-      graphqlQuery: vi.fn().mockResolvedValue(makeGraphqlResponse()),
+      graphqlQueryForInstallation: vi.fn().mockResolvedValue(makeGraphqlResponse()),
     })
 
     const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
@@ -1159,5 +1169,232 @@ describe('security — source-channel labels', () => {
     // driftCount is just a number
     expect(snap.driftCount).toBe(2)
     expect(typeof snap.driftCount).toBe('number')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P1 Regression tests: two-install GraphQL uses correct installation per repo
+// ---------------------------------------------------------------------------
+
+describe('P1 regression — two-install GraphQL uses correct installation_id per repo', () => {
+  it('install 1 → marcusrbrown/ha-config, install 2 → fro-bot/agent: each uses its own installation', async () => {
+    // Two repos from two different installations.
+    // The fake graphqlQueryForInstallation only accepts the correct installationId for each repo.
+    const repoA = makeRepo({node_id: 'NODE_HA', owner: 'marcusrbrown', name: 'ha-config', installation_id: 1})
+    const repoB = makeRepo({node_id: 'NODE_AGENT', owner: 'fro-bot', name: 'agent', installation_id: 2})
+
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockImplementation(
+      async (installId: number, _query: string, vars: Record<string, unknown>) => {
+        const owner = vars.owner as string
+        // install 1 only accepts marcusrbrown repos
+        if (installId === 1 && owner !== 'marcusrbrown') {
+          throw new Error(`install 1 cannot access ${owner}`)
+        }
+        // install 2 only accepts fro-bot repos
+        if (installId === 2 && owner !== 'fro-bot') {
+          throw new Error(`install 2 cannot access ${owner}`)
+        }
+        return makeGraphqlResponse({rollupState: 'SUCCESS'})
+      },
+    )
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([repoA, repoB])),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
+        publicRepos: [
+          makePublicRepo({node_id: 'NODE_HA', owner: 'marcusrbrown', name: 'ha-config'}),
+          makePublicRepo({node_id: 'NODE_AGENT', owner: 'fro-bot', name: 'agent'}),
+        ],
+      }))),
+      graphqlQueryForInstallation,
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+    const snap = agg.getSnapshot()
+
+    // Both repos fetched non-stale — each used the correct installation
+    expect(snap.repos).toHaveLength(2)
+    const haRepo = snap.repos.find(r => r.node_id === 'NODE_HA')
+    const agentRepo = snap.repos.find(r => r.node_id === 'NODE_AGENT')
+    expect(haRepo?.status.stale).toBe(false)
+    expect(agentRepo?.status.stale).toBe(false)
+
+    // Verify calls used the correct installationId for each repo
+    const calls = (graphqlQueryForInstallation as ReturnType<typeof vi.fn>).mock.calls
+    expect(calls).toHaveLength(2)
+    const haCall = calls.find(c => (c[2] as {owner: string}).owner === 'marcusrbrown')
+    const agentCall = calls.find(c => (c[2] as {owner: string}).owner === 'fro-bot')
+    expect(haCall?.[0]).toBe(1) // install 1 for marcusrbrown
+    expect(agentCall?.[0]).toBe(2) // install 2 for fro-bot
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P1 Regression tests: overlay provenance (metadata + install → uses install_id)
+// ---------------------------------------------------------------------------
+
+describe('P1 regression — overlay provenance: metadata publicRepo + install repo → uses install installation_id', () => {
+  it('publicRepo in metadata + same node_id in installRepos with installation_id:2 → query uses installation_id:2', async () => {
+    // fro-bot/agent is in both metadata (publicRepos) and installRepos (installation_id:2).
+    // The working set must use installation_id:2 (from the install channel) while keeping
+    // the metadata discovery_channel label.
+    const installRepo = makeRepo({node_id: 'NODE_AGENT', owner: 'fro-bot', name: 'agent', installation_id: 2})
+
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockResolvedValue(
+      makeGraphqlResponse({rollupState: 'SUCCESS'}),
+    )
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([installRepo])),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
+        publicRepos: [makePublicRepo({node_id: 'NODE_AGENT', owner: 'fro-bot', name: 'agent', discovery_channel: 'collab'})],
+      }))),
+      graphqlQueryForInstallation,
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+    const snap = agg.getSnapshot()
+
+    expect(snap.repos).toHaveLength(1)
+    const repo = snap.repos[0]
+    // Metadata discovery_channel preserved
+    expect(repo?.discovery_channel).toBe('collab')
+    // Not stale — query succeeded
+    expect(repo?.status.stale).toBe(false)
+
+    // Query used installation_id:2 (from install channel, not a default)
+    const calls = (graphqlQueryForInstallation as ReturnType<typeof vi.fn>).mock.calls
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.[0]).toBe(2) // installationId arg
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P1 Regression tests: vulnerabilityAlerts graceful degradation
+// ---------------------------------------------------------------------------
+
+describe('P1 regression — vulnerabilityAlerts graceful: permission error → openAlertCount:null, not stale', () => {
+  it('repo whose query errors on vulnerabilityAlerts → openAlertCount:null, repo NOT stale, other fields present', async () => {
+    const repo = makeRepo({node_id: 'NODE_NOALERT_PERM', owner: 'org', name: 'no-alert-perm', installation_id: 1})
+
+    let callCount = 0
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockImplementation(
+      async (_installId: number, _query: string, _vars: Record<string, unknown>) => {
+        callCount++
+        if (callCount === 1) {
+          // First call (with vulnerabilityAlerts): throw a permission error
+          throw new Error('Must have push access to view vulnerability alerts.')
+        }
+        // Second call (no-alerts variant): succeed
+        // Return a response without vulnerabilityAlerts field
+        return {
+          repository: {
+            defaultBranchRef: {
+              target: {
+                statusCheckRollup: {state: 'SUCCESS'},
+                checkSuites: {nodes: []},
+              },
+            },
+            pullRequests: {totalCount: 1},
+            issues: {totalCount: 2},
+            // No vulnerabilityAlerts field — the no-alerts query variant
+          },
+        }
+      },
+    )
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([repo])),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
+        publicRepos: [makePublicRepo({node_id: 'NODE_NOALERT_PERM', owner: 'org', name: 'no-alert-perm'})],
+      }))),
+      graphqlQueryForInstallation,
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+    const snap = agg.getSnapshot()
+
+    expect(snap.repos).toHaveLength(1)
+    const repoStatus = snap.repos[0]?.status
+
+    // openAlertCount is null (permission unavailable), NOT stale
+    expect(repoStatus?.openAlertCount).toBeNull()
+    expect(repoStatus?.stale).toBe(false)
+
+    // Other fields are present and correct
+    expect(repoStatus?.rollupState).toBe('green')
+    expect(repoStatus?.openPrCount).toBe(1)
+    expect(repoStatus?.openIssueCount).toBe(2)
+
+    // Two calls were made: first with alerts (failed), second without (succeeded)
+    expect(callCount).toBe(2)
+  })
+
+  it('repo with non-permission GraphQL error → stale (not graceful retry)', async () => {
+    const repo = makeRepo({node_id: 'NODE_REAL_FAIL', owner: 'org', name: 'real-fail', installation_id: 1})
+
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockImplementation(async () => {
+      throw new Error('GraphQL network timeout')
+    })
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([repo])),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
+        publicRepos: [makePublicRepo({node_id: 'NODE_REAL_FAIL', owner: 'org', name: 'real-fail'})],
+      }))),
+      graphqlQueryForInstallation,
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+    const snap = agg.getSnapshot()
+
+    expect(snap.repos).toHaveLength(1)
+    // Non-permission error → stale
+    expect(snap.repos[0]?.status.stale).toBe(true)
+    // Only one call (no retry for non-permission errors)
+    expect((graphqlQueryForInstallation as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P1 Regression tests: per-install token cache (no cross-install reuse)
+// ---------------------------------------------------------------------------
+
+describe('P1 regression — per-install token cache: no cross-install reuse', () => {
+  it('mintReadOnlyToken(1)=>token-1, (2)=>token-2: no cross-install reuse; repeated same install reuses cache', async () => {
+    const {mintReadOnlyToken} = await import('../src/github/installations.ts')
+
+    // Use unique IDs to avoid cache hits from other tests
+    const INSTALL_ID_1 = 8001
+    const INSTALL_ID_2 = 8002
+
+    const mintFn = vi.fn()
+      .mockResolvedValueOnce('token-for-8001')
+      .mockResolvedValueOnce('token-for-8002')
+      .mockResolvedValue('should-not-be-called-again')
+
+    // First call for each installation
+    const token1a = await mintReadOnlyToken(INSTALL_ID_1, mintFn)
+    const token2a = await mintReadOnlyToken(INSTALL_ID_2, mintFn)
+
+    // Tokens are different (no cross-install reuse)
+    expect(token1a).toBe('token-for-8001')
+    expect(token2a).toBe('token-for-8002')
+    expect(token1a).not.toBe(token2a)
+
+    // Second call for each installation — should hit cache (no new mint)
+    const token1b = await mintReadOnlyToken(INSTALL_ID_1, mintFn)
+    const token2b = await mintReadOnlyToken(INSTALL_ID_2, mintFn)
+
+    // Cache hit: same tokens returned
+    expect(token1b).toBe('token-for-8001')
+    expect(token2b).toBe('token-for-8002')
+
+    // mintFn called exactly twice (once per installation, cache hit on repeat)
+    expect(mintFn).toHaveBeenCalledTimes(2)
   })
 })

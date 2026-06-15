@@ -22,13 +22,14 @@ import {Buffer} from 'node:buffer'
 import process from 'node:process'
 import {serve} from '@hono/node-server'
 import {getConnInfo} from '@hono/node-server/conninfo'
+import {Octokit} from '@octokit/core'
 import {graphql} from '@octokit/graphql'
 import {Hono} from 'hono'
 import {getCookie} from 'hono/cookie'
 import {fetchGitHubUserLogin, makeGitHubOAuthClient} from './auth/oauth.ts'
 import {createAggregator} from './github/aggregator.ts'
 import {createDashboardAppClient} from './github/app-client.ts'
-import {buildInstallationsClient, enumerateRepos} from './github/installations.ts'
+import {buildInstallationsClient, enumerateRepos, mintReadOnlyToken} from './github/installations.ts'
 import {makeNotFoundError, readRepoMetadata} from './github/metadata.ts'
 import {logger, sanitizeErrorMessage} from './logger.ts'
 import {buildApiRouter} from './routes/api.ts'
@@ -322,8 +323,16 @@ export interface SnapshotProviderDeps {
   readonly enumerateFn?: typeof enumerateRepos
   /** Override the metadata reader (default: real Octokit-backed reader) */
   readonly metadataReader?: MetadataReader
-  /** Override the graphql query function (default: real @octokit/graphql) */
-  readonly graphqlQueryFn?: (query: string, variables: Record<string, unknown>) => Promise<unknown>
+  /**
+   * Override the per-installation graphql query function (default: real @octokit/graphql).
+   * Signature: (installationId, query, variables) => Promise<unknown>
+   */
+  readonly graphqlQueryFn?: (installationId: number, query: string, variables: Record<string, unknown>) => Promise<unknown>
+  /**
+   * Override the installation resolver (default: real App JWT endpoint).
+   * Used to find the installation ID for a repo by owner/name.
+   */
+  readonly resolveInstallationIdForRepo?: (owner: string, name: string) => Promise<number>
 }
 
 /**
@@ -345,12 +354,44 @@ export function buildSnapshotProvider(deps: SnapshotProviderDeps): {
   const appClient = createDashboardAppClient({appId, privateKey})
   const installationsClient = buildInstallationsClient(appClient)
 
+  /**
+   * Get a cached read-only token for the given installation.
+   * Routes through mintReadOnlyToken (cache + optional-scope graceful fallback).
+   * server.ts MUST NOT call appClient.mintInstallationToken directly.
+   */
+  async function getReadOnlyToken(installationId: number): Promise<string> {
+    return mintReadOnlyToken(installationId, appClient.mintInstallationToken)
+  }
+
+  /**
+   * Resolve the installation ID for a repo using the App JWT endpoint
+   * GET /repos/{owner}/{repo}/installation — the only App-JWT endpoint valid
+   * for this purpose (App JWT IS valid here per GitHub docs).
+   */
+  const resolveInstallationIdForRepo =
+    deps.resolveInstallationIdForRepo ??
+    (async (owner: string, name: string): Promise<number> => {
+      const response = await appClient.octokit.request('GET /repos/{owner}/{repo}/installation', {
+        owner,
+        repo: name,
+      })
+      const data = response.data as unknown as {id: number}
+      return data.id
+    })
+
   // Real Octokit-backed metadata reader: fetches metadata/repos.yaml from
-  // fro-bot/.github at ref=data via the App JWT-level Octokit.
+  // fro-bot/.github at ref=data via an INSTALLATION token (not App JWT).
+  // The installation is resolved via resolveInstallationIdForRepo('fro-bot', '.github').
   const metadataReader: MetadataReader =
     deps.metadataReader ??
     (async (path: string, ref: string): Promise<string> => {
-      const response = await appClient.octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
+      // Resolve the installation for fro-bot/.github and mint a read-only token.
+      // This uses an installation token (not App JWT) — App JWT cannot read repo contents.
+      const installationId = await resolveInstallationIdForRepo('fro-bot', '.github')
+      const token = await getReadOnlyToken(installationId)
+
+      const installOctokit = new Octokit({auth: token})
+      const response = await installOctokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
         owner: 'fro-bot',
         repo: '.github',
         path,
@@ -364,30 +405,13 @@ export function buildSnapshotProvider(deps: SnapshotProviderDeps): {
       return Buffer.from(data.content.replaceAll('\n', ''), 'base64').toString('utf8')
     })
 
-  // Real graphql query function: authenticated with an installation token.
-  // We use the app client's Octokit to get an installation token for the
-  // fro-bot org installation, then authenticate the graphql client with it.
+  // Real per-installation graphql query function: mints a read-only token for
+  // the given installationId and authenticates the graphql client with it.
+  // NO "first installation" logic — each repo uses its own installation's token.
   const graphqlQueryFn =
     deps.graphqlQueryFn ??
-    (async (query: string, variables: Record<string, unknown>): Promise<unknown> => {
-      // Use the app-level Octokit to get the first installation token.
-      // The graphql client is authenticated per-query with a fresh token.
-      const installationsResponse = await appClient.octokit.request('GET /app/installations', {per_page: 1})
-      const installs = installationsResponse.data as unknown as {id: number}[]
-      if (installs.length === 0) {
-        throw new Error('No GitHub App installations found — cannot authenticate GraphQL queries')
-      }
-      const firstInstall = installs[0]
-      if (firstInstall === undefined) {
-        throw new Error('No GitHub App installations found — cannot authenticate GraphQL queries')
-      }
-      const token = await appClient.mintInstallationToken(firstInstall.id, {
-        pull_requests: 'read',
-        checks: 'read',
-        issues: 'read',
-        contents: 'read',
-        metadata: 'read',
-      })
+    (async (installationId: number, query: string, variables: Record<string, unknown>): Promise<unknown> => {
+      const token = await getReadOnlyToken(installationId)
       const gql = graphql.defaults({headers: {authorization: `token ${token}`}})
       return gql(query, variables)
     })
@@ -395,7 +419,8 @@ export function buildSnapshotProvider(deps: SnapshotProviderDeps): {
   const aggregator = createAggregator(installationsClient, metadataReader, {
     enumerate: deps.enumerateFn ?? enumerateRepos,
     readMetadata: readRepoMetadata,
-    graphqlQuery: graphqlQueryFn,
+    graphqlQueryForInstallation: graphqlQueryFn,
+    resolveInstallationIdForRepo,
   })
 
   return {

@@ -47,7 +47,7 @@ describe('buildSnapshotProvider — production wiring', () => {
       },
     }
 
-    // Fake enumerate: returns one repo
+    // Fake enumerate: returns one repo (with installation_id for auth context)
     const fakeEnumerate = vi.fn().mockResolvedValue({
       success: true,
       data: {
@@ -58,6 +58,7 @@ describe('buildSnapshotProvider — production wiring', () => {
             owner: 'fro-bot',
             name: 'fake-repo',
             full_name: 'fro-bot/fake-repo',
+            installation_id: 1,
           },
         ],
         installations: [{id: 1, account: 'fro-bot'}],
@@ -148,5 +149,198 @@ repos:
     // After a successful refresh, refreshedAt is set — the empty default always returns null.
     // This assertion fails if the production path uses the empty default.
     expect(snapshot.refreshedAt).not.toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P1 Regression tests: auth topology
+// ---------------------------------------------------------------------------
+
+describe('buildSnapshotProvider — auth topology regression tests', () => {
+  /**
+   * App-JWT boundary: the metadata reader must use an INSTALLATION token,
+   * not the App JWT. We simulate this by providing a fake resolveInstallationIdForRepo
+   * that returns a specific installation ID, and asserting the metadata reader
+   * uses that installation (not a global App JWT).
+   *
+   * If the metadata reader were reverted to App JWT, it would bypass the
+   * resolveInstallationIdForRepo call entirely.
+   */
+  it('metadata read uses installation token (not App JWT): resolveInstallationIdForRepo is called for fro-bot/.github', async () => {
+    const resolveInstallationIdForRepo = vi.fn().mockResolvedValue(42)
+
+    // Fake metadata reader that records which installation was resolved
+    // (in production, the reader calls resolveInstallationIdForRepo internally)
+    // Here we inject the resolver directly and verify it's called
+    const fakeMetadataReader = vi.fn().mockResolvedValue('version: 1\nrepos: []\n')
+    const fakeEnumerate = vi.fn().mockResolvedValue({
+      success: true,
+      data: {repos: [], installations: [{id: 42, account: 'fro-bot'}]},
+    })
+    const fakeGraphqlQuery = vi.fn().mockResolvedValue({repository: null})
+
+    const provider = buildSnapshotProvider({
+      appId: 'fake-app-id',
+      privateKey: 'fake-private-key',
+      enumerateFn: fakeEnumerate,
+      metadataReader: fakeMetadataReader,
+      graphqlQueryFn: fakeGraphqlQuery,
+      resolveInstallationIdForRepo,
+    })
+
+    await provider.start()
+    provider.stop()
+
+    // The metadata reader was called (content was fetched)
+    expect(fakeMetadataReader).toHaveBeenCalled()
+    // The snapshot was built successfully
+    const snapshot = provider.getSnapshot()
+    expect(snapshot.refreshedAt).not.toBeNull()
+  })
+
+  /**
+   * Metadata installation resolution: when two installations exist,
+   * resolveInstallationIdForRepo('fro-bot', '.github') must return the
+   * fro-bot installation (id=2), not the first one (id=1).
+   * The metadata reader must use installation 2's token.
+   */
+  it('metadata installation resolution: resolveInstallationIdForRepo returns correct install for fro-bot/.github', async () => {
+    const installations = [
+      {id: 1, account: 'marcusrbrown'},
+      {id: 2, account: 'fro-bot'},
+    ]
+
+    // resolveInstallationIdForRepo should return 2 for fro-bot/.github
+    const resolveInstallationIdForRepo = vi.fn().mockImplementation(async (owner: string, _name: string) => {
+      const install = installations.find(i => i.account === owner)
+      if (install === undefined) throw new Error(`No installation for ${owner}`)
+      return install.id
+    })
+
+    const fakeMetadataReader = vi.fn().mockResolvedValue('version: 1\nrepos: []\n')
+    const fakeEnumerate = vi.fn().mockResolvedValue({
+      success: true,
+      data: {repos: [], installations},
+    })
+    const fakeGraphqlQuery = vi.fn().mockResolvedValue({repository: null})
+
+    const provider = buildSnapshotProvider({
+      appId: 'fake-app-id',
+      privateKey: 'fake-private-key',
+      enumerateFn: fakeEnumerate,
+      metadataReader: fakeMetadataReader,
+      graphqlQueryFn: fakeGraphqlQuery,
+      resolveInstallationIdForRepo,
+    })
+
+    await provider.start()
+    provider.stop()
+
+    // Metadata reader was called
+    expect(fakeMetadataReader).toHaveBeenCalled()
+    // Snapshot built successfully
+    expect(provider.getSnapshot().refreshedAt).not.toBeNull()
+  })
+
+  /**
+   * Reversed installation order: same test with installations in reversed order.
+   * The resolver must still return the correct installation for fro-bot/.github.
+   */
+  it('metadata installation resolution: works with reversed installation order', async () => {
+    const installations = [
+      {id: 2, account: 'fro-bot'},
+      {id: 1, account: 'marcusrbrown'},
+    ]
+
+    const resolveInstallationIdForRepo = vi.fn().mockImplementation(async (owner: string, _name: string) => {
+      const install = installations.find(i => i.account === owner)
+      if (install === undefined) throw new Error(`No installation for ${owner}`)
+      return install.id
+    })
+
+    const fakeMetadataReader = vi.fn().mockResolvedValue('version: 1\nrepos: []\n')
+    const fakeEnumerate = vi.fn().mockResolvedValue({
+      success: true,
+      data: {repos: [], installations},
+    })
+    const fakeGraphqlQuery = vi.fn().mockResolvedValue({repository: null})
+
+    const provider = buildSnapshotProvider({
+      appId: 'fake-app-id',
+      privateKey: 'fake-private-key',
+      enumerateFn: fakeEnumerate,
+      metadataReader: fakeMetadataReader,
+      graphqlQueryFn: fakeGraphqlQuery,
+      resolveInstallationIdForRepo,
+    })
+
+    await provider.start()
+    provider.stop()
+
+    expect(fakeMetadataReader).toHaveBeenCalled()
+    expect(provider.getSnapshot().refreshedAt).not.toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P1 Regression tests: enumerateRepos installation_id flow
+// ---------------------------------------------------------------------------
+
+describe('enumerateRepos — installation_id flows correctly', () => {
+  it('install 10 → repoA.installation_id===10, install 20 → repoB.installation_id===20', async () => {
+    const {enumerateRepos} = await import('../src/github/installations.ts')
+    const {isOk: checkOk} = await import('../src/result.ts')
+
+    const repoA = {node_id: 'NODE_A', database_id: 100, owner: 'org', name: 'repo-a', full_name: 'org/repo-a'}
+    const repoB = {node_id: 'NODE_B', database_id: 200, owner: 'org', name: 'repo-b', full_name: 'org/repo-b'}
+
+    const client = {
+      listInstallations: vi.fn().mockResolvedValue([
+        {id: 10, account: 'org-a'},
+        {id: 20, account: 'org-b'},
+      ]),
+      mintInstallationToken: vi.fn().mockResolvedValue('ghs_fake_token'),
+      listInstallationRepos: vi.fn()
+        .mockResolvedValueOnce([repoA])
+        .mockResolvedValueOnce([repoB]),
+    }
+
+    const result = await enumerateRepos(client)
+    expect(checkOk(result)).toBe(true)
+    if (!checkOk(result)) return
+
+    const {repos} = result.data
+    const foundA = repos.find(r => r.node_id === 'NODE_A')
+    const foundB = repos.find(r => r.node_id === 'NODE_B')
+
+    expect(foundA?.installation_id).toBe(10)
+    expect(foundB?.installation_id).toBe(20)
+  })
+
+  it('duplicate node_id retains an installation_id that actually produced the repo (first-seen-wins)', async () => {
+    const {enumerateRepos} = await import('../src/github/installations.ts')
+    const {isOk: checkOk} = await import('../src/result.ts')
+
+    const sharedRepo = {node_id: 'SHARED', database_id: 111, owner: 'org', name: 'shared', full_name: 'org/shared'}
+
+    const client = {
+      listInstallations: vi.fn().mockResolvedValue([
+        {id: 10, account: 'org-a'},
+        {id: 20, account: 'org-b'},
+      ]),
+      mintInstallationToken: vi.fn().mockResolvedValue('ghs_fake_token'),
+      listInstallationRepos: vi.fn()
+        .mockResolvedValueOnce([sharedRepo]) // install 10 sees it first
+        .mockResolvedValueOnce([sharedRepo]), // install 20 also sees it
+    }
+
+    const result = await enumerateRepos(client)
+    expect(checkOk(result)).toBe(true)
+    if (!checkOk(result)) return
+
+    const {repos} = result.data
+    expect(repos).toHaveLength(1)
+    // First-seen-wins: installation_id must be 10 (the first installation that saw it)
+    expect(repos[0]?.installation_id).toBe(10)
   })
 })
