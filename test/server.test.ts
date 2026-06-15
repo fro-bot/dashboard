@@ -1,5 +1,39 @@
 import {describe, expect, it, vi} from 'vitest'
-import {buildDashboardApp, buildSnapshotProvider} from '../src/server.ts'
+import {buildDashboardApp, buildSnapshotProvider, readServerBindConfig} from '../src/server.ts'
+
+describe('readServerBindConfig — server bind address (issue #13)', () => {
+  it('defaults to 0.0.0.0:3000 so a sibling reverse-proxy container can reach it', () => {
+    expect(readServerBindConfig({})).toEqual({host: '0.0.0.0', port: 3000})
+  })
+
+  it('honors DASHBOARD_HOST override (e.g. loopback for local runs)', () => {
+    expect(readServerBindConfig({DASHBOARD_HOST: '127.0.0.1'})).toEqual({host: '127.0.0.1', port: 3000})
+  })
+
+  it('honors DASHBOARD_PORT override', () => {
+    expect(readServerBindConfig({DASHBOARD_PORT: '8080'})).toEqual({host: '0.0.0.0', port: 8080})
+  })
+
+  it('honors both overrides together', () => {
+    expect(readServerBindConfig({DASHBOARD_HOST: '127.0.0.1', DASHBOARD_PORT: '9000'})).toEqual({
+      host: '127.0.0.1',
+      port: 9000,
+    })
+  })
+
+  it('treats empty/whitespace env values as unset (falls back to defaults)', () => {
+    expect(readServerBindConfig({DASHBOARD_HOST: '  ', DASHBOARD_PORT: ''})).toEqual({host: '0.0.0.0', port: 3000})
+  })
+
+  it('throws on a non-numeric DASHBOARD_PORT (fail loud, no surprise port)', () => {
+    expect(() => readServerBindConfig({DASHBOARD_PORT: 'abc'})).toThrow(/DASHBOARD_PORT/)
+  })
+
+  it('throws on an out-of-range DASHBOARD_PORT', () => {
+    expect(() => readServerBindConfig({DASHBOARD_PORT: '70000'})).toThrow(/DASHBOARD_PORT/)
+    expect(() => readServerBindConfig({DASHBOARD_PORT: '0'})).toThrow(/DASHBOARD_PORT/)
+  })
+})
 
 describe('dashboard server', () => {
   const app = buildDashboardApp()
