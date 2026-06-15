@@ -1,0 +1,176 @@
+---
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'tsconfig*.json'
+      - 'src/**'
+      - '.github/workflows/release.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash -Eeuo pipefail {0}
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: ⤵ Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: 🔑 Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🔧 Set up Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: 🏗️ Build and push candidate image
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ghcr.io/${{ github.repository }}:ci-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: 🧪 Smoke-test candidate image by digest
+        run: |
+          IMG="ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}"
+          docker network create smoke-net
+          COOKIE_KEY=$(openssl rand -hex 32)
+          docker run -d --name dashboard-smoke --network smoke-net \
+            -e DASHBOARD_COOKIE_KEY="$COOKIE_KEY" -e DASHBOARD_OPERATOR_LOGIN=smoke-test \
+            -p 127.0.0.1:8080:3000 "$IMG"
+          # poll host-published port (catches 127.0.0.1 bind regression)
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/api/healthz >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          # sibling-container reachability (mimics Caddy -> app over docker network)
+          sib=0
+          if docker run --rm --network smoke-net curlimages/curl:latest \
+              -fsS http://dashboard-smoke:3000/api/healthz >/dev/null 2>&1; then sib=1; fi
+          if [ "$ok" != 1 ] || [ "$sib" != 1 ]; then
+            echo "SMOKE FAILED (host_port_ok=$ok sibling_ok=$sib)"
+            docker logs dashboard-smoke || true
+            exit 1
+          fi
+          echo "smoke OK"
+
+      - name: 🧹 Cleanup smoke containers
+        if: always()
+        run: |
+          docker rm -f dashboard-smoke || true
+          docker network rm smoke-net || true
+
+      - name: 🏷️ Compute and push CalVer tag
+        id: calver
+        run: |
+          git fetch --tags --force
+          today="$(date -u +%Y.%m.%d)"
+
+          compute_tag() {
+            local n=-1 t
+            while IFS= read -r t; do
+              if [ "$t" = "$today" ]; then
+                [ "$n" -lt 0 ] && n=0
+              else
+                suf="${t#"$today."}"
+                case "$suf" in
+                  (''|*[!0-9]*) ;;
+                  (*) [ "$suf" -gt "$n" ] && n="$suf" ;;
+                esac
+              fi
+            done < <(git tag -l "${today}*")
+            if [ "$n" -lt 0 ]; then echo "$today"; else echo "$today.$((n+1))"; fi
+          }
+
+          TAG=""
+          for attempt in 1 2 3 4 5; do
+            TAG="$(compute_tag)"
+            echo "Attempt $attempt: tagging $TAG"
+            if git tag "$TAG" "${{ github.sha }}" && git push origin "$TAG"; then
+              echo "Pushed tag $TAG"
+              break
+            fi
+            echo "Tag push failed (race?), refetching and retrying..."
+            git tag -d "$TAG" 2>/dev/null || true
+            git fetch --tags --force
+            TAG=""
+            sleep 2
+          done
+
+          if [ -z "$TAG" ]; then
+            echo "Failed to push CalVer tag after 5 attempts"
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: 📦 Promote candidate digest to stable tags
+        run: |
+          CALVER="${{ steps.calver.outputs.tag }}"
+          SRC="ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}"
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+
+          for TAG in "$CALVER" "latest" "sha-${SHORT_SHA}"; do
+            docker buildx imagetools create \
+              --tag "ghcr.io/${{ github.repository }}:$TAG" "$SRC"
+          done
+
+          # Verify promoted tags resolve to the smoke-tested digest
+          for TAG in "$CALVER" "latest"; do
+            got=$(docker buildx imagetools inspect \
+              "ghcr.io/${{ github.repository }}:$TAG" \
+              --format '{{.Manifest.Digest}}')
+            if [ "$got" != "${{ steps.build.outputs.digest }}" ]; then
+              echo "DIGEST MISMATCH on $TAG: got=$got expected=${{ steps.build.outputs.digest }}"
+              exit 1
+            fi
+          done
+          echo "digest verification OK"
+
+      - name: 🚀 Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CALVER="${{ steps.calver.outputs.tag }}"
+          DIGEST="${{ steps.build.outputs.digest }}"
+          SHA="${{ github.sha }}"
+
+          gh release create "$CALVER" \
+            --title "$CALVER" \
+            --generate-notes
+
+          EXISTING_BODY="$(gh release view "$CALVER" --json body -q .body)"
+          IMAGE_BLOCK="$(printf '\n\n## Image\n\nImage: ghcr.io/fro-bot/dashboard:%s\nDigest: ghcr.io/fro-bot/dashboard@%s\nSource: %s' "$CALVER" "$DIGEST" "$SHA")"
+
+          gh release edit "$CALVER" \
+            --notes "${EXISTING_BODY}${IMAGE_BLOCK}"
