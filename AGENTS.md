@@ -29,6 +29,9 @@ cross-repo footprint.
 - `as unknown as X` for Octokit boundary casts; never `any`.
 - `Result<T,E>` error-return shape for the app client (extraction seam).
 - Gates: `pnpm check-types`, `pnpm lint`, `pnpm test`.
+- `docs/solutions/` — documented solutions to past problems, organized by category
+  with YAML frontmatter (`module`, `tags`, `problem_type`). Relevant when
+  implementing or debugging in documented areas.
 
 ## Cloned Dependency Source
 
