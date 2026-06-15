@@ -5,12 +5,12 @@ on:
   push:
     branches: [main]
     paths:
-      - 'Dockerfile'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
+      - Dockerfile
+      - package.json
+      - pnpm-lock.yaml
       - 'tsconfig*.json'
       - 'src/**'
-      - '.github/workflows/release.yaml'
+      - .github/workflows/release.yaml
   workflow_dispatch:
 
 concurrency:
@@ -27,6 +27,9 @@ defaults:
 jobs:
   release:
     name: Release
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
