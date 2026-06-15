@@ -288,13 +288,24 @@ async function listInstallationReposWithToken(token: string): Promise<readonly R
  */
 export function buildInstallationsClient(appClient: DashboardAppClient): InstallationsClient {
   async function listInstallations(): Promise<readonly InstallationRecord[]> {
-    const response = await appClient.octokit.request('GET /app/installations', {
-      per_page: 100,
-    })
-    return (response.data as unknown as {id: number; account: {login: string} | null}[]).map(install => ({
-      id: install.id,
-      account: install.account?.login ?? null,
-    }))
+    const installations: InstallationRecord[] = []
+    let page = 1
+    while (true) {
+      const response = await appClient.octokit.request('GET /app/installations', {
+        per_page: 100,
+        page,
+      })
+      const data = response.data as unknown as {id: number; account: {login: string} | null}[]
+      for (const install of data) {
+        installations.push({
+          id: install.id,
+          account: install.account?.login ?? null,
+        })
+      }
+      if (data.length < 100) break
+      page++
+    }
+    return installations
   }
 
   return {

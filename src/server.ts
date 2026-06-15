@@ -187,7 +187,7 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono<{Variables: Variable
   // and XFF is client-controlled — trusting it would allow spoofing the throttle key.
   app.use('*', async (c, next) => {
     const path = new URL(c.req.url).pathname
-    const sensitiveRoutes = ['/', '/auth/callback']
+    const sensitiveRoutes = ['/', '/auth/login', '/auth/callback']
     const isSensitive = sensitiveRoutes.includes(path) || path.startsWith('/api/')
 
     if (isSensitive) {

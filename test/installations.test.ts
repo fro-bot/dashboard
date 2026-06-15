@@ -100,6 +100,76 @@ describe('enumerateRepos — happy path', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Pagination: listInstallations fetches all pages
+// ---------------------------------------------------------------------------
+
+describe('buildInstallationsClient — listInstallations pagination', () => {
+  it('accumulates installations across multiple pages (>100 total)', async () => {
+    const {buildInstallationsClient} = await import('../src/github/installations.ts')
+
+    // Page 1: 100 installations (full page → must fetch page 2)
+    const page1 = Array.from({length: 100}, (_, i) => ({
+      id: i + 1,
+      account: {login: `org-${i + 1}`},
+    }))
+    // Page 2: 3 installations (partial page → stop)
+    const page2 = Array.from({length: 3}, (_, i) => ({
+      id: 200 + i + 1,
+      account: {login: `org-extra-${i + 1}`},
+    }))
+
+    const requestFn = vi.fn()
+      .mockResolvedValueOnce({data: page1})
+      .mockResolvedValueOnce({data: page2})
+
+    const fakeAppClient = {
+      octokit: {request: requestFn},
+      mintInstallationToken: vi.fn(),
+    }
+
+    const client = buildInstallationsClient(fakeAppClient as unknown as Parameters<typeof buildInstallationsClient>[0])
+    const installations = await client.listInstallations()
+
+    // All 103 installations must be present
+    expect(installations).toHaveLength(103)
+
+    // Page 2 must have been requested
+    expect(requestFn).toHaveBeenCalledTimes(2)
+    const secondCall = requestFn.mock.calls[1]
+    expect(secondCall?.[1]).toMatchObject({per_page: 100, page: 2})
+
+    // Spot-check: first and last installations
+    expect(installations[0]?.id).toBe(1)
+    expect(installations[0]?.account).toBe('org-1')
+    expect(installations[102]?.id).toBe(203)
+    expect(installations[102]?.account).toBe('org-extra-3')
+  })
+
+  it('stops after a single page when fewer than 100 installations returned', async () => {
+    const {buildInstallationsClient} = await import('../src/github/installations.ts')
+
+    const page1 = Array.from({length: 5}, (_, i) => ({
+      id: i + 1,
+      account: {login: `org-${i + 1}`},
+    }))
+
+    const requestFn = vi.fn().mockResolvedValueOnce({data: page1})
+
+    const fakeAppClient = {
+      octokit: {request: requestFn},
+      mintInstallationToken: vi.fn(),
+    }
+
+    const client = buildInstallationsClient(fakeAppClient as unknown as Parameters<typeof buildInstallationsClient>[0])
+    const installations = await client.listInstallations()
+
+    expect(installations).toHaveLength(5)
+    // Only one page request
+    expect(requestFn).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Security: database_id captured from REST id field
 // ---------------------------------------------------------------------------
 

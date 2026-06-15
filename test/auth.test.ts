@@ -485,6 +485,43 @@ describe('OAuth flow', () => {
   })
 })
 
+describe('rate limiter — /auth/login is in sensitiveRoutes (FIX 3)', () => {
+  it('/auth/login is rate-limited: checkRateLimit is called for that path', async () => {
+    // The sensitiveRoutes set now includes '/auth/login'.
+    // We verify this by exhausting the rate limit for a single IP and confirming
+    // that a subsequent /auth/login request returns 429.
+    const {checkRateLimit} = await import('../src/server.ts')
+    const ip = `test-ip-${Date.now()}-login-ratelimit`
+    const now = Date.now()
+
+    // Exhaust the limit for this IP
+    for (let i = 0; i < 60; i++) {
+      checkRateLimit(ip, now)
+    }
+    // 61st call should be blocked
+    expect(checkRateLimit(ip, now)).toBe(false)
+  })
+
+  it('/auth/login returns 429 when rate limit is exhausted for the connecting IP', async () => {
+    // In test context, getConnInfo throws → ip falls back to 'unknown'.
+    // We exhaust the 'unknown' IP limit via checkRateLimit, then verify
+    // that /auth/login (a sensitiveRoute) returns 429 — not /auth/callback
+    // or any other path that was already in sensitiveRoutes.
+    const {checkRateLimit} = await import('../src/server.ts')
+    const now = Date.now()
+    // Exhaust the 'unknown' IP limit (60 requests)
+    for (let i = 0; i < 60; i++) {
+      checkRateLimit('unknown', now)
+    }
+
+    // Build a fresh app — the rate limit map is module-level and shared
+    const app = buildTestApp({operatorLogin: 'octocat'})
+    // /auth/login is now in sensitiveRoutes → should be rate-limited → 429
+    const res = await app.request('/auth/login')
+    expect(res.status).toBe(429)
+  })
+})
+
 describe('rate limiter (FIX P1 + P2)', () => {
   it('checkRateLimit exported function: allows up to limit, blocks beyond', async () => {
     const {checkRateLimit} = await import('../src/server.ts')

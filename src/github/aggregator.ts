@@ -25,7 +25,7 @@ import type {Result} from '../result.ts'
 import type {EnumerateReposResult, InstallationsClient} from './installations.ts'
 import type {MetadataError, MetadataReader, MetadataResult} from './metadata.ts'
 
-import {logger} from '../logger.ts'
+import {logger, sanitizeErrorMessage} from '../logger.ts'
 import {isErr, isOk} from '../result.ts'
 
 // ---------------------------------------------------------------------------
@@ -377,7 +377,7 @@ async function fetchRepoStatus(
     logger.warning('Per-repo GraphQL fetch failed; marking stale', {
       owner: entry.owner,
       name: entry.name,
-      error: error instanceof Error ? error.message : String(error),
+      error: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)),
     })
     return {rollupState: 'unknown', failingChecks: 0, openPrCount: 0, openIssueCount: 0, openAlertCount: null, stale: true, fetchedAt}
   }
@@ -433,7 +433,7 @@ export function createAggregator(
     if (isErr(metadataResult)) {
       // FAIL-CLOSED: denylist unavailable — do NOT build a fresh union
       logger.warning('Metadata read failed; failing closed — serving stale/empty snapshot', {
-        error: metadataResult.error.message,
+        error: sanitizeErrorMessage(metadataResult.error.message),
       })
 
       if (lastGoodSnapshot === null) {
@@ -458,7 +458,7 @@ export function createAggregator(
     } else {
       enumerationFailed = true
       logger.warning('Installation enumeration failed; using empty install set — snapshot will be incomplete', {
-        error: String((enumerateResult as {error: unknown}).error),
+        error: sanitizeErrorMessage(String((enumerateResult as {error: unknown}).error)),
       })
     }
 
@@ -562,7 +562,7 @@ export function createAggregator(
     intervalHandle = setIntervalFn(() => {
       refresh().catch(error => {
         logger.error('Aggregator background refresh threw unexpectedly', {
-          error: error instanceof Error ? error.message : String(error),
+          error: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)),
         })
       })
     }, 60_000)

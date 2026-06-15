@@ -986,6 +986,153 @@ describe('aggregator — enumeration failure sets staleBanner=true', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Security: error log sanitization (FIX 2 — no raw tokens in logs)
+// ---------------------------------------------------------------------------
+
+describe('security — error log sanitization', () => {
+  it('per-repo GraphQL failure with token in error message → token NOT logged', async () => {
+    const FAKE_TOKEN = 'ghs_FAKEFAKEFAKEFAKEFAKE123456'
+    const repo = makeRepo({node_id: 'NODE_SANITIZE_GQL', owner: 'org', name: 'sanitize-gql'})
+
+    const graphqlQuery: GraphqlQueryFn = vi.fn().mockImplementation(async () => {
+      throw new Error(`GraphQL auth failed: ${FAKE_TOKEN}`)
+    })
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([repo])),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
+        publicRepos: [makePublicRepo({node_id: 'NODE_SANITIZE_GQL', owner: 'org', name: 'sanitize-gql'})],
+      }))),
+      graphqlQuery,
+    })
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+      await agg.refresh()
+
+      // Collect all logged output
+      const allOutput = [
+        ...warnSpy.mock.calls.map(args => JSON.stringify(args)),
+        ...errorSpy.mock.calls.map(args => JSON.stringify(args)),
+      ].join('\n')
+
+      // Token must NOT appear in any log output
+      expect(allOutput).not.toContain(FAKE_TOKEN)
+      expect(allOutput).not.toContain('ghs_FAKE')
+      // [REDACTED] must appear instead
+      expect(allOutput).toContain('[REDACTED]')
+    } finally {
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('per-repo GraphQL failure with PEM fragment in error → PEM NOT logged', async () => {
+    const FAKE_PEM_FRAGMENT = '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Z3VS5JJ\n-----END RSA PRIVATE KEY-----'
+    const repo = makeRepo({node_id: 'NODE_SANITIZE_PEM', owner: 'org', name: 'sanitize-pem'})
+
+    const graphqlQuery: GraphqlQueryFn = vi.fn().mockImplementation(async () => {
+      throw new Error(`Auth error: ${FAKE_PEM_FRAGMENT}`)
+    })
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([repo])),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
+        publicRepos: [makePublicRepo({node_id: 'NODE_SANITIZE_PEM', owner: 'org', name: 'sanitize-pem'})],
+      }))),
+      graphqlQuery,
+    })
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+      await agg.refresh()
+
+      const allOutput = [
+        ...warnSpy.mock.calls.map(args => JSON.stringify(args)),
+        ...errorSpy.mock.calls.map(args => JSON.stringify(args)),
+      ].join('\n')
+
+      expect(allOutput).not.toContain('BEGIN RSA PRIVATE KEY')
+      expect(allOutput).not.toContain('MIIEowIBAAKCAQEA')
+      expect(allOutput).toContain('[REDACTED]')
+    } finally {
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('metadata read failure with token in error → token NOT logged', async () => {
+    const FAKE_TOKEN = 'ghs_FAKEFAKEFAKEFAKEFAKE123456'
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([])),
+      readMetadata: vi.fn().mockResolvedValue(
+        err({message: `Metadata fetch failed: ${FAKE_TOKEN}`, name: 'MetadataTransportError'} as unknown as import('../src/github/metadata.ts').MetadataError),
+      ),
+      graphqlQuery: vi.fn(),
+    })
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+      await agg.refresh()
+
+      const allOutput = [
+        ...warnSpy.mock.calls.map(args => JSON.stringify(args)),
+        ...errorSpy.mock.calls.map(args => JSON.stringify(args)),
+      ].join('\n')
+
+      expect(allOutput).not.toContain(FAKE_TOKEN)
+      expect(allOutput).not.toContain('ghs_FAKE')
+      expect(allOutput).toContain('[REDACTED]')
+    } finally {
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('enumeration failure with token in error → token NOT logged', async () => {
+    const FAKE_TOKEN = 'ghs_FAKEFAKEFAKEFAKEFAKE123456'
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(
+        err(new FetchInstallationsError(`Network error: ${FAKE_TOKEN}`)),
+      ),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult())),
+      graphqlQuery: vi.fn(),
+    })
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+      await agg.refresh()
+
+      const allOutput = [
+        ...warnSpy.mock.calls.map(args => JSON.stringify(args)),
+        ...errorSpy.mock.calls.map(args => JSON.stringify(args)),
+      ].join('\n')
+
+      expect(allOutput).not.toContain(FAKE_TOKEN)
+      expect(allOutput).not.toContain('ghs_FAKE')
+      expect(allOutput).toContain('[REDACTED]')
+    } finally {
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Security: source-channel labels (cardinality non-disclosure)
 // ---------------------------------------------------------------------------
 
