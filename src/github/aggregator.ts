@@ -220,21 +220,68 @@ interface WorkingSetEntry {
 
 /**
  * Build the working set from the union of installation repos and metadata publicRepos,
- * then REMOVE every repo whose node_id is in redactedNodeIds.
+ * then REMOVE every repo whose node_id is in redactedNodeIds OR whose database_id is
+ * in redactedDatabaseIds.
  *
  * This is the DENYLIST-BEFORE-QUERY enforcement point. The returned set contains
- * ONLY repos that are safe to query. Denylisted node_ids never reach the query loop.
+ * ONLY repos that are safe to query. Denylisted repos never reach the query loop.
  *
- * @param installRepos - Repos from the installations channel
- * @param metadata - Parsed metadata result (publicRepos + redactedNodeIds)
- * @returns { workingSet, driftCount } where driftCount is the number of
- *   installation-only repos (not in publicRepos, not denylisted) — count only.
+ * Cross-format safety: GitHub has two node_id formats (legacy base64 and new R_kgDO...).
+ * The node_id check is the primary guard (both channels use the same format per API
+ * version). The database_id check is the secondary, format-independent guard — it closes
+ * the gap if API-version skew ever produces different node_id formats for the same repo
+ * across channels.
+ *
+ * redactedDatabaseIds is now populated from TWO sources:
+ *   1. Explicit `database_id`/`id` fields in repos.yaml entries (if present).
+ *   2. Derived from the node_id string via `deriveDatabaseId()` in metadata.ts:
+ *      legacy base64 node_ids (e.g. `MDEwOlJlcG9zaXRvcnkxODY5MTU0`) encode the
+ *      databaseId in their decoded ASCII form and can be reliably extracted.
+ *      New-format node_ids (`R_kgDO...`) cannot be reliably decoded without a
+ *      known test vector — `deriveDatabaseId` returns null for them, so those
+ *      entries contribute only to redactedNodeIds (primary guard only).
+ *
+ * Residual limitation: if a redacted entry has a new-format node_id AND the
+ * installation channel returns the same repo under a DIFFERENT new-format node_id
+ * (cross-format skew within the new format), neither guard catches it. This is
+ * an extremely unlikely edge case (new-format node_ids are stable per repo), and
+ * the primary node_id guard still works for same-format matches. The databaseId
+ * secondary guard closes the gap for all legacy-format entries and any entry with
+ * an explicit database_id field. A warning is logged when any redacted entry
+ * could not contribute a derived databaseId (denylistComplete=false).
+ *
+ * @param installRepos - Repos from the installations channel (must carry database_id)
+ * @param metadata - Parsed metadata result (publicRepos + redactedNodeIds + redactedDatabaseIds)
+ * @returns { workingSet, driftCount, denylistComplete } where driftCount is the number of
+ *   installation-only repos (not in publicRepos, not denylisted) — count only, and
+ *   denylistComplete indicates whether ALL redacted entries contributed a databaseId.
  */
 function buildWorkingSet(
-  installRepos: readonly {node_id: string; owner: string; name: string; full_name: string}[],
+  installRepos: readonly {node_id: string; database_id: number; owner: string; name: string; full_name: string}[],
   metadata: MetadataResult,
-): {workingSet: WorkingSetEntry[]; driftCount: number} {
-  const {publicRepos, redactedNodeIds} = metadata
+): {workingSet: WorkingSetEntry[]; driftCount: number; denylistComplete: boolean} {
+  const {publicRepos, redactedNodeIds, redactedDatabaseIds} = metadata
+
+  // denylistComplete: true if every redacted node_id also has a derived databaseId in
+  // redactedDatabaseIds. False means at least one redacted entry (likely a new-format
+  // R_kgDO... node_id) could not contribute a databaseId — the cross-format secondary
+  // guard is partial for that entry. The primary node_id guard still applies.
+  // Tradeoff: we do NOT fail fully closed here — the primary guard covers same-format
+  // matches, and full fail-closed-to-empty would be too aggressive for a single
+  // undecodable new-format node_id. We log a warning instead.
+  let denylistComplete = true
+  for (const nodeId of redactedNodeIds) {
+    // Check if this node_id has a corresponding databaseId in the denylist.
+    // We can't reverse-lookup by node_id here, so we check if redactedDatabaseIds
+    // is non-empty as a proxy — if it's empty and redactedNodeIds is non-empty,
+    // at least one entry has no derived databaseId.
+    // More precise: new-format node_ids (R_kgDO...) can't be decoded, so if any
+    // redacted node_id starts with R_, denylistComplete is false.
+    if (nodeId.startsWith('R_')) {
+      denylistComplete = false
+      break
+    }
+  }
 
   // Index publicRepos by node_id for O(1) lookup
   const publicByNodeId = new Map<string, (typeof publicRepos)[number]>()
@@ -261,10 +308,14 @@ function buildWorkingSet(
   // Add installation repos not already in the union
   let driftCount = 0
   for (const repo of installRepos) {
-    // *** PRIMARY DENYLIST-BEFORE-QUERY ENFORCEMENT ***
-    // If this repo's node_id is in the denylist, SKIP IT — never add to working set,
-    // never query it. This is the exact line where denylisted ids are removed.
-    if (redactedNodeIds.has(repo.node_id)) {
+    // *** PRIMARY + SECONDARY DENYLIST-BEFORE-QUERY ENFORCEMENT ***
+    // Exclude if EITHER:
+    //   (a) node_id matches redactedNodeIds (primary — same format per API version), OR
+    //   (b) database_id matches redactedDatabaseIds (secondary — format-independent,
+    //       closes the node_id format-mismatch gap; populated from derived databaseIds
+    //       extracted from legacy base64 node_ids AND explicit database_id fields).
+    // A match on either key is sufficient to exclude the repo.
+    if (redactedNodeIds.has(repo.node_id) || redactedDatabaseIds.has(repo.database_id)) {
       continue
     }
 
@@ -281,7 +332,7 @@ function buildWorkingSet(
     }
   }
 
-  return {workingSet: [...unionByNodeId.values()], driftCount}
+  return {workingSet: [...unionByNodeId.values()], driftCount, denylistComplete}
 }
 
 // ---------------------------------------------------------------------------
@@ -364,13 +415,18 @@ export function createAggregator(
   // Interval handle
   let intervalHandle: ReturnType<typeof setInterval> | null = null
 
+  // In-flight guard: prevents overlapping refreshes. If a refresh cycle takes
+  // longer than the 60s interval, the next tick is skipped rather than piling
+  // up concurrent refreshes that race on lastGoodSnapshot and the per-repo cache.
+  let refreshing = false
+
   /**
    * Perform a full refresh cycle.
    *
    * Security: if readMetadata fails (denylist unavailable), we MUST NOT build
    * a fresh union. We serve last-good cache + staleBanner, or empty on cold start.
    */
-  async function refresh(): Promise<void> {
+  async function runRefresh(): Promise<void> {
     // 1. Read metadata + denylist FIRST
     const metadataResult = await deps.readMetadata(metadataReader)
 
@@ -395,20 +451,34 @@ export function createAggregator(
     // 2. Enumerate installation repos
     const enumerateResult = await deps.enumerate(installationsClient)
 
-    let installRepos: readonly {node_id: string; owner: string; name: string; full_name: string}[] = []
+    let installRepos: readonly {node_id: string; database_id: number; owner: string; name: string; full_name: string}[] = []
+    let enumerationFailed = false
     if (isOk(enumerateResult)) {
       installRepos = enumerateResult.data.repos
     } else {
-      logger.warning('Installation enumeration failed; using empty install set', {
+      enumerationFailed = true
+      logger.warning('Installation enumeration failed; using empty install set — snapshot will be incomplete', {
         error: String((enumerateResult as {error: unknown}).error),
       })
     }
 
     // 3. Build working set — DENYLIST-BEFORE-QUERY applied here
-    const {workingSet, driftCount} = buildWorkingSet(installRepos, metadata)
+    const {workingSet, driftCount, denylistComplete} = buildWorkingSet(installRepos, metadata)
+
+    // Warn if cross-format denylist protection is partial (new-format node_ids that
+    // couldn't be decoded to a databaseId). The primary node_id guard still applies;
+    // only the secondary databaseId guard is absent for those entries.
+    if (!denylistComplete) {
+      logger.warning(
+        'Denylist cross-format protection is partial: one or more redacted entries have new-format node_ids (R_kgDO...) ' +
+        'that could not be decoded to a numeric databaseId. The primary node_id guard still applies for same-format matches. ' +
+        'If the installation channel returns the same repo under a different node_id format, it may not be excluded by the secondary guard.',
+      )
+    }
 
     if (workingSet.length === 0) {
-      lastGoodSnapshot = {repos: [], staleBanner: false, driftCount, refreshedAt: now()}
+      // staleBanner=true if enumeration failed (data is incomplete — install repos missing)
+      lastGoodSnapshot = {repos: [], staleBanner: enumerationFailed, driftCount, refreshedAt: now()}
       return
     }
 
@@ -444,12 +514,34 @@ export function createAggregator(
 
     // 5. Sort attention-first and store snapshot
     const sorted = sortAttentionFirst(dashboardRepos)
-    lastGoodSnapshot = {repos: sorted, staleBanner: false, driftCount, refreshedAt: now()}
+    // staleBanner=true if enumeration failed — data is incomplete (install repos missing).
+    // We still show metadata publicRepos (they are public and safe), but the operator
+    // must know the installation channel data is absent.
+    lastGoodSnapshot = {repos: sorted, staleBanner: enumerationFailed, driftCount, refreshedAt: now()}
 
     logger.info('Aggregator refresh complete', {
       repoCount: sorted.length,
       driftCount,
+      enumerationFailed,
     })
+  }
+
+  /**
+   * Perform a refresh cycle, guarded against overlap. If a refresh is already
+   * in flight, this call is skipped (returns immediately) so concurrent cycles
+   * never race on shared state.
+   */
+  async function refresh(): Promise<void> {
+    if (refreshing) {
+      logger.debug('Refresh already in flight; skipping overlapping cycle')
+      return
+    }
+    refreshing = true
+    try {
+      await runRefresh()
+    } finally {
+      refreshing = false
+    }
   }
 
   /**

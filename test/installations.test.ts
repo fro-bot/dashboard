@@ -25,6 +25,7 @@ import {isErr, isOk} from '../src/result.ts'
 function makeRepo(overrides: Partial<RepoRecord> = {}): RepoRecord {
   return {
     node_id: 'MDEwOlJlcG9zaXRvcnkx',
+    database_id: 186915400,
     owner: 'fro-bot',
     name: 'agent',
     full_name: 'fro-bot/agent',
@@ -95,6 +96,61 @@ describe('enumerateRepos — happy path', () => {
     expect(result.data.installations).toHaveLength(2)
     expect(result.data.installations[0]?.id).toBe(10)
     expect(result.data.installations[1]?.id).toBe(20)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Security: database_id captured from REST id field
+// ---------------------------------------------------------------------------
+
+describe('security — database_id captured from REST id field', () => {
+  it('enumerated repos carry database_id from the REST id field', async () => {
+    const repoWithDbId = makeRepo({
+      node_id: 'R_kgDOJ_bMaQ',
+      database_id: 123456789,
+      owner: 'fro-bot',
+      name: 'agent',
+      full_name: 'fro-bot/agent',
+    })
+
+    const client = makeClient({
+      listInstallations: vi.fn().mockResolvedValue([makeInstall(1)]),
+      listInstallationRepos: vi.fn().mockResolvedValue([repoWithDbId]),
+    })
+
+    const result = await enumerateRepos(client)
+
+    expect(isOk(result)).toBe(true)
+    if (!isOk(result)) return
+
+    const {repos} = result.data
+    expect(repos).toHaveLength(1)
+    // database_id must be present and match the REST id field value
+    expect(repos[0]?.database_id).toBe(123456789)
+    expect(repos[0]?.node_id).toBe('R_kgDOJ_bMaQ')
+  })
+
+  it('database_id is preserved across deduplication (first-seen wins)', async () => {
+    const repoInstall1 = makeRepo({node_id: 'SHARED', database_id: 111, full_name: 'fro-bot/shared'})
+    const repoInstall2 = makeRepo({node_id: 'SHARED', database_id: 111, full_name: 'fro-bot/shared'})
+
+    const client = makeClient({
+      listInstallations: vi.fn().mockResolvedValue([makeInstall(1), makeInstall(2)]),
+      mintInstallationToken: vi.fn().mockResolvedValue('ghs_fake_token'),
+      listInstallationRepos: vi
+        .fn()
+        .mockResolvedValueOnce([repoInstall1])
+        .mockResolvedValueOnce([repoInstall2]),
+    })
+
+    const result = await enumerateRepos(client)
+
+    expect(isOk(result)).toBe(true)
+    if (!isOk(result)) return
+
+    const {repos} = result.data
+    expect(repos).toHaveLength(1)
+    expect(repos[0]?.database_id).toBe(111)
   })
 })
 

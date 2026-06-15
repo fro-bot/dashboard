@@ -24,6 +24,7 @@
 
 import type {Result} from '../result.ts'
 
+import {Buffer} from 'node:buffer'
 import {parse} from 'yaml'
 
 import {logger} from '../logger.ts'
@@ -69,8 +70,23 @@ export interface MetadataResult {
   /**
    * node_id of EVERY private:true / [REDACTED] entry.
    * The aggregator must exclude these BEFORE any per-repo query.
+   *
+   * Cross-format note: GitHub has two node_id formats (legacy base64
+   * `MDEwOlJlcG9zaXRvcnkx` and new `R_kgDO...`). In practice both channels
+   * use the same format for a given API version, so this set is the primary
+   * denylist key. The secondary key is `redactedDatabaseIds` (see below).
    */
   readonly redactedNodeIds: ReadonlySet<string>
+  /**
+   * Numeric databaseId of EVERY private:true / [REDACTED] entry, when the
+   * repos.yaml entry carries a `database_id` (or `id`) field.
+   *
+   * This is the format-independent join key: the numeric id is stable across
+   * both node_id formats. Currently empty unless repos.yaml entries include a
+   * `database_id`/`id` field. The aggregator checks BOTH sets — whichever
+   * matches first excludes the repo.
+   */
+  readonly redactedDatabaseIds: ReadonlySet<number>
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +183,10 @@ interface RawRepoEntry {
   discovery_channel: unknown
   private: unknown
   node_id: unknown
+  /** Optional numeric databaseId — future-proofing for format-independent denylist matching. */
+  database_id: unknown
+  /** Alias for database_id — accepted for convenience. */
+  id: unknown
 }
 
 interface RawYaml {
@@ -251,6 +271,7 @@ export async function readRepoMetadata(reader: MetadataReader): Promise<Result<M
   // 6. Iterate entries — classify as public or redacted
   const publicRepos: PublicRepo[] = []
   const redactedNodeIds = new Set<string>()
+  const redactedDatabaseIds = new Set<number>()
 
   for (const rawEntry of doc.repos) {
     if (rawEntry === null || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) {
@@ -263,9 +284,45 @@ export async function readRepoMetadata(reader: MetadataReader): Promise<Result<M
     const isRedactedOwner = entry.owner === REDACTED_OWNER
 
     if (isPrivate || isRedactedOwner) {
-      // Security: only retain the node_id — never store/log owner or name
-      if (typeof entry.node_id === 'string' && entry.node_id.length > 0) {
-        redactedNodeIds.add(entry.node_id)
+      // Security: only retain deny keys — never store/log owner or name.
+      //
+      // Cross-format risk: GitHub has two node_id formats (legacy base64 and
+      // new R_kgDO...). Both channels use the same format per API version, so
+      // node_id is the primary key. The numeric database_id (from `database_id`
+      // or `id` field) is the format-independent secondary key — it closes the
+      // gap if API-version skew ever produces different node_id formats for the
+      // same repo across channels.
+      //
+      // FAIL CLOSED: if a redacted entry has NO usable deny key (no valid
+      // node_id AND no valid database_id), we cannot safely exclude it from
+      // the aggregator's working set. Return err to prevent building a union
+      // against an incomplete denylist. Do NOT log owner/name.
+      const hasValidNodeId = typeof entry.node_id === 'string' && entry.node_id.length > 0
+      const rawDbId = entry.database_id ?? entry.id
+      const hasValidDatabaseId = typeof rawDbId === 'number' && Number.isFinite(rawDbId)
+
+      if (!hasValidNodeId && !hasValidDatabaseId) {
+        logger.error('Redacted/private repos.yaml entry has no usable deny key (no valid node_id or database_id) — failing closed')
+        return err(new MetadataSchemaError(
+          `${METADATA_PATH}: redacted/private entry has no usable deny key (node_id missing or empty, database_id absent)`,
+        ))
+      }
+
+      if (hasValidNodeId) {
+        const nodeIdStr = entry.node_id as string
+        redactedNodeIds.add(nodeIdStr)
+        // Attempt to derive the numeric databaseId from the node_id string.
+        // This closes the cross-format gap: if the installation channel returns
+        // the same repo under a different node_id format (legacy vs new R_kgDO...),
+        // the exact node_id string match misses it — but the derived databaseId
+        // (format-independent) catches it via the secondary guard.
+        const derivedId = deriveDatabaseId(nodeIdStr)
+        if (derivedId !== null) {
+          redactedDatabaseIds.add(derivedId)
+        }
+      }
+      if (typeof rawDbId === 'number' && Number.isFinite(rawDbId)) {
+        redactedDatabaseIds.add(rawDbId)
       }
       // Do NOT add to publicRepos. Do NOT log owner/name.
     } else if (
@@ -288,7 +345,7 @@ export async function readRepoMetadata(reader: MetadataReader): Promise<Result<M
     redactedCount: redactedNodeIds.size,
   })
 
-  return ok({publicRepos, redactedNodeIds})
+  return ok({publicRepos, redactedNodeIds, redactedDatabaseIds})
 }
 
 // ---------------------------------------------------------------------------
@@ -303,4 +360,45 @@ function isNotFoundError(error: unknown): boolean {
 function safeMessage(error: unknown): string {
   if (error instanceof Error) return error.message
   return String(error)
+}
+
+/**
+ * Derive the numeric GitHub databaseId from a repository node_id string.
+ *
+ * GitHub has two node_id formats:
+ *
+ * 1. **Legacy base64** (e.g. `MDEwOlJlcG9zaXRvcnkxODY5MTU0`):
+ *    base64-decode → ASCII like `010:Repository1869154`.
+ *    The trailing integer after `Repository` is the databaseId.
+ *    Verified known pair: `MDEwOlJlcG9zaXRvcnkxODY5MTU0` → 1869154
+ *    (marcusrbrown/.dotfiles).
+ *
+ * 2. **New format** (starts with `R_`, e.g. `R_kgDOJ_bMaQ`):
+ *    The binary decode is not reliably hand-rollable without a known test vector.
+ *    Returns `null` to fail conservatively — the node_id string primary guard
+ *    still applies; only the cross-format secondary guard is absent.
+ *
+ * Returns `null` on any decode failure or unrecognised format.
+ *
+ * @param nodeId - Raw node_id string from repos.yaml or GitHub API.
+ * @returns The numeric databaseId, or null if it cannot be reliably derived.
+ */
+export function deriveDatabaseId(nodeId: string): number | null {
+  if (typeof nodeId !== 'string' || nodeId.length === 0) return null
+
+  // New format: R_kgDO... — conservative: return null rather than guess.
+  if (nodeId.startsWith('R_')) return null
+
+  // Legacy format: base64-decode and match `...Repository<digits>` suffix.
+  try {
+    const decoded = Buffer.from(nodeId, 'base64').toString('ascii')
+    // Match the trailing Repository<digits> pattern (e.g. "010:Repository1869154")
+    const match = /Repository(\d+)$/.exec(decoded)
+    if (match === null || match[1] === undefined) return null
+    const id = Number.parseInt(match[1], 10)
+    if (!Number.isFinite(id) || id <= 0) return null
+    return id
+  } catch {
+    return null
+  }
 }

@@ -24,11 +24,12 @@ import {err, ok} from '../src/result.ts'
 // Fixtures + helpers
 // ---------------------------------------------------------------------------
 
-function makeRepo(overrides: {node_id?: string; owner?: string; name?: string; full_name?: string} = {}) {
+function makeRepo(overrides: {node_id?: string; database_id?: number; owner?: string; name?: string; full_name?: string} = {}) {
   const owner = overrides.owner ?? 'fro-bot'
   const name = overrides.name ?? 'agent'
   return {
     node_id: overrides.node_id ?? 'NODE_AGENT',
+    database_id: overrides.database_id ?? 1000,
     owner,
     name,
     full_name: overrides.full_name ?? `${owner}/${name}`,
@@ -52,10 +53,12 @@ function makePublicRepo(overrides: {
 function makeMetadataResult(overrides: {
   publicRepos?: ReturnType<typeof makePublicRepo>[]
   redactedNodeIds?: string[]
+  redactedDatabaseIds?: number[]
 } = {}): MetadataResult {
   return {
     publicRepos: overrides.publicRepos ?? [],
     redactedNodeIds: new Set(overrides.redactedNodeIds ?? []),
+    redactedDatabaseIds: new Set(overrides.redactedDatabaseIds ?? []),
   }
 }
 
@@ -493,7 +496,7 @@ describe('aggregator — error paths', () => {
     expect(snap.staleBanner).toBe(false)
   })
 
-  it('installation enumeration failure → uses empty install set, still queries metadata publicRepos', async () => {
+  it('installation enumeration failure → uses empty install set, still queries metadata publicRepos, staleBanner=true', async () => {
     const deps = makeDeps({
       enumerate: vi.fn().mockResolvedValue(err(new FetchInstallationsError('network down'))),
       readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
@@ -506,10 +509,11 @@ describe('aggregator — error paths', () => {
     await agg.refresh()
     const snap = agg.getSnapshot()
 
-    // metadata publicRepos still show up
+    // metadata publicRepos still show up (public data is safe to serve)
     expect(snap.repos).toHaveLength(1)
     expect(snap.repos[0]?.node_id).toBe('NODE_META')
-    expect(snap.staleBanner).toBe(false)
+    // staleBanner=true — data is incomplete (installation channel failed)
+    expect(snap.staleBanner).toBe(true)
   })
 })
 
@@ -647,6 +651,92 @@ describe('security — denylist-before-query', () => {
     expect(serialized).not.toContain(REDACTED_NODE_ID)
     expect(serialized).not.toContain(REDACTED_NAME)
     expect(serialized).not.toContain(REDACTED_OWNER)
+  })
+
+  it('database_id match excludes repo when node_id formats differ (cross-format gap closure)', async () => {
+    // Scenario: metadata stores the redacted repo under legacy base64 node_id format,
+    // but the installation channel returns the SAME repo under the new R_kgDO... format.
+    // The exact-string node_id match would MISS this — but the database_id match catches it.
+    const METADATA_NODE_ID = 'MDEwOlJlcG9zaXRvcnkxODY5MTU0' // legacy base64 format
+    const INSTALL_NODE_ID = 'R_kgDOxxxx' // new format — different string, same repo
+    const SHARED_DATABASE_ID = 186915400 // stable numeric id — same across both formats
+
+    const privateRepo = makeRepo({
+      node_id: INSTALL_NODE_ID,
+      database_id: SHARED_DATABASE_ID,
+      owner: 'private-org',
+      name: 'format-mismatch-repo',
+    })
+    const publicRepo = makeRepo({node_id: 'NODE_PUBLIC_FM', database_id: 9999, owner: 'org', name: 'public-fm'})
+
+    const graphqlQuery: GraphqlQueryFn = vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'}))
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([privateRepo, publicRepo])),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
+        publicRepos: [makePublicRepo({node_id: 'NODE_PUBLIC_FM', owner: 'org', name: 'public-fm'})],
+        // Metadata has the LEGACY node_id — won't match INSTALL_NODE_ID
+        redactedNodeIds: [METADATA_NODE_ID],
+        // But metadata also has the database_id — this IS the format-independent match
+        redactedDatabaseIds: [SHARED_DATABASE_ID],
+      }))),
+      graphqlQuery,
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+
+    // GraphQL was called (for the public repo)
+    expect(graphqlQuery).toHaveBeenCalled()
+
+    // GraphQL was NEVER called for the private repo — database_id match caught it
+    const calls = (graphqlQuery as ReturnType<typeof vi.fn>).mock.calls
+    for (const call of calls) {
+      const vars = call[1] as {owner: string; name: string}
+      expect(vars.owner).not.toBe('private-org')
+      expect(vars.name).not.toBe('format-mismatch-repo')
+    }
+
+    // The private repo must not appear in the snapshot
+    const snap = agg.getSnapshot()
+    const serialized = JSON.stringify(snap)
+    expect(serialized).not.toContain(INSTALL_NODE_ID)
+    expect(serialized).not.toContain('format-mismatch-repo')
+    expect(serialized).not.toContain('private-org')
+  })
+
+  it('same-node_id exclusion still works (regression guard)', async () => {
+    // Existing behavior: node_id exact match still excludes the repo
+    const REDACTED_NODE_ID = 'NODE_SAME_FORMAT_PRIVATE'
+
+    const privateRepo = makeRepo({
+      node_id: REDACTED_NODE_ID,
+      database_id: 77777,
+      owner: 'private-org',
+      name: 'same-format-secret',
+    })
+    const publicRepo = makeRepo({node_id: 'NODE_SAFE_SF', database_id: 88888, owner: 'org', name: 'safe-sf'})
+
+    const graphqlQuery: GraphqlQueryFn = vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'}))
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([privateRepo, publicRepo])),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
+        publicRepos: [makePublicRepo({node_id: 'NODE_SAFE_SF', owner: 'org', name: 'safe-sf'})],
+        redactedNodeIds: [REDACTED_NODE_ID], // same format — primary match
+        redactedDatabaseIds: [], // no database_id in metadata
+      }))),
+      graphqlQuery,
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+
+    // Only 1 call — for the safe public repo
+    expect(graphqlQuery).toHaveBeenCalledTimes(1)
+    const call = (graphqlQuery as ReturnType<typeof vi.fn>).mock.calls[0]
+    const vars = call?.[1] as {owner: string; name: string}
+    expect(vars.name).toBe('safe-sf')
   })
 
   it('multiple denylisted repos are all excluded from GraphQL calls', async () => {
@@ -787,6 +877,111 @@ describe('security — fail-closed on denylist unavailability', () => {
     const serialized = JSON.stringify(snap)
     expect(serialized).not.toContain(WOULD_LEAK_NAME)
     expect(serialized).not.toContain(WOULD_LEAK_NODE)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Security: cross-format gap closure via derived databaseId
+// ---------------------------------------------------------------------------
+
+describe('security — cross-format gap closure via derived databaseId from legacy node_id', () => {
+  it('redacted entry with legacy node_id MDEw... (dbid 1869154) + install repo with new-format node_id but same database_id → GraphQL NEVER called', async () => {
+    // Scenario: metadata stores the redacted repo under the legacy base64 node_id format.
+    // deriveDatabaseId('MDEwOlJlcG9zaXRvcnkxODY5MTU0') → 1869154.
+    // The installation channel returns the SAME repo under a new-format node_id (R_kgDO...),
+    // but with the same numeric database_id (1869154).
+    // The exact node_id string match MISSES this — but the derived databaseId match catches it.
+    const LEGACY_NODE_ID = 'MDEwOlJlcG9zaXRvcnkxODY5MTU0' // legacy format → dbid 1869154
+    const NEW_FORMAT_NODE_ID = 'R_kgDONewFormat' // new format — different string, same repo
+    const SHARED_DATABASE_ID = 1869154 // derived from legacy node_id
+
+    const privateRepo = makeRepo({
+      node_id: NEW_FORMAT_NODE_ID,
+      database_id: SHARED_DATABASE_ID,
+      owner: 'marcusrbrown',
+      name: 'dotfiles',
+    })
+    const publicRepo = makeRepo({node_id: 'NODE_PUBLIC_LEGACY', database_id: 9999, owner: 'org', name: 'public-legacy'})
+
+    const graphqlQuery: GraphqlQueryFn = vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'}))
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([privateRepo, publicRepo])),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
+        publicRepos: [makePublicRepo({node_id: 'NODE_PUBLIC_LEGACY', owner: 'org', name: 'public-legacy'})],
+        // Metadata has the LEGACY node_id — won't match NEW_FORMAT_NODE_ID by string
+        redactedNodeIds: [LEGACY_NODE_ID],
+        // But metadata also has the derived databaseId — this IS the format-independent match.
+        // In production, this is populated by deriveDatabaseId() in readRepoMetadata.
+        // Here we inject it directly to test the aggregator's secondary guard.
+        redactedDatabaseIds: [SHARED_DATABASE_ID],
+      }))),
+      graphqlQuery,
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+
+    // GraphQL was called (for the public repo)
+    expect(graphqlQuery).toHaveBeenCalled()
+
+    // GraphQL was NEVER called for the private repo — derived databaseId match caught it
+    const calls = (graphqlQuery as ReturnType<typeof vi.fn>).mock.calls
+    for (const call of calls) {
+      const vars = call[1] as {owner: string; name: string}
+      expect(vars.owner).not.toBe('marcusrbrown')
+      expect(vars.name).not.toBe('dotfiles')
+    }
+
+    // The private repo must not appear in the snapshot
+    const snap = agg.getSnapshot()
+    const serialized = JSON.stringify(snap)
+    expect(serialized).not.toContain(NEW_FORMAT_NODE_ID)
+    expect(serialized).not.toContain('dotfiles')
+    expect(serialized).not.toContain('marcusrbrown')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FIX P1: enumeration failure → staleBanner:true
+// ---------------------------------------------------------------------------
+
+describe('aggregator — enumeration failure sets staleBanner=true', () => {
+  it('enumeration err → snapshot has staleBanner=true (data is incomplete)', async () => {
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(err(new FetchInstallationsError('network down'))),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
+        publicRepos: [],
+      }))),
+      graphqlQuery: vi.fn(),
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+    const snap = agg.getSnapshot()
+
+    // staleBanner must be true — installation channel failed, data is incomplete
+    expect(snap.staleBanner).toBe(true)
+  })
+
+  it('enumeration err with metadata publicRepos → repos shown but staleBanner=true', async () => {
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(err(new FetchInstallationsError('timeout'))),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
+        publicRepos: [makePublicRepo({node_id: 'NODE_PUB_ENUM_FAIL', owner: 'org', name: 'pub-enum-fail'})],
+      }))),
+      graphqlQuery: vi.fn().mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'})),
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+    const snap = agg.getSnapshot()
+
+    // Public repos still shown (safe to serve)
+    expect(snap.repos).toHaveLength(1)
+    expect(snap.repos[0]?.node_id).toBe('NODE_PUB_ENUM_FAIL')
+    // But staleBanner=true — operator must know install channel failed
+    expect(snap.staleBanner).toBe(true)
   })
 })
 

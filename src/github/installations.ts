@@ -61,6 +61,14 @@ export const FULL_READ_PERMISSIONS: Record<string, 'read'> = {
 
 export interface RepoRecord {
   readonly node_id: string
+  /**
+   * GitHub's numeric repository id (REST `repository.id` = databaseId).
+   * This is the stable cross-format join key: GitHub has two node_id formats
+   * (legacy base64 `MDEwOlJlcG9zaXRvcnkx` and new `R_kgDO...`), but the
+   * numeric database_id is stable across both. Used as a secondary denylist
+   * key in the aggregator to close the node_id format-mismatch gap.
+   */
+  readonly database_id: number
   readonly owner: string
   readonly name: string
   readonly full_name: string
@@ -252,6 +260,7 @@ async function listInstallationReposWithToken(token: string): Promise<readonly R
     const data = response.data as unknown as {
       total_count: number
       repositories: {
+        id: number
         node_id: string
         owner: {login: string}
         name: string
@@ -261,6 +270,7 @@ async function listInstallationReposWithToken(token: string): Promise<readonly R
     for (const repo of data.repositories) {
       repos.push({
         node_id: repo.node_id,
+        database_id: repo.id,
         owner: repo.owner.login,
         name: repo.name,
         full_name: repo.full_name,

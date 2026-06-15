@@ -8,8 +8,11 @@
  * owner/name NEVER appear in the result, and that the denylist is populated.
  */
 
+import {Buffer} from 'node:buffer'
+
 import {describe, expect, it} from 'vitest'
 import {
+  deriveDatabaseId,
   makeNotFoundError,
   MetadataParseError,
   MetadataSchemaError,
@@ -414,6 +417,151 @@ repos: []
 })
 
 // ---------------------------------------------------------------------------
+// Security: FIX #2 — fail closed on redacted entry with no usable deny key
+// ---------------------------------------------------------------------------
+
+describe('security — fail closed on redacted entry with no usable deny key', () => {
+  it('private:true entry with missing node_id (and no database_id) returns err(MetadataSchemaError)', async () => {
+    const yaml = `
+version: 1
+repos:
+  - owner: '[REDACTED]'
+    name: some-private-repo
+    added: 2026-01-01
+    onboarding_status: pending
+    last_survey_at: null
+    last_survey_status: null
+    has_fro_bot_workflow: false
+    has_renovate: false
+    discovery_channel: collab
+    next_survey_eligible_at: null
+    private: true
+`
+    const result = await readRepoMetadata(makeReader(yaml))
+
+    // Must fail closed — not ok
+    expect(isErr(result)).toBe(true)
+    if (!isErr(result)) return
+    expect(result.error).toBeInstanceOf(MetadataSchemaError)
+    // Must NOT contain owner or name in the error message
+    expect(result.error.message).not.toContain('[REDACTED]')
+    expect(result.error.message).not.toContain('some-private-repo')
+  })
+
+  it('private:true entry with empty string node_id (and no database_id) returns err(MetadataSchemaError)', async () => {
+    const yaml = `
+version: 1
+repos:
+  - owner: '[REDACTED]'
+    name: another-private-repo
+    added: 2026-01-01
+    onboarding_status: pending
+    last_survey_at: null
+    last_survey_status: null
+    has_fro_bot_workflow: false
+    has_renovate: false
+    discovery_channel: collab
+    next_survey_eligible_at: null
+    private: true
+    node_id: ''
+`
+    const result = await readRepoMetadata(makeReader(yaml))
+
+    expect(isErr(result)).toBe(true)
+    if (!isErr(result)) return
+    expect(result.error).toBeInstanceOf(MetadataSchemaError)
+    expect(result.error.message).not.toContain('[REDACTED]')
+    expect(result.error.message).not.toContain('another-private-repo')
+  })
+
+  it('private:true entry with non-string node_id (and no database_id) returns err(MetadataSchemaError)', async () => {
+    const yaml = `
+version: 1
+repos:
+  - owner: '[REDACTED]'
+    name: yet-another-private-repo
+    added: 2026-01-01
+    onboarding_status: pending
+    last_survey_at: null
+    last_survey_status: null
+    has_fro_bot_workflow: false
+    has_renovate: false
+    discovery_channel: collab
+    next_survey_eligible_at: null
+    private: true
+    node_id: 12345
+`
+    const result = await readRepoMetadata(makeReader(yaml))
+
+    expect(isErr(result)).toBe(true)
+    if (!isErr(result)) return
+    expect(result.error).toBeInstanceOf(MetadataSchemaError)
+  })
+
+  it('private:true entry with valid node_id still works (regression guard)', async () => {
+    const yaml = `
+version: 1
+repos:
+  - owner: '[REDACTED]'
+    name: valid-private-repo
+    added: 2026-01-01
+    onboarding_status: pending
+    last_survey_at: null
+    last_survey_status: null
+    has_fro_bot_workflow: false
+    has_renovate: false
+    discovery_channel: collab
+    next_survey_eligible_at: null
+    private: true
+    node_id: R_kgDOValidPrivate
+`
+    const result = await readRepoMetadata(makeReader(yaml))
+
+    // Must succeed — valid node_id is a usable deny key
+    expect(isOk(result)).toBe(true)
+    if (!isOk(result)) return
+    expect(result.data.redactedNodeIds.has('R_kgDOValidPrivate')).toBe(true)
+    expect(result.data.publicRepos).toHaveLength(0)
+  })
+
+  it('private:true entry with no node_id but valid database_id succeeds (database_id is a usable deny key)', async () => {
+    const yaml = `
+version: 1
+repos:
+  - owner: '[REDACTED]'
+    name: db-id-only-private-repo
+    added: 2026-01-01
+    onboarding_status: pending
+    last_survey_at: null
+    last_survey_status: null
+    has_fro_bot_workflow: false
+    has_renovate: false
+    discovery_channel: collab
+    next_survey_eligible_at: null
+    private: true
+    database_id: 987654321
+`
+    const result = await readRepoMetadata(makeReader(yaml))
+
+    // Must succeed — database_id is a usable deny key
+    expect(isOk(result)).toBe(true)
+    if (!isOk(result)) return
+    expect(result.data.redactedDatabaseIds.has(987654321)).toBe(true)
+    expect(result.data.redactedNodeIds.size).toBe(0)
+    expect(result.data.publicRepos).toHaveLength(0)
+  })
+
+  it('MetadataResult includes redactedDatabaseIds as a Set', async () => {
+    const result = await readRepoMetadata(makeReader(FIXTURE_YAML))
+
+    expect(isOk(result)).toBe(true)
+    if (!isOk(result)) return
+    expect(result.data).toHaveProperty('redactedDatabaseIds')
+    expect(result.data.redactedDatabaseIds).toBeInstanceOf(Set)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Integration boundary: Unit 4 fail-closed contract
 // ---------------------------------------------------------------------------
 
@@ -468,5 +616,126 @@ describe('Unit 4 fail-closed contract', () => {
 
     expect(schemaResult.error).toBeInstanceOf(MetadataSchemaError)
     expect(parseResult.error).toBeInstanceOf(MetadataParseError)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// deriveDatabaseId — unit tests
+// ---------------------------------------------------------------------------
+
+describe('deriveDatabaseId — legacy base64 decode', () => {
+  it('decodes the known real pair: MDEwOlJlcG9zaXRvcnkxODY5MTU0 → 1869154', () => {
+    // Verified: base64-decode → "010:Repository1869154" → databaseId 1869154
+    // This is marcusrbrown/.dotfiles from repos.yaml.
+    expect(deriveDatabaseId('MDEwOlJlcG9zaXRvcnkxODY5MTU0')).toBe(1869154)
+  })
+
+  it('decodes another legacy node_id with a different databaseId', () => {
+    // base64-encode "010:Repository42" → "MDEwOlJlcG9zaXRvcnk0Mg=="
+    // Verify the decode works for arbitrary legacy ids.
+    const encoded = Buffer.from('010:Repository42').toString('base64')
+    expect(deriveDatabaseId(encoded)).toBe(42)
+  })
+
+  it('returns null for new-format node_ids (R_kgDO...)', () => {
+    // Conservative: new-format cannot be reliably decoded without a known test vector.
+    expect(deriveDatabaseId('R_kgDOJ_bMaQ')).toBeNull()
+    expect(deriveDatabaseId('R_kgDOSVJgdw')).toBeNull()
+    expect(deriveDatabaseId('R_kgDOAnotherPrivate')).toBeNull()
+  })
+
+  it('returns null for empty string', () => {
+    expect(deriveDatabaseId('')).toBeNull()
+  })
+
+  it('returns null for a base64 string that does not match the Repository<digits> pattern', () => {
+    // base64-encode "010:User12345" — not a Repository node_id
+    const encoded = Buffer.from('010:User12345').toString('base64')
+    expect(deriveDatabaseId(encoded)).toBeNull()
+  })
+
+  it('returns null for a non-base64 garbage string', () => {
+    expect(deriveDatabaseId('not-valid-base64!!!')).toBeNull()
+  })
+})
+
+describe('deriveDatabaseId — integration with readRepoMetadata', () => {
+  it('a redacted entry with a legacy node_id populates redactedDatabaseIds with the derived id', async () => {
+    // MDEwOlJlcG9zaXRvcnkxODY5MTU0 → databaseId 1869154
+    const yaml = `
+version: 1
+repos:
+  - owner: '[REDACTED]'
+    name: dotfiles
+    added: 2026-01-01
+    onboarding_status: pending
+    last_survey_at: null
+    last_survey_status: null
+    has_fro_bot_workflow: false
+    has_renovate: false
+    discovery_channel: collab
+    next_survey_eligible_at: null
+    private: true
+    node_id: MDEwOlJlcG9zaXRvcnkxODY5MTU0
+`
+    const result = await readRepoMetadata(makeReader(yaml))
+
+    expect(isOk(result)).toBe(true)
+    if (!isOk(result)) return
+
+    // node_id still in redactedNodeIds (primary guard)
+    expect(result.data.redactedNodeIds.has('MDEwOlJlcG9zaXRvcnkxODY5MTU0')).toBe(true)
+    // derived databaseId in redactedDatabaseIds (secondary guard)
+    expect(result.data.redactedDatabaseIds.has(1869154)).toBe(true)
+  })
+
+  it('a new-format node_id that cannot be decoded does not add a bogus entry to redactedDatabaseIds', async () => {
+    const yaml = `
+version: 1
+repos:
+  - owner: '[REDACTED]'
+    name: new-format-private
+    added: 2026-01-01
+    onboarding_status: pending
+    last_survey_at: null
+    last_survey_status: null
+    has_fro_bot_workflow: false
+    has_renovate: false
+    discovery_channel: collab
+    next_survey_eligible_at: null
+    private: true
+    node_id: R_kgDOSVJgdw
+`
+    const result = await readRepoMetadata(makeReader(yaml))
+
+    expect(isOk(result)).toBe(true)
+    if (!isOk(result)) return
+
+    // node_id still in redactedNodeIds (primary guard still works)
+    expect(result.data.redactedNodeIds.has('R_kgDOSVJgdw')).toBe(true)
+    // No bogus entry in redactedDatabaseIds — new-format decode returns null
+    expect(result.data.redactedDatabaseIds.size).toBe(0)
+  })
+
+  it('no crash when new-format node_id cannot be decoded — result is still ok', async () => {
+    const yaml = `
+version: 1
+repos:
+  - owner: '[REDACTED]'
+    name: new-format-private
+    added: 2026-01-01
+    onboarding_status: pending
+    last_survey_at: null
+    last_survey_status: null
+    has_fro_bot_workflow: false
+    has_renovate: false
+    discovery_channel: collab
+    next_survey_eligible_at: null
+    private: true
+    node_id: R_kgDOAnotherPrivate
+`
+    await expect(readRepoMetadata(makeReader(yaml))).resolves.toBeDefined()
+    const result = await readRepoMetadata(makeReader(yaml))
+    expect(isOk(result)).toBe(true)
   })
 })
