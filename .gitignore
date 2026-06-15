@@ -13,3 +13,9 @@ dist
 .slim/clonedeps/repos/
 # END oh-my-opencode-slim clonedeps
 .context/
+
+# Opencode
+!.opencode/
+.opencode/*
+!.opencode/themes/
+!.opencode/tui.json

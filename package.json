@@ -10,6 +10,7 @@
     "start": "node src/server.ts",
     "check-types": "tsc --noEmit",
     "lint": "eslint",
+    "fix": "eslint --fix",
     "test": "vitest run"
   },
   "dependencies": {
