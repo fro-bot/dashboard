@@ -11,8 +11,11 @@ describe('dashboard server', () => {
     expect(body).toEqual({ok: true, lastFetch: null, rateLimit: null})
   })
 
-  it('unknown route returns 404', async () => {
+  it('fails closed: with no operator configured, an unknown protected route is denied (401), not 404', async () => {
+    // Deny-by-default — an unauthenticated caller must not be able to probe
+    // which routes exist, and an unconfigured operator login must never serve
+    // protected content.
     const res = await app.request('/not-a-real-route')
-    expect(res.status).toBe(404)
+    expect(res.status).toBe(401)
   })
 })
