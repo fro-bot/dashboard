@@ -3,3 +3,12 @@ node_modules
 coverage
 dist
 .DS_Store
+
+# Never commit private keys (App PEM, cookie key). Defense-in-depth: do not
+# rely on a machine-global gitignore for a public repo holding a read credential.
+*.pem
+*.key
+
+# BEGIN oh-my-opencode-slim clonedeps
+.slim/clonedeps/repos/
+# END oh-my-opencode-slim clonedeps
