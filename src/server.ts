@@ -16,6 +16,7 @@
  */
 import type {ServerType} from '@hono/node-server'
 import type {GitHubOAuthClient} from './auth/oauth.ts'
+import type {AggregatorSnapshot} from './github/aggregator.ts'
 import {Buffer} from 'node:buffer'
 import process from 'node:process'
 import {serve} from '@hono/node-server'
@@ -23,8 +24,9 @@ import {Hono} from 'hono'
 import {getCookie} from 'hono/cookie'
 import {fetchGitHubUserLogin, makeGitHubOAuthClient} from './auth/oauth.ts'
 import {logger} from './logger.ts'
-import {api} from './routes/api.ts'
+import {buildApiRouter} from './routes/api.ts'
 import {buildAuthRouter} from './routes/auth.ts'
+import {buildDashboardRouter} from './routes/dashboard.ts'
 import {loadCookieKey, SessionManager} from './session.ts'
 
 /** Per-IP rate limiter state */
@@ -80,6 +82,16 @@ export interface DashboardAppConfig {
    * If undefined, uses the real GitHub API.
    */
   fetchUserLogin?: ((accessToken: string) => Promise<string>) | undefined
+  /**
+   * Aggregator snapshot provider. Both the dashboard SSR route and /api/status
+   * read from this same provider so they always serve the same data.
+   *
+   * If undefined, defaults to a provider returning an empty snapshot
+   * {repos:[], staleBanner:false, driftCount:0, refreshedAt:null}.
+   * The real aggregator is wired here in production via createDashboardServer.
+   * Tests inject a fake snapshot provider.
+   */
+  getSnapshot?: (() => AggregatorSnapshot) | undefined
 }
 
 /**
@@ -112,6 +124,11 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono {
     )
 
   const fetchUserLogin = opts?.fetchUserLogin ?? fetchGitHubUserLogin
+
+  // Resolve snapshot provider — both dashboard SSR and /api/status share the same source.
+  // Default: empty snapshot (no aggregator wired yet; production wires the real one).
+  const EMPTY_SNAPSHOT = {repos: [], staleBanner: false, driftCount: 0, refreshedAt: null} as const
+  const getSnapshot = opts?.getSnapshot ?? (() => EMPTY_SNAPSHOT)
 
   const app = new Hono()
 
@@ -201,7 +218,14 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono {
   }
 
   // ── API routes ───────────────────────────────────────────────────────────────
-  app.route('/api', api)
+  // /api/healthz is public (exempted in isPublicPath above).
+  // /api/status is protected — the auth middleware above already denies unauthenticated
+  // requests to any path not in isPublicPath, so no extra guard is needed here.
+  app.route('/api', buildApiRouter(getSnapshot))
+
+  // ── Dashboard SSR route ──────────────────────────────────────────────────────
+  // Mounted at `/` — protected by the auth middleware above.
+  app.route('/', buildDashboardRouter({getSnapshot}))
 
   return app
 }
