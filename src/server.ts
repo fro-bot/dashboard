@@ -14,20 +14,27 @@
  * - `/api/healthz` (public health check)
  * - `/auth/*` (login/callback/logout)
  */
-import type {Buffer} from 'node:buffer'
 import type {ServerType} from '@hono/node-server'
 import type {GitHubOAuthClient} from './auth/oauth.ts'
 import type {AggregatorSnapshot} from './github/aggregator.ts'
+import type {MetadataReader} from './github/metadata.ts'
+import {Buffer} from 'node:buffer'
 import process from 'node:process'
 import {serve} from '@hono/node-server'
 import {getConnInfo} from '@hono/node-server/conninfo'
+import {graphql} from '@octokit/graphql'
 import {Hono} from 'hono'
 import {getCookie} from 'hono/cookie'
 import {fetchGitHubUserLogin, makeGitHubOAuthClient} from './auth/oauth.ts'
+import {createAggregator} from './github/aggregator.ts'
+import {createDashboardAppClient} from './github/app-client.ts'
+import {buildInstallationsClient, enumerateRepos} from './github/installations.ts'
+import {makeNotFoundError, readRepoMetadata} from './github/metadata.ts'
 import {logger, sanitizeErrorMessage} from './logger.ts'
 import {buildApiRouter} from './routes/api.ts'
 import {buildAuthRouter} from './routes/auth.ts'
 import {buildDashboardRouter} from './routes/dashboard.ts'
+import {readOptionalMultilineSecret, readOptionalSecret} from './secrets.ts'
 import {loadCookieKey, SessionManager} from './session.ts'
 
 /** Hono context variables set by auth middleware */
@@ -299,13 +306,139 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono<{Variables: Variable
   return app
 }
 
+// ---------------------------------------------------------------------------
+// Snapshot provider (testable wiring helper)
+// ---------------------------------------------------------------------------
+
+/**
+ * Injectable deps for `buildSnapshotProvider` — allows tests to inject fakes
+ * for the app client, enumerate fn, metadata reader, and graphql fn without
+ * touching the network.
+ */
+export interface SnapshotProviderDeps {
+  readonly appId: string
+  readonly privateKey: string
+  /** Override the enumerate function (default: real enumerateRepos) */
+  readonly enumerateFn?: typeof enumerateRepos
+  /** Override the metadata reader (default: real Octokit-backed reader) */
+  readonly metadataReader?: MetadataReader
+  /** Override the graphql query function (default: real @octokit/graphql) */
+  readonly graphqlQueryFn?: (query: string, variables: Record<string, unknown>) => Promise<unknown>
+}
+
+/**
+ * Build the real aggregator snapshot provider from GitHub App credentials.
+ *
+ * Extracted from `createDashboardServer` so tests can assert the production
+ * path uses the REAL aggregator (not the empty default). Inject fakes via
+ * `deps` to avoid network calls in tests.
+ *
+ * Returns `{ getSnapshot, start, stop }` — the same shape as the aggregator.
+ */
+export function buildSnapshotProvider(deps: SnapshotProviderDeps): {
+  getSnapshot: () => AggregatorSnapshot
+  start: () => Promise<void>
+  stop: () => void
+} {
+  const {appId, privateKey} = deps
+
+  const appClient = createDashboardAppClient({appId, privateKey})
+  const installationsClient = buildInstallationsClient(appClient)
+
+  // Real Octokit-backed metadata reader: fetches metadata/repos.yaml from
+  // fro-bot/.github at ref=data via the App JWT-level Octokit.
+  const metadataReader: MetadataReader =
+    deps.metadataReader ??
+    (async (path: string, ref: string): Promise<string> => {
+      const response = await appClient.octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
+        owner: 'fro-bot',
+        repo: '.github',
+        path,
+        ref,
+      })
+      const data = response.data as unknown as {type: string; encoding: string; content: string}
+      if (data.type !== 'file' || data.encoding !== 'base64') {
+        throw makeNotFoundError(`${path} at ref=${ref} is not a base64-encoded file`)
+      }
+      // base64-decode the content (GitHub wraps at 60 chars with newlines)
+      return Buffer.from(data.content.replaceAll('\n', ''), 'base64').toString('utf8')
+    })
+
+  // Real graphql query function: authenticated with an installation token.
+  // We use the app client's Octokit to get an installation token for the
+  // fro-bot org installation, then authenticate the graphql client with it.
+  const graphqlQueryFn =
+    deps.graphqlQueryFn ??
+    (async (query: string, variables: Record<string, unknown>): Promise<unknown> => {
+      // Use the app-level Octokit to get the first installation token.
+      // The graphql client is authenticated per-query with a fresh token.
+      const installationsResponse = await appClient.octokit.request('GET /app/installations', {per_page: 1})
+      const installs = installationsResponse.data as unknown as {id: number}[]
+      if (installs.length === 0) {
+        throw new Error('No GitHub App installations found — cannot authenticate GraphQL queries')
+      }
+      const firstInstall = installs[0]
+      if (firstInstall === undefined) {
+        throw new Error('No GitHub App installations found — cannot authenticate GraphQL queries')
+      }
+      const token = await appClient.mintInstallationToken(firstInstall.id, {
+        pull_requests: 'read',
+        checks: 'read',
+        issues: 'read',
+        contents: 'read',
+        metadata: 'read',
+      })
+      const gql = graphql.defaults({headers: {authorization: `token ${token}`}})
+      return gql(query, variables)
+    })
+
+  const aggregator = createAggregator(installationsClient, metadataReader, {
+    enumerate: deps.enumerateFn ?? enumerateRepos,
+    readMetadata: readRepoMetadata,
+    graphqlQuery: graphqlQueryFn,
+  })
+
+  return {
+    getSnapshot: aggregator.getSnapshot,
+    start: aggregator.start,
+    stop: aggregator.stop,
+  }
+}
+
 /**
  * Binds the app to 127.0.0.1:3000 via @hono/node-server.
  * Loads the cookie key asynchronously before starting.
  */
 async function createDashboardServer(): Promise<ServerType> {
   const cookieKey = await loadCookieKey()
-  const app = buildDashboardApp({cookieKey})
+
+  // Wire the real GitHub data layer when credentials are present.
+  // If creds are absent (dev/test context), fall back to the empty provider
+  // with a clear warning — the server still boots, just serves empty data.
+  let getSnapshot: (() => AggregatorSnapshot) | undefined
+  let stopAggregator: (() => void) | undefined
+
+  const appId = readOptionalSecret('DASHBOARD_GITHUB_APP_ID')
+  const privateKey = readOptionalMultilineSecret('DASHBOARD_GITHUB_APP_KEY')
+
+  if (appId !== null && privateKey !== null) {
+    try {
+      const provider = buildSnapshotProvider({appId, privateKey})
+      await provider.start()
+      getSnapshot = provider.getSnapshot
+      stopAggregator = provider.stop
+    } catch (error) {
+      logger.warning('Failed to start GitHub aggregator; serving empty snapshot', {
+        error: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)),
+      })
+    }
+  } else {
+    logger.warning(
+      'DASHBOARD_GITHUB_APP_ID or DASHBOARD_GITHUB_APP_KEY not set — GitHub data layer disabled; serving empty snapshot',
+    )
+  }
+
+  const app = buildDashboardApp({cookieKey, getSnapshot})
 
   const server = serve(
     {
@@ -317,6 +450,14 @@ async function createDashboardServer(): Promise<ServerType> {
       console.warn(`Dashboard listening on http://${info.address}:${info.port}`)
     },
   )
+
+  // Attach stop handler for graceful shutdown
+  if (stopAggregator !== undefined) {
+    const stop = stopAggregator
+    server.addListener('close', () => {
+      stop()
+    })
+  }
 
   return server
 }

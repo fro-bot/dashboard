@@ -27,7 +27,7 @@ import type {Result} from '../result.ts'
 import {Buffer} from 'node:buffer'
 import {parse} from 'yaml'
 
-import {logger} from '../logger.ts'
+import {logger, sanitizeErrorMessage} from '../logger.ts'
 import {err, ok} from '../result.ts'
 
 // ---------------------------------------------------------------------------
@@ -229,7 +229,7 @@ export async function readRepoMetadata(reader: MetadataReader): Promise<Result<M
       })
       return err(new MetadataUnavailableError(`${METADATA_PATH} not found on ref=${DATA_REF}`))
     }
-    const msg = safeMessage(fetchError)
+    const msg = sanitizeErrorMessage(fetchError instanceof Error ? fetchError.message : String(fetchError))
     logger.error('Transport error reading metadata/repos.yaml', {path: METADATA_PATH, ref: DATA_REF, error: msg})
     return err(new MetadataTransportError(`Transport error reading ${METADATA_PATH}: ${msg}`))
   }
@@ -239,7 +239,7 @@ export async function readRepoMetadata(reader: MetadataReader): Promise<Result<M
   try {
     parsed = parse(raw)
   } catch (parseError) {
-    const msg = safeMessage(parseError)
+    const msg = sanitizeErrorMessage(parseError instanceof Error ? parseError.message : String(parseError))
     logger.error('Failed to parse metadata/repos.yaml', {error: msg})
     return err(new MetadataParseError(`Failed to parse ${METADATA_PATH}: ${msg}`))
   }
@@ -355,11 +355,6 @@ export async function readRepoMetadata(reader: MetadataReader): Promise<Result<M
 function isNotFoundError(error: unknown): boolean {
   if (error === null || typeof error !== 'object') return false
   return (error as Record<string, unknown>).code === NOT_FOUND_CODE
-}
-
-function safeMessage(error: unknown): string {
-  if (error instanceof Error) return error.message
-  return String(error)
 }
 
 /**

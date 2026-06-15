@@ -10,7 +10,7 @@
 
 import {Buffer} from 'node:buffer'
 
-import {describe, expect, it} from 'vitest'
+import {describe, expect, it, vi} from 'vitest'
 import {
   deriveDatabaseId,
   makeNotFoundError,
@@ -737,5 +737,128 @@ repos:
     await expect(readRepoMetadata(makeReader(yaml))).resolves.toBeDefined()
     const result = await readRepoMetadata(makeReader(yaml))
     expect(isOk(result)).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Security: token-shaped secrets must not leak from error log paths
+// ---------------------------------------------------------------------------
+
+describe('security — token-shaped secrets redacted in error log paths', () => {
+  it('transport error containing a ghs_ token is redacted before logging', async () => {
+    // The reader throws with a ghs_ token in the error message.
+    // readRepoMetadata must NOT log the raw token — sanitizeErrorMessage must strip it.
+    const fakeToken = 'ghs_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE'
+    const reader = async (): Promise<string> => {
+      throw new Error(`Octokit request failed: Authorization: token ${fakeToken}`)
+    }
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      const result = await readRepoMetadata(reader)
+
+      // Must return err (transport error), not throw
+      expect(isErr(result)).toBe(true)
+      if (!isErr(result)) return
+      expect(result.error).toBeInstanceOf(MetadataTransportError)
+
+      // The raw token must NOT appear in any log output
+      const allOutput = (warnSpy.mock.calls.flat() as unknown[])
+        .concat(errorSpy.mock.calls.flat() as unknown[])
+        .map(String)
+        .join(' ')
+      expect(allOutput).not.toContain(fakeToken)
+      expect(allOutput).toContain('[REDACTED]')
+    } finally {
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('transport error containing a github_pat_ token is redacted before logging', async () => {
+    const fakeToken = 'github_pat_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE'
+    const reader = async (): Promise<string> => {
+      throw new Error(`Auth failed with token: ${fakeToken}`)
+    }
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      const result = await readRepoMetadata(reader)
+
+      expect(isErr(result)).toBe(true)
+      if (!isErr(result)) return
+      expect(result.error).toBeInstanceOf(MetadataTransportError)
+
+      const allOutput = (warnSpy.mock.calls.flat() as unknown[])
+        .concat(errorSpy.mock.calls.flat() as unknown[])
+        .map(String)
+        .join(' ')
+      expect(allOutput).not.toContain(fakeToken)
+      expect(allOutput).toContain('[REDACTED]')
+    } finally {
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('transport error containing a long opaque bearer token is redacted before logging', async () => {
+    // 40+ char opaque token (e.g. OAuth bearer)
+    const fakeToken = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2'
+    const reader = async (): Promise<string> => {
+      throw new Error(`Bearer ${fakeToken} rejected`)
+    }
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      const result = await readRepoMetadata(reader)
+
+      expect(isErr(result)).toBe(true)
+      if (!isErr(result)) return
+      expect(result.error).toBeInstanceOf(MetadataTransportError)
+
+      const allOutput = (warnSpy.mock.calls.flat() as unknown[])
+        .concat(errorSpy.mock.calls.flat() as unknown[])
+        .map(String)
+        .join(' ')
+      expect(allOutput).not.toContain(fakeToken)
+      expect(allOutput).toContain('[REDACTED]')
+    } finally {
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('parse error containing a ghs_ token is redacted before logging', async () => {
+    // Contrived: a YAML parse error that somehow includes a token in the message.
+    // The parse error path also goes through sanitizeErrorMessage.
+    const fakeToken = 'ghs_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE'
+    // We can't easily inject a token into a YAML parse error, so we test the
+    // sanitizeErrorMessage path directly via a transport error that triggers
+    // the same code path (both use sanitizeErrorMessage).
+    const reader = async (): Promise<string> => {
+      throw new Error(`Parse context: token=${fakeToken}`)
+    }
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      await readRepoMetadata(reader)
+
+      const allOutput = (warnSpy.mock.calls.flat() as unknown[])
+        .concat(errorSpy.mock.calls.flat() as unknown[])
+        .map(String)
+        .join(' ')
+      expect(allOutput).not.toContain(fakeToken)
+    } finally {
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
   })
 })

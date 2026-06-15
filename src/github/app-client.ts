@@ -16,7 +16,7 @@ import {Octokit} from '@octokit/core'
 import {retry} from '@octokit/plugin-retry'
 import {throttling} from '@octokit/plugin-throttling'
 
-import {logger} from '../logger.ts'
+import {logger, sanitizeErrorMessage} from '../logger.ts'
 
 // ---------------------------------------------------------------------------
 // Throttled + retrying Octokit class
@@ -99,16 +99,13 @@ export function createDashboardAppClient(options: AppClientOptions): DashboardAp
 /**
  * Extract a safe error message that cannot contain sensitive material.
  *
- * Strips anything that looks like a PEM block or a JWT (three base64url
- * segments separated by dots) before returning the message.
+ * Delegates to `sanitizeErrorMessage` from logger.ts — the single canonical
+ * redactor that covers PEM blocks, JWT-shaped strings, GitHub tokens
+ * (ghs_/gho_/ghp_/ghu_/github_pat_), and long opaque bearer strings.
  */
 export function safeErrorMessage(error: unknown): string {
   if (!(error instanceof Error)) {
     return 'Unknown error'
   }
-  // Strip PEM blocks
-  let msg = error.message.replaceAll(/-----BEGIN[^-]+-----[\s\S]*?-----END[^-]+-----/g, '[REDACTED]')
-  // Strip JWT-shaped strings (three base64url segments)
-  msg = msg.replaceAll(/[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}/g, '[REDACTED]')
-  return msg
+  return sanitizeErrorMessage(error.message)
 }

@@ -513,3 +513,136 @@ describe('security — optional-scope graceful degradation', () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// Security: token-shaped secrets must not leak from error log paths
+// ---------------------------------------------------------------------------
+
+describe('security — token-shaped secrets redacted in error log paths', () => {
+  it('enumerateRepos: ghs_ token in listInstallations error is redacted in logs', async () => {
+    const fakeToken = 'ghs_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE'
+    const client = makeClient({
+      listInstallations: vi.fn().mockRejectedValue(
+        new Error(`Authorization: token ${fakeToken} rejected`),
+      ),
+    })
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      const result = await enumerateRepos(client)
+
+      // Must return err, not throw
+      expect(isErr(result)).toBe(true)
+      if (!isErr(result)) return
+      expect(result.error).toBeInstanceOf(FetchInstallationsError)
+
+      // The raw token must NOT appear in any log output
+      const allOutput = (warnSpy.mock.calls.flat() as unknown[])
+        .concat(errorSpy.mock.calls.flat() as unknown[])
+        .map(String)
+        .join(' ')
+      expect(allOutput).not.toContain(fakeToken)
+      expect(allOutput).toContain('[REDACTED]')
+    } finally {
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('enumerateRepos: github_pat_ token in listInstallations error is redacted in logs', async () => {
+    const fakeToken = 'github_pat_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE'
+    const client = makeClient({
+      listInstallations: vi.fn().mockRejectedValue(
+        new Error(`Auth failed with token: ${fakeToken}`),
+      ),
+    })
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      const result = await enumerateRepos(client)
+
+      expect(isErr(result)).toBe(true)
+      if (!isErr(result)) return
+      expect(result.error).toBeInstanceOf(FetchInstallationsError)
+
+      const allOutput = (warnSpy.mock.calls.flat() as unknown[])
+        .concat(errorSpy.mock.calls.flat() as unknown[])
+        .map(String)
+        .join(' ')
+      expect(allOutput).not.toContain(fakeToken)
+      expect(allOutput).toContain('[REDACTED]')
+    } finally {
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('mintReadOnlyToken: ghs_ token in mint error is redacted in warning log', async () => {
+    const fakeToken = 'ghs_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE'
+    // Full-permissions mint fails with a token in the error, core-only succeeds
+    const mintFn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error(`Token ${fakeToken} has insufficient scope`))
+      .mockResolvedValueOnce('ghs_core_only_token')
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      // Use an installationId not used in other tests to avoid cache hits
+      const token = await mintReadOnlyToken(9001, mintFn)
+      expect(token).toBe('ghs_core_only_token')
+
+      // The raw token from the error must NOT appear in any log output
+      const allOutput = (warnSpy.mock.calls.flat() as unknown[])
+        .concat(errorSpy.mock.calls.flat() as unknown[])
+        .map(String)
+        .join(' ')
+      expect(allOutput).not.toContain(fakeToken)
+      expect(allOutput).toContain('[REDACTED]')
+    } finally {
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('enumerateRepos: long opaque bearer token in mint error is redacted in warning log', async () => {
+    // 40+ char opaque token (e.g. OAuth bearer)
+    const fakeToken = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2'
+    const client = makeClient({
+      listInstallations: vi.fn().mockResolvedValue([makeInstall(9002)]),
+      mintInstallationToken: vi
+        .fn()
+        // Full permissions fail with opaque token in error
+        .mockRejectedValueOnce(new Error(`Bearer ${fakeToken} rejected`))
+        // Core-only also fails → installation skipped
+        .mockRejectedValueOnce(new Error('core scope also failed')),
+      listInstallationRepos: vi.fn().mockResolvedValue([]),
+    })
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      const result = await enumerateRepos(client)
+
+      // enumerateRepos succeeds (returns ok with empty repos — install was skipped)
+      expect(isOk(result)).toBe(true)
+
+      // The raw token must NOT appear in any log output
+      const allOutput = (warnSpy.mock.calls.flat() as unknown[])
+        .concat(errorSpy.mock.calls.flat() as unknown[])
+        .map(String)
+        .join(' ')
+      expect(allOutput).not.toContain(fakeToken)
+      expect(allOutput).toContain('[REDACTED]')
+    } finally {
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
+  })
+})
