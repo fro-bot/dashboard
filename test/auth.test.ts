@@ -462,6 +462,26 @@ describe('OAuth flow', () => {
 
       expect(res.status).toBe(403)
     })
+
+    it('CSRF token from an expired time window → 403 (leaked token expires)', async () => {
+      const app = buildTestApp({operatorLogin: 'octocat'})
+      const sm = new SessionManager(TEST_KEY)
+      const sessionCookie = sm.sign('octocat')
+      // Token derived 3 hours ago — older than the current + previous accepted windows
+      const staleToken = deriveLogoutCsrfToken(TEST_KEY, 'octocat', Date.now() - 3 * 60 * 60 * 1000)
+
+      const body = new URLSearchParams({csrf_token: staleToken})
+      const res = await app.request('/auth/logout', {
+        method: 'POST',
+        headers: {
+          cookie: `session=${sessionCookie}`,
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body: body.toString(),
+      })
+
+      expect(res.status).toBe(403)
+    })
   })
 })
 

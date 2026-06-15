@@ -41,13 +41,18 @@ export interface AuthRouteConfig {
   readonly cookieKey: Buffer
 }
 
+/** CSRF token validity window (ms). A leaked logout token expires after at most 2 windows. */
+const CSRF_WINDOW_MS = 60 * 60 * 1000
+
 /**
- * Derives the logout CSRF token for a given login.
- * Token = first 32 hex chars of HMAC-SHA256(cookieKey, login + ':logout').
- * Binding to the login ensures the token is session-specific.
+ * Derives the logout CSRF token for a given login, bound to a coarse time window.
+ * Token = first 32 hex chars of HMAC-SHA256(cookieKey, login + ':logout:' + window).
+ * Binding to the login makes it operator-specific; binding to the time window means
+ * a leaked token stops working after at most 2 windows (defeats permanent replay).
  */
-export function deriveLogoutCsrfToken(cookieKey: Buffer, login: string): string {
-  return createHmac('sha256', cookieKey).update(`${login}:logout`).digest('hex').slice(0, 32)
+export function deriveLogoutCsrfToken(cookieKey: Buffer, login: string, now: number = Date.now()): string {
+  const window = Math.floor(now / CSRF_WINDOW_MS)
+  return createHmac('sha256', cookieKey).update(`${login}:logout:${window}`).digest('hex').slice(0, 32)
 }
 
 /**
@@ -170,13 +175,20 @@ export function buildAuthRouter(config: AuthRouteConfig): Hono {
       return c.text('Forbidden: missing CSRF token', 403)
     }
 
-    const expectedToken = deriveLogoutCsrfToken(cookieKey, operatorLogin)
-
-    // Constant-time comparison to prevent timing attacks
+    // Accept the current OR previous time window so a token rendered just before a
+    // window boundary still validates on submit. A leaked token expires within 2 windows.
+    const now = Date.now()
     const submittedBuf = Buffer.from(submittedToken, 'utf8')
-    const expectedBuf = Buffer.from(expectedToken, 'utf8')
+    const candidates = [
+      deriveLogoutCsrfToken(cookieKey, operatorLogin, now),
+      deriveLogoutCsrfToken(cookieKey, operatorLogin, now - CSRF_WINDOW_MS),
+    ]
+    const matched = candidates.some(expected => {
+      const expectedBuf = Buffer.from(expected, 'utf8')
+      return submittedBuf.length === expectedBuf.length && timingSafeEqual(submittedBuf, expectedBuf)
+    })
 
-    if (submittedBuf.length !== expectedBuf.length || !timingSafeEqual(submittedBuf, expectedBuf)) {
+    if (!matched) {
       logger.warning('Logout: CSRF token mismatch')
       return c.text('Forbidden: invalid CSRF token', 403)
     }
