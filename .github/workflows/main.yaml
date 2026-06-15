@@ -1,0 +1,107 @@
+# Continuous Integration jobs for changes headed to main.
+---
+name: Main
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, ready_for_review, reopened, synchronize]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash -Eeuo pipefail {0}
+
+jobs:
+  lint:
+    name: Lint
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: ⤵ Checkout Branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: 📦 Setup
+        uses: ./.github/actions/setup
+
+      - env:
+          TIMING: 1
+        name: 💅🏽 Lint
+        run: pnpm lint
+
+  check-types:
+    name: Check Types
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: ⤵ Checkout Branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: 📦 Setup
+        uses: ./.github/actions/setup
+
+      - name: ✅ Validate Types
+        run: pnpm check-types
+
+  test:
+    name: Test
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: ⤵ Checkout Branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: 📦 Setup
+        uses: ./.github/actions/setup
+
+      - name: 🧪 Run Tests
+        run: pnpm test
+
+  test-scripts-load:
+    name: Test Scripts Load
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: ⤵ Checkout Branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: 📦 Setup
+        uses: ./.github/actions/setup
+
+      - name: 🧪 Load production scripts under Node strip-only
+        # Node 24's strip-only TypeScript execution only erases type annotations -- it does
+        # not transform TS-specific class constructs (parameter properties, enum, namespace).
+        # Neither `tsc --noEmit` nor Vitest exercise the strip-only parser, so those runtime
+        # errors used to surface only at runtime. Importing each production module here catches
+        # them at merge time instead. Recursive over src/ so nested modules (routes/, github/,
+        # auth/) are covered as the app grows, excluding tests.
+        run: |
+          while IFS= read -r f; do
+            node -e "import('./$f').then(() => {}).catch(err => { process.stderr.write('FAIL $f: ' + (err.code || err.message) + '\\n'); process.exit(1); })"
+            echo "  ok   $f"
+          done < <(find src -name '*.ts' ! -name '*.test.ts' | sort)

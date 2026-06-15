@@ -1,0 +1,49 @@
+---
+name: Setup
+description: Setup build environment and install dependencies
+
+inputs:
+  cache-version:
+    default: '0'
+    description: Cache version. Can be incremented to invalidate the cache.
+    required: false
+
+runs:
+  steps:
+    - name: Install pnpm
+      uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      with:
+        node-version: '24'
+        cache: pnpm
+
+    - id: configure-cache
+      name: Configure cache
+      run: |
+        pnpm_store_path="$(pnpm store path --silent)"
+        if [ -z "$pnpm_store_path" ]; then
+          echo "Failed to get pnpm store path"
+          exit 1
+        fi
+        mkdir -p "$pnpm_store_path" || exit 1
+        echo "path=$pnpm_store_path" >> $GITHUB_OUTPUT
+        year_month=$(date -u '+%Y-%m')
+        base_key="pnpm-store-v${{ inputs.cache-version }}-${{ runner.os }}-${year_month}-"
+        echo "key=${base_key}${{ hashFiles('**/pnpm-lock.yaml') }}" >> $GITHUB_OUTPUT
+        echo "restore-keys=${base_key}" >> $GITHUB_OUTPUT
+      shell: bash -Eeuo pipefail {0}
+
+    - name: Restore pnpm store cache
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        key: ${{ steps.configure-cache.outputs.key }}
+        path: ${{ steps.configure-cache.outputs.path }}
+        restore-keys: ${{ steps.configure-cache.outputs.restore-keys }}
+
+    - name: Install dependencies
+      run: pnpm install --frozen-lockfile
+      shell: bash -Eeuo pipefail {0}
+
+  using: composite
