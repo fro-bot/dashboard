@@ -28,23 +28,36 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: write
       packages: write
 
     steps:
+      # Act as fro-bot[bot] (not the Actions user) so tags + releases are authored by
+      # the App identity, matching fro-bot/.github + fro-bot/agent automation.
+      # NOTE: The GitHub App must have contents:write + packages:write (+ metadata:read)
+      # on its installation for tag push, GHCR push, and release creation to succeed.
+      - name: 🤖 Get App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.APPLICATION_ID }}
+          private-key: ${{ secrets.APPLICATION_PRIVATE_KEY }}
+
       - name: ⤵ Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          # Persist the App token so `git push` of the CalVer tag is authored by fro-bot[bot].
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: 🔑 Log in to GHCR
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: x-access-token
+          password: ${{ steps.app-token.outputs.token }}
 
       - name: 🔧 Set up Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
@@ -62,6 +75,7 @@ jobs:
       - name: 🧪 Smoke-test candidate image by digest
         run: |
           IMG="ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}"
+          trap 'docker rm -f dashboard-smoke >/dev/null 2>&1 || true; docker network rm smoke-net >/dev/null 2>&1 || true' EXIT
           docker network create smoke-net
           COOKIE_KEY=$(openssl rand -hex 32)
           docker run -d --name dashboard-smoke --network smoke-net \
@@ -75,8 +89,9 @@ jobs:
           done
           # sibling-container reachability (mimics Caddy -> app over docker network)
           sib=0
-          if docker run --rm --network smoke-net curlimages/curl:latest \
-              -fsS http://dashboard-smoke:3000/api/healthz >/dev/null 2>&1; then sib=1; fi
+          if docker exec dashboard-smoke node -e \
+              "fetch('http://localhost:3000/api/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" \
+              >/dev/null 2>&1; then sib=1; fi
           if [ "$ok" != 1 ] || [ "$sib" != 1 ]; then
             echo "SMOKE FAILED (host_port_ok=$ok sibling_ok=$sib)"
             docker logs dashboard-smoke || true
@@ -141,12 +156,22 @@ jobs:
           SHORT_SHA="$(git rev-parse --short HEAD)"
 
           for TAG in "$CALVER" "latest" "sha-${SHORT_SHA}"; do
-            docker buildx imagetools create \
-              --tag "ghcr.io/${{ github.repository }}:$TAG" "$SRC"
+            for attempt in 1 2 3; do
+              if docker buildx imagetools create \
+                  --tag "ghcr.io/${{ github.repository }}:$TAG" "$SRC"; then
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                echo "promote failed for $TAG after 3 attempts"
+                exit 1
+              fi
+              echo "promote attempt $attempt failed for $TAG, retrying..."
+              sleep 3
+            done
           done
 
           # Verify promoted tags resolve to the smoke-tested digest
-          for TAG in "$CALVER" "latest"; do
+          for TAG in "$CALVER" "latest" "sha-${SHORT_SHA}"; do
             got=$(docker buildx imagetools inspect \
               "ghcr.io/${{ github.repository }}:$TAG" \
               --format '{{.Manifest.Digest}}')
@@ -159,7 +184,7 @@ jobs:
 
       - name: 🚀 Create GitHub Release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           CALVER="${{ steps.calver.outputs.tag }}"
           DIGEST="${{ steps.build.outputs.digest }}"
@@ -170,7 +195,23 @@ jobs:
             --generate-notes
 
           EXISTING_BODY="$(gh release view "$CALVER" --json body -q .body)"
-          IMAGE_BLOCK="$(printf '\n\n## Image\n\nImage: ghcr.io/fro-bot/dashboard:%s\nDigest: ghcr.io/fro-bot/dashboard@%s\nSource: %s' "$CALVER" "$DIGEST" "$SHA")"
+          REPO="${{ github.repository }}"
+          IMAGE_BLOCK="$(printf '\n\n## Image\n\nImage: ghcr.io/%s:%s\nDigest: ghcr.io/%s@%s\nSource: %s' "$REPO" "$CALVER" "$REPO" "$DIGEST" "$SHA")"
 
           gh release edit "$CALVER" \
             --notes "${EXISTING_BODY}${IMAGE_BLOCK}"
+
+      - name: 🧹 Cleanup on failure (delete tag + release)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          TAG="${{ steps.calver.outputs.tag }}"
+          if [ -z "$TAG" ]; then
+            echo "No tag was pushed; nothing to clean up."
+            exit 0
+          fi
+          echo "Cleaning up remote tag $TAG and any partial release..."
+          git push origin ":refs/tags/$TAG" 2>/dev/null || echo "Remote tag $TAG not found or already deleted."
+          gh release delete "$TAG" --yes 2>/dev/null || echo "Release $TAG not found or already deleted."
+          echo "Cleanup complete."
