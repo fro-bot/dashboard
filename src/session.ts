@@ -72,13 +72,18 @@ export class SessionManager {
    */
   verify(cookieValue: string): SessionPayload | null {
     try {
-      const dotIndex = cookieValue.indexOf('.')
-      if (dotIndex === -1) return null
+      // FIX #6: Enforce canonical 2-part structure (exactly one dot separator).
+      const parts = cookieValue.split('.')
+      if (parts.length !== 2) return null
 
-      const payloadB64 = cookieValue.slice(0, dotIndex)
-      const sigB64 = cookieValue.slice(dotIndex + 1)
+      const payloadB64 = parts[0] ?? ''
+      const sigB64 = parts[1] ?? ''
 
       if (payloadB64.length === 0 || sigB64.length === 0) return null
+
+      // Validate both parts are strict base64url (no padding, no non-base64url chars)
+      const BASE64URL_RE = /^[\w-]+$/
+      if (!BASE64URL_RE.test(payloadB64) || !BASE64URL_RE.test(sigB64)) return null
 
       // Recompute HMAC and compare (timing-safe)
       const expectedSig = this.computeHmac(payloadB64)
@@ -132,31 +137,106 @@ export async function loadCookieKey(): Promise<Buffer> {
   }
 
   const keyFile = process.env.DASHBOARD_COOKIE_KEY_FILE ?? '/data/cookie.key'
-  const raw = await readFile(keyFile)
-  // File may contain hex/base64 text or raw bytes
-  const trimmed = raw.toString('utf8').trim()
-  return decodeKey(trimmed)
+  const rawFile = await readFile(keyFile)
+
+  // If the file is already ≥32 raw bytes and not obviously text-encoded, try raw first.
+  // We detect "obviously text-encoded" by checking if the content is valid ASCII printable
+  // (hex or base64 chars only). If it looks like raw binary, skip text decoding.
+  const trimmed = rawFile.toString('utf8').trim()
+  // Only treat as text-encoded if the trimmed content is entirely printable ASCII
+  const isPrintableAscii = /^[\u0020-\u007E]+$/.test(trimmed)
+  if (isPrintableAscii) {
+    return decodeKey(trimmed)
+  }
+
+  // Raw binary file
+  if (rawFile.length >= 32) {
+    assertNonDegenerate(rawFile)
+    return rawFile
+  }
+
+  throw new Error(`Cookie signing key must be at least 32 bytes (256-bit); file key is too short (${rawFile.length} bytes)`)
 }
 
 /**
- * Decodes a key string (hex, base64, or raw UTF-8) to a Buffer.
- * Tries hex first, then base64, then falls back to raw UTF-8.
- * Validates that the result is ≥32 bytes.
+ * Decodes a key string (hex or base64) to a Buffer.
+ *
+ * Hardened against the "44 A's" exploit:
+ * - Only treats input as hex if it FULLY matches /^[0-9a-fA-F]+$/ AND has even length
+ *   AND decodes to ≥32 bytes.
+ * - Only treats as base64 if it matches base64 charset AND decodes to ≥32 bytes.
+ * - Does NOT fall through to a weaker decoder if a stronger one yields <32 bytes.
+ * - Rejects all-zero and single-repeated-byte keys (degenerate/forgeable).
+ * - Does NOT round-trip through UTF-8 for raw bytes (avoids U+FFFD corruption).
+ *
+ * Throws if no candidate yields a ≥32-byte non-degenerate key.
  */
 function decodeKey(input: string): Buffer {
-  // Try hex (64 hex chars = 32 bytes)
+  const candidates: Buffer[] = []
+
+  // Try hex ONLY if input is a full hex string with even length
   if (/^[\da-f]+$/i.test(input) && input.length % 2 === 0) {
     const buf = Buffer.from(input, 'hex')
-    if (buf.length >= 32) return buf
+    if (buf.length >= 32) {
+      candidates.push(buf)
+    }
+    // If it matched hex but decoded to <32 bytes, do NOT fall through to base64
+    // (the 44-A exploit: 44 hex chars → 22 bytes, then base64 of "AAAA..." → 33 null bytes)
+    // We only add to candidates if ≥32 bytes; if hex matched but was too short, stop here.
+    if (candidates.length === 0) {
+      throw new Error(`Cookie signing key must be at least 32 bytes (256-bit); hex-decoded key is too short`)
+    }
+  } else {
+    // Try base64 (standard or URL-safe) — only if not a hex string
+    const isBase64 = /^[\w+/=-]+$/.test(input)
+    if (isBase64) {
+      // Try base64url first, then standard base64
+      const b64Buf = Buffer.from(input, 'base64')
+      if (b64Buf.length >= 32) {
+        candidates.push(b64Buf)
+      } else {
+        throw new Error(`Cookie signing key must be at least 32 bytes (256-bit); base64-decoded key is too short`)
+      }
+    } else {
+      // Raw UTF-8 passthrough (e.g. a long passphrase)
+      const rawBuf = Buffer.from(input, 'utf8')
+      if (rawBuf.length >= 32) {
+        candidates.push(rawBuf)
+      } else {
+        throw new Error(`Cookie signing key must be at least 32 bytes (256-bit); decoded key is too short`)
+      }
+    }
   }
 
-  // Try base64
-  const b64Buf = Buffer.from(input, 'base64')
-  if (b64Buf.length >= 32) return b64Buf
+  const key = candidates[0]
+  if (key === undefined) {
+    throw new Error(`Cookie signing key must be at least 32 bytes (256-bit); decoded key is too short`)
+  }
 
-  // Raw UTF-8
-  const rawBuf = Buffer.from(input, 'utf8')
-  if (rawBuf.length >= 32) return rawBuf
+  assertNonDegenerate(key)
+  return key
+}
 
-  throw new Error(`Cookie signing key must be at least 32 bytes (256-bit); decoded key is too short`)
+/**
+ * Rejects degenerate keys: all-zero or single-repeated-byte.
+ * These indicate a misconfigured or zeroed-out key that would be trivially forgeable.
+ */
+function assertNonDegenerate(key: Buffer): void {
+  const first = key[0]
+  if (first === undefined) {
+    throw new Error('Cookie signing key is empty')
+  }
+  // Check if all bytes are identical (covers all-zero and any single-repeated-byte pattern)
+  let allSame = true
+  for (let i = 1; i < key.length; i++) {
+    if (key[i] !== first) {
+      allSame = false
+      break
+    }
+  }
+  if (allSame) {
+    throw new Error(
+      `Cookie signing key is degenerate (all bytes are 0x${first.toString(16).padStart(2, '0')}); this key is trivially forgeable — use a cryptographically random key`,
+    )
+  }
 }

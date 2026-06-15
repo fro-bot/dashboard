@@ -7,11 +7,13 @@ import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
 import {Buffer} from 'node:buffer'
 import {createHmac} from 'node:crypto'
 import {describe, expect, it} from 'vitest'
+import {sanitizeErrorMessage} from '../src/logger.ts'
+import {deriveLogoutCsrfToken} from '../src/routes/auth.ts'
 import {buildDashboardApp} from '../src/server.ts'
 import {SessionManager} from '../src/session.ts'
 
-// 32-byte key for tests
-const TEST_KEY = Buffer.from('testkey-'.repeat(4), 'utf8') // 32 bytes
+// 32-byte key for tests — must be non-degenerate (mixed bytes)
+const TEST_KEY = Buffer.from('testkey-ABCDEFGHIJKLMNOPQRSTUV12', 'utf8') // 32 bytes, mixed
 
 // Minimal fake GitHub OAuth client
 function makeFakeGitHub(_login: string): GitHubOAuthClient {
@@ -153,6 +155,81 @@ describe('auth middleware', () => {
       ).toThrow(/key.*32|32.*byte/i)
     })
   })
+
+  describe('fail-closed: missing cookie key when operator is set', () => {
+    it('operatorLogin set but no cookieKey → boot throws (FIX #3)', () => {
+      expect(() =>
+        buildDashboardApp({
+          operatorLogin: 'octocat',
+          // cookieKey intentionally omitted
+          oauthClient: makeFakeGitHub('octocat'),
+          fetchUserLogin: async () => 'octocat',
+        }),
+      ).toThrow(/cookie key required/i)
+    })
+
+    it('operatorLogin unset (deny-all) with no cookieKey → does NOT throw (FIX #3)', () => {
+      expect(() =>
+        buildDashboardApp({
+          operatorLogin: undefined,
+          // cookieKey intentionally omitted — deny-all mode needs no key
+          oauthClient: makeFakeGitHub('octocat'),
+          fetchUserLogin: async () => 'octocat',
+        }),
+      ).not.toThrow()
+    })
+  })
+
+  describe('operator login mismatch (FIX #4)', () => {
+    it('valid cookie for wrong login → protected route denied', async () => {
+      // App is configured for 'octocat'; cookie is signed for 'attacker'
+      const app = buildTestApp({operatorLogin: 'octocat'})
+      const attackerSm = new SessionManager(TEST_KEY)
+      const attackerCookie = attackerSm.sign('attacker')
+
+      const res = await app.request('/', {
+        headers: {cookie: `session=${attackerCookie}`},
+      })
+      // Must be denied — redirect to login or 401
+      expect([401, 302, 303]).toContain(res.status)
+      if (res.status === 302 || res.status === 303) {
+        expect(res.headers.get('location')).toContain('/auth/login')
+      }
+    })
+  })
+})
+
+describe('sanitizeErrorMessage (FIX #5)', () => {
+  it('redacts GitHub ghs_ tokens', () => {
+    const msg = 'token exchange failed: ghs_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE'
+    expect(sanitizeErrorMessage(msg)).not.toContain('ghs_')
+    expect(sanitizeErrorMessage(msg)).toContain('[REDACTED]')
+  })
+
+  it('redacts GitHub gho_ tokens', () => {
+    const msg = 'error: gho_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE'
+    expect(sanitizeErrorMessage(msg)).not.toContain('gho_')
+    expect(sanitizeErrorMessage(msg)).toContain('[REDACTED]')
+  })
+
+  it('redacts PEM blocks', () => {
+    const pem = '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----'
+    const msg = `key load failed: ${pem}`
+    expect(sanitizeErrorMessage(msg)).not.toContain('BEGIN RSA')
+    expect(sanitizeErrorMessage(msg)).toContain('[REDACTED]')
+  })
+
+  it('redacts JWT-shaped strings', () => {
+    const jwt = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c'
+    const msg = `auth failed: ${jwt}`
+    expect(sanitizeErrorMessage(msg)).not.toContain('eyJhbGci')
+    expect(sanitizeErrorMessage(msg)).toContain('[REDACTED]')
+  })
+
+  it('passes through safe error messages unchanged', () => {
+    const msg = 'OAuth callback: state mismatch'
+    expect(sanitizeErrorMessage(msg)).toBe(msg)
+  })
 })
 
 describe('OAuth flow', () => {
@@ -178,6 +255,13 @@ describe('OAuth flow', () => {
       const res = await app.request('/auth/login')
       const stateCookie = getSetCookie(res, 'oauth_state')
       expect(stateCookie?.toLowerCase()).toContain('samesite=lax')
+    })
+
+    it('sets oauth_state cookie scoped to path=/auth (FIX P3)', async () => {
+      const app = buildTestApp({operatorLogin: 'octocat'})
+      const res = await app.request('/auth/login')
+      const stateCookie = getSetCookie(res, 'oauth_state')
+      expect(stateCookie?.toLowerCase()).toContain('path=/auth')
     })
   })
 
@@ -284,22 +368,156 @@ describe('OAuth flow', () => {
     })
   })
 
-  describe('/auth/logout', () => {
-    it('clears session cookie and redirects', async () => {
+  describe('/auth/logout — CSRF-protected POST (FIX P1)', () => {
+    it('POST with valid CSRF token → session cleared + redirect to /auth/login', async () => {
+      const app = buildTestApp({operatorLogin: 'octocat'})
+      const sm = new SessionManager(TEST_KEY)
+      const sessionCookie = sm.sign('octocat')
+      const csrfToken = deriveLogoutCsrfToken(TEST_KEY, 'octocat')
+
+      const body = new URLSearchParams({csrf_token: csrfToken})
+      const res = await app.request('/auth/logout', {
+        method: 'POST',
+        headers: {
+          cookie: `session=${sessionCookie}`,
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body: body.toString(),
+      })
+
+      expect([302, 303]).toContain(res.status)
+      expect(res.headers.get('location')).toContain('/auth/login')
+      // Session cookie should be cleared (Max-Age=0 or Expires in past)
+      const clearedCookie = getSetCookie(res, 'session')
+      expect(clearedCookie).toBeDefined()
+      expect(clearedCookie?.toLowerCase()).toMatch(/max-age=0|expires=.*1970/)
+    })
+
+    it('POST with missing CSRF token → 403', async () => {
       const app = buildTestApp({operatorLogin: 'octocat'})
       const sm = new SessionManager(TEST_KEY)
       const sessionCookie = sm.sign('octocat')
 
       const res = await app.request('/auth/logout', {
         method: 'POST',
+        headers: {
+          cookie: `session=${sessionCookie}`,
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body: '',
+      })
+
+      expect(res.status).toBe(403)
+    })
+
+    it('POST with wrong CSRF token → 403', async () => {
+      const app = buildTestApp({operatorLogin: 'octocat'})
+      const sm = new SessionManager(TEST_KEY)
+      const sessionCookie = sm.sign('octocat')
+
+      const body = new URLSearchParams({csrf_token: 'wrongtoken12345678901234567890ab'})
+      const res = await app.request('/auth/logout', {
+        method: 'POST',
+        headers: {
+          cookie: `session=${sessionCookie}`,
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body: body.toString(),
+      })
+
+      expect(res.status).toBe(403)
+    })
+
+    it('GET /auth/logout is not a registered route (no GET handler)', async () => {
+      // /auth/logout is POST-only; GET should return 404 or 405
+      const app = buildTestApp({operatorLogin: 'octocat'})
+      const sm = new SessionManager(TEST_KEY)
+      const sessionCookie = sm.sign('octocat')
+
+      const res = await app.request('/auth/logout', {
+        method: 'GET',
         headers: {cookie: `session=${sessionCookie}`},
       })
 
-      expect([302, 303]).toContain(res.status)
-      // Session cookie should be cleared (Max-Age=0 or Expires in past)
-      const clearedCookie = getSetCookie(res, 'session')
-      expect(clearedCookie).toBeDefined()
-      expect(clearedCookie?.toLowerCase()).toMatch(/max-age=0|expires=.*1970/)
+      // Hono returns 404 for unregistered routes; 405 would also be acceptable
+      expect([404, 405]).toContain(res.status)
     })
+
+    it('CSRF token is login-specific (token for different login → 403)', async () => {
+      const app = buildTestApp({operatorLogin: 'octocat'})
+      const sm = new SessionManager(TEST_KEY)
+      const sessionCookie = sm.sign('octocat')
+      // Token derived for a different login
+      const wrongToken = deriveLogoutCsrfToken(TEST_KEY, 'attacker')
+
+      const body = new URLSearchParams({csrf_token: wrongToken})
+      const res = await app.request('/auth/logout', {
+        method: 'POST',
+        headers: {
+          cookie: `session=${sessionCookie}`,
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body: body.toString(),
+      })
+
+      expect(res.status).toBe(403)
+    })
+  })
+})
+
+describe('rate limiter (FIX P1 + P2)', () => {
+  it('checkRateLimit exported function: allows up to limit, blocks beyond', async () => {
+    const {checkRateLimit} = await import('../src/server.ts')
+    const ip = `test-ip-${Date.now()}-ratelimit`
+    const now = Date.now()
+
+    // First 60 requests should be allowed
+    for (let i = 0; i < 60; i++) {
+      expect(checkRateLimit(ip, now)).toBe(true)
+    }
+    // 61st should be blocked
+    expect(checkRateLimit(ip, now)).toBe(false)
+  })
+
+  it('checkRateLimit resets after window expires', async () => {
+    const {checkRateLimit} = await import('../src/server.ts')
+    const ip = `test-ip-${Date.now()}-reset`
+    const now = Date.now()
+
+    // Exhaust the limit
+    for (let i = 0; i < 61; i++) {
+      checkRateLimit(ip, now)
+    }
+    expect(checkRateLimit(ip, now)).toBe(false)
+
+    // After window expires, should reset
+    const later = now + 61_000 // 61 seconds later
+    expect(checkRateLimit(ip, later)).toBe(true)
+  })
+
+  it('stale entries are evicted after window passes (FIX P2 — unbounded growth)', async () => {
+    const {checkRateLimit} = await import('../src/server.ts')
+    // Create many unique IPs to populate the map
+    const baseNow = Date.now() + 1_000_000 // offset to avoid collision with other tests
+    const ips = Array.from({length: 10}, (_, i) => `evict-test-ip-${i}-${baseNow}`)
+
+    for (const ip of ips) {
+      checkRateLimit(ip, baseNow)
+    }
+
+    // Advance time by 2× window + 1ms (entries are now stale)
+    const staleNow = baseNow + 2 * 60_000 + 1
+
+    // Trigger a sweep by making 500 calls (EVICT_INTERVAL)
+    const sweepIp = `sweep-trigger-${baseNow}`
+    for (let i = 0; i < 500; i++) {
+      checkRateLimit(sweepIp, staleNow)
+    }
+
+    // After sweep, the old IPs should be evicted — making a new request for them
+    // should succeed (they start fresh, not blocked)
+    for (const ip of ips) {
+      expect(checkRateLimit(ip, staleNow)).toBe(true)
+    }
   })
 })

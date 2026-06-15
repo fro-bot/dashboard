@@ -11,6 +11,7 @@ import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
  * - Drift count is rendered as a number only — no repo names from drift.
  * - staleBanner renders the expected banner text.
  * - Empty snapshot renders loading state, not an error.
+ * - Logout is rendered as a POST form with a CSRF token (not a GET link).
  */
 import type {AggregatorSnapshot, DashboardRepo} from '../src/github/aggregator.ts'
 import {Buffer} from 'node:buffer'
@@ -22,7 +23,8 @@ import {SessionManager} from '../src/session.ts'
 // Test fixtures
 // ---------------------------------------------------------------------------
 
-const TEST_KEY = Buffer.from('testkey-'.repeat(4), 'utf8') // 32 bytes
+// Must be non-degenerate (mixed bytes) to pass the hardened decodeKey check
+const TEST_KEY = Buffer.from('testkey-ABCDEFGHIJKLMNOPQRSTUV12', 'utf8') // 32 bytes, mixed
 const TEST_OPERATOR = 'octocat'
 
 function makeFakeOAuthClient(): GitHubOAuthClient {
@@ -212,6 +214,53 @@ describe('dashboard SSR — GET /', () => {
       expect(res.status).toBe(200)
       const body = await res.text()
       expect(body).toContain('stale')
+    })
+  })
+
+  describe('logout form (FIX P1 — GET link replaced with POST form + CSRF)', () => {
+    it('renders a POST form for logout (not a GET link)', async () => {
+      const snapshot = makeSnapshot({refreshedAt: 1_700_000_000_000})
+      const app = buildTestApp(snapshot)
+      const res = await authedGet(app, '/')
+
+      expect(res.status).toBe(200)
+      const body = await res.text()
+
+      // Must have a form POSTing to /auth/logout
+      expect(body).toContain('method="POST"')
+      expect(body).toContain('action="/auth/logout"')
+
+      // Must have a hidden CSRF token input
+      expect(body).toContain('name="csrf_token"')
+      expect(body).toContain('type="hidden"')
+
+      // Must NOT have a bare GET link to /auth/logout
+      // (the old <a href="/auth/logout"> pattern)
+      expect(body).not.toMatch(/<a[^>]+href="\/auth\/logout"/)
+    })
+
+    it('CSRF token in form is non-empty', async () => {
+      const snapshot = makeSnapshot({refreshedAt: 1_700_000_000_000})
+      const app = buildTestApp(snapshot)
+      const res = await authedGet(app, '/')
+
+      const body = await res.text()
+      // Extract the csrf_token value from the hidden input
+      const matchA = /name="csrf_token"\s+value="([^"]+)"/.exec(body)
+      const matchB = /value="([^"]+)"\s+name="csrf_token"/.exec(body)
+      const match = matchA ?? matchB
+      expect(match).not.toBeNull()
+      expect(match?.[1]).toBeTruthy()
+      expect((match?.[1] ?? '').length).toBeGreaterThan(0)
+    })
+
+    it('logout form submits to correct action', async () => {
+      const snapshot = makeSnapshot()
+      const app = buildTestApp(snapshot)
+      const res = await authedGet(app, '/')
+
+      const body = await res.text()
+      expect(body).toContain('action="/auth/logout"')
     })
   })
 

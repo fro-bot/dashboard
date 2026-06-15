@@ -33,11 +33,3 @@ export function buildApiRouter(getSnapshot?: SnapshotProvider): Hono {
 
   return api
 }
-
-/**
- * Default API router instance (no snapshot provider — returns empty snapshot for /status).
- * Used by server.ts when no aggregator is wired (pre-aggregator bootstrap).
- *
- * @deprecated Prefer `buildApiRouter(getSnapshot)` when an aggregator is available.
- */
-export const api = buildApiRouter()

@@ -9,10 +9,13 @@
  * - node_id is never rendered as user-facing identity.
  * - Drift count is rendered as a number only — never repo names or node_ids.
  * - This route is protected by the auth middleware in server.ts.
+ * - Logout is a POST form with a CSRF token (not a GET link).
  */
+import type {Buffer} from 'node:buffer'
 import type {AggregatorSnapshot, DashboardRepo} from '../github/aggregator.ts'
 import {Hono} from 'hono'
 import {html, raw} from 'hono/html'
+import {deriveLogoutCsrfToken} from './auth.ts'
 
 /** Injectable snapshot provider — returns the current aggregator snapshot. */
 export type SnapshotProvider = () => AggregatorSnapshot
@@ -20,6 +23,16 @@ export type SnapshotProvider = () => AggregatorSnapshot
 /** Config for building the dashboard router. */
 export interface DashboardRouterConfig {
   readonly getSnapshot: SnapshotProvider
+  /**
+   * Cookie signing key — used to derive the logout CSRF token.
+   * When undefined (e.g. deny-all mode), the logout form is not rendered.
+   */
+  readonly cookieKey: Buffer | undefined
+  /**
+   * Operator login — used to derive the logout CSRF token.
+   * When undefined (deny-all mode), the logout form is not rendered.
+   */
+  readonly operatorLogin: string | undefined
 }
 
 // ---------------------------------------------------------------------------
@@ -95,9 +108,23 @@ const PAGE_STYLES = `
   th.center{text-align:center}
   a{color:#1d4ed8}
   .refresh{margin-top:16px;font-size:0.8rem;color:#6b7280}
+  .logout-btn{background:none;border:none;padding:0;color:#6b7280;font-size:0.8rem;cursor:pointer;text-decoration:underline;font-family:inherit}
+  .logout-btn:hover{color:#374151}
 `
 
-function dashboardPage(snapshot: AggregatorSnapshot): ReturnType<typeof html> {
+/**
+ * Renders the logout form with a CSRF token.
+ * The form POSTs to /auth/logout with a hidden csrf_token field.
+ * Styled as an inline link to match the surrounding text.
+ */
+function logoutForm(csrfToken: string): ReturnType<typeof html> {
+  return html`<form method="POST" action="/auth/logout" style="display:inline;">
+    <input type="hidden" name="csrf_token" value="${csrfToken}" />
+    <button type="submit" class="logout-btn">Logout</button>
+  </form>`
+}
+
+function dashboardPage(snapshot: AggregatorSnapshot, csrfToken: string | undefined): ReturnType<typeof html> {
   const {repos, staleBanner, driftCount, refreshedAt} = snapshot
   const isEmpty = repos.length === 0 && refreshedAt === null
 
@@ -143,6 +170,10 @@ function dashboardPage(snapshot: AggregatorSnapshot): ReturnType<typeof html> {
         </table>
       `
 
+  // Render logout as a POST form with CSRF token (not a GET link).
+  // If csrfToken is undefined (deny-all mode), omit the logout control entirely.
+  const logoutControl = csrfToken === undefined ? '' : logoutForm(csrfToken)
+
   return html`<!doctype html>
 <html lang="en">
 <head>
@@ -159,7 +190,7 @@ function dashboardPage(snapshot: AggregatorSnapshot): ReturnType<typeof html> {
   ${bodyContent}
   <p class="refresh">
     <a href="/">↻ Refresh</a>
-    · <a href="/auth/logout" style="color:#6b7280;">Logout</a>
+    · ${logoutControl}
   </p>
 </body>
 </html>`
@@ -174,12 +205,18 @@ function dashboardPage(snapshot: AggregatorSnapshot): ReturnType<typeof html> {
  * Mounted at `/` in server.ts — auth middleware is applied upstream.
  */
 export function buildDashboardRouter(config: DashboardRouterConfig): Hono {
-  const {getSnapshot} = config
+  const {getSnapshot, cookieKey, operatorLogin} = config
   const router = new Hono()
 
   router.get('/', async c => {
     const snapshot = getSnapshot()
-    return c.html(dashboardPage(snapshot))
+    // Derive the CSRF token for the logout form.
+    // Both cookieKey and operatorLogin must be present (auth is active).
+    const csrfToken =
+      cookieKey !== undefined && operatorLogin !== undefined
+        ? deriveLogoutCsrfToken(cookieKey, operatorLogin)
+        : undefined
+    return c.html(dashboardPage(snapshot, csrfToken))
   })
 
   return router

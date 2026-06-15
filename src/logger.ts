@@ -38,6 +38,27 @@ export const DEFAULT_SENSITIVE_FIELDS: readonly string[] = [
 
 const REDACTED = '[REDACTED]'
 
+/**
+ * Sanitize an error message string to strip sensitive material that could
+ * appear in error text: PEM blocks, JWT-shaped strings, GitHub tokens, and
+ * bearer-looking long tokens.
+ *
+ * This is defence-in-depth — callers should never construct errors from raw
+ * auth material, but this catches accidental leakage before it reaches a log sink.
+ */
+export function sanitizeErrorMessage(input: string): string {
+  // Strip PEM blocks (-----BEGIN ... -----END ...-----)
+  let out = input.replaceAll(/-----BEGIN[^-]+-----[\s\S]*?-----END[^-]+-----/g, REDACTED)
+  // Strip JWT-shaped strings (three base64url segments separated by dots)
+  out = out.replaceAll(/[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}/g, REDACTED)
+  // Strip GitHub tokens: gho_, ghs_, ghp_, ghu_, github_pat_
+  out = out.replaceAll(/gh[opsu]_\w{10,}/gi, REDACTED)
+  out = out.replaceAll(/github_pat_\w{10,}/gi, REDACTED)
+  // Strip bearer-looking long opaque tokens (40+ chars, e.g. OAuth tokens)
+  out = out.replaceAll(/\b[\w-]{40,}\b/g, REDACTED)
+  return out
+}
+
 function isSensitiveField(fieldName: string, patterns: readonly string[]): boolean {
   const lower = fieldName.toLowerCase()
   return patterns.some(pattern => lower.includes(pattern.toLowerCase()))

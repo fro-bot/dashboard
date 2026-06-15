@@ -14,20 +14,26 @@
  * - `/api/healthz` (public health check)
  * - `/auth/*` (login/callback/logout)
  */
+import type {Buffer} from 'node:buffer'
 import type {ServerType} from '@hono/node-server'
 import type {GitHubOAuthClient} from './auth/oauth.ts'
 import type {AggregatorSnapshot} from './github/aggregator.ts'
-import {Buffer} from 'node:buffer'
 import process from 'node:process'
 import {serve} from '@hono/node-server'
+import {getConnInfo} from '@hono/node-server/conninfo'
 import {Hono} from 'hono'
 import {getCookie} from 'hono/cookie'
 import {fetchGitHubUserLogin, makeGitHubOAuthClient} from './auth/oauth.ts'
-import {logger} from './logger.ts'
+import {logger, sanitizeErrorMessage} from './logger.ts'
 import {buildApiRouter} from './routes/api.ts'
 import {buildAuthRouter} from './routes/auth.ts'
 import {buildDashboardRouter} from './routes/dashboard.ts'
 import {loadCookieKey, SessionManager} from './session.ts'
+
+/** Hono context variables set by auth middleware */
+interface Variables {
+  sessionLogin: string
+}
 
 /** Per-IP rate limiter state */
 interface RateLimitEntry {
@@ -40,8 +46,35 @@ const rateLimitMap = new Map<string, RateLimitEntry>()
 const RATE_LIMIT_WINDOW_MS = 60_000 // 1 minute
 const RATE_LIMIT_MAX = 60 // requests per window per IP
 
-function checkRateLimit(ip: string): boolean {
-  const now = Date.now()
+/**
+ * Eviction sweep counter. Every EVICT_INTERVAL calls we sweep the map for
+ * entries older than 2× the window. This is cheap, non-blocking, and avoids
+ * unbounded memory growth without a module-level setInterval.
+ */
+let rateLimitCallCount = 0
+const EVICT_INTERVAL = 500 // sweep every 500 calls
+const EVICT_STALE_AGE = 2 * RATE_LIMIT_WINDOW_MS
+
+function sweepRateLimitMap(now: number): void {
+  for (const [key, entry] of rateLimitMap) {
+    if (now - entry.windowStart > EVICT_STALE_AGE) {
+      rateLimitMap.delete(key)
+    }
+  }
+}
+
+/**
+ * Check rate limit for the given IP.
+ * Accepts an optional `now` for testability (defaults to Date.now()).
+ * Returns true if the request is allowed, false if rate-limited.
+ */
+export function checkRateLimit(ip: string, now: number = Date.now()): boolean {
+  rateLimitCallCount++
+  if (rateLimitCallCount >= EVICT_INTERVAL) {
+    rateLimitCallCount = 0
+    sweepRateLimitMap(now)
+  }
+
   const entry = rateLimitMap.get(ip)
 
   if (entry === undefined || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
@@ -70,7 +103,10 @@ export interface DashboardAppConfig {
   operatorLogin?: string | undefined
   /**
    * Cookie signing key (≥32 bytes).
-   * If undefined, uses a zero-filled 32-byte placeholder (production must use loadCookieKey).
+   * Required when `operatorLogin` is set (auth active). Throws at construction if absent.
+   * When `operatorLogin` is unset (deny-all mode), no SessionManager is constructed
+   * and this field is ignored.
+   * Production: use `createDashboardServer()` which calls `loadCookieKey()`.
    */
   cookieKey?: Buffer | undefined
   /**
@@ -100,9 +136,10 @@ export interface DashboardAppConfig {
  *
  * Throws at construction time if:
  * - `operatorLogin` is whitespace-only or empty (fail-closed)
+ * - `operatorLogin` is set but `cookieKey` is undefined (fail-closed — zero key is forgeable)
  * - `cookieKey` is <32 bytes (fail-closed)
  */
-function buildDashboardApp(opts?: DashboardAppConfig): Hono {
+function buildDashboardApp(opts?: DashboardAppConfig): Hono<{Variables: Variables}> {
   // Resolve operator login (fail-closed)
   const rawOperatorLogin = opts?.operatorLogin ?? process.env.DASHBOARD_OPERATOR_LOGIN
   if (typeof rawOperatorLogin === 'string' && rawOperatorLogin.trim() === '') {
@@ -110,9 +147,20 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono {
   }
   const operatorLogin = typeof rawOperatorLogin === 'string' ? rawOperatorLogin.trim() : undefined
 
-  // Resolve cookie key — SessionManager validates key length (throws if <32 bytes)
-  const cookieKey = opts?.cookieKey ?? Buffer.alloc(32)
-  const sessionManager = new SessionManager(cookieKey)
+  // Resolve cookie key — only construct SessionManager when auth is active.
+  // When operatorLogin is set, a real key is MANDATORY (fail-closed).
+  // When operatorLogin is unset (deny-all mode), no session is ever issued so
+  // no SessionManager is needed; skip construction to avoid a zero-key footgun.
+  let sessionManager: SessionManager | undefined
+  if (operatorLogin !== undefined) {
+    if (opts?.cookieKey === undefined) {
+      throw new Error(
+        'cookie key required when DASHBOARD_OPERATOR_LOGIN is set (pass cookieKey or use createDashboardServer which calls loadCookieKey)',
+      )
+    }
+    // SessionManager constructor validates key length (throws if <32 bytes)
+    sessionManager = new SessionManager(opts.cookieKey)
+  }
 
   // Resolve OAuth client
   const oauthClient =
@@ -130,23 +178,26 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono {
   const EMPTY_SNAPSHOT = {repos: [], staleBanner: false, driftCount: 0, refreshedAt: null} as const
   const getSnapshot = opts?.getSnapshot ?? (() => EMPTY_SNAPSHOT)
 
-  const app = new Hono()
+  const app = new Hono<{Variables: Variables}>()
 
   // ── Rate limiting middleware (applied to sensitive routes) ──────────────────
+  // NOTE: Real per-client rate limiting belongs at Caddy (the reverse proxy).
+  // This is defense-in-depth only. We key on the direct connection remote address
+  // (not X-Forwarded-For) because the app only sees loopback connections from Caddy
+  // and XFF is client-controlled — trusting it would allow spoofing the throttle key.
   app.use('*', async (c, next) => {
     const path = new URL(c.req.url).pathname
     const sensitiveRoutes = ['/', '/auth/callback']
     const isSensitive = sensitiveRoutes.includes(path) || path.startsWith('/api/')
 
     if (isSensitive) {
-      const forwarded = c.req.header('x-forwarded-for')
-      const realIp = c.req.header('x-real-ip')
+      // Use the direct connection remote address — not XFF (client-spoofable).
+      // getConnInfo is only available in the real Node.js server context; in tests
+      // (app.request()) it throws, so we fall back to 'unknown' gracefully.
       let ip: string
-      if (typeof forwarded === 'string') {
-        ip = forwarded.split(',')[0]?.trim() ?? 'unknown'
-      } else if (typeof realIp === 'string') {
-        ip = realIp
-      } else {
+      try {
+        ip = getConnInfo(c as unknown as Parameters<typeof getConnInfo>[0]).remote.address ?? 'unknown'
+      } catch {
         ip = 'unknown'
       }
 
@@ -191,13 +242,22 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono {
       return c.redirect('/auth/login', 302)
     }
 
-    const session = sessionManager.verify(cookieValue)
+    // sessionManager is guaranteed non-undefined here: operatorLogin is set (checked above)
+    // and we only construct SessionManager when operatorLogin is set.
+    const session = (sessionManager as SessionManager).verify(cookieValue)
     if (session === null) {
       return c.redirect('/auth/login', 302)
     }
 
-    // Attach session to context for downstream handlers
-    c.set('sessionLogin' as never, session.login as never)
+    // FIX #4: Reject sessions minted for a different operator login.
+    // A stale session from a previously-configured login must not grant access
+    // after the operator changes.
+    if (session.login !== operatorLogin) {
+      return c.redirect('/auth/login', 302)
+    }
+
+    // Attach session login to context for downstream handlers (typed, no `as never`)
+    c.set('sessionLogin', session.login)
     return next()
   })
 
@@ -210,9 +270,10 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono {
   } else {
     const authRouter = buildAuthRouter({
       operatorLogin,
-      sessionManager,
+      sessionManager: sessionManager as SessionManager,
       oauthClient,
       fetchUserLogin,
+      cookieKey: opts?.cookieKey as Buffer,
     })
     app.route('/auth', authRouter)
   }
@@ -225,7 +286,15 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono {
 
   // ── Dashboard SSR route ──────────────────────────────────────────────────────
   // Mounted at `/` — protected by the auth middleware above.
-  app.route('/', buildDashboardRouter({getSnapshot}))
+  // Pass cookieKey + operatorLogin so the dashboard can render the CSRF token for logout.
+  app.route(
+    '/',
+    buildDashboardRouter({
+      getSnapshot,
+      cookieKey: opts?.cookieKey,
+      operatorLogin,
+    }),
+  )
 
   return app
 }
@@ -255,7 +324,9 @@ async function createDashboardServer(): Promise<ServerType> {
 // Only start the server when this module is the entry point
 if (import.meta.url === `file://${process.argv[1]}`) {
   createDashboardServer().catch((error: unknown) => {
-    console.error('Failed to start dashboard server:', error)
+    logger.error('Failed to start dashboard server', {
+      error: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)),
+    })
     process.exit(1)
   })
 }
