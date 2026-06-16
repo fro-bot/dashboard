@@ -205,7 +205,7 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono<{Variables: Variable
       // (app.request()) it throws, so we fall back to 'unknown' gracefully.
       let ip: string
       try {
-        ip = getConnInfo(c as unknown as Parameters<typeof getConnInfo>[0]).remote.address ?? 'unknown'
+        ip = getConnInfo(c).remote.address ?? 'unknown'
       } catch {
         ip = 'unknown'
       }
@@ -246,7 +246,7 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono<{Variables: Variable
     // Validate session cookie.
     // The middleware context type is slightly wider than getCookie's declared param type;
     // this cast is safe — getCookie only reads headers from the context.
-    const cookieValue = getCookie(c as unknown as Parameters<typeof getCookie>[0], 'session')
+    const cookieValue = getCookie(c, 'session')
     if (typeof cookieValue !== 'string' || cookieValue.length === 0) {
       return c.redirect('/auth/login', 302)
     }
