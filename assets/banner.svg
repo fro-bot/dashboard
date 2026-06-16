@@ -121,7 +121,7 @@
     <text x="0" y="-120" font-family="'Courier New', monospace" font-size="20" fill="#00BCD4" opacity="0.9">fro-bot/dashboard</text>
 
     <!-- Title (High Contrast) -->
-    <text x="-5" y="20" font-family="'Arial Black', 'Arial', sans-serif" font-weight="bold" font-size="160" fill="#FFFFFF" stroke="#00BCD4" stroke-width="2" paint-order="stroke" filter="url(#b1-glow)">dashboard</text>
+    <text x="-5" y="20" font-family="'Arial Black', 'Arial', sans-serif" font-weight="bold" font-size="90" fill="#FFFFFF" stroke="#00BCD4" stroke-width="2" paint-order="stroke" filter="url(#b1-glow)">dashboard</text>
 
     <!-- Tagline -->
     <text x="0" y="100" font-family="'Arial', sans-serif" font-size="22" fill="#F5EBEB" letter-spacing="0.5">Command center for Fro Bot operations.</text>
