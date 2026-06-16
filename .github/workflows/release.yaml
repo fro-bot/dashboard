@@ -11,6 +11,8 @@ on:
       - 'tsconfig*.json'
       - 'src/**'
       - .github/workflows/release.yaml
+      - scripts/should-release.ts
+      - scripts/compute-release-tag.ts
   workflow_dispatch:
 
 concurrency:
@@ -25,11 +27,89 @@ defaults:
     shell: bash -Eeuo pipefail {0}
 
 jobs:
+  guard:
+    name: Release guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      should-release: ${{ steps.check.outputs.should-release }}
+
+    steps:
+      - name: ⤵ Checkout (with history for push range)
+        if: github.event_name == 'push'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: 🟢 Set up Node.js
+        if: github.event_name == 'push'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
+      - name: 🔍 Evaluate release gate
+        id: check
+        run: |
+          # workflow_dispatch: only release when triggered from main.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+              echo "Manual dispatch on main: releasing."
+              echo "should-release=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "Manual dispatch on non-main ref (${{ github.ref }}): skipping release."
+              echo "should-release=false" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
+          # Collect all changed files across the entire pushed range.
+          # github.event.before is the SHA before the push; github.sha is the tip.
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.sha }}"
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            # First push to branch — all tracked files at HEAD are "new".
+            echo "First push to branch — listing all tracked files as changed."
+            CHANGED=$(git ls-files)
+          else
+            CHANGED=$(git diff --name-only "$BEFORE" "$AFTER")
+          fi
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          # Extract base package.json from the before commit
+          BASE_PKG=$(mktemp)
+          trap 'rm -f "$BASE_PKG"' EXIT
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            # No parent commit — use an empty object as base
+            echo '{}' > "$BASE_PKG"
+          else
+            if ! git show "${BEFORE}:package.json" > "$BASE_PKG" 2>/dev/null; then
+              # package.json didn't exist in the before commit — use empty object
+              echo '{}' > "$BASE_PKG"
+            fi
+          fi
+
+          # Run the guard script
+          if node scripts/should-release.ts \
+              --changed-files "$CHANGED" \
+              --base-pkg "$BASE_PKG" \
+              --head-pkg package.json; then
+            echo "should-release=true" >> "$GITHUB_OUTPUT"
+          else
+            EXIT=$?
+            if [ "$EXIT" -eq 1 ]; then
+              echo "should-release=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "Guard script error (exit $EXIT)" >&2
+              exit "$EXIT"
+            fi
+          fi
+
   release:
     name: Release
-    if: >-
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    needs: [guard]
+    if: needs.guard.outputs.should-release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -52,6 +132,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
+          ref: ${{ github.sha }}
           # Persist the App token so `git push` of the release tag is authored by fro-bot[bot].
           token: ${{ steps.app-token.outputs.token }}
 
