@@ -33,14 +33,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
       packages: write
 
     steps:
       # Act as fro-bot[bot] (not the Actions user) so tags + releases are authored by
       # the App identity, matching fro-bot/.github + fro-bot/agent automation.
-      # NOTE: The GitHub App must have contents:write + packages:write (+ metadata:read)
-      # on its installation for tag push, GHCR push, and release creation to succeed.
+      # NOTE: The GitHub App must have contents:write + metadata:read on its installation
+      # for tag push and release creation to succeed. GHCR push uses GITHUB_TOKEN below.
       - name: 🤖 Get App token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -52,7 +52,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
-          # Persist the App token so `git push` of the CalVer tag is authored by fro-bot[bot].
+          # Persist the App token so `git push` of the release tag is authored by fro-bot[bot].
           token: ${{ steps.app-token.outputs.token }}
 
       # GHCR only accepts GITHUB_TOKEN (same-repo packages) or a classic PAT — NOT a
@@ -115,31 +115,19 @@ jobs:
           docker rm -f dashboard-smoke || true
           docker network rm smoke-net || true
 
-      - name: 🏷️ Compute and push CalVer tag
+      - name: 🟢 Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
+      - name: 🏷️ Compute and push release tag
         id: calver
         run: |
           git fetch --tags --force
-          today="$(date -u +%Y.%m.%d)"
-
-          compute_tag() {
-            local n=-1 t
-            while IFS= read -r t; do
-              if [ "$t" = "$today" ]; then
-                [ "$n" -lt 0 ] && n=0
-              else
-                suf="${t#"$today."}"
-                case "$suf" in
-                  (''|*[!0-9]*) ;;
-                  (*) [ "$suf" -gt "$n" ] && n="$suf" ;;
-                esac
-              fi
-            done < <(git tag -l "${today}*")
-            if [ "$n" -lt 0 ]; then echo "$today"; else echo "$today.$((n+1))"; fi
-          }
 
           TAG=""
           for attempt in 1 2 3 4 5; do
-            TAG="$(compute_tag)"
+            TAG="$(node scripts/compute-release-tag.ts)"
             echo "Attempt $attempt: tagging $TAG"
             if git tag "$TAG" "${{ github.sha }}" && git push origin "$TAG"; then
               echo "Pushed tag $TAG"
@@ -153,7 +141,7 @@ jobs:
           done
 
           if [ -z "$TAG" ]; then
-            echo "Failed to push CalVer tag after 5 attempts"
+            echo "Failed to push release tag after 5 attempts"
             exit 1
           fi
 
