@@ -50,6 +50,8 @@ jobs:
 
       - name: 🔍 Evaluate release gate
         id: check
+        env:
+          GITHUB_REF_NAME_FOR_LOG: ${{ github.ref }}
         run: |
           # workflow_dispatch: only release when triggered from main.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -57,7 +59,7 @@ jobs:
               echo "Manual dispatch on main: releasing."
               echo "should-release=true" >> "$GITHUB_OUTPUT"
             else
-              echo "Manual dispatch on non-main ref (${{ github.ref }}): skipping release."
+              printf 'Manual dispatch on non-main ref (%s): skipping release.\n' "$GITHUB_REF_NAME_FOR_LOG"
               echo "should-release=false" >> "$GITHUB_OUTPUT"
             fi
             exit 0

@@ -22,10 +22,11 @@
 //       scripts, type, exports, imports) between base and head.
 //      If any runtime field changed => release.
 //      If only devDependencies changed => skip.
-//   3. If only pnpm-lock.yaml changed (no package.json diff) => skip (conservative).
-//      Rationale: we cannot cheaply distinguish a runtime-dep re-resolution from
-//      a dev-dep re-resolution without parsing the full lockfile diff. The escape
-//      hatch is workflow_dispatch (which bypasses this script entirely).
+//   3. If only pnpm-lock.yaml changed (no package.json diff) => release.
+//      Rationale: a lockfile-only update can change the exact package versions
+//      installed into the Docker image even when package.json semver ranges are
+//      unchanged. We cannot cheaply prove the change is dev-only without parsing
+//      the full lockfile diff, so we fail open and release.
 //   4. No matched files => skip.
 //
 // Node 24 strip-only TypeScript constraints:
@@ -284,13 +285,17 @@ function decide(
     }
   }
 
-  // 3. pnpm-lock.yaml only (no package.json diff) — conservative skip
+  // 3. pnpm-lock.yaml only (no package.json diff) — release (fail open)
+  // A lockfile-only update can change the exact package versions installed into
+  // the Docker image even when package.json semver ranges are unchanged. We
+  // cannot cheaply prove the change is dev-only without parsing the full lockfile
+  // diff, so we fail open and release.
   if (hasLockChange) {
     return {
-      shouldRelease: false,
+      shouldRelease: true,
       reason:
-        'pnpm-lock.yaml changed without a package.json runtime diff — conservative skip ' +
-        '(use workflow_dispatch to force a release)',
+        'pnpm-lock.yaml changed without a package.json runtime diff — releasing ' +
+        '(lockfile-only may affect installed runtime dependency graph)',
     }
   }
 

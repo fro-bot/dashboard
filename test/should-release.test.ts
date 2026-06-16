@@ -41,7 +41,7 @@
  * - reordered dependency keys with same values => no release
  * - hard-release path + package.json no-op => release (hard-release wins)
  * - package.json `devDependencies`-only change => no release
- * - pnpm-lock.yaml-only change (no package.json diff) => no release (conservative)
+ * - pnpm-lock.yaml-only change (no package.json diff) => release (fail open: may affect runtime graph)
  * - pnpm-lock.yaml + devDependencies-only package.json change => no release
  * - pnpm-lock.yaml + dependencies change => release
  * - no changed files => no release
@@ -578,16 +578,19 @@ describe('should-release — devDependencies-only change skips release', () => {
 })
 
 // ---------------------------------------------------------------------------
-// No-release: pnpm-lock.yaml-only changes (conservative)
+// Release: pnpm-lock.yaml-only changes (fail open — may affect runtime graph)
 // ---------------------------------------------------------------------------
 
-describe('should-release — pnpm-lock.yaml-only change skips release (conservative)', () => {
-  it('skips when only pnpm-lock.yaml changed and package.json is identical', () => {
+describe('should-release — pnpm-lock.yaml-only change triggers release (fail open)', () => {
+  it('releases when only pnpm-lock.yaml changed and package.json is identical', () => {
+    // A lockfile-only update can change the exact package versions installed into
+    // the Docker image even when package.json semver ranges are unchanged. We
+    // cannot cheaply prove the change is dev-only, so we fail open and release.
     const base = writePkg(tmpDir, 'base.json', BASE_PKG)
     const head = writePkg(tmpDir, 'head.json', BASE_PKG)
     const {exitCode, stdout} = runGuard('pnpm-lock.yaml', base, head)
-    expect(exitCode).toBe(1)
-    expect(stdout).toMatch(/^skip:/)
+    expect(exitCode).toBe(0)
+    expect(stdout).toMatch(/^release:/)
   })
 })
 
