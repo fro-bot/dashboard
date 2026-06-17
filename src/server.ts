@@ -25,7 +25,7 @@ import {serve} from '@hono/node-server'
 import {getConnInfo} from '@hono/node-server/conninfo'
 import {Octokit} from '@octokit/core'
 import {graphql} from '@octokit/graphql'
-import {Hono} from 'hono'
+import {Hono, type Context} from 'hono'
 import {getCookie} from 'hono/cookie'
 import {fetchGitHubUserLogin, makeGitHubOAuthClient} from './auth/oauth.ts'
 import {createAggregator} from './github/aggregator.ts'
@@ -194,7 +194,7 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono<{Variables: Variable
   // This is defense-in-depth only. We key on the direct connection remote address
   // (not X-Forwarded-For) because the app only sees loopback connections from Caddy
   // and XFF is client-controlled — trusting it would allow spoofing the throttle key.
-  app.use('*', async (c, next) => {
+  app.use('*', async (c: Context, next) => {
     const path = new URL(c.req.url).pathname
     const sensitiveRoutes = ['/', '/auth/login', '/auth/callback']
     const isSensitive = sensitiveRoutes.includes(path) || path.startsWith('/api/')
@@ -205,7 +205,7 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono<{Variables: Variable
       // (app.request()) it throws, so we fall back to 'unknown' gracefully.
       let ip: string
       try {
-        ip = getConnInfo(c as unknown as Parameters<typeof getConnInfo>[0]).remote.address ?? 'unknown'
+        ip = getConnInfo(c).remote.address ?? 'unknown'
       } catch {
         ip = 'unknown'
       }
@@ -231,7 +231,7 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono<{Variables: Variable
   const isPublicPath = (path: string): boolean =>
     path === '/api/healthz' || path === '/auth/login' || path === '/auth/callback' || path === '/auth/logout'
 
-  app.use('*', async (c, next) => {
+  app.use('*', async (c: Context, next) => {
     const path = new URL(c.req.url).pathname
 
     if (isPublicPath(path)) {
@@ -246,7 +246,7 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono<{Variables: Variable
     // Validate session cookie.
     // The middleware context type is slightly wider than getCookie's declared param type;
     // this cast is safe — getCookie only reads headers from the context.
-    const cookieValue = getCookie(c as unknown as Parameters<typeof getCookie>[0], 'session')
+    const cookieValue = getCookie(c, 'session')
     if (typeof cookieValue !== 'string' || cookieValue.length === 0) {
       return c.redirect('/auth/login', 302)
     }

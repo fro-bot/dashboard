@@ -88,7 +88,7 @@ export function createDashboardAppClient(options: AppClientOptions): DashboardAp
     const installAuth = createAppAuth({appId, privateKey, installationId})
     const result = await installAuth({
       type: 'installation',
-      permissions: permissions as unknown as Record<string, 'read' | 'write' | 'admin'>,
+      permissions,
     })
     return result.token
   }

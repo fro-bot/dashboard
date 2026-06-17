@@ -1083,7 +1083,7 @@ describe('security — error log sanitization', () => {
     const deps = makeDeps({
       enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([])),
       readMetadata: vi.fn().mockResolvedValue(
-        err({message: `Metadata fetch failed: ${FAKE_TOKEN}`, name: 'MetadataTransportError'} as unknown as import('../src/github/metadata.ts').MetadataError),
+        err({message: `Metadata fetch failed: ${FAKE_TOKEN}`, name: 'MetadataTransportError'}),
       ),
       graphqlQueryForInstallation: vi.fn(),
     })
