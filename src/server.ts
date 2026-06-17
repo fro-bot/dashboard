@@ -25,7 +25,7 @@ import {serve} from '@hono/node-server'
 import {getConnInfo} from '@hono/node-server/conninfo'
 import {Octokit} from '@octokit/core'
 import {graphql} from '@octokit/graphql'
-import {Hono} from 'hono'
+import {Hono, type Context} from 'hono'
 import {getCookie} from 'hono/cookie'
 import {fetchGitHubUserLogin, makeGitHubOAuthClient} from './auth/oauth.ts'
 import {createAggregator} from './github/aggregator.ts'
@@ -194,7 +194,7 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono<{Variables: Variable
   // This is defense-in-depth only. We key on the direct connection remote address
   // (not X-Forwarded-For) because the app only sees loopback connections from Caddy
   // and XFF is client-controlled — trusting it would allow spoofing the throttle key.
-  app.use('*', async (c, next) => {
+  app.use('*', async (c: Context, next) => {
     const path = new URL(c.req.url).pathname
     const sensitiveRoutes = ['/', '/auth/login', '/auth/callback']
     const isSensitive = sensitiveRoutes.includes(path) || path.startsWith('/api/')
@@ -231,7 +231,7 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono<{Variables: Variable
   const isPublicPath = (path: string): boolean =>
     path === '/api/healthz' || path === '/auth/login' || path === '/auth/callback' || path === '/auth/logout'
 
-  app.use('*', async (c, next) => {
+  app.use('*', async (c: Context, next) => {
     const path = new URL(c.req.url).pathname
 
     if (isPublicPath(path)) {
