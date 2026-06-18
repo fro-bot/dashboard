@@ -10,6 +10,7 @@ symptoms:
   - "operator launch and approval mutations could omit CSRF or idempotency guards"
   - "logs could capture prompts, tool arguments, workspace paths, internal URLs, tokens, cookies, session IDs, CSRF values, or idempotency keys"
   - "absolute, protocol-relative, or traversal paths could bypass same-origin /operator/* assumptions"
+  - "dynamic IDs (runId, requestId) with literal or percent-encoded slashes/backslashes could reach encodeURIComponent and produce traversal paths that a proxy may decode before dispatch"
 root_cause: missing_validation
 resolution_type: code_fix
 severity: high
@@ -90,8 +91,18 @@ same-origin `/operator/*` paths and rejects:
 - paths outside `/operator/*`;
 - decoded `..` path segments.
 
-Dynamic `runId` and `requestId` values are encoded with `encodeURIComponent` at
-route construction sites, and blank IDs fail before fetch or stream creation.
+Dynamic `runId` and `requestId` values are validated with `validateDynamicId`
+before `encodeURIComponent` is applied. The guard rejects:
+
+- blank or whitespace-only values;
+- any literal `/` or `\` (path separator injection);
+- any percent-encoded slash (`%2F`/`%2f`) or backslash (`%5C`/`%5c`) — a proxy
+  may decode `%2F` before dispatch, so encoding is not a sufficient defence;
+- any decoded segment equal to `.` or `..` (traversal after percent-decoding).
+
+Blank IDs return `missing_run_id` or `missing_request_id` validation errors.
+Slash/traversal IDs return the same codes so callers handle them uniformly.
+The raw ID value is never passed to the logger.
 
 ### Guard mutating calls before fetch
 
@@ -192,8 +203,9 @@ This extends two earlier dashboard lessons:
 
 - Keep `src/gateway/operator-client.ts` marked contract-churn-prone until Gateway
   Phase B live route shapes and smoke tests are ready.
-- Any new operator client method must use the same path validator, `Result` error
-  contract, coarse logger shape, and injected transport boundary.
+- Any new operator client method must use the same path validator, `validateDynamicId`
+  for dynamic path segments, `Result` error contract, coarse logger shape, and
+  injected transport boundary.
 - Any new mutating method must reject missing CSRF/idempotency before fetch and
   use `redirect: 'error'`.
 - Tests should assert absence directly: no fetch when validation fails, no stream
@@ -209,4 +221,4 @@ This extends two earlier dashboard lessons:
 - `docs/plans/2026-06-17-001-feat-gateway-operator-control-surface-plan.md` —
   same-origin, auth-boundary, disabled-mode, and no-production-call requirements.
 - `src/gateway/operator-client.ts` and `test/operator-client.test.ts` — contract
-  and 114 focused tests.
+  and 121 focused tests.

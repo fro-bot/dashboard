@@ -651,21 +651,78 @@ describe('decideApproval', () => {
 // ---------------------------------------------------------------------------
 
 describe('path parameter encoding', () => {
-  it('encodes runId with slashes in getRunSnapshot', async () => {
-    const calls: string[] = []
+  it('rejects runId with literal slash in getRunSnapshot before fetch', async () => {
+    let fetchCalled = false
     const client = createOperatorClient({
-      fetch: async (input, _init) => {
-        calls.push(typeof input === 'string' ? input : String(input))
-        return new Response(
-          JSON.stringify({runId: 'run/evil', status: 'queued', owner: 'o', repo: 'r', createdAt: '2026-06-18T20:00:00Z'}),
-          {status: 200, headers: {'content-type': 'application/json'}},
-        )
+      fetch: async () => {
+        fetchCalled = true
+        return new Response('{}', {status: 200, headers: {'content-type': 'application/json'}})
       },
       createEventStream: makeEventStream([]),
     })
-    await client.getRunSnapshot('run/evil')
-    expect(calls[0]).toBe('/operator/runs/run%2Fevil')
-    expect(calls[0]).not.toContain('/run/evil')
+    const result = await client.getRunSnapshot('run/evil')
+    expect(fetchCalled).toBe(false)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+      if (result.error.kind === 'validation') {
+        expect(result.error.code).toBe('missing_run_id')
+      }
+    }
+  })
+
+  it('rejects runId with percent-encoded slash (%2F) in getRunSnapshot before fetch', async () => {
+    let fetchCalled = false
+    const client = createOperatorClient({
+      fetch: async () => {
+        fetchCalled = true
+        return new Response('{}', {status: 200, headers: {'content-type': 'application/json'}})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.getRunSnapshot('run%2Fevil')
+    expect(fetchCalled).toBe(false)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+      if (result.error.kind === 'validation') {
+        expect(result.error.code).toBe('missing_run_id')
+      }
+    }
+  })
+
+  it('rejects runId with percent-encoded traversal (%2F..%2F) in getRunSnapshot before fetch', async () => {
+    let fetchCalled = false
+    const client = createOperatorClient({
+      fetch: async () => {
+        fetchCalled = true
+        return new Response('{}', {status: 200, headers: {'content-type': 'application/json'}})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.getRunSnapshot('run%2Fevil%2F..%2Finject')
+    expect(fetchCalled).toBe(false)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+    }
+  })
+
+  it('rejects runId with percent-encoded backslash (%5C) in getRunSnapshot before fetch', async () => {
+    let fetchCalled = false
+    const client = createOperatorClient({
+      fetch: async () => {
+        fetchCalled = true
+        return new Response('{}', {status: 200, headers: {'content-type': 'application/json'}})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.getRunSnapshot('run%5Cevil')
+    expect(fetchCalled).toBe(false)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+    }
   })
 
   it('encodes runId with query chars in getRunSnapshot', async () => {
@@ -684,12 +741,12 @@ describe('path parameter encoding', () => {
     expect(calls[0]).toBe('/operator/runs/run%3Fx%3D1')
   })
 
-  it('encodes runId with slashes in connectRunStream', () => {
-    const capturedPaths: string[] = []
+  it('rejects runId with literal slash in connectRunStream before stream creation', () => {
+    let streamCreated = false
     const client = createOperatorClient({
       fetch: makeOkFetch({}),
-      createEventStream: (path, _opts) => {
-        capturedPaths.push(path)
+      createEventStream: (_path, _opts) => {
+        streamCreated = true
         return {
           start(_onEvent: StreamEventCallback, _onError: (err: Error) => void, onClose: () => void) {
             onClose()
@@ -698,36 +755,146 @@ describe('path parameter encoding', () => {
         }
       },
     })
-    client.connectRunStream('run/evil/../inject', {
+    const result = client.connectRunStream('run/evil', {
       onEvent: () => {},
       onError: () => {},
       onClose: () => {},
     })
-    expect(capturedPaths[0]).toBe('/operator/runs/run%2Fevil%2F..%2Finject/stream')
-    expect(capturedPaths[0]).not.toContain('/run/evil')
+    expect(streamCreated).toBe(false)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+      if (result.error.kind === 'validation') {
+        expect(result.error.code).toBe('missing_run_id')
+      }
+    }
   })
 
-  it('encodes requestId with slashes in decideApproval', async () => {
-    const calls: string[] = []
+  it('rejects runId with traversal (run/evil/../inject) in connectRunStream before stream creation', () => {
+    let streamCreated = false
     const client = createOperatorClient({
-      fetch: async (input, _init) => {
-        calls.push(typeof input === 'string' ? input : String(input))
-        return new Response(
-          JSON.stringify({state: 'claimed', requestId: 'req/evil', timestamp: '2026-06-18T20:00:00Z'}),
-          {status: 200, headers: {'content-type': 'application/json'}},
-        )
+      fetch: makeOkFetch({}),
+      createEventStream: (_path, _opts) => {
+        streamCreated = true
+        return {
+          start(_onEvent: StreamEventCallback, _onError: (err: Error) => void, onClose: () => void) {
+            onClose()
+          },
+          close() {},
+        }
+      },
+    })
+    const result = client.connectRunStream('run/evil/../inject', {
+      onEvent: () => {},
+      onError: () => {},
+      onClose: () => {},
+    })
+    expect(streamCreated).toBe(false)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+    }
+  })
+
+  it('rejects runId with percent-encoded slash (%2F) in connectRunStream before stream creation', () => {
+    let streamCreated = false
+    const client = createOperatorClient({
+      fetch: makeOkFetch({}),
+      createEventStream: (_path, _opts) => {
+        streamCreated = true
+        return {
+          start(_onEvent: StreamEventCallback, _onError: (err: Error) => void, onClose: () => void) {
+            onClose()
+          },
+          close() {},
+        }
+      },
+    })
+    const result = client.connectRunStream('run%2Fevil%2F..%2Finject', {
+      onEvent: () => {},
+      onError: () => {},
+      onClose: () => {},
+    })
+    expect(streamCreated).toBe(false)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+    }
+  })
+
+  it('rejects requestId with literal slash in decideApproval before fetch', async () => {
+    let fetchCalled = false
+    const client = createOperatorClient({
+      fetch: async () => {
+        fetchCalled = true
+        return new Response('{}', {status: 200, headers: {'content-type': 'application/json'}})
       },
       createEventStream: makeEventStream([]),
     })
-    await client.decideApproval({
+    const result = await client.decideApproval({
       requestId: 'req/evil',
       decision: 'approve',
       approvalScope: 'tool_use',
       idempotencyKey: 'idem-key-abc',
       csrfToken: 'csrf-token-xyz',
     })
-    expect(calls[0]).toBe('/operator/approvals/req%2Fevil/decision')
-    expect(calls[0]).not.toContain('/req/evil')
+    expect(fetchCalled).toBe(false)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+      if (result.error.kind === 'validation') {
+        expect(result.error.code).toBe('missing_request_id')
+      }
+    }
+  })
+
+  it('rejects requestId with percent-encoded slash (%2F) in decideApproval before fetch', async () => {
+    let fetchCalled = false
+    const client = createOperatorClient({
+      fetch: async () => {
+        fetchCalled = true
+        return new Response('{}', {status: 200, headers: {'content-type': 'application/json'}})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.decideApproval({
+      requestId: 'req%2Fevil',
+      decision: 'approve',
+      approvalScope: 'tool_use',
+      idempotencyKey: 'idem-key-abc',
+      csrfToken: 'csrf-token-xyz',
+    })
+    expect(fetchCalled).toBe(false)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+      if (result.error.kind === 'validation') {
+        expect(result.error.code).toBe('missing_request_id')
+      }
+    }
+  })
+
+  it('rejects requestId with percent-encoded backslash (%5C) in decideApproval before fetch', async () => {
+    let fetchCalled = false
+    const client = createOperatorClient({
+      fetch: async () => {
+        fetchCalled = true
+        return new Response('{}', {status: 200, headers: {'content-type': 'application/json'}})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.decideApproval({
+      requestId: 'req%5Cevil',
+      decision: 'reject',
+      approvalScope: 'tool_use',
+      idempotencyKey: 'idem-key-abc',
+      csrfToken: 'csrf-token-xyz',
+    })
+    expect(fetchCalled).toBe(false)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+    }
   })
 
   it('encodes requestId with query chars in decideApproval', async () => {

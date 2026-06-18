@@ -317,16 +317,50 @@ function requireIdempotencyKey(idempotencyKey: string): GatewayValidationError |
   return null
 }
 
+/**
+ * Validate a dynamic path ID (runId, requestId) before it is embedded in a URL.
+ *
+ * Rejects:
+ * - blank or whitespace-only values
+ * - any literal `/` or `\` (path separator injection)
+ * - any percent-encoded slash (`%2F`, `%2f`) or backslash (`%5C`, `%5c`)
+ * - any decoded segment equal to `.` or `..` (traversal after percent-decoding)
+ *
+ * Does NOT log the raw ID value — callers must use the error code only.
+ */
+function validateDynamicId(id: string): boolean {
+  if (id.trim() === '') return false
+  // Reject literal slash or backslash
+  if (id.includes('/') || id.includes('\\')) return false
+  // Reject percent-encoded slash (%2F/%2f) or backslash (%5C/%5c)
+  if (/%(?:2f|5c)/i.test(id)) return false
+  // Reject decoded `.` or `..` segments (after safe percent-decode attempt)
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(id)
+  } catch {
+    // Malformed percent-encoding — reject
+    return false
+  }
+  if (decoded === '.' || decoded === '..') return false
+  // Split decoded value on path separators and check each segment
+  const segments = decoded.split(/[/\\]/)
+  for (const segment of segments) {
+    if (segment === '.' || segment === '..') return false
+  }
+  return true
+}
+
 function requireRunId(runId: string): GatewayValidationError | null {
-  if (runId.trim() === '') {
-    return {kind: 'validation', code: 'missing_run_id', message: 'Run ID is required.'}
+  if (!validateDynamicId(runId)) {
+    return {kind: 'validation', code: 'missing_run_id', message: 'Run ID is required and must not contain path separators or traversal sequences.'}
   }
   return null
 }
 
 function requireRequestId(requestId: string): GatewayValidationError | null {
-  if (requestId.trim() === '') {
-    return {kind: 'validation', code: 'missing_request_id', message: 'Request ID is required.'}
+  if (!validateDynamicId(requestId)) {
+    return {kind: 'validation', code: 'missing_request_id', message: 'Request ID is required and must not contain path separators or traversal sequences.'}
   }
   return null
 }
