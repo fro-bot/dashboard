@@ -16,9 +16,9 @@ import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
 import {Buffer} from 'node:buffer'
 
 import {describe, expect, it} from 'vitest'
-import {createMockOperatorClient} from '../src/gateway/operator-fixtures.ts'
 import {buildDashboardApp} from '../src/server.ts'
 import {SessionManager} from '../src/session.ts'
+import {createMockOperatorClient} from './operator-mock-client.ts'
 
 // ---------------------------------------------------------------------------
 // Test helpers
