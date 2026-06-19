@@ -1,16 +1,11 @@
 /**
- * Typed fixtures and in-memory mock OperatorClient for the operator UI skeleton.
+ * Typed fixtures for the operator UI skeleton.
  *
  * Security invariants:
  * - Fixture data must NOT contain real prompts, tool args, workspace paths,
  *   internal URLs, tokens, session cookies, or CSRF values.
- * - The mock client's injected fetch THROWS if called — proving the UI never
- *   hits network during mock render.
- * - The mock createEventStream replays fixture events synchronously (no real SSE).
- * - Zero /operator/* fetch happens during SSR.
  */
-import type {ApprovalDecisionRequest, ApprovalDecisionResponse, CsrfDto, EventStreamHandle, LaunchRunRequest, LaunchRunResponse, OperatorClient, PendingApprovalsResponse, PendingApprovalSummary, RunSnapshotDto, RunStreamEvent, SessionDto} from './operator-client.ts'
-import {createOperatorClient} from './operator-client.ts'
+import type {ApprovalDecisionRequest, ApprovalDecisionResponse, CsrfDto, LaunchRunRequest, LaunchRunResponse, PendingApprovalsResponse, PendingApprovalSummary, RunSnapshotDto, RunStreamEvent, SessionDto} from './operator-client.ts'
 
 // ---------------------------------------------------------------------------
 // Session fixtures
@@ -238,51 +233,6 @@ export const FIXTURE_DECISION_UNAVAILABLE: ApprovalDecisionResponse = {
   state: 'unavailable',
   requestId: 'req-fixture-unavailable-004',
   timestamp: '2026-06-17T10:08:00Z',
-}
-
-// ---------------------------------------------------------------------------
-// Mock OperatorClient factory
-// ---------------------------------------------------------------------------
-
-/**
- * Create a mock OperatorClient built via the real createOperatorClient factory
- * with an injected fetch that THROWS if called (proving the UI never hits network
- * in mock render) and an injected createEventStream that replays fixture events
- * synchronously (no real SSE).
- *
- * The skeleton SSR render must NOT call network — it renders from static fixtures
- * directly. This mock client exists to satisfy the contract/type-surface and for
- * any interaction tests.
- */
-export function createMockOperatorClient(): OperatorClient {
-  // Injected fetch that throws if called — proves no network calls during SSR
-  const throwingFetch = async (_input: string, _init?: RequestInit): Promise<Response> => {
-    throw new Error(
-      'Mock operator client fetch was called — this proves a live network call was attempted. ' +
-      'The operator UI skeleton must render from static fixtures only, with zero /operator/* calls.',
-    )
-  }
-
-  // Injected createEventStream that replays fixture events synchronously
-  const fixtureEventStream = (_path: string): EventStreamHandle => {
-    return {
-      start: (onEvent, _onError, onClose) => {
-        // Replay fixture timeline events synchronously
-        for (const event of FIXTURE_RUN_TIMELINE) {
-          onEvent(event)
-        }
-        onClose()
-      },
-      close: () => {
-        // No-op for fixture stream
-      },
-    }
-  }
-
-  return createOperatorClient({
-    fetch: throwingFetch,
-    createEventStream: fixtureEventStream,
-  })
 }
 
 // ---------------------------------------------------------------------------
