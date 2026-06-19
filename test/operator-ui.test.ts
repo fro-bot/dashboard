@@ -186,7 +186,7 @@ describe('operator UI — flag ON + authenticated', () => {
     // If a future refactor wires the launch form to render request fields, these will catch it.
     // FIXTURE_LAUNCH_REQUEST.prompt
     expect(body).not.toContain('[Fixture prompt — not rendered in UI]')
-    // FIXTURE_CSRF.token / FIXTURE_LAUNCH_REQUEST.csrfToken
+    // FIXTURE_CSRF.csrfToken / FIXTURE_LAUNCH_REQUEST.csrfToken
     expect(body).not.toContain('fixture-csrf-placeholder')
     // FIXTURE_LAUNCH_REQUEST.idempotencyKey
     expect(body).not.toContain('fixture-idempotency-key-001')

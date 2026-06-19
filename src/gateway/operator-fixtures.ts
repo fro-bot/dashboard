@@ -19,14 +19,15 @@ import {createOperatorClient} from './operator-client.ts'
 export const FIXTURE_SESSION: SessionDto = {
   operatorId: 1,
   login: 'fixture-operator',
-  expiresAt: '2099-01-01T00:00:00Z',
+  // expiresAt is ms-since-epoch (number) per canonical OperatorSessionInfo
+  expiresAt: Date.parse('2099-01-01T00:00:00Z'),
 }
 
 export const FIXTURE_CSRF: CsrfDto = {
   // NOTE: This is a fixture placeholder — never a real CSRF token.
   // The token value is intentionally generic and not rendered in the UI.
-  token: 'fixture-csrf-placeholder',
-  expiresAt: '2099-01-01T00:00:00Z',
+  // Field is csrfToken per canonical OperatorCsrfToken (not token).
+  csrfToken: 'fixture-csrf-placeholder',
 }
 
 // ---------------------------------------------------------------------------

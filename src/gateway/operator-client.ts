@@ -18,6 +18,8 @@
 import type {Logger} from '../logger.ts'
 import type {Result} from '../result.ts'
 import {err, ok} from '../result.ts'
+import type {OperatorCsrfToken, OperatorSessionInfo} from './operator-contract/index.ts'
+import {parseOperatorCsrfToken, parseOperatorSessionInfo} from './operator-contract/index.ts'
 
 // ---------------------------------------------------------------------------
 // Run status union
@@ -39,19 +41,14 @@ export type RunStatus =
 export type ApprovalDecisionState = 'claimed' | 'already_settled' | 'expired' | 'failed_to_settle' | 'unavailable'
 
 // ---------------------------------------------------------------------------
-// DTOs
+// DTOs — frozen canonical shapes from operator contract v1.0.0
 // ---------------------------------------------------------------------------
 
-export interface SessionDto {
-  readonly operatorId: number
-  readonly login: string
-  readonly expiresAt: string
-}
+/** Canonical session response shape. expiresAt is ms-since-epoch (number). */
+export type SessionDto = OperatorSessionInfo
 
-export interface CsrfDto {
-  readonly token: string
-  readonly expiresAt: string
-}
+/** Canonical CSRF token response shape. Field is csrfToken (not token). */
+export type CsrfDto = OperatorCsrfToken
 
 export interface LaunchRunRequest {
   readonly owner: string
@@ -437,11 +434,27 @@ export function createOperatorClient(options: OperatorClientOptions): OperatorCl
   // -------------------------------------------------------------------------
 
   async function getCurrentSession(): Promise<Result<SessionDto, GatewayClientError>> {
-    return fetchJson<SessionDto>('/operator/session', '/operator/session')
+    const raw = await fetchJson<unknown>('/operator/session', '/operator/session')
+    if (!raw.success) return raw
+    const parsed = parseOperatorSessionInfo(raw.data)
+    if (!parsed.success) {
+      const protocolErr: GatewayProtocolError = {kind: 'protocol', message: 'Failed to parse session response'}
+      logger?.error('operator-client: session parse error', {route: '/operator/session'})
+      return err(protocolErr)
+    }
+    return ok(parsed.data)
   }
 
   async function refreshCsrf(): Promise<Result<CsrfDto, GatewayClientError>> {
-    return fetchJson<CsrfDto>('/operator/session/csrf', '/operator/session/csrf')
+    const raw = await fetchJson<unknown>('/operator/session/csrf', '/operator/session/csrf')
+    if (!raw.success) return raw
+    const parsed = parseOperatorCsrfToken(raw.data)
+    if (!parsed.success) {
+      const protocolErr: GatewayProtocolError = {kind: 'protocol', message: 'Failed to parse csrf response'}
+      logger?.error('operator-client: csrf parse error', {route: '/operator/session/csrf'})
+      return err(protocolErr)
+    }
+    return ok(parsed.data)
   }
 
   async function launchRun(req: LaunchRunRequest): Promise<Result<LaunchRunResponse, GatewayClientError>> {
