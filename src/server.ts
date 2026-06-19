@@ -28,6 +28,7 @@ import {graphql} from '@octokit/graphql'
 import {Hono, type Context} from 'hono'
 import {getCookie} from 'hono/cookie'
 import {fetchGitHubUserLogin, makeGitHubOAuthClient} from './auth/oauth.ts'
+import {readOperatorUiConfig} from './gateway/operator-config.ts'
 import {createAggregator} from './github/aggregator.ts'
 import {createDashboardAppClient} from './github/app-client.ts'
 import {buildInstallationsClient, enumerateRepos, mintReadOnlyToken} from './github/installations.ts'
@@ -137,6 +138,15 @@ export interface DashboardAppConfig {
    * Tests inject a fake snapshot provider.
    */
   getSnapshot?: (() => AggregatorSnapshot) | undefined
+  /**
+   * Whether to mount the operator UI skeleton at /operator.
+   * If undefined, reads from DASHBOARD_OPERATOR_UI_ENABLED env (default: false).
+   * When false (default), /operator is NOT mounted — zero operator objects are
+   * constructed in-process. The route falls through to the auth middleware which
+   * returns the standard deny/redirect for protected unknown paths.
+   * Tests inject this directly to avoid env dependencies.
+   */
+  operatorUiEnabled?: boolean | undefined
 }
 
 /**
@@ -148,7 +158,7 @@ export interface DashboardAppConfig {
  * - `operatorLogin` is set but `cookieKey` is undefined (fail-closed — zero key is forgeable)
  * - `cookieKey` is <32 bytes (fail-closed)
  */
-function buildDashboardApp(opts?: DashboardAppConfig): Hono<{Variables: Variables}> {
+async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Variables: Variables}>> {
   // Resolve operator login (fail-closed)
   const rawOperatorLogin = opts?.operatorLogin ?? process.env.DASHBOARD_OPERATOR_LOGIN
   if (typeof rawOperatorLogin === 'string' && rawOperatorLogin.trim() === '') {
@@ -186,6 +196,11 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono<{Variables: Variable
   // Default: empty snapshot (no aggregator wired yet; production wires the real one).
   const EMPTY_SNAPSHOT = {repos: [], staleBanner: false, driftCount: 0, refreshedAt: null} as const
   const getSnapshot = opts?.getSnapshot ?? (() => EMPTY_SNAPSHOT)
+
+  // Resolve operator UI flag — default OFF (fail-closed).
+  // When undefined, reads from env. Tests inject directly via opts.operatorUiEnabled.
+  const operatorUiEnabled =
+    opts?.operatorUiEnabled === undefined ? readOperatorUiConfig().enabled : opts.operatorUiEnabled
 
   const app = new Hono<{Variables: Variables}>()
 
@@ -304,6 +319,17 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono<{Variables: Variable
       operatorLogin,
     }),
   )
+
+  // ── Operator UI skeleton route ────────────────────────────────────────────────
+  // Only mounted when operatorUiEnabled is true (default: false).
+  // When disabled, /operator is NOT mounted — zero operator objects are constructed.
+  // The route falls through to the auth middleware which returns the standard
+  // deny/redirect for protected unknown paths (Marcus's explicit decision).
+  // MUST be inside the auth boundary (protected) — NOT added to isPublicPath.
+  if (operatorUiEnabled) {
+    const {buildOperatorRouter} = await import('./routes/operator.ts')
+    app.route('/operator', buildOperatorRouter())
+  }
 
   return app
 }
@@ -504,7 +530,7 @@ async function createDashboardServer(): Promise<ServerType> {
     )
   }
 
-  const app = buildDashboardApp({cookieKey, getSnapshot})
+  const app = await buildDashboardApp({cookieKey, getSnapshot})
 
   const {host, port} = readServerBindConfig()
   const server = serve(

@@ -27,7 +27,7 @@ function makeFakeGitHub(_login: string): GitHubOAuthClient {
 }
 
 // Helper: build app with injected config
-function buildTestApp(opts: {
+async function buildTestApp(opts: {
   operatorLogin?: string | undefined
   cookieKey?: Buffer | undefined
   githubLogin?: string | undefined // what the fake /user endpoint returns
@@ -56,7 +56,7 @@ function extractCookieValue(header: string): string {
 describe('auth middleware', () => {
   describe('/healthz is public', () => {
     it('GET /api/healthz returns 200 without auth', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat'})
       const res = await app.request('/api/healthz')
       expect(res.status).toBe(200)
     })
@@ -64,7 +64,7 @@ describe('auth middleware', () => {
 
   describe('protected routes require auth', () => {
     it('GET / without session cookie → 401 or redirect to /auth/login', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat'})
       const res = await app.request('/')
       expect([401, 302, 303]).toContain(res.status)
       if (res.status === 302 || res.status === 303) {
@@ -73,7 +73,7 @@ describe('auth middleware', () => {
     })
 
     it('GET / with invalid session cookie → denied', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat'})
       const res = await app.request('/', {
         headers: {cookie: 'session=invalid.garbage'},
       })
@@ -81,7 +81,7 @@ describe('auth middleware', () => {
     })
 
     it('GET / with tampered session cookie → denied', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat'})
       const sm = new SessionManager(TEST_KEY)
       const validCookie = sm.sign('octocat')
       const [payload] = validCookie.split('.')
@@ -102,7 +102,7 @@ describe('auth middleware', () => {
       const sig = Buffer.from(hmac).toString('base64url')
       const expiredCookie = `${payload}.${sig}`
 
-      const app = buildTestApp({operatorLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat'})
       const res = await app.request('/', {
         headers: {cookie: `session=${expiredCookie}`},
       })
@@ -113,7 +113,7 @@ describe('auth middleware', () => {
   describe('fail-closed: missing operator login', () => {
     it('DASHBOARD_OPERATOR_LOGIN unset → all auth denied (no session issued)', async () => {
       // operatorLogin undefined → fail closed (auth routes return 401)
-      const app = buildTestApp({operatorLogin: undefined})
+      const app = await buildTestApp({operatorLogin: undefined})
       // Even the callback should fail
       const res = await app.request('/auth/callback?code=abc&state=xyz', {
         headers: {cookie: 'oauth_state=xyz.fakesig'},
@@ -125,7 +125,7 @@ describe('auth middleware', () => {
       // The real fail-closed contract: with no operator configured, the
       // PROTECTED data routes (and any unknown path) must be denied — never
       // served without auth. Probing must not reveal which routes exist.
-      const app = buildTestApp({operatorLogin: undefined})
+      const app = await buildTestApp({operatorLogin: undefined})
       const root = await app.request('/')
       expect(root.status).toBe(401)
       const unknown = await app.request('/anything')
@@ -135,55 +135,55 @@ describe('auth middleware', () => {
     })
 
     it('DASHBOARD_OPERATOR_LOGIN unset → /api/healthz stays public', async () => {
-      const app = buildTestApp({operatorLogin: undefined})
+      const app = await buildTestApp({operatorLogin: undefined})
       const res = await app.request('/api/healthz')
       expect(res.status).toBe(200)
     })
 
-    it('DASHBOARD_OPERATOR_LOGIN whitespace-only → boot throws', () => {
-      expect(() => buildTestApp({operatorLogin: '   '})).toThrow(/operator.*login|DASHBOARD_OPERATOR_LOGIN/i)
+    it('DASHBOARD_OPERATOR_LOGIN whitespace-only → boot throws', async () => {
+      await expect(buildTestApp({operatorLogin: '   '})).rejects.toThrow(/operator.*login|DASHBOARD_OPERATOR_LOGIN/i)
     })
   })
 
   describe('fail-closed: weak cookie key', () => {
-    it('cookie key < 32 bytes → boot throws', () => {
-      expect(() =>
+    it('cookie key < 32 bytes → boot throws', async () => {
+      await expect(
         buildTestApp({
           operatorLogin: 'octocat',
           cookieKey: Buffer.from('short', 'utf8'),
         }),
-      ).toThrow(/key.*32|32.*byte/i)
+      ).rejects.toThrow(/key.*32|32.*byte/i)
     })
   })
 
   describe('fail-closed: missing cookie key when operator is set', () => {
-    it('operatorLogin set but no cookieKey → boot throws (FIX #3)', () => {
-      expect(() =>
+    it('operatorLogin set but no cookieKey → boot throws (FIX #3)', async () => {
+      await expect(
         buildDashboardApp({
           operatorLogin: 'octocat',
           // cookieKey intentionally omitted
           oauthClient: makeFakeGitHub('octocat'),
           fetchUserLogin: async () => 'octocat',
         }),
-      ).toThrow(/cookie key required/i)
+      ).rejects.toThrow(/cookie key required/i)
     })
 
-    it('operatorLogin unset (deny-all) with no cookieKey → does NOT throw (FIX #3)', () => {
-      expect(() =>
+    it('operatorLogin unset (deny-all) with no cookieKey → does NOT throw (FIX #3)', async () => {
+      await expect(
         buildDashboardApp({
           operatorLogin: undefined,
           // cookieKey intentionally omitted — deny-all mode needs no key
           oauthClient: makeFakeGitHub('octocat'),
           fetchUserLogin: async () => 'octocat',
         }),
-      ).not.toThrow()
+      ).resolves.toBeDefined()
     })
   })
 
   describe('operator login mismatch (FIX #4)', () => {
     it('valid cookie for wrong login → protected route denied', async () => {
       // App is configured for 'octocat'; cookie is signed for 'attacker'
-      const app = buildTestApp({operatorLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat'})
       const attackerSm = new SessionManager(TEST_KEY)
       const attackerCookie = attackerSm.sign('attacker')
 
@@ -235,7 +235,7 @@ describe('sanitizeErrorMessage (FIX #5)', () => {
 describe('OAuth flow', () => {
   describe('/auth/login', () => {
     it('redirects to GitHub authorization URL', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat'})
       const res = await app.request('/auth/login')
       expect([302, 303]).toContain(res.status)
       const location = res.headers.get('location') ?? ''
@@ -243,7 +243,7 @@ describe('OAuth flow', () => {
     })
 
     it('sets oauth_state cookie (HttpOnly)', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat'})
       const res = await app.request('/auth/login')
       const stateCookie = getSetCookie(res, 'oauth_state')
       expect(stateCookie).toBeDefined()
@@ -251,14 +251,14 @@ describe('OAuth flow', () => {
     })
 
     it('sets oauth_state cookie with SameSite=Lax', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat'})
       const res = await app.request('/auth/login')
       const stateCookie = getSetCookie(res, 'oauth_state')
       expect(stateCookie?.toLowerCase()).toContain('samesite=lax')
     })
 
     it('sets oauth_state cookie scoped to path=/auth (FIX P3)', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat'})
       const res = await app.request('/auth/login')
       const stateCookie = getSetCookie(res, 'oauth_state')
       expect(stateCookie?.toLowerCase()).toContain('path=/auth')
@@ -267,7 +267,7 @@ describe('OAuth flow', () => {
 
   describe('/auth/callback — happy path', () => {
     it('issues session cookie for allowlisted login', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat', githubLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat', githubLogin: 'octocat'})
       const sm = new SessionManager(TEST_KEY)
 
       // First get a valid state cookie from /auth/login
@@ -298,7 +298,7 @@ describe('OAuth flow', () => {
     })
 
     it('protected route accessible with valid session cookie', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat', githubLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat', githubLogin: 'octocat'})
       const sm = new SessionManager(TEST_KEY)
       const sessionCookie = sm.sign('octocat')
 
@@ -313,7 +313,7 @@ describe('OAuth flow', () => {
   describe('/auth/callback — security', () => {
     it('rejects non-allowlisted login (403 or redirect)', async () => {
       // githubLogin is 'attacker', operatorLogin is 'octocat'
-      const app = buildTestApp({operatorLogin: 'octocat', githubLogin: 'attacker'})
+      const app = await buildTestApp({operatorLogin: 'octocat', githubLogin: 'attacker'})
 
       const loginRes = await app.request('/auth/login')
       const stateCookieHeader = getSetCookie(loginRes, 'oauth_state') ?? ''
@@ -332,7 +332,7 @@ describe('OAuth flow', () => {
     })
 
     it('rejects state mismatch (CSRF protection)', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat', githubLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat', githubLogin: 'octocat'})
 
       // Use a different state in the cookie vs the query param
       const loginRes = await app.request('/auth/login')
@@ -348,13 +348,13 @@ describe('OAuth flow', () => {
     })
 
     it('rejects missing state cookie (CSRF protection)', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat', githubLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat', githubLogin: 'octocat'})
       const res = await app.request('/auth/callback?code=fake-code&state=somestate')
       expect([401, 403]).toContain(res.status)
     })
 
     it('rejects missing code parameter', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat', githubLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat', githubLogin: 'octocat'})
       const loginRes = await app.request('/auth/login')
       const stateCookieHeader = getSetCookie(loginRes, 'oauth_state') ?? ''
       const stateCookieValue = extractCookieValue(stateCookieHeader)
@@ -370,7 +370,7 @@ describe('OAuth flow', () => {
 
   describe('/auth/logout — CSRF-protected POST (FIX P1)', () => {
     it('POST with valid CSRF token → session cleared + redirect to /auth/login', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat'})
       const sm = new SessionManager(TEST_KEY)
       const sessionCookie = sm.sign('octocat')
       const csrfToken = deriveLogoutCsrfToken(TEST_KEY, 'octocat')
@@ -394,7 +394,7 @@ describe('OAuth flow', () => {
     })
 
     it('POST with missing CSRF token → 403', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat'})
       const sm = new SessionManager(TEST_KEY)
       const sessionCookie = sm.sign('octocat')
 
@@ -411,7 +411,7 @@ describe('OAuth flow', () => {
     })
 
     it('POST with wrong CSRF token → 403', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat'})
       const sm = new SessionManager(TEST_KEY)
       const sessionCookie = sm.sign('octocat')
 
@@ -430,7 +430,7 @@ describe('OAuth flow', () => {
 
     it('GET /auth/logout is not a registered route (no GET handler)', async () => {
       // /auth/logout is POST-only; GET should return 404 or 405
-      const app = buildTestApp({operatorLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat'})
       const sm = new SessionManager(TEST_KEY)
       const sessionCookie = sm.sign('octocat')
 
@@ -444,7 +444,7 @@ describe('OAuth flow', () => {
     })
 
     it('CSRF token is login-specific (token for different login → 403)', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat'})
       const sm = new SessionManager(TEST_KEY)
       const sessionCookie = sm.sign('octocat')
       // Token derived for a different login
@@ -464,7 +464,7 @@ describe('OAuth flow', () => {
     })
 
     it('CSRF token from an expired time window → 403 (leaked token expires)', async () => {
-      const app = buildTestApp({operatorLogin: 'octocat'})
+      const app = await buildTestApp({operatorLogin: 'octocat'})
       const sm = new SessionManager(TEST_KEY)
       const sessionCookie = sm.sign('octocat')
       // Token derived 3 hours ago — older than the current + previous accepted windows
@@ -515,7 +515,7 @@ describe('rate limiter — /auth/login is in sensitiveRoutes (FIX 3)', () => {
     }
 
     // Build a fresh app — the rate limit map is module-level and shared
-    const app = buildTestApp({operatorLogin: 'octocat'})
+    const app = await buildTestApp({operatorLogin: 'octocat'})
     // /auth/login is now in sensitiveRoutes → should be rate-limited → 429
     const res = await app.request('/auth/login')
     expect(res.status).toBe(429)
