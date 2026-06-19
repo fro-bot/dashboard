@@ -202,22 +202,30 @@ export const FIXTURE_PENDING_APPROVALS: PendingApprovalsResponse = {
 // Approval decision response fixtures — one per ApprovalDecisionState
 // ---------------------------------------------------------------------------
 
+export const FIXTURE_DECISION_PENDING: ApprovalDecisionResponse = {
+  state: 'pending',
+  requestId: 'req-fixture-pending-001',
+  timestamp: '2026-06-17T10:04:00Z',
+}
+
 export const FIXTURE_DECISION_CLAIMED: ApprovalDecisionResponse = {
   state: 'claimed',
   requestId: 'req-fixture-pending-001',
   timestamp: '2026-06-17T10:04:30Z',
 }
 
-export const FIXTURE_DECISION_ALREADY_SETTLED: ApprovalDecisionResponse = {
-  state: 'already_settled',
+export const FIXTURE_DECISION_ALREADY_CLAIMED: ApprovalDecisionResponse = {
+  // already_claimed: a second decision arrived while the first POST was still in-flight.
+  // The entry has NOT settled yet — this is NOT 'already_settled'.
+  state: 'already_claimed',
   requestId: 'req-fixture-pending-001',
   timestamp: '2026-06-17T10:05:00Z',
 }
 
-export const FIXTURE_DECISION_EXPIRED: ApprovalDecisionResponse = {
-  state: 'expired',
-  requestId: 'req-fixture-expired-002',
-  timestamp: '2026-06-17T10:06:00Z',
+export const FIXTURE_DECISION_SCOPE_MISMATCH: ApprovalDecisionResponse = {
+  state: 'scope_mismatch',
+  requestId: 'req-fixture-scope-005',
+  timestamp: '2026-06-17T10:05:30Z',
 }
 
 export const FIXTURE_DECISION_FAILED_TO_SETTLE: ApprovalDecisionResponse = {

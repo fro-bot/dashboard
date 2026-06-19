@@ -18,7 +18,7 @@
 import type {Logger} from '../logger.ts'
 import type {Result} from '../result.ts'
 import {err, ok} from '../result.ts'
-import type {OperatorCsrfToken, OperatorSessionInfo} from './operator-contract/index.ts'
+import type {OperatorCsrfToken, OperatorDecisionState, OperatorSessionInfo} from './operator-contract/index.ts'
 import {parseOperatorCsrfToken, parseOperatorSessionInfo} from './operator-contract/index.ts'
 
 // ---------------------------------------------------------------------------
@@ -38,7 +38,8 @@ export type RunStatus =
 // Approval state union
 // ---------------------------------------------------------------------------
 
-export type ApprovalDecisionState = 'claimed' | 'already_settled' | 'expired' | 'failed_to_settle' | 'unavailable'
+/** Canonical operator-facing decision states from contract v1.0.0. */
+export type ApprovalDecisionState = OperatorDecisionState
 
 // ---------------------------------------------------------------------------
 // DTOs — frozen canonical shapes from operator contract v1.0.0

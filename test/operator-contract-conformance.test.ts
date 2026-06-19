@@ -6,6 +6,8 @@
  *
  * Source: fro-bot/agent | Tag: v0.71.0 | PR: #952 | Commit: 92b621e1
  */
+import type {ApprovalDecisionState, RunStatus} from '../src/gateway/operator-client.ts'
+import type {OperatorDecisionState, OperatorWebStatus} from '../src/gateway/operator-contract/index.ts'
 import {describe, expect, it} from 'vitest'
 import {
   OPERATOR_CONTRACT_VERSION,
@@ -13,6 +15,25 @@ import {
   parseOperatorError,
   parseOperatorSessionInfo,
 } from '../src/gateway/operator-contract/index.ts'
+
+// ---------------------------------------------------------------------------
+// Type-level assignability: dashboard types ↔ canonical contract types
+// ---------------------------------------------------------------------------
+// These are compile-time checks — if the types diverge, tsc fails.
+// Assignment-based style: assign in both directions to prove mutual assignability.
+
+// ApprovalDecisionState ↔ OperatorDecisionState
+const _checkApprovalToCanonical = (_x: ApprovalDecisionState): OperatorDecisionState => _x
+const _checkCanonicalToApproval = (_x: OperatorDecisionState): ApprovalDecisionState => _x
+// Suppress unused-variable lint
+void _checkApprovalToCanonical
+void _checkCanonicalToApproval
+
+// RunStatus ↔ OperatorWebStatus
+const _checkRunStatusToCanonical = (_x: RunStatus): OperatorWebStatus => _x
+const _checkCanonicalToRunStatus = (_x: OperatorWebStatus): RunStatus => _x
+void _checkRunStatusToCanonical
+void _checkCanonicalToRunStatus
 
 // ---------------------------------------------------------------------------
 // Version pin

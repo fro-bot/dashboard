@@ -654,9 +654,9 @@ describe('decideApproval', () => {
     expect(calls[0]).toBe('/operator/approvals/req-1/decision')
   })
 
-  it('handles already_settled state', async () => {
+  it('handles already_claimed state', async () => {
     const decisionResult = {
-      state: 'already_settled' as const,
+      state: 'already_claimed' as const,
       requestId: 'req-1',
       timestamp: '2026-06-18T20:00:00Z',
     }
@@ -667,7 +667,7 @@ describe('decideApproval', () => {
     const result = await client.decideApproval(validDecision)
     expect(result.success).toBe(true)
     if (result.success) {
-      expect(result.data.state).toBe('already_settled')
+      expect(result.data.state).toBe('already_claimed')
     }
   })
 })
@@ -961,7 +961,8 @@ describe('decideApproval — all decision states', () => {
     csrfToken: 'csrf-state-xyz',
   }
 
-  const allStates = ['claimed', 'already_settled', 'expired', 'failed_to_settle', 'unavailable'] as const
+  // Canonical OperatorDecisionState values per contract v1.0.0
+  const allStates = ['pending', 'claimed', 'already_claimed', 'scope_mismatch', 'failed_to_settle', 'unavailable'] as const
 
   for (const state of allStates) {
     it(`handles ${state} state`, async () => {

@@ -135,8 +135,10 @@ describe('operator UI — flag ON + authenticated', () => {
 
     // failed_to_settle must NOT appear as primary label
     expect(body).not.toContain('failed_to_settle')
-    // already_settled must NOT appear as raw token
-    expect(body).not.toContain('already_settled')
+    // already_claimed must NOT appear as raw token
+    expect(body).not.toContain('already_claimed')
+    // scope_mismatch must NOT appear as raw token
+    expect(body).not.toContain('scope_mismatch')
     // waiting_for_approval must NOT appear as raw token in primary labels
     // (it may appear in data attributes or aria, but not as visible text)
   })
@@ -241,14 +243,17 @@ describe('operator UI — flag ON + authenticated', () => {
     expect(body).toMatch(/approval|approve|reject/i)
   })
 
-  it('renders terminal approval states as non-actionable', async () => {
+  it('renders approval decision states as non-actionable', async () => {
     const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
     expect(res.status).toBe(200)
     const body = await res.text()
 
-    // Terminal states should be shown
-    expect(body).toMatch(/expir|timeout/i)
+    // Decision states should be shown with safe copy
+    // claimed state
+    expect(body).toMatch(/claim|process|review|in progress/i)
+    // unavailable state
+    expect(body).toMatch(/unavailable/i)
   })
 
   it('renders Gateway unauthenticated panel', async () => {

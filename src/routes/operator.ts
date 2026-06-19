@@ -23,7 +23,7 @@ import {Hono} from 'hono'
 import {html, raw} from 'hono/html'
 
 import {approvalStateLabel, runStatusLabel, streamEventLabel} from '../gateway/operator-copy.ts'
-import {ALL_FIXTURE_RUNS, FIXTURE_DECISION_ALREADY_SETTLED, FIXTURE_DECISION_CLAIMED, FIXTURE_DECISION_EXPIRED, FIXTURE_DECISION_FAILED_TO_SETTLE, FIXTURE_DECISION_UNAVAILABLE, FIXTURE_PENDING_APPROVAL, FIXTURE_RUN_TIMELINE} from '../gateway/operator-fixtures.ts'
+import {ALL_FIXTURE_RUNS, FIXTURE_DECISION_ALREADY_CLAIMED, FIXTURE_DECISION_CLAIMED, FIXTURE_DECISION_FAILED_TO_SETTLE, FIXTURE_DECISION_PENDING, FIXTURE_DECISION_SCOPE_MISMATCH, FIXTURE_DECISION_UNAVAILABLE, FIXTURE_PENDING_APPROVAL, FIXTURE_RUN_TIMELINE} from '../gateway/operator-fixtures.ts'
 
 // ---------------------------------------------------------------------------
 // Styles
@@ -268,14 +268,17 @@ function pendingApprovalSection(): ReturnType<typeof html> {
         </p>
       </div>
 
-      <h3 style="margin-top:16px;margin-bottom:8px;">Terminal Approval States</h3>
+      <h3 style="margin-top:16px;margin-bottom:8px;">Approval Decision States</h3>
       <p style="font-size:0.8rem;color:#6b7280;margin-bottom:10px;">
-        The following cards show all terminal approval states (non-actionable):
+        The following cards show all canonical approval decision states (non-actionable in this skeleton).
+        Note: the &ldquo;Decision already in progress&rdquo; state is in-flight (not terminal) —
+        a second decision arrived while the first POST was still in-flight.
       </p>
 
+      ${terminalApprovalCard(FIXTURE_DECISION_PENDING)}
       ${terminalApprovalCard(FIXTURE_DECISION_CLAIMED)}
-      ${terminalApprovalCard(FIXTURE_DECISION_ALREADY_SETTLED)}
-      ${terminalApprovalCard(FIXTURE_DECISION_EXPIRED)}
+      ${terminalApprovalCard(FIXTURE_DECISION_ALREADY_CLAIMED)}
+      ${terminalApprovalCard(FIXTURE_DECISION_SCOPE_MISMATCH)}
       ${terminalApprovalCard(FIXTURE_DECISION_FAILED_TO_SETTLE)}
       ${terminalApprovalCard(FIXTURE_DECISION_UNAVAILABLE)}
     </section>
