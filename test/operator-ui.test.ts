@@ -135,10 +135,20 @@ describe('operator UI — flag ON + authenticated', () => {
 
     // failed_to_settle must NOT appear as primary label
     expect(body).not.toContain('failed_to_settle')
-    // already_settled must NOT appear as raw token
-    expect(body).not.toContain('already_settled')
+    // already_claimed must NOT appear as raw token
+    expect(body).not.toContain('already_claimed')
+    // scope_mismatch must NOT appear as raw token
+    expect(body).not.toContain('scope_mismatch')
     // waiting_for_approval must NOT appear as raw token in primary labels
     // (it may appear in data attributes or aria, but not as visible text)
+
+    // POSITIVE: pending fixture is rendered — assert safe label appears
+    // approvalStateLabel('pending') === 'Awaiting your decision'
+    expect(body).toContain('Awaiting your decision')
+    // POSITIVE: scope_mismatch fixture is rendered — assert safe label appears
+    // approvalStateLabel('scope_mismatch') === "Approval scope didn't match — decision not applied"
+    // The apostrophe is HTML-entity-encoded in SSR output (&#39;) — use regex to match both forms
+    expect(body).toMatch(/Approval scope didn(?:'|&#39;)t match — decision not applied/)
   })
 
   it('CRITICAL: failed_to_settle raw token never appears in rendered HTML', async () => {
@@ -186,7 +196,7 @@ describe('operator UI — flag ON + authenticated', () => {
     // If a future refactor wires the launch form to render request fields, these will catch it.
     // FIXTURE_LAUNCH_REQUEST.prompt
     expect(body).not.toContain('[Fixture prompt — not rendered in UI]')
-    // FIXTURE_CSRF.token / FIXTURE_LAUNCH_REQUEST.csrfToken
+    // FIXTURE_CSRF.csrfToken / FIXTURE_LAUNCH_REQUEST.csrfToken
     expect(body).not.toContain('fixture-csrf-placeholder')
     // FIXTURE_LAUNCH_REQUEST.idempotencyKey
     expect(body).not.toContain('fixture-idempotency-key-001')
@@ -241,14 +251,17 @@ describe('operator UI — flag ON + authenticated', () => {
     expect(body).toMatch(/approval|approve|reject/i)
   })
 
-  it('renders terminal approval states as non-actionable', async () => {
+  it('renders approval decision states as non-actionable', async () => {
     const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
     expect(res.status).toBe(200)
     const body = await res.text()
 
-    // Terminal states should be shown
-    expect(body).toMatch(/expir|timeout/i)
+    // Decision states should be shown with safe copy
+    // claimed state
+    expect(body).toMatch(/claim|process|review|in progress/i)
+    // unavailable state
+    expect(body).toMatch(/unavailable/i)
   })
 
   it('renders Gateway unauthenticated panel', async () => {

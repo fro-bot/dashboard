@@ -17,41 +17,51 @@
 
 import type {Logger} from '../logger.ts'
 import type {Result} from '../result.ts'
+import type {OperatorCsrfToken, OperatorDecisionState, OperatorSessionInfo, OperatorWebStatus} from './operator-contract/index.ts'
 import {err, ok} from '../result.ts'
+import {parseOperatorCsrfToken, parseOperatorSessionInfo} from './operator-contract/index.ts'
 
 // ---------------------------------------------------------------------------
 // Run status union
 // ---------------------------------------------------------------------------
 
-export type RunStatus =
-  | 'queued'
-  | 'running'
-  | 'waiting_for_approval'
-  | 'blocked'
-  | 'failed'
-  | 'cancelled'
-  | 'succeeded'
+/** Canonical operator-facing run statuses from contract v1.0.0. */
+export type RunStatus = OperatorWebStatus
 
 // ---------------------------------------------------------------------------
 // Approval state union
 // ---------------------------------------------------------------------------
 
-export type ApprovalDecisionState = 'claimed' | 'already_settled' | 'expired' | 'failed_to_settle' | 'unavailable'
+/** Canonical operator-facing decision states from contract v1.0.0. */
+export type ApprovalDecisionState = OperatorDecisionState
 
 // ---------------------------------------------------------------------------
-// DTOs
+// DTOs — frozen canonical shapes from operator contract v1.0.0
 // ---------------------------------------------------------------------------
 
-export interface SessionDto {
-  readonly operatorId: number
-  readonly login: string
-  readonly expiresAt: string
-}
+/** Canonical session response shape. expiresAt is ms-since-epoch (number). */
+export type SessionDto = OperatorSessionInfo
 
-export interface CsrfDto {
-  readonly token: string
-  readonly expiresAt: string
-}
+/** Canonical CSRF token response shape. Field is csrfToken (not token). */
+export type CsrfDto = OperatorCsrfToken
+
+// ---------------------------------------------------------------------------
+// MOCK-ONLY / DEFERRED — NOT part of frozen contract v1.0.0
+//
+// The following DTOs (LaunchRunRequest, LaunchRunResponse, RunSnapshotDto,
+// PendingApprovalSummary, PendingApprovalsResponse, ApprovalDecisionRequest,
+// ApprovalDecisionResponse) and the RunStreamEvent SSE union are MOCK-ONLY.
+//
+// Only the following are frozen in operator contract v1.0.0:
+//   - GET /operator/session → OperatorSessionInfo (SessionDto)
+//   - GET /operator/session/csrf → OperatorCsrfToken (CsrfDto)
+//   - OperatorWebStatus (RunStatus)
+//   - OperatorDecisionState (ApprovalDecisionState)
+//
+// These deferred types will be aligned to the canonical contract when
+// Gateway Phase B route units (4-6, 8) land. Do NOT add conformance
+// assertions over these types until they are frozen upstream.
+// ---------------------------------------------------------------------------
 
 export interface LaunchRunRequest {
   readonly owner: string
@@ -102,7 +112,12 @@ export interface ApprovalDecisionResponse {
 }
 
 // ---------------------------------------------------------------------------
-// SSE event union
+// SSE event union — MOCK-ONLY / DEFERRED (not part of frozen contract v1.0.0)
+//
+// approval.expired is a mock-only/deferred SSE event. It is NOT a canonical
+// OperatorDecisionState — 'expired' was removed from the decision state taxonomy
+// in contract v1.0.0. If exposed at all, it is derived separately from the
+// deadline settlement path, not from OperatorDecisionState.
 // ---------------------------------------------------------------------------
 
 export type RunStreamEvent =
@@ -437,11 +452,27 @@ export function createOperatorClient(options: OperatorClientOptions): OperatorCl
   // -------------------------------------------------------------------------
 
   async function getCurrentSession(): Promise<Result<SessionDto, GatewayClientError>> {
-    return fetchJson<SessionDto>('/operator/session', '/operator/session')
+    const raw = await fetchJson<unknown>('/operator/session', '/operator/session')
+    if (!raw.success) return raw
+    const parsed = parseOperatorSessionInfo(raw.data)
+    if (!parsed.success) {
+      const protocolErr: GatewayProtocolError = {kind: 'protocol', message: 'Failed to parse session response'}
+      logger?.error('operator-client: session parse error', {route: '/operator/session'})
+      return err(protocolErr)
+    }
+    return ok(parsed.data)
   }
 
   async function refreshCsrf(): Promise<Result<CsrfDto, GatewayClientError>> {
-    return fetchJson<CsrfDto>('/operator/session/csrf', '/operator/session/csrf')
+    const raw = await fetchJson<unknown>('/operator/session/csrf', '/operator/session/csrf')
+    if (!raw.success) return raw
+    const parsed = parseOperatorCsrfToken(raw.data)
+    if (!parsed.success) {
+      const protocolErr: GatewayProtocolError = {kind: 'protocol', message: 'Failed to parse csrf response'}
+      logger?.error('operator-client: csrf parse error', {route: '/operator/session/csrf'})
+      return err(protocolErr)
+    }
+    return ok(parsed.data)
   }
 
   async function launchRun(req: LaunchRunRequest): Promise<Result<LaunchRunResponse, GatewayClientError>> {

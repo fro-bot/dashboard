@@ -39,15 +39,22 @@ export function runStatusLabel(status: RunStatus): string {
  * Human-readable label for an approval decision state.
  * CRITICAL: 'failed_to_settle' must NEVER be the primary label.
  * Maps it to safe copy: "Couldn't finalize the decision".
+ *
+ * Canonical OperatorDecisionState values per contract v1.0.0:
+ * pending | claimed | already_claimed | scope_mismatch | failed_to_settle | unavailable
  */
 export function approvalStateLabel(state: ApprovalDecisionState): string {
   switch (state) {
+    case 'pending':
+      return 'Awaiting your decision'
     case 'claimed':
       return 'Decision in progress — claimed for review'
-    case 'already_settled':
-      return 'Already decided — no further action needed'
-    case 'expired':
-      return 'Expired — approval window has lapsed'
+    case 'already_claimed':
+      // already_claimed: a second decision arrived while the first POST was still in-flight.
+      // The entry has NOT settled yet — this is NOT "already done".
+      return 'Decision already in progress — no duplicate action sent'
+    case 'scope_mismatch':
+      return "Approval scope didn't match — decision not applied"
     case 'failed_to_settle':
       return "Couldn't finalize the decision — please try again"
     case 'unavailable':

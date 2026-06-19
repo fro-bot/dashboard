@@ -67,7 +67,7 @@ describe('getCurrentSession', () => {
     const sessionData = {
       operatorId: 42,
       login: 'octocat',
-      expiresAt: '2026-06-18T22:00:00Z',
+      expiresAt: 4070908800000,
     }
     const client = createOperatorClient({
       fetch: makeOkFetch(sessionData),
@@ -96,12 +96,26 @@ describe('getCurrentSession', () => {
     }
   })
 
+  it('returns protocol error when expiresAt is a string (legacy shape)', async () => {
+    // Canonical OperatorSessionInfo.expiresAt is number; string must fail parse
+    const legacyShape = {operatorId: 42, login: 'octocat', expiresAt: '2026-06-18T22:00:00Z'}
+    const client = createOperatorClient({
+      fetch: makeOkFetch(legacyShape),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.getCurrentSession()
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('protocol')
+    }
+  })
+
   it('uses relative path /operator/session', async () => {
     const calls: string[] = []
     const client = createOperatorClient({
       fetch: async (input, _init) => {
         calls.push(typeof input === 'string' ? input : String(input))
-        return new Response(JSON.stringify({operatorId: 1, login: 'x', expiresAt: '2026-06-18T22:00:00Z'}), {
+        return new Response(JSON.stringify({operatorId: 1, login: 'x', expiresAt: 4070908800000}), {
           status: 200,
           headers: {'content-type': 'application/json'},
         })
@@ -118,8 +132,8 @@ describe('getCurrentSession', () => {
 // ---------------------------------------------------------------------------
 
 describe('refreshCsrf', () => {
-  it('returns csrf token metadata on success', async () => {
-    const csrfData = {token: 'csrf-abc123', expiresAt: '2026-06-18T22:00:00Z'}
+  it('returns csrf token on success', async () => {
+    const csrfData = {csrfToken: 'csrf-abc123'}
     const client = createOperatorClient({
       fetch: makeOkFetch(csrfData),
       createEventStream: makeEventStream([]),
@@ -127,7 +141,21 @@ describe('refreshCsrf', () => {
     const result = await client.refreshCsrf()
     expect(result.success).toBe(true)
     if (result.success) {
-      expect(result.data.token).toBe('csrf-abc123')
+      expect(result.data.csrfToken).toBe('csrf-abc123')
+    }
+  })
+
+  it('rejects old {token, expiresAt} shape as protocol error', async () => {
+    // Canonical field is csrfToken (not token); old shape must fail parse
+    const oldShape = {token: 'csrf-abc123', expiresAt: '2026-06-18T22:00:00Z'}
+    const client = createOperatorClient({
+      fetch: makeOkFetch(oldShape),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.refreshCsrf()
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('protocol')
     }
   })
 
@@ -136,7 +164,7 @@ describe('refreshCsrf', () => {
     const client = createOperatorClient({
       fetch: async (input, _init) => {
         calls.push(typeof input === 'string' ? input : String(input))
-        return new Response(JSON.stringify({token: 't', expiresAt: '2026-06-18T22:00:00Z'}), {
+        return new Response(JSON.stringify({csrfToken: 't'}), {
           status: 200,
           headers: {'content-type': 'application/json'},
         })
@@ -626,9 +654,9 @@ describe('decideApproval', () => {
     expect(calls[0]).toBe('/operator/approvals/req-1/decision')
   })
 
-  it('handles already_settled state', async () => {
+  it('handles already_claimed state', async () => {
     const decisionResult = {
-      state: 'already_settled' as const,
+      state: 'already_claimed' as const,
       requestId: 'req-1',
       timestamp: '2026-06-18T20:00:00Z',
     }
@@ -639,7 +667,7 @@ describe('decideApproval', () => {
     const result = await client.decideApproval(validDecision)
     expect(result.success).toBe(true)
     if (result.success) {
-      expect(result.data.state).toBe('already_settled')
+      expect(result.data.state).toBe('already_claimed')
     }
   })
 })
@@ -933,7 +961,8 @@ describe('decideApproval — all decision states', () => {
     csrfToken: 'csrf-state-xyz',
   }
 
-  const allStates = ['claimed', 'already_settled', 'expired', 'failed_to_settle', 'unavailable'] as const
+  // Canonical OperatorDecisionState values per contract v1.0.0
+  const allStates = ['pending', 'claimed', 'already_claimed', 'scope_mismatch', 'failed_to_settle', 'unavailable'] as const
 
   for (const state of allStates) {
     it(`handles ${state} state`, async () => {

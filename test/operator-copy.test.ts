@@ -79,10 +79,12 @@ describe('runStatusLabel', () => {
 })
 
 describe('approvalStateLabel', () => {
+  // Canonical OperatorDecisionState values per contract v1.0.0
   const allStates: ApprovalDecisionState[] = [
+    'pending',
     'claimed',
-    'already_settled',
-    'expired',
+    'already_claimed',
+    'scope_mismatch',
     'failed_to_settle',
     'unavailable',
   ]
@@ -117,16 +119,31 @@ describe('approvalStateLabel', () => {
     expect(label).toMatch(/claim|process|review|in progress/i)
   })
 
-  it('already_settled → human-readable label (not raw token)', () => {
-    const label = approvalStateLabel('already_settled')
-    expect(label).not.toBe('already_settled')
-    expect(label).not.toContain('already_settled')
-    expect(label).toMatch(/already|settled|decided|complete/i)
+  it('already_claimed → human-readable label (not raw token, not "already decided")', () => {
+    const label = approvalStateLabel('already_claimed')
+    // Must NOT use the raw backend token
+    expect(label).not.toBe('already_claimed')
+    expect(label).not.toContain('already_claimed')
+    // already_claimed means a second decision arrived while first POST was in-flight
+    // NOT "already done" — must convey in-flight/duplicate/progress semantics
+    expect(label).toMatch(/in progress|no duplicate|duplicate action/i)
+    // Must NOT reuse "already decided" wording (that was the old already_settled copy)
+    expect(label).not.toMatch(/already decided/i)
+    // Must NOT imply the decision is terminal/settled — it is still in-flight
+    expect(label).not.toMatch(/\bdone\b|completed|settled|finished/i)
   })
 
-  it('expired → human-readable label', () => {
-    const label = approvalStateLabel('expired')
-    expect(label).toMatch(/expir|timeout|lapsed/i)
+  it('pending → human-readable label', () => {
+    const label = approvalStateLabel('pending')
+    expect(label).not.toBe('pending')
+    expect(label).toMatch(/await|pending|decision|your/i)
+  })
+
+  it('scope_mismatch → human-readable label (not raw token)', () => {
+    const label = approvalStateLabel('scope_mismatch')
+    expect(label).not.toBe('scope_mismatch')
+    expect(label).not.toContain('scope_mismatch')
+    expect(label).toMatch(/scope|match|apply|decision/i)
   })
 
   it('unavailable → human-readable label', () => {
