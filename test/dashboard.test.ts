@@ -73,7 +73,7 @@ function makeSnapshot(overrides: Partial<AggregatorSnapshot> = {}): AggregatorSn
 }
 
 /** Build a test app with injected snapshot + minimal auth config. */
-function buildTestApp(snapshot: AggregatorSnapshot, operatorLogin: string = TEST_OPERATOR) {
+async function buildTestApp(snapshot: AggregatorSnapshot, operatorLogin: string = TEST_OPERATOR) {
   return buildDashboardApp({
     operatorLogin,
     cookieKey: TEST_KEY,
@@ -84,7 +84,7 @@ function buildTestApp(snapshot: AggregatorSnapshot, operatorLogin: string = TEST
 }
 
 /** Authed request helper — injects a valid session cookie. */
-async function authedGet(app: ReturnType<typeof buildTestApp>, path: string): Promise<Response> {
+async function authedGet(app: Awaited<ReturnType<typeof buildTestApp>>, path: string): Promise<Response> {
   const cookie = makeSessionCookie()
   return app.request(path, {headers: {cookie: `session=${cookie}`}})
 }
@@ -127,7 +127,7 @@ describe('dashboard SSR — GET /', () => {
         },
       })
       const snapshot = makeSnapshot({repos: [repo1, repo2], refreshedAt: 1_700_000_000_000})
-      const app = buildTestApp(snapshot)
+      const app = await buildTestApp(snapshot)
       const res = await authedGet(app, '/')
 
       expect(res.status).toBe(200)
@@ -160,7 +160,7 @@ describe('dashboard SSR — GET /', () => {
         },
       })
       const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
-      const app = buildTestApp(snapshot)
+      const app = await buildTestApp(snapshot)
       const res = await authedGet(app, '/')
 
       expect(res.status).toBe(200)
@@ -187,7 +187,7 @@ describe('dashboard SSR — GET /', () => {
         },
       })
       const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
-      const app = buildTestApp(snapshot)
+      const app = await buildTestApp(snapshot)
       const res = await authedGet(app, '/')
 
       expect(res.status).toBe(200)
@@ -208,7 +208,7 @@ describe('dashboard SSR — GET /', () => {
         },
       })
       const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
-      const app = buildTestApp(snapshot)
+      const app = await buildTestApp(snapshot)
       const res = await authedGet(app, '/')
 
       expect(res.status).toBe(200)
@@ -220,7 +220,7 @@ describe('dashboard SSR — GET /', () => {
   describe('logout form (FIX P1 — GET link replaced with POST form + CSRF)', () => {
     it('renders a POST form for logout (not a GET link)', async () => {
       const snapshot = makeSnapshot({refreshedAt: 1_700_000_000_000})
-      const app = buildTestApp(snapshot)
+      const app = await buildTestApp(snapshot)
       const res = await authedGet(app, '/')
 
       expect(res.status).toBe(200)
@@ -241,7 +241,7 @@ describe('dashboard SSR — GET /', () => {
 
     it('CSRF token in form is non-empty', async () => {
       const snapshot = makeSnapshot({refreshedAt: 1_700_000_000_000})
-      const app = buildTestApp(snapshot)
+      const app = await buildTestApp(snapshot)
       const res = await authedGet(app, '/')
 
       const body = await res.text()
@@ -256,7 +256,7 @@ describe('dashboard SSR — GET /', () => {
 
     it('logout form submits to correct action', async () => {
       const snapshot = makeSnapshot()
-      const app = buildTestApp(snapshot)
+      const app = await buildTestApp(snapshot)
       const res = await authedGet(app, '/')
 
       const body = await res.text()
@@ -266,7 +266,7 @@ describe('dashboard SSR — GET /', () => {
 
   describe('security — unauthenticated access denied', () => {
     it('GET / without session cookie → redirect or 401', async () => {
-      const app = buildTestApp(makeSnapshot())
+      const app = await buildTestApp(makeSnapshot())
       const res = await app.request('/')
       expect([302, 303, 401]).toContain(res.status)
       if (res.status === 302 || res.status === 303) {
@@ -275,7 +275,7 @@ describe('dashboard SSR — GET /', () => {
     })
 
     it('GET / with invalid session cookie → denied', async () => {
-      const app = buildTestApp(makeSnapshot())
+      const app = await buildTestApp(makeSnapshot())
       const res = await app.request('/', {headers: {cookie: 'session=invalid.garbage'}})
       expect([302, 303, 401]).toContain(res.status)
     })
@@ -284,7 +284,7 @@ describe('dashboard SSR — GET /', () => {
   describe('edge: empty snapshot (pre-first-fetch)', () => {
     it('renders loading/empty state — 200, no throw', async () => {
       const snapshot = makeSnapshot({repos: [], refreshedAt: null})
-      const app = buildTestApp(snapshot)
+      const app = await buildTestApp(snapshot)
       const res = await authedGet(app, '/')
 
       expect(res.status).toBe(200)
@@ -299,7 +299,7 @@ describe('dashboard SSR — GET /', () => {
   describe('edge: staleBanner', () => {
     it('renders stale-cache banner when staleBanner is true', async () => {
       const snapshot = makeSnapshot({staleBanner: true, refreshedAt: 1_700_000_000_000})
-      const app = buildTestApp(snapshot)
+      const app = await buildTestApp(snapshot)
       const res = await authedGet(app, '/')
 
       expect(res.status).toBe(200)
@@ -310,7 +310,7 @@ describe('dashboard SSR — GET /', () => {
 
     it('does NOT render stale banner when staleBanner is false', async () => {
       const snapshot = makeSnapshot({staleBanner: false, refreshedAt: 1_700_000_000_000})
-      const app = buildTestApp(snapshot)
+      const app = await buildTestApp(snapshot)
       const res = await authedGet(app, '/')
 
       expect(res.status).toBe(200)
@@ -322,7 +322,7 @@ describe('dashboard SSR — GET /', () => {
   describe('edge: driftCount', () => {
     it('renders count-only drift line when driftCount > 0', async () => {
       const snapshot = makeSnapshot({driftCount: 3, refreshedAt: 1_700_000_000_000})
-      const app = buildTestApp(snapshot)
+      const app = await buildTestApp(snapshot)
       const res = await authedGet(app, '/')
 
       expect(res.status).toBe(200)
@@ -336,7 +336,7 @@ describe('dashboard SSR — GET /', () => {
       // The drift count is 3 — there are no repos in the snapshot (drift repos are
       // never passed to the view). Assert no private repo names appear.
       const snapshot = makeSnapshot({driftCount: 3, refreshedAt: 1_700_000_000_000})
-      const app = buildTestApp(snapshot)
+      const app = await buildTestApp(snapshot)
       const res = await authedGet(app, '/')
 
       const body = await res.text()
@@ -347,7 +347,7 @@ describe('dashboard SSR — GET /', () => {
 
     it('does NOT render drift line when driftCount is 0', async () => {
       const snapshot = makeSnapshot({driftCount: 0, refreshedAt: 1_700_000_000_000})
-      const app = buildTestApp(snapshot)
+      const app = await buildTestApp(snapshot)
       const res = await authedGet(app, '/')
 
       const body = await res.text()
@@ -359,7 +359,7 @@ describe('dashboard SSR — GET /', () => {
     it('node_id is not rendered as visible text in the page', async () => {
       const repo = makeRepo({node_id: 'SENSITIVE_NODE_ID_12345'})
       const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
-      const app = buildTestApp(snapshot)
+      const app = await buildTestApp(snapshot)
       const res = await authedGet(app, '/')
 
       const body = await res.text()
@@ -382,7 +382,7 @@ describe('/api/status', () => {
         driftCount: 1,
         refreshedAt: 1_700_000_000_000,
       })
-      const app = buildTestApp(snapshot)
+      const app = await buildTestApp(snapshot)
       const res = await authedGet(app, '/api/status')
 
       expect(res.status).toBe(200)
@@ -403,7 +403,7 @@ describe('/api/status', () => {
 
     it('returns empty snapshot when no repos', async () => {
       const snapshot = makeSnapshot()
-      const app = buildTestApp(snapshot)
+      const app = await buildTestApp(snapshot)
       const res = await authedGet(app, '/api/status')
 
       expect(res.status).toBe(200)
@@ -415,13 +415,13 @@ describe('/api/status', () => {
 
   describe('security — unauthenticated access denied', () => {
     it('GET /api/status without session cookie → denied', async () => {
-      const app = buildTestApp(makeSnapshot())
+      const app = await buildTestApp(makeSnapshot())
       const res = await app.request('/api/status')
       expect([302, 303, 401]).toContain(res.status)
     })
 
     it('GET /api/status with invalid session cookie → denied', async () => {
-      const app = buildTestApp(makeSnapshot())
+      const app = await buildTestApp(makeSnapshot())
       const res = await app.request('/api/status', {headers: {cookie: 'session=bad.cookie'}})
       expect([302, 303, 401]).toContain(res.status)
     })
@@ -431,7 +431,7 @@ describe('/api/status', () => {
     it('/ and /api/status serve data from the same provider', async () => {
       const repo = makeRepo({full_name: 'fro-bot/shared-source'})
       const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
-      const app = buildTestApp(snapshot)
+      const app = await buildTestApp(snapshot)
 
       const [htmlRes, jsonRes] = await Promise.all([authedGet(app, '/'), authedGet(app, '/api/status')])
 
@@ -447,7 +447,7 @@ describe('/api/status', () => {
 
 describe('/api/healthz remains public', () => {
   it('GET /api/healthz returns 200 without auth', async () => {
-    const app = buildTestApp(makeSnapshot())
+    const app = await buildTestApp(makeSnapshot())
     const res = await app.request('/api/healthz')
     expect(res.status).toBe(200)
     const body = await res.json()

@@ -1,4 +1,4 @@
-import {describe, expect, it, vi} from 'vitest'
+import {beforeAll, describe, expect, it, vi} from 'vitest'
 import {buildDashboardApp, buildSnapshotProvider, readServerBindConfig} from '../src/server.ts'
 
 describe('readServerBindConfig — server bind address (issue #13)', () => {
@@ -36,7 +36,11 @@ describe('readServerBindConfig — server bind address (issue #13)', () => {
 })
 
 describe('dashboard server', () => {
-  const app = buildDashboardApp()
+  let app: Awaited<ReturnType<typeof buildDashboardApp>>
+
+  beforeAll(async () => {
+    app = await buildDashboardApp()
+  })
 
   it('GET /api/healthz returns 200 with status shape', async () => {
     const res = await app.request('/api/healthz')

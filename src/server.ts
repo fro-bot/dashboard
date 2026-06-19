@@ -37,7 +37,6 @@ import {logger, sanitizeErrorMessage} from './logger.ts'
 import {buildApiRouter} from './routes/api.ts'
 import {buildAuthRouter} from './routes/auth.ts'
 import {buildDashboardRouter} from './routes/dashboard.ts'
-import {buildOperatorRouter} from './routes/operator.ts'
 import {readOptionalMultilineSecret, readOptionalSecret} from './secrets.ts'
 import {loadCookieKey, SessionManager} from './session.ts'
 
@@ -159,7 +158,7 @@ export interface DashboardAppConfig {
  * - `operatorLogin` is set but `cookieKey` is undefined (fail-closed — zero key is forgeable)
  * - `cookieKey` is <32 bytes (fail-closed)
  */
-function buildDashboardApp(opts?: DashboardAppConfig): Hono<{Variables: Variables}> {
+async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Variables: Variables}>> {
   // Resolve operator login (fail-closed)
   const rawOperatorLogin = opts?.operatorLogin ?? process.env.DASHBOARD_OPERATOR_LOGIN
   if (typeof rawOperatorLogin === 'string' && rawOperatorLogin.trim() === '') {
@@ -328,6 +327,7 @@ function buildDashboardApp(opts?: DashboardAppConfig): Hono<{Variables: Variable
   // deny/redirect for protected unknown paths (Marcus's explicit decision).
   // MUST be inside the auth boundary (protected) — NOT added to isPublicPath.
   if (operatorUiEnabled) {
+    const {buildOperatorRouter} = await import('./routes/operator.ts')
     app.route('/operator', buildOperatorRouter())
   }
 
@@ -530,7 +530,7 @@ async function createDashboardServer(): Promise<ServerType> {
     )
   }
 
-  const app = buildDashboardApp({cookieKey, getSnapshot})
+  const app = await buildDashboardApp({cookieKey, getSnapshot})
 
   const {host, port} = readServerBindConfig()
   const server = serve(

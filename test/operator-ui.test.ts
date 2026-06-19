@@ -42,7 +42,7 @@ function makeSessionCookie(login: string = TEST_OPERATOR): string {
   return sm.sign(login)
 }
 
-function buildTestApp(operatorUiEnabled: boolean) {
+async function buildTestApp(operatorUiEnabled: boolean) {
   return buildDashboardApp({
     operatorLogin: TEST_OPERATOR,
     cookieKey: TEST_KEY,
@@ -53,7 +53,7 @@ function buildTestApp(operatorUiEnabled: boolean) {
   })
 }
 
-async function authedGet(app: ReturnType<typeof buildTestApp>, path: string): Promise<Response> {
+async function authedGet(app: Awaited<ReturnType<typeof buildTestApp>>, path: string): Promise<Response> {
   const cookie = makeSessionCookie()
   return app.request(path, {headers: {cookie: `session=${cookie}`}})
 }
@@ -64,7 +64,7 @@ async function authedGet(app: ReturnType<typeof buildTestApp>, path: string): Pr
 
 describe('operator UI — flag OFF (default)', () => {
   it('GET /operator without flag → denied (redirect or 401)', async () => {
-    const app = buildTestApp(false)
+    const app = await buildTestApp(false)
     const res = await authedGet(app, '/operator')
     // When flag is off, /operator is not mounted → falls through to auth middleware
     // which either redirects or 401s (it's a protected unknown path)
@@ -82,7 +82,7 @@ describe('operator UI — flag OFF (default)', () => {
   })
 
   it('GET /operator without flag → no operator skeleton content', async () => {
-    const app = buildTestApp(false)
+    const app = await buildTestApp(false)
     const res = await authedGet(app, '/operator')
     expect([302, 303, 401, 404]).toContain(res.status)
     // Must not serve operator UI content — assert unconditionally so the test
@@ -93,7 +93,7 @@ describe('operator UI — flag OFF (default)', () => {
   })
 
   it('GET /operator unauthenticated without flag → denied', async () => {
-    const app = buildTestApp(false)
+    const app = await buildTestApp(false)
     const res = await app.request('/operator')
     expect([302, 303, 401, 404]).toContain(res.status)
   })
@@ -105,7 +105,7 @@ describe('operator UI — flag OFF (default)', () => {
 
 describe('operator UI — flag ON + authenticated', () => {
   it('GET /operator → 200 with operator skeleton', async () => {
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
     expect(res.status).toBe(200)
     const body = await res.text()
@@ -113,7 +113,7 @@ describe('operator UI — flag ON + authenticated', () => {
   })
 
   it('renders all run status states', async () => {
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
     expect(res.status).toBe(200)
     const body = await res.text()
@@ -128,7 +128,7 @@ describe('operator UI — flag ON + authenticated', () => {
   })
 
   it('renders approval states with safe copy', async () => {
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
     expect(res.status).toBe(200)
     const body = await res.text()
@@ -142,7 +142,7 @@ describe('operator UI — flag ON + authenticated', () => {
   })
 
   it('CRITICAL: failed_to_settle raw token never appears in rendered HTML', async () => {
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
     expect(res.status).toBe(200)
     const body = await res.text()
@@ -150,7 +150,7 @@ describe('operator UI — flag ON + authenticated', () => {
   })
 
   it('copy distinguishes dashboard auth from Gateway auth', async () => {
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
     expect(res.status).toBe(200)
     const body = await res.text()
@@ -164,7 +164,7 @@ describe('operator UI — flag ON + authenticated', () => {
   })
 
   it('no sensitive values rendered: no CSRF tokens, session cookies, or raw tokens', async () => {
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
     expect(res.status).toBe(200)
     const body = await res.text()
@@ -177,7 +177,7 @@ describe('operator UI — flag ON + authenticated', () => {
   })
 
   it('no raw prompts or tool args from fixtures rendered', async () => {
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
     expect(res.status).toBe(200)
     const body = await res.text()
@@ -196,7 +196,7 @@ describe('operator UI — flag ON + authenticated', () => {
 
   it('SSR renders without network AND mock client fetch guard converts calls to network errors', async () => {
     // Part 1: SSR renders from static fixtures — the throwing fetch is never called during render.
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
     expect(res.status).toBe(200)
 
@@ -219,7 +219,7 @@ describe('operator UI — flag ON + authenticated', () => {
   })
 
   it('renders launch form as inert (no live submit)', async () => {
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
     expect(res.status).toBe(200)
     const body = await res.text()
@@ -232,7 +232,7 @@ describe('operator UI — flag ON + authenticated', () => {
   })
 
   it('renders pending approval card with keyboard-reachable controls', async () => {
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
     expect(res.status).toBe(200)
     const body = await res.text()
@@ -242,7 +242,7 @@ describe('operator UI — flag ON + authenticated', () => {
   })
 
   it('renders terminal approval states as non-actionable', async () => {
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
     expect(res.status).toBe(200)
     const body = await res.text()
@@ -252,7 +252,7 @@ describe('operator UI — flag ON + authenticated', () => {
   })
 
   it('renders Gateway unauthenticated panel', async () => {
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
     expect(res.status).toBe(200)
     const body = await res.text()
@@ -262,7 +262,7 @@ describe('operator UI — flag ON + authenticated', () => {
   })
 
   it('disabled controls have text reasons, not color-only', async () => {
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
     expect(res.status).toBe(200)
     const body = await res.text()
@@ -273,7 +273,7 @@ describe('operator UI — flag ON + authenticated', () => {
   })
 
   it('renders valid HTML with lang attribute', async () => {
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
     expect(res.status).toBe(200)
     const body = await res.text()
@@ -288,7 +288,7 @@ describe('operator UI — flag ON + authenticated', () => {
 
 describe('operator UI — flag ON + unauthenticated', () => {
   it('GET /operator without session → denied (redirect or 401)', async () => {
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await app.request('/operator')
     expect([302, 303, 401]).toContain(res.status)
     if (res.status === 302 || res.status === 303) {
@@ -297,7 +297,7 @@ describe('operator UI — flag ON + unauthenticated', () => {
   })
 
   it('GET /operator with invalid session → denied', async () => {
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await app.request('/operator', {headers: {cookie: 'session=invalid.garbage'}})
     expect([302, 303, 401]).toContain(res.status)
   })
@@ -309,19 +309,19 @@ describe('operator UI — flag ON + unauthenticated', () => {
 
 describe('existing routes unaffected by operator flag', () => {
   it('GET /api/healthz still returns 200 when flag is off', async () => {
-    const app = buildTestApp(false)
+    const app = await buildTestApp(false)
     const res = await app.request('/api/healthz')
     expect(res.status).toBe(200)
   })
 
   it('GET /api/healthz still returns 200 when flag is on', async () => {
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await app.request('/api/healthz')
     expect(res.status).toBe(200)
   })
 
   it('GET / (dashboard) still works when flag is on', async () => {
-    const app = buildTestApp(true)
+    const app = await buildTestApp(true)
     const res = await authedGet(app, '/')
     expect(res.status).toBe(200)
   })
