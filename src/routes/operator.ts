@@ -18,6 +18,7 @@
  * This route is protected by the auth middleware in server.ts.
  * It is NOT a public path — do NOT add it to isPublicPath.
  */
+import type {ApprovalDecisionState, RunStatus} from '../gateway/operator-client.ts'
 import {Hono} from 'hono'
 import {html, raw} from 'hono/html'
 
@@ -70,7 +71,7 @@ const OPERATOR_PAGE_STYLES = `
 // Status pill helper
 // ---------------------------------------------------------------------------
 
-function runStatusClass(status: string): string {
+function runStatusClass(status: RunStatus): string {
   switch (status) {
     case 'queued': return 'status-queued'
     case 'running': return 'status-running'
@@ -79,7 +80,6 @@ function runStatusClass(status: string): string {
     case 'failed': return 'status-failed'
     case 'cancelled': return 'status-cancelled'
     case 'succeeded': return 'status-succeeded'
-    default: return 'status-cancelled'
   }
 }
 
@@ -175,7 +175,7 @@ function runStatusSection(): ReturnType<typeof html> {
         <div style="font-size:0.8rem;color:#6b7280;">
           <span>${run.owner}/${run.repo}</span>
           · <span>Created: ${run.createdAt}</span>
-          ${run.updatedAt === undefined ? '' : html` · <span>Updated: ${run.updatedAt}</span>`}
+          ${run.updatedAt == null ? '' : html` · <span>Updated: ${run.updatedAt}</span>`}
         </div>
       </div>
     `
@@ -283,12 +283,12 @@ function pendingApprovalSection(): ReturnType<typeof html> {
 }
 
 function terminalApprovalCard(decision: {
-  state: string
+  state: ApprovalDecisionState
   requestId: string
   timestamp: string
 }): ReturnType<typeof html> {
   // approvalStateLabel maps all states to safe copy — failed_to_settle never shown raw
-  const label = approvalStateLabel(decision.state as Parameters<typeof approvalStateLabel>[0])
+  const label = approvalStateLabel(decision.state)
   return html`
     <div class="approval-terminal" tabindex="0" aria-label="Approval ${decision.requestId}: ${label}">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">

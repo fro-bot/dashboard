@@ -10,7 +10,7 @@
  *   secondary text), never as the headline.
  * - Copy must NOT imply dashboard auth authorizes Gateway actions.
  */
-import type {ApprovalDecisionState, RunStatus} from './operator-client.ts'
+import type {ApprovalDecisionState, RunStatus, RunStreamEvent} from './operator-client.ts'
 
 /**
  * Human-readable label for a run status.
@@ -59,7 +59,7 @@ export function approvalStateLabel(state: ApprovalDecisionState): string {
  * Human-readable label for a stream event type.
  * Used for displaying event timeline entries.
  */
-export function streamEventLabel(type: string): string {
+export function streamEventLabel(type: RunStreamEvent['type']): string {
   switch (type) {
     case 'heartbeat':
       return 'Connection active'
