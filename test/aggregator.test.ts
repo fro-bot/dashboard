@@ -624,6 +624,31 @@ describe('security — repo-name redaction in operational logs (#54)', () => {
     expect(out).toContain('NODE_SECRET4')
   })
 
+  it('scrubs fully when owner and name overlap (name is a substring of owner)', async () => {
+    // Overlapping tokens: name 'secret' is a substring of owner 'secret-corp'.
+    // Longest-first replacement must scrub both without leaving a partial owner.
+    const secret = makeRepo({node_id: 'NODE_SECRET5', database_id: 4246, owner: 'secret-corp', name: 'secret', installation_id: 17})
+
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockImplementation(async () => {
+      throw new Error("Could not resolve 'secret-corp/secret'; org 'secret-corp' is restricted")
+    })
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([secret])),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult())),
+      graphqlQueryForInstallation,
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+
+    const out = loggedOutput()
+    expect(out).toMatch(/marking stale/i)
+    expect(out).not.toContain('secret-corp')
+    expect(out).not.toContain('secret')
+    expect(out).toContain('NODE_SECRET5')
+  })
+
   it('no-alerts retry failure path also scrubs the private repo name from the error', async () => {
     // Force the vuln-alerts permission retry, then make the retry ALSO fail with
     // an error that echoes the repo name (site C — the no-alerts retry path).

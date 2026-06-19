@@ -475,18 +475,16 @@ function safeRepoErrorContext(entry: RepoLogIdentity, error: unknown): LogContex
 
 /** Strip a repo's own owner, name, and full_name occurrences from a text string. */
 function redactRepoIdentityFromText(text: string, entry: RepoLogIdentity): string {
-  const fullName = `${entry.owner}/${entry.name}`
+  // Replace identity tokens LONGEST-FIRST so the most specific match always wins
+  // and no partial fragment survives when tokens overlap (e.g. the name is a
+  // substring of the owner). An error string may carry the full `owner/name`,
+  // or the owner or name in isolation.
+  const tokens = [`${entry.owner}/${entry.name}`, entry.owner, entry.name]
+    .filter(token => token.length > 1)
+    .sort((a, b) => b.length - a.length)
   let out = text
-  // Replace the full `owner/name` first (longest, most specific), then each part
-  // on its own — an error string may carry the owner OR the name in isolation.
-  if (fullName.length > 1) {
-    out = out.split(fullName).join('[REDACTED_REPO]')
-  }
-  if (entry.name.length > 0) {
-    out = out.split(entry.name).join('[REDACTED_REPO]')
-  }
-  if (entry.owner.length > 0) {
-    out = out.split(entry.owner).join('[REDACTED_REPO]')
+  for (const token of tokens) {
+    out = out.split(token).join('[REDACTED_REPO]')
   }
   return out
 }
