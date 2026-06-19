@@ -99,8 +99,8 @@ export interface RedactionContext {
 export function assertRedactionApplied(_context: RedactionContext): void {
   throw new Error(
     'REDACTION_GATE_NOT_IMPLEMENTED: redaction check not yet implemented. ' +
-      'The first repo-data endpoint must replace this stub with the real denylist-before-query gate ' +
-      '(bound alongside checkRepoAuthz). See REDACTION_OBLIGATION for the four operational rules.',
+    'The first repo-data endpoint must replace this stub with the real denylist-before-query gate ' +
+    '(bound alongside checkRepoAuthz). See REDACTION_OBLIGATION for the four operational rules.',
   )
 }
 

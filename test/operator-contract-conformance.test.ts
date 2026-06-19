@@ -20,20 +20,23 @@ import {
 // Type-level assignability: dashboard types ↔ canonical contract types
 // ---------------------------------------------------------------------------
 // These are compile-time checks — if the types diverge, tsc fails.
-// Assignment-based style: assign in both directions to prove mutual assignability.
+// Function-based style: declare type-checking functions that are never called.
+// Using satisfies to avoid unused-variable lint while keeping the type constraint.
 
-// ApprovalDecisionState ↔ OperatorDecisionState
-const _checkApprovalToCanonical = (_x: ApprovalDecisionState): OperatorDecisionState => _x
-const _checkCanonicalToApproval = (_x: OperatorDecisionState): ApprovalDecisionState => _x
-// Suppress unused-variable lint
-void _checkApprovalToCanonical
-void _checkCanonicalToApproval
+// ApprovalDecisionState ↔ OperatorDecisionState (mutual assignability)
+type CheckApprovalToCanonical = (x: ApprovalDecisionState) => OperatorDecisionState
+type CheckCanonicalToApproval = (x: OperatorDecisionState) => ApprovalDecisionState
+// These type aliases are the compile-time check — if types diverge, tsc fails here.
+// The identity function satisfies both directions only when the types are identical.
+const checkApprovalBidirectional: CheckApprovalToCanonical & CheckCanonicalToApproval = x => x
+// Suppress unused-variable lint without void
+export {checkApprovalBidirectional}
 
-// RunStatus ↔ OperatorWebStatus
-const _checkRunStatusToCanonical = (_x: RunStatus): OperatorWebStatus => _x
-const _checkCanonicalToRunStatus = (_x: OperatorWebStatus): RunStatus => _x
-void _checkRunStatusToCanonical
-void _checkCanonicalToRunStatus
+// RunStatus ↔ OperatorWebStatus (mutual assignability)
+type CheckRunStatusToCanonical = (x: RunStatus) => OperatorWebStatus
+type CheckCanonicalToRunStatus = (x: OperatorWebStatus) => RunStatus
+const checkRunStatusBidirectional: CheckRunStatusToCanonical & CheckCanonicalToRunStatus = x => x
+export {checkRunStatusBidirectional}
 
 // ---------------------------------------------------------------------------
 // Version pin

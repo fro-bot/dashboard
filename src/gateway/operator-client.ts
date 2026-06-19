@@ -17,8 +17,8 @@
 
 import type {Logger} from '../logger.ts'
 import type {Result} from '../result.ts'
-import {err, ok} from '../result.ts'
 import type {OperatorCsrfToken, OperatorDecisionState, OperatorSessionInfo} from './operator-contract/index.ts'
+import {err, ok} from '../result.ts'
 import {parseOperatorCsrfToken, parseOperatorSessionInfo} from './operator-contract/index.ts'
 
 // ---------------------------------------------------------------------------
@@ -50,6 +50,24 @@ export type SessionDto = OperatorSessionInfo
 
 /** Canonical CSRF token response shape. Field is csrfToken (not token). */
 export type CsrfDto = OperatorCsrfToken
+
+// ---------------------------------------------------------------------------
+// MOCK-ONLY / DEFERRED — NOT part of frozen contract v1.0.0
+//
+// The following DTOs (LaunchRunRequest, LaunchRunResponse, RunSnapshotDto,
+// PendingApprovalSummary, PendingApprovalsResponse, ApprovalDecisionRequest,
+// ApprovalDecisionResponse) and the RunStreamEvent SSE union are MOCK-ONLY.
+//
+// Only the following are frozen in operator contract v1.0.0:
+//   - GET /operator/session → OperatorSessionInfo (SessionDto)
+//   - GET /operator/session/csrf → OperatorCsrfToken (CsrfDto)
+//   - OperatorWebStatus (RunStatus)
+//   - OperatorDecisionState (ApprovalDecisionState)
+//
+// These deferred types will be aligned to the canonical contract when
+// Gateway Phase B route units (4-6, 8) land. Do NOT add conformance
+// assertions over these types until they are frozen upstream.
+// ---------------------------------------------------------------------------
 
 export interface LaunchRunRequest {
   readonly owner: string
@@ -100,7 +118,12 @@ export interface ApprovalDecisionResponse {
 }
 
 // ---------------------------------------------------------------------------
-// SSE event union
+// SSE event union — MOCK-ONLY / DEFERRED (not part of frozen contract v1.0.0)
+//
+// approval.expired is a mock-only/deferred SSE event. It is NOT a canonical
+// OperatorDecisionState — 'expired' was removed from the decision state taxonomy
+// in contract v1.0.0. If exposed at all, it is derived separately from the
+// deadline settlement path, not from OperatorDecisionState.
 // ---------------------------------------------------------------------------
 
 export type RunStreamEvent =
