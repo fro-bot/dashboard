@@ -950,6 +950,109 @@ describe('security — cross-format gap closure via derived databaseId from lega
   })
 })
 
+describe('security — production condition: new-format R_ node_id with no database_id (secondary guard inert)', () => {
+  // Pins the CURRENT production shape: the redacted entries in metadata/repos.yaml
+  // use new-format R_ node_ids and carry no database_id field, so readRepoMetadata's
+  // deriveDatabaseId() returns null and redactedDatabaseIds is empty. The PRIMARY
+  // node_id string guard is therefore the sole protection. This is safe today
+  // because both channels run against the same GitHub API version (same node_id
+  // format), so the primary guard matches. These tests lock in that behavior and
+  // document the residual defense-in-depth gap (tracked: fro-bot/.github#3525).
+
+  it('redacted R_ node_id, empty redactedDatabaseIds, same node_id from install channel → excluded by PRIMARY guard, GraphQL never called', async () => {
+    const REDACTED_NEW_NODE_ID = 'R_kgDORedactedPrivate'
+
+    // The install channel returns the redacted repo under the SAME node_id the
+    // metadata denylist holds — the primary guard must catch it.
+    const privateRepo = makeRepo({
+      node_id: REDACTED_NEW_NODE_ID,
+      database_id: 555_001,
+      owner: 'marcusrbrown',
+      name: 'private-thing',
+    })
+    const publicRepo = makeRepo({node_id: 'NODE_PUBLIC', database_id: 9001, owner: 'fro-bot', name: 'agent'})
+
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi
+      .fn()
+      .mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'}))
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([privateRepo, publicRepo])),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
+        publicRepos: [makePublicRepo({node_id: 'NODE_PUBLIC', owner: 'fro-bot', name: 'agent'})],
+        redactedNodeIds: [REDACTED_NEW_NODE_ID],
+        // Production reality: no database_id field on the redacted entry and an
+        // R_ node_id that deriveDatabaseId() can't decode → this set is EMPTY.
+        redactedDatabaseIds: [],
+      }))),
+      graphqlQueryForInstallation,
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+
+    // GraphQL ran for the public repo, NEVER for the redacted one (primary guard).
+    expect(graphqlQueryForInstallation).toHaveBeenCalled()
+    const calls = (graphqlQueryForInstallation as ReturnType<typeof vi.fn>).mock.calls
+    for (const call of calls) {
+      const vars = call[2] as {owner: string; name: string}
+      expect(vars.owner).not.toBe('marcusrbrown')
+      expect(vars.name).not.toBe('private-thing')
+    }
+
+    const serialized = JSON.stringify(agg.getSnapshot())
+    expect(serialized).not.toContain(REDACTED_NEW_NODE_ID)
+    expect(serialized).not.toContain('private-thing')
+    expect(serialized).not.toContain('marcusrbrown')
+  })
+
+  it('documents the residual: R_ node_id with no database_id leaves redactedDatabaseIds empty, so a format-skewed node_id from the install channel is NOT caught by the secondary guard', async () => {
+    // This test makes the defense-in-depth gap explicit and observable. It is the
+    // ONLY scenario where a redacted repo could leak: the metadata denylist holds
+    // node_id A (R_ format, no database_id → empty redactedDatabaseIds), but the
+    // installation channel returns the SAME repo under a DIFFERENT node_id B
+    // (a hypothetical future format migration). With no database_id fallback,
+    // neither guard matches. Fixing this requires adding database_id to the
+    // redacted repos.yaml entries (fro-bot/.github#3525). Until then, this test
+    // documents that the leak is possible ONLY under node_id-format skew.
+    const DENYLIST_NODE_ID = 'R_kgDOFormatA'
+    const SKEWED_NODE_ID = 'R_kgDOFormatB' // same repo, different format — hypothetical
+
+    const skewedPrivateRepo = makeRepo({
+      node_id: SKEWED_NODE_ID,
+      database_id: 777_002, // no database_id in metadata → can't match on this either
+      owner: 'marcusrbrown',
+      name: 'skewed-private',
+    })
+
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi
+      .fn()
+      .mockResolvedValue(makeGraphqlResponse({rollupState: 'SUCCESS'}))
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([skewedPrivateRepo])),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
+        publicRepos: [],
+        redactedNodeIds: [DENYLIST_NODE_ID], // holds format A only
+        redactedDatabaseIds: [], // empty — the gap
+      }))),
+      graphqlQueryForInstallation,
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+
+    // Characterize the gap honestly: under format skew with an empty secondary
+    // guard, the repo IS queried and DOES surface. This is the documented residual,
+    // not desired behavior — it is what #3525 (add database_id) closes. If a future
+    // fix makes deriveDatabaseId/database_id close this gap, THIS assertion will flip
+    // and should be updated to assert exclusion.
+    const calls = (graphqlQueryForInstallation as ReturnType<typeof vi.fn>).mock.calls
+    const queriedNames = calls.map(c => (c[2] as {name: string}).name)
+    expect(queriedNames).toContain('skewed-private')
+  })
+})
+
 // ---------------------------------------------------------------------------
 // FIX P1: enumeration failure → staleBanner:true
 // ---------------------------------------------------------------------------
