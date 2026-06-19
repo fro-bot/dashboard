@@ -282,6 +282,23 @@ interface WorkingSetEntry {
 }
 
 /**
+ * The generic discovery channel assigned to installation-only repos (repos seen
+ * via the installation channel but NOT present in the metadata public set). This
+ * is the redaction discriminator: any other channel value means the repo came
+ * from the public metadata set and is safe to identify in logs. Defined once and
+ * referenced at both the production site (buildWorkingSet) and the consumption
+ * sites (safeRepoLogIdentity / safeRepoErrorContext) so the two can never drift.
+ */
+const DISCOVERED_CHANNEL = 'discovered'
+
+/** A repo is known-public only if it came from the metadata public set. */
+function isKnownPublic(discoveryChannel: string): boolean {
+  return discoveryChannel !== DISCOVERED_CHANNEL
+}
+
+type RepoLogIdentity = Pick<WorkingSetEntry, 'node_id' | 'owner' | 'name' | 'discovery_channel' | 'installation_id'>
+
+/**
  * Build the working set from the union of installation repos and metadata publicRepos,
  * then REMOVE every repo whose node_id is in redactedNodeIds OR whose database_id is
  * in redactedDatabaseIds.
@@ -402,7 +419,7 @@ function buildWorkingSet(
         owner: repo.owner,
         name: repo.name,
         full_name: repo.full_name,
-        discovery_channel: 'discovered',
+        discovery_channel: DISCOVERED_CHANNEL,
         installation_id: repo.installation_id,
       })
       driftCount++
@@ -421,25 +438,53 @@ function buildWorkingSet(
  *
  * Private repo names must never reach operational logs. A repo's real
  * `owner`/`name` are only safe to log when the repo is KNOWN PUBLIC — i.e. it
- * came from the `metadata/repos.yaml` public set (any `discovery_channel` other
- * than the generic `'discovered'` label). Installation-only repos
- * (`discovery_channel === 'discovered'`) are NOT known public and may be
- * private, so they are logged with only non-revealing identifiers
- * (`node_id`/`installation_id`) instead of `owner`/`name`.
+ * came from the `metadata/repos.yaml` public set. Installation-only repos are
+ * NOT known public and may be private, so they are logged with only
+ * non-revealing identifiers (`node_id`/`installation_id`) instead of
+ * `owner`/`name`.
  */
-function safeRepoLogIdentity(entry: {
-  readonly node_id: string
-  readonly owner: string
-  readonly name: string
-  readonly discovery_channel: string
-  readonly installation_id: number | null
-}): LogContext {
-  if (entry.discovery_channel === 'discovered') {
+function safeRepoLogIdentity(entry: RepoLogIdentity): LogContext {
+  if (!isKnownPublic(entry.discovery_channel)) {
     // Not known public — redact owner/name, keep diagnosable opaque identity.
     return {repoNodeId: entry.node_id, installationId: entry.installation_id}
   }
   // Known public (from metadata public set) — name is safe to log.
   return {owner: entry.owner, name: entry.name, repoNodeId: entry.node_id}
+}
+
+/**
+ * Build a log-safe identity + error context (#54).
+ *
+ * The error string is a SECOND leak vector: GitHub's GraphQL API echoes the
+ * queried `owner/name` back in error messages (e.g. "Could not resolve to a
+ * Repository with the name 'private-org/secret-repo'"). `sanitizeErrorMessage`
+ * strips credentials but NOT repo names, so for a not-known-public repo the
+ * repo's own `owner`, `name`, and `full_name` are stripped from the error text
+ * before logging.
+ */
+function safeRepoErrorContext(entry: RepoLogIdentity, error: unknown): LogContext {
+  const message = sanitizeErrorMessage(error instanceof Error ? error.message : String(error))
+  const identity = safeRepoLogIdentity(entry)
+  if (isKnownPublic(entry.discovery_channel)) {
+    return {...identity, error: message}
+  }
+  // Not known public — also scrub this repo's identity from the error text.
+  const scrubbed = redactRepoIdentityFromText(message, entry)
+  return {...identity, error: scrubbed}
+}
+
+/** Strip a repo's own owner/name/full_name occurrences from a text string. */
+function redactRepoIdentityFromText(text: string, entry: RepoLogIdentity): string {
+  const fullName = `${entry.owner}/${entry.name}`
+  let out = text
+  // Replace owner/name first (longest, most specific), then the bare name.
+  if (fullName.length > 1) {
+    out = out.split(fullName).join('[REDACTED_REPO]')
+  }
+  if (entry.name.length > 0) {
+    out = out.split(entry.name).join('[REDACTED_REPO]')
+  }
+  return out
 }
 
 /**
@@ -523,18 +568,12 @@ async function fetchRepoStatus(
         // Parse with openAlertCount=null (alerts unavailable, not stale)
         return parseRepoResponse(raw, fetchedAt, null)
       } catch (retryError) {
-        logger.warning('Per-repo GraphQL fetch failed (no-alerts retry); marking stale', {
-          ...safeRepoLogIdentity(entry),
-          error: sanitizeErrorMessage(retryError instanceof Error ? retryError.message : String(retryError)),
-        })
+        logger.warning('Per-repo GraphQL fetch failed (no-alerts retry); marking stale', safeRepoErrorContext(entry, retryError))
         return {rollupState: 'unknown', failingChecks: 0, openPrCount: 0, openIssueCount: 0, openAlertCount: null, stale: true, fetchedAt}
       }
     }
 
-    logger.warning('Per-repo GraphQL fetch failed; marking stale', {
-      ...safeRepoLogIdentity(entry),
-      error: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)),
-    })
+    logger.warning('Per-repo GraphQL fetch failed; marking stale', safeRepoErrorContext(entry, error))
     return {rollupState: 'unknown', failingChecks: 0, openPrCount: 0, openIssueCount: 0, openAlertCount: null, stale: true, fetchedAt}
   }
 }
@@ -642,10 +681,7 @@ export function createAggregator(
           const resolvedId = await resolveInstallation(entry.owner, entry.name)
           resolvedEntries.push({...entry, installation_id: resolvedId})
         } catch (resolveError) {
-          logger.warning('Could not resolve installation for metadata-only repo; skipping', {
-            ...safeRepoLogIdentity(entry),
-            error: sanitizeErrorMessage(resolveError instanceof Error ? resolveError.message : String(resolveError)),
-          })
+          logger.warning('Could not resolve installation for metadata-only repo; skipping', safeRepoErrorContext(entry, resolveError))
           // Skip: no valid auth context — do NOT query with an ambient token
         }
       }

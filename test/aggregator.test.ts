@@ -573,6 +573,61 @@ describe('security — repo-name redaction in operational logs (#54)', () => {
     expect(out).toContain('NODE_SECRET')
   })
 
+  it('private repo name echoed in the GraphQL error message is scrubbed before logging', async () => {
+    // GitHub's GraphQL API echoes the queried owner/name back in error text.
+    // The error field is a SECOND leak vector — it must be scrubbed for
+    // not-known-public repos, not just the structured owner/name fields.
+    const secret = makeRepo({node_id: 'NODE_SECRET2', database_id: 4243, owner: 'private-org', name: 'secret-repo', installation_id: 9})
+
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockImplementation(async () => {
+      throw new Error("Could not resolve to a Repository with the name 'private-org/secret-repo'.")
+    })
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([secret])),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult())),
+      graphqlQueryForInstallation,
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+
+    const out = loggedOutput()
+    expect(out).toMatch(/marking stale/i)
+    // The name echoed inside the error string must NOT survive.
+    expect(out).not.toContain('private-org')
+    expect(out).not.toContain('secret-repo')
+    expect(out).toContain('NODE_SECRET2')
+  })
+
+  it('no-alerts retry failure path also scrubs the private repo name from the error', async () => {
+    // Force the vuln-alerts permission retry, then make the retry ALSO fail with
+    // an error that echoes the repo name (site C — the no-alerts retry path).
+    const secret = makeRepo({node_id: 'NODE_SECRET3', database_id: 4244, owner: 'private-org', name: 'hidden-svc', installation_id: 11})
+
+    let call = 0
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockImplementation(async () => {
+      call += 1
+      if (call === 1) {
+        throw new Error('Must have push access to view vulnerability alerts.')
+      }
+      throw new Error("Could not resolve to a Repository with the name 'private-org/hidden-svc'.")
+    })
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([secret])),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult())),
+      graphqlQueryForInstallation,
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+
+    const out = loggedOutput()
+    expect(out).not.toContain('private-org')
+    expect(out).not.toContain('hidden-svc')
+  })
+
   it('known-public metadata repo MAY log owner/name (public data is safe)', async () => {
     const pub = makeRepo({node_id: 'NODE_PUB', owner: 'fro-bot', name: 'agent', installation_id: 1})
 
@@ -613,6 +668,8 @@ describe('security — repo-name redaction in operational logs (#54)', () => {
     const out = loggedOutput()
     expect(out).not.toContain('private-org')
     expect(out).not.toContain('hidden-repo')
+    // Guard against a vacuous pass: the safe identity must actually be logged.
+    expect(out).toContain('NODE_META_SECRET')
   })
 })
 
