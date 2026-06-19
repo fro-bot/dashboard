@@ -13,6 +13,7 @@ import {
   OPERATOR_CONTRACT_VERSION,
   parseOperatorCsrfToken,
   parseOperatorError,
+  parseOperatorOk,
   parseOperatorSessionInfo,
 } from '../src/gateway/operator-contract/index.ts'
 
@@ -187,6 +188,55 @@ describe('parseOperatorError', () => {
 
   it('rejects non-string error field', () => {
     const result = parseOperatorError({error: 42})
+    expect(result.success).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseOperatorOk
+// ---------------------------------------------------------------------------
+
+describe('parseOperatorOk', () => {
+  it('accepts {ok: true} shape', () => {
+    const input = {ok: true}
+    const result = parseOperatorOk(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.ok).toBe(true)
+    }
+  })
+
+  it('accepts extra fields (permissive structural subtyping)', () => {
+    const input = {ok: true, message: 'extra field ignored', code: 200}
+    const result = parseOperatorOk(input)
+    expect(result.success).toBe(true)
+  })
+
+  it('rejects {ok: false} (discriminant must be literal true)', () => {
+    const result = parseOperatorOk({ok: false})
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error.message).toBe('invalid operator ok shape')
+    }
+  })
+
+  it('rejects {} (missing ok field)', () => {
+    const result = parseOperatorOk({})
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error.message).toBe('invalid operator ok shape')
+    }
+  })
+
+  it('rejects a non-object (string)', () => {
+    const result = parseOperatorOk('ok')
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects null', () => {
+    const result = parseOperatorOk(null)
     expect(result.success).toBe(false)
   })
 })

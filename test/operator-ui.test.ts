@@ -141,6 +141,14 @@ describe('operator UI — flag ON + authenticated', () => {
     expect(body).not.toContain('scope_mismatch')
     // waiting_for_approval must NOT appear as raw token in primary labels
     // (it may appear in data attributes or aria, but not as visible text)
+
+    // POSITIVE: pending fixture is rendered — assert safe label appears
+    // approvalStateLabel('pending') === 'Awaiting your decision'
+    expect(body).toContain('Awaiting your decision')
+    // POSITIVE: scope_mismatch fixture is rendered — assert safe label appears
+    // approvalStateLabel('scope_mismatch') === "Approval scope didn't match — decision not applied"
+    // The apostrophe is HTML-entity-encoded in SSR output (&#39;) — use regex to match both forms
+    expect(body).toMatch(/Approval scope didn(?:'|&#39;)t match — decision not applied/)
   })
 
   it('CRITICAL: failed_to_settle raw token never appears in rendered HTML', async () => {

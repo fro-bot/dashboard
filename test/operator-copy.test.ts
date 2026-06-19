@@ -126,9 +126,11 @@ describe('approvalStateLabel', () => {
     expect(label).not.toContain('already_claimed')
     // already_claimed means a second decision arrived while first POST was in-flight
     // NOT "already done" — must convey in-flight/duplicate/progress semantics
-    expect(label).toMatch(/already|claimed|progress|duplicate|in.flight/i)
+    expect(label).toMatch(/in progress|no duplicate|duplicate action/i)
     // Must NOT reuse "already decided" wording (that was the old already_settled copy)
     expect(label).not.toMatch(/already decided/i)
+    // Must NOT imply the decision is terminal/settled — it is still in-flight
+    expect(label).not.toMatch(/\bdone\b|completed|settled|finished/i)
   })
 
   it('pending → human-readable label', () => {

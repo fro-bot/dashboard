@@ -17,7 +17,7 @@
 
 import type {Logger} from '../logger.ts'
 import type {Result} from '../result.ts'
-import type {OperatorCsrfToken, OperatorDecisionState, OperatorSessionInfo} from './operator-contract/index.ts'
+import type {OperatorCsrfToken, OperatorDecisionState, OperatorSessionInfo, OperatorWebStatus} from './operator-contract/index.ts'
 import {err, ok} from '../result.ts'
 import {parseOperatorCsrfToken, parseOperatorSessionInfo} from './operator-contract/index.ts'
 
@@ -25,14 +25,8 @@ import {parseOperatorCsrfToken, parseOperatorSessionInfo} from './operator-contr
 // Run status union
 // ---------------------------------------------------------------------------
 
-export type RunStatus =
-  | 'queued'
-  | 'running'
-  | 'waiting_for_approval'
-  | 'blocked'
-  | 'failed'
-  | 'cancelled'
-  | 'succeeded'
+/** Canonical operator-facing run statuses from contract v1.0.0. */
+export type RunStatus = OperatorWebStatus
 
 // ---------------------------------------------------------------------------
 // Approval state union
