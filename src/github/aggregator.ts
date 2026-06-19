@@ -473,16 +473,20 @@ function safeRepoErrorContext(entry: RepoLogIdentity, error: unknown): LogContex
   return {...identity, error: scrubbed}
 }
 
-/** Strip a repo's own owner/name/full_name occurrences from a text string. */
+/** Strip a repo's own owner, name, and full_name occurrences from a text string. */
 function redactRepoIdentityFromText(text: string, entry: RepoLogIdentity): string {
   const fullName = `${entry.owner}/${entry.name}`
   let out = text
-  // Replace owner/name first (longest, most specific), then the bare name.
+  // Replace the full `owner/name` first (longest, most specific), then each part
+  // on its own — an error string may carry the owner OR the name in isolation.
   if (fullName.length > 1) {
     out = out.split(fullName).join('[REDACTED_REPO]')
   }
   if (entry.name.length > 0) {
     out = out.split(entry.name).join('[REDACTED_REPO]')
+  }
+  if (entry.owner.length > 0) {
+    out = out.split(entry.owner).join('[REDACTED_REPO]')
   }
   return out
 }

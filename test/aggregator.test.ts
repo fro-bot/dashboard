@@ -600,6 +600,30 @@ describe('security — repo-name redaction in operational logs (#54)', () => {
     expect(out).toContain('NODE_SECRET2')
   })
 
+  it('private owner appearing ALONE in the error text (not as owner/name) is scrubbed', async () => {
+    // An error may reference just the owner, outside the full owner/name form.
+    // The bare owner must be scrubbed too, not only the owner/name pair.
+    const secret = makeRepo({node_id: 'NODE_SECRET4', database_id: 4245, owner: 'private-org', name: 'secret-repo', installation_id: 13})
+
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockImplementation(async () => {
+      throw new Error('Resource not accessible by integration for organization private-org')
+    })
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([secret])),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult())),
+      graphqlQueryForInstallation,
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+
+    const out = loggedOutput()
+    expect(out).toMatch(/marking stale/i)
+    expect(out).not.toContain('private-org')
+    expect(out).toContain('NODE_SECRET4')
+  })
+
   it('no-alerts retry failure path also scrubs the private repo name from the error', async () => {
     // Force the vuln-alerts permission retry, then make the retry ALSO fail with
     // an error that echoes the repo name (site C — the no-alerts retry path).
