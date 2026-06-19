@@ -25,7 +25,7 @@ import type {Result} from '../result.ts'
 import type {EnumerateReposResult, InstallationsClient} from './installations.ts'
 import type {MetadataError, MetadataReader, MetadataResult} from './metadata.ts'
 
-import {logger, sanitizeErrorMessage} from '../logger.ts'
+import {logger, sanitizeErrorMessage, type LogContext} from '../logger.ts'
 import {isErr, isOk} from '../result.ts'
 
 // ---------------------------------------------------------------------------
@@ -417,6 +417,32 @@ function buildWorkingSet(
 // ---------------------------------------------------------------------------
 
 /**
+ * Build a log-safe identity for a repo (#54).
+ *
+ * Private repo names must never reach operational logs. A repo's real
+ * `owner`/`name` are only safe to log when the repo is KNOWN PUBLIC — i.e. it
+ * came from the `metadata/repos.yaml` public set (any `discovery_channel` other
+ * than the generic `'discovered'` label). Installation-only repos
+ * (`discovery_channel === 'discovered'`) are NOT known public and may be
+ * private, so they are logged with only non-revealing identifiers
+ * (`node_id`/`installation_id`) instead of `owner`/`name`.
+ */
+function safeRepoLogIdentity(entry: {
+  readonly node_id: string
+  readonly owner: string
+  readonly name: string
+  readonly discovery_channel: string
+  readonly installation_id: number | null
+}): LogContext {
+  if (entry.discovery_channel === 'discovered') {
+    // Not known public — redact owner/name, keep diagnosable opaque identity.
+    return {repoNodeId: entry.node_id, installationId: entry.installation_id}
+  }
+  // Known public (from metadata public set) — name is safe to log.
+  return {owner: entry.owner, name: entry.name, repoNodeId: entry.node_id}
+}
+
+/**
  * Detect whether a GraphQL error is specifically about the vulnerabilityAlerts
  * field being inaccessible (permission/scope error).
  */
@@ -477,10 +503,7 @@ async function fetchRepoStatus(
 
   // installation_id must be present — if null, we cannot authenticate the query
   if (entry.installation_id === null) {
-    logger.warning('No installation_id for repo; marking stale', {
-      owner: entry.owner,
-      name: entry.name,
-    })
+    logger.warning('No installation_id for repo; marking stale', safeRepoLogIdentity(entry))
     return {rollupState: 'unknown', failingChecks: 0, openPrCount: 0, openIssueCount: 0, openAlertCount: null, stale: true, fetchedAt}
   }
 
@@ -494,18 +517,14 @@ async function fetchRepoStatus(
     // P1 #11: if the error is specifically about vulnerabilityAlerts permission,
     // retry without that field and set openAlertCount = null (not stale).
     if (isVulnerabilityAlertsPermissionError(error)) {
-      logger.warning('vulnerabilityAlerts permission error; retrying without alerts field', {
-        owner: entry.owner,
-        name: entry.name,
-      })
+      logger.warning('vulnerabilityAlerts permission error; retrying without alerts field', safeRepoLogIdentity(entry))
       try {
         const raw = await graphqlQueryForInstallation(installationId, REPO_STATUS_QUERY_NO_ALERTS, vars)
         // Parse with openAlertCount=null (alerts unavailable, not stale)
         return parseRepoResponse(raw, fetchedAt, null)
       } catch (retryError) {
         logger.warning('Per-repo GraphQL fetch failed (no-alerts retry); marking stale', {
-          owner: entry.owner,
-          name: entry.name,
+          ...safeRepoLogIdentity(entry),
           error: sanitizeErrorMessage(retryError instanceof Error ? retryError.message : String(retryError)),
         })
         return {rollupState: 'unknown', failingChecks: 0, openPrCount: 0, openIssueCount: 0, openAlertCount: null, stale: true, fetchedAt}
@@ -513,8 +532,7 @@ async function fetchRepoStatus(
     }
 
     logger.warning('Per-repo GraphQL fetch failed; marking stale', {
-      owner: entry.owner,
-      name: entry.name,
+      ...safeRepoLogIdentity(entry),
       error: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)),
     })
     return {rollupState: 'unknown', failingChecks: 0, openPrCount: 0, openIssueCount: 0, openAlertCount: null, stale: true, fetchedAt}
@@ -625,8 +643,7 @@ export function createAggregator(
           resolvedEntries.push({...entry, installation_id: resolvedId})
         } catch (resolveError) {
           logger.warning('Could not resolve installation for metadata-only repo; skipping', {
-            owner: entry.owner,
-            name: entry.name,
+            ...safeRepoLogIdentity(entry),
             error: sanitizeErrorMessage(resolveError instanceof Error ? resolveError.message : String(resolveError)),
           })
           // Skip: no valid auth context — do NOT query with an ambient token

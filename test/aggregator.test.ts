@@ -521,6 +521,102 @@ describe('aggregator — error paths', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Security: private repo names never logged in plaintext (#54)
+// ---------------------------------------------------------------------------
+
+describe('security — repo-name redaction in operational logs (#54)', () => {
+  const captured: string[] = []
+  let originalWarn: typeof console.warn
+
+  beforeEach(() => {
+    captured.length = 0
+    originalWarn = console.warn
+    console.warn = (...args: unknown[]): void => {
+      captured.push(args.map((a: unknown) => String(a)).join(' '))
+    }
+  })
+
+  afterEach(() => {
+    console.warn = originalWarn
+  })
+
+  function loggedOutput(): string {
+    return captured.join('\n')
+  }
+
+  it('installation-only repo (not known public) GraphQL failure does NOT log owner/name', async () => {
+    // An installation-only repo gets discovery_channel 'discovered' — it is NOT
+    // known to be public, so its real owner/name must never reach the log.
+    const secret = makeRepo({node_id: 'NODE_SECRET', database_id: 4242, owner: 'private-org', name: 'secret-repo', installation_id: 7})
+
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockImplementation(async () => {
+      throw new Error('timeout while querying GitHub')
+    })
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([secret])),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult())), // empty public set → 'discovered'
+      graphqlQueryForInstallation,
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+
+    const out = loggedOutput()
+    // The failure WAS logged (marking stale) ...
+    expect(out).toMatch(/marking stale/i)
+    // ... but the private owner/name must be absent.
+    expect(out).not.toContain('private-org')
+    expect(out).not.toContain('secret-repo')
+    expect(out).not.toContain('private-org/secret-repo')
+    // A safe, non-revealing identity IS present for diagnosability.
+    expect(out).toContain('NODE_SECRET')
+  })
+
+  it('known-public metadata repo MAY log owner/name (public data is safe)', async () => {
+    const pub = makeRepo({node_id: 'NODE_PUB', owner: 'fro-bot', name: 'agent', installation_id: 1})
+
+    const graphqlQueryForInstallation: GraphqlQueryForInstallationFn = vi.fn().mockImplementation(async () => {
+      throw new Error('timeout while querying GitHub')
+    })
+
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(makeEnumerateResult([pub])),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
+        publicRepos: [makePublicRepo({node_id: 'NODE_PUB', owner: 'fro-bot', name: 'agent', discovery_channel: 'collab'})],
+      }))),
+      graphqlQueryForInstallation,
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+
+    const out = loggedOutput()
+    expect(out).toMatch(/marking stale/i)
+    // Public repo: name is safe to log.
+    expect(out).toContain('agent')
+  })
+
+  it('installation-only repo with null installation_id does NOT log owner/name', async () => {
+    // Force a null installation_id path: metadata-only repo whose resolver fails.
+    const deps = makeDeps({
+      enumerate: vi.fn().mockResolvedValue(err(new FetchInstallationsError('enum down'))),
+      readMetadata: vi.fn().mockResolvedValue(ok(makeMetadataResult({
+        publicRepos: [makePublicRepo({node_id: 'NODE_META_SECRET', owner: 'private-org', name: 'hidden-repo', discovery_channel: 'discovered'})],
+      }))),
+      resolveInstallationIdForRepo: vi.fn().mockRejectedValue(new Error('cannot resolve')),
+    })
+
+    const agg = createAggregator(fakeInstallationsClient, fakeMetadataReader, deps)
+    await agg.refresh()
+
+    const out = loggedOutput()
+    expect(out).not.toContain('private-org')
+    expect(out).not.toContain('hidden-repo')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Cache refresh with fake timers
 // ---------------------------------------------------------------------------
 
