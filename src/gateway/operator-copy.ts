@@ -68,25 +68,11 @@ export function approvalStateLabel(state: ApprovalDecisionState): string {
  */
 export function streamEventLabel(type: RunStreamEvent['type']): string {
   switch (type) {
-    case 'heartbeat':
-      return 'Connection active'
-    case 'run.state':
+    case 'ready':
+      return 'Stream connected'
+    case 'status':
       return 'Run status updated'
-    case 'run.output':
-      return 'Output received'
-    case 'run.error':
-      return 'Run error'
-    case 'approval.pending':
-      return 'Approval requested'
-    case 'approval.claimed':
-      return 'Approval claimed for review'
-    case 'approval.confirmed':
-      return 'Approval decision recorded'
-    case 'approval.expired':
-      return 'Approval window expired'
-    case 'approval.failed_to_settle':
-      return "Couldn't finalize the approval decision"
-    case 'stream.reset':
+    case 'reset':
       return 'Stream reconnected'
     default:
       return 'Event received'

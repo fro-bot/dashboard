@@ -25,4 +25,5 @@ export {assertRedactionApplied, AUTHORIZATION_OBLIGATION, REDACTION_OBLIGATION} 
 export type {RedactionContext} from './redaction.ts'
 export type {OperatorCsrfToken, OperatorError, OperatorOk, OperatorSessionInfo} from './responses.ts'
 export type {OperatorRunStatus, OperatorWebStatus, RunPhase, Surface} from './run-status.ts'
+export type {ReadyFrame, ResetFrameData, ResetReason, RunStreamFrame, StatusFrameData} from './sse-frames.ts'
 export {OPERATOR_CONTRACT_VERSION} from './version.ts'

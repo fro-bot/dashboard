@@ -1,7 +1,6 @@
 /**
  * Typed Gateway operator API client contract tests.
  *
- * @contract-churn-prone — Gateway Phase B route units (4-6, 8) have not landed.
  * These tests prove the mocked boundary contract only; no live /operator/* calls.
  *
  * Security invariants tested:
@@ -378,8 +377,19 @@ describe('getRunSnapshot', () => {
 describe('connectRunStream', () => {
   it('delivers typed events to the callback', () => {
     const events: RunStreamEvent[] = [
-      {type: 'heartbeat', timestamp: '2026-06-18T20:00:00Z'},
-      {type: 'run.state', runId: 'run-001', status: 'running', timestamp: '2026-06-18T20:00:01Z'},
+      {type: 'ready', data: {contractVersion: '1.1.0'}},
+      {
+        type: 'status',
+        data: {
+          runId: 'run-001',
+          entityRef: 'fro-bot/agent',
+          surface: 'github',
+          phase: 'EXECUTING',
+          status: 'running',
+          startedAt: '2026-06-18T20:00:00Z',
+          stale: false,
+        },
+      },
     ]
     const received: RunStreamEvent[] = []
     const client = createOperatorClient({
@@ -392,8 +402,8 @@ describe('connectRunStream', () => {
       onClose: () => {},
     })
     expect(received).toHaveLength(2)
-    expect(received[0]?.type).toBe('heartbeat')
-    expect(received[1]?.type).toBe('run.state')
+    expect(received[0]?.type).toBe('ready')
+    expect(received[1]?.type).toBe('status')
   })
 
   it('passes lastEventId to the transport', () => {
@@ -441,8 +451,8 @@ describe('connectRunStream', () => {
     expect(capturedPaths[0]).toBe('/operator/runs/run-001/stream')
   })
 
-  it('delivers reset event when replay is unavailable', () => {
-    const events: RunStreamEvent[] = [{type: 'stream.reset', reason: 'replay_unavailable'}]
+  it('delivers reset event when stream is reset', () => {
+    const events: RunStreamEvent[] = [{type: 'reset', data: {runId: 'run-001', reason: 'no-snapshot'}}]
     const received: RunStreamEvent[] = []
     const client = createOperatorClient({
       fetch: makeOkFetch({}),
@@ -453,38 +463,25 @@ describe('connectRunStream', () => {
       onError: () => {},
       onClose: () => {},
     })
-    expect(received[0]?.type).toBe('stream.reset')
+    expect(received[0]?.type).toBe('reset')
   })
 
-  it('delivers approval events', () => {
-    const events: RunStreamEvent[] = [
-      {
-        type: 'approval.pending',
-        requestId: 'req-1',
-        runId: 'run-001',
-        safeSummary: 'run a script',
-        approvalScope: 'tool_use',
-        timestamp: '2026-06-18T20:00:00Z',
-      },
-    ]
-    const received: RunStreamEvent[] = []
-    const client = createOperatorClient({
-      fetch: makeOkFetch({}),
-      createEventStream: makeEventStream(events),
-    })
-    client.connectRunStream('run-001', {
-      onEvent: e => received.push(e),
-      onError: () => {},
-      onClose: () => {},
-    })
-    expect(received[0]?.type).toBe('approval.pending')
-  })
-
-  it('delivers terminal run state events', () => {
+  it('delivers status events for terminal run statuses', () => {
     const terminalStatuses = ['succeeded', 'failed', 'cancelled'] as const
     for (const status of terminalStatuses) {
       const events: RunStreamEvent[] = [
-        {type: 'run.state', runId: 'run-001', status, timestamp: '2026-06-18T20:00:00Z'},
+        {
+          type: 'status',
+          data: {
+            runId: 'run-001',
+            entityRef: 'fro-bot/agent',
+            surface: 'github',
+            phase: 'COMPLETED',
+            status,
+            startedAt: '2026-06-18T20:00:00Z',
+            stale: false,
+          },
+        },
       ]
       const received: RunStreamEvent[] = []
       const client = createOperatorClient({
@@ -496,9 +493,9 @@ describe('connectRunStream', () => {
         onError: () => {},
         onClose: () => {},
       })
-      expect(received[0]?.type).toBe('run.state')
-      if (received[0]?.type === 'run.state') {
-        expect(received[0].status).toBe(status)
+      expect(received[0]?.type).toBe('status')
+      if (received[0]?.type === 'status') {
+        expect(received[0].data.status).toBe(status)
       }
     }
   })
@@ -981,12 +978,12 @@ describe('decideApproval — all decision states', () => {
 })
 
 // ---------------------------------------------------------------------------
-// connectRunStream — both stream.reset reasons
+// connectRunStream — all reset reasons
 // ---------------------------------------------------------------------------
 
-describe('connectRunStream — stream.reset reasons', () => {
-  it('delivers stream.reset with replay_unavailable reason', () => {
-    const events: RunStreamEvent[] = [{type: 'stream.reset', reason: 'replay_unavailable'}]
+describe('connectRunStream — reset reasons', () => {
+  it('delivers reset with no-snapshot reason', () => {
+    const events: RunStreamEvent[] = [{type: 'reset', data: {runId: 'run-001', reason: 'no-snapshot'}}]
     const received: RunStreamEvent[] = []
     const client = createOperatorClient({
       fetch: makeOkFetch({}),
@@ -997,14 +994,14 @@ describe('connectRunStream — stream.reset reasons', () => {
       onError: () => {},
       onClose: () => {},
     })
-    expect(received[0]?.type).toBe('stream.reset')
-    if (received[0]?.type === 'stream.reset') {
-      expect(received[0].reason).toBe('replay_unavailable')
+    expect(received[0]?.type).toBe('reset')
+    if (received[0]?.type === 'reset') {
+      expect(received[0].data.reason).toBe('no-snapshot')
     }
   })
 
-  it('delivers stream.reset with resnapshot reason', () => {
-    const events: RunStreamEvent[] = [{type: 'stream.reset', reason: 'resnapshot'}]
+  it('delivers reset with terminal reason', () => {
+    const events: RunStreamEvent[] = [{type: 'reset', data: {runId: 'run-001', reason: 'terminal'}}]
     const received: RunStreamEvent[] = []
     const client = createOperatorClient({
       fetch: makeOkFetch({}),
@@ -1015,9 +1012,45 @@ describe('connectRunStream — stream.reset reasons', () => {
       onError: () => {},
       onClose: () => {},
     })
-    expect(received[0]?.type).toBe('stream.reset')
-    if (received[0]?.type === 'stream.reset') {
-      expect(received[0].reason).toBe('resnapshot')
+    expect(received[0]?.type).toBe('reset')
+    if (received[0]?.type === 'reset') {
+      expect(received[0].data.reason).toBe('terminal')
+    }
+  })
+
+  it('delivers reset with shutdown reason', () => {
+    const events: RunStreamEvent[] = [{type: 'reset', data: {runId: 'run-001', reason: 'shutdown'}}]
+    const received: RunStreamEvent[] = []
+    const client = createOperatorClient({
+      fetch: makeOkFetch({}),
+      createEventStream: makeEventStream(events),
+    })
+    client.connectRunStream('run-001', {
+      onEvent: e => received.push(e),
+      onError: () => {},
+      onClose: () => {},
+    })
+    expect(received[0]?.type).toBe('reset')
+    if (received[0]?.type === 'reset') {
+      expect(received[0].data.reason).toBe('shutdown')
+    }
+  })
+
+  it('delivers reset with overflow reason', () => {
+    const events: RunStreamEvent[] = [{type: 'reset', data: {runId: 'run-001', reason: 'overflow'}}]
+    const received: RunStreamEvent[] = []
+    const client = createOperatorClient({
+      fetch: makeOkFetch({}),
+      createEventStream: makeEventStream(events),
+    })
+    client.connectRunStream('run-001', {
+      onEvent: e => received.push(e),
+      onError: () => {},
+      onClose: () => {},
+    })
+    expect(received[0]?.type).toBe('reset')
+    if (received[0]?.type === 'reset') {
+      expect(received[0].data.reason).toBe('overflow')
     }
   })
 })
@@ -1290,8 +1323,22 @@ describe('connectRunStream — SSE event metadata (eventId)', () => {
           _onError: (err: Error) => void,
           onClose: () => void,
         ) {
-          onEvent({type: 'heartbeat', timestamp: '2026-06-18T20:00:00Z'}, {eventId: 'evt-001'})
-          onEvent({type: 'run.state', runId: 'run-001', status: 'running', timestamp: '2026-06-18T20:00:01Z'}, {eventId: 'evt-002'})
+          onEvent({type: 'ready', data: {contractVersion: '1.1.0'}}, {eventId: 'evt-001'})
+          onEvent(
+            {
+              type: 'status',
+              data: {
+                runId: 'run-001',
+                entityRef: 'fro-bot/agent',
+                surface: 'github',
+                phase: 'EXECUTING',
+                status: 'running',
+                startedAt: '2026-06-18T20:00:00Z',
+                stale: false,
+              },
+            },
+            {eventId: 'evt-002'},
+          )
           onClose()
         },
         close() {},
@@ -1315,7 +1362,7 @@ describe('connectRunStream — SSE event metadata (eventId)', () => {
     const receivedMeta: {eventId?: string}[] = []
     const client = createOperatorClient({
       fetch: makeOkFetch({}),
-      createEventStream: makeEventStream([{type: 'heartbeat', timestamp: '2026-06-18T20:00:00Z'}]),
+      createEventStream: makeEventStream([{type: 'ready', data: {contractVersion: '1.1.0'}}]),
     })
     client.connectRunStream('run-001', {
       onEvent: (_event, meta) => {
@@ -1345,7 +1392,7 @@ describe('connectRunStream — SSE event metadata (eventId)', () => {
             _onError: (err: Error) => void,
             onClose: () => void,
           ) {
-            onEvent({type: 'heartbeat', timestamp: '2026-06-18T20:00:00Z'}, {eventId: 'evt-100'})
+            onEvent({type: 'ready', data: {contractVersion: '1.1.0'}}, {eventId: 'evt-100'})
             onClose()
           },
           close() {},
@@ -1725,18 +1772,23 @@ describe('GatewayHttpError has no code field', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Fix 4: approval.failed_to_settle must include timestamp
+// SSE status frame carries all OperatorRunStatus fields
 // ---------------------------------------------------------------------------
 
-describe('approval.failed_to_settle SSE event includes timestamp', () => {
-  it('delivers approval.failed_to_settle with timestamp field', () => {
+describe('status SSE frame carries all OperatorRunStatus fields', () => {
+  it('delivers status frame with stale flag', () => {
     const events: RunStreamEvent[] = [
       {
-        type: 'approval.failed_to_settle',
-        requestId: 'req-1',
-        runId: 'run-001',
-        reason: 'lock_timeout',
-        timestamp: '2026-06-18T20:00:00Z',
+        type: 'status',
+        data: {
+          runId: 'run-001',
+          entityRef: 'fro-bot/agent',
+          surface: 'github',
+          phase: 'EXECUTING',
+          status: 'running',
+          startedAt: '2026-06-18T20:00:00Z',
+          stale: true,
+        },
       },
     ]
     const received: RunStreamEvent[] = []
@@ -1749,27 +1801,22 @@ describe('approval.failed_to_settle SSE event includes timestamp', () => {
       onError: () => {},
       onClose: () => {},
     })
-    expect(received[0]?.type).toBe('approval.failed_to_settle')
-    if (received[0]?.type === 'approval.failed_to_settle') {
-      expect(received[0].timestamp).toBe('2026-06-18T20:00:00Z')
+    expect(received[0]?.type).toBe('status')
+    if (received[0]?.type === 'status') {
+      expect(received[0].data.stale).toBe(true)
+      expect(received[0].data.runId).toBe('run-001')
     }
   })
 })
 
 // ---------------------------------------------------------------------------
-// Fix 5: approval.confirmed.outcome narrowed to 'approved' | 'rejected'
+// SSE reset frame carries runId and reason
 // ---------------------------------------------------------------------------
 
-describe('approval.confirmed outcome is narrowed', () => {
-  it('delivers approval.confirmed with approved outcome', () => {
+describe('reset SSE frame carries runId and reason', () => {
+  it('delivers reset frame with writer-error reason', () => {
     const events: RunStreamEvent[] = [
-      {
-        type: 'approval.confirmed',
-        requestId: 'req-1',
-        runId: 'run-001',
-        outcome: 'approved',
-        timestamp: '2026-06-18T20:00:00Z',
-      },
+      {type: 'reset', data: {runId: 'run-001', reason: 'writer-error'}},
     ]
     const received: RunStreamEvent[] = []
     const client = createOperatorClient({
@@ -1781,21 +1828,16 @@ describe('approval.confirmed outcome is narrowed', () => {
       onError: () => {},
       onClose: () => {},
     })
-    expect(received[0]?.type).toBe('approval.confirmed')
-    if (received[0]?.type === 'approval.confirmed') {
-      expect(received[0].outcome).toBe('approved')
+    expect(received[0]?.type).toBe('reset')
+    if (received[0]?.type === 'reset') {
+      expect(received[0].data.reason).toBe('writer-error')
+      expect(received[0].data.runId).toBe('run-001')
     }
   })
 
-  it('delivers approval.confirmed with rejected outcome', () => {
+  it('delivers reset frame with max-duration reason', () => {
     const events: RunStreamEvent[] = [
-      {
-        type: 'approval.confirmed',
-        requestId: 'req-1',
-        runId: 'run-001',
-        outcome: 'rejected',
-        timestamp: '2026-06-18T20:00:00Z',
-      },
+      {type: 'reset', data: {runId: 'run-001', reason: 'max-duration'}},
     ]
     const received: RunStreamEvent[] = []
     const client = createOperatorClient({
@@ -1807,9 +1849,9 @@ describe('approval.confirmed outcome is narrowed', () => {
       onError: () => {},
       onClose: () => {},
     })
-    expect(received[0]?.type).toBe('approval.confirmed')
-    if (received[0]?.type === 'approval.confirmed') {
-      expect(received[0].outcome).toBe('rejected')
+    expect(received[0]?.type).toBe('reset')
+    if (received[0]?.type === 'reset') {
+      expect(received[0].data.reason).toBe('max-duration')
     }
   })
 })

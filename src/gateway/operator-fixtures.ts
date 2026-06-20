@@ -107,73 +107,39 @@ export const ALL_FIXTURE_RUNS: readonly RunSnapshotDto[] = [
 
 export const FIXTURE_RUN_TIMELINE: readonly RunStreamEvent[] = [
   {
-    type: 'heartbeat',
-    timestamp: '2026-06-17T10:01:00Z',
+    type: 'ready',
+    data: {contractVersion: '1.1.0'},
   },
   {
-    type: 'run.state',
-    runId: 'run-fixture-running-002',
-    status: 'queued',
-    timestamp: '2026-06-17T10:01:01Z',
+    type: 'status',
+    data: {
+      runId: 'run-fixture-running-002',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'PENDING',
+      status: 'queued',
+      startedAt: '2026-06-17T10:01:01Z',
+      stale: false,
+    },
   },
   {
-    type: 'run.state',
-    runId: 'run-fixture-running-002',
-    status: 'running',
-    timestamp: '2026-06-17T10:01:05Z',
+    type: 'status',
+    data: {
+      runId: 'run-fixture-running-002',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'EXECUTING',
+      status: 'running',
+      startedAt: '2026-06-17T10:01:05Z',
+      stale: false,
+    },
   },
   {
-    type: 'run.output',
-    runId: 'run-fixture-running-002',
-    // Safe summary text only — no raw prompts, tool args, or workspace paths
-    text: '[Fixture output — safe summary text only]',
-    truncated: false,
-  },
-  {
-    type: 'approval.pending',
-    requestId: 'req-fixture-pending-001',
-    runId: 'run-fixture-approval-003',
-    // Safe summary — no raw tool arguments or workspace paths
-    safeSummary: 'Fixture approval request — safe summary',
-    approvalScope: 'fixture-scope',
-    timestamp: '2026-06-17T10:04:00Z',
-  },
-  {
-    type: 'approval.claimed',
-    requestId: 'req-fixture-pending-001',
-    runId: 'run-fixture-approval-003',
-    timestamp: '2026-06-17T10:04:30Z',
-  },
-  {
-    type: 'approval.confirmed',
-    requestId: 'req-fixture-pending-001',
-    runId: 'run-fixture-approval-003',
-    outcome: 'approved',
-    timestamp: '2026-06-17T10:05:00Z',
-  },
-  {
-    type: 'approval.expired',
-    requestId: 'req-fixture-expired-002',
-    runId: 'run-fixture-approval-003',
-    timestamp: '2026-06-17T10:06:00Z',
-  },
-  {
-    type: 'approval.failed_to_settle',
-    requestId: 'req-fixture-failed-003',
-    runId: 'run-fixture-approval-003',
-    // Coarse reason only — no internal details
-    reason: 'fixture-reason',
-    timestamp: '2026-06-17T10:07:00Z',
-  },
-  {
-    type: 'run.error',
-    runId: 'run-fixture-failed-005',
-    code: 'fixture-error-code',
-    description: 'Fixture error — safe description only',
-  },
-  {
-    type: 'stream.reset',
-    reason: 'replay_unavailable',
+    type: 'reset',
+    data: {
+      runId: 'run-fixture-running-002',
+      reason: 'terminal',
+    },
   },
 ]
 

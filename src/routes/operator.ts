@@ -20,52 +20,10 @@
  */
 import type {ApprovalDecisionState, RunStatus} from '../gateway/operator-client.ts'
 import {Hono} from 'hono'
-import {html, raw} from 'hono/html'
+import {html} from 'hono/html'
 
 import {approvalStateLabel, runStatusLabel, streamEventLabel} from '../gateway/operator-copy.ts'
 import {ALL_FIXTURE_RUNS, FIXTURE_DECISION_ALREADY_CLAIMED, FIXTURE_DECISION_CLAIMED, FIXTURE_DECISION_FAILED_TO_SETTLE, FIXTURE_DECISION_PENDING, FIXTURE_DECISION_SCOPE_MISMATCH, FIXTURE_DECISION_UNAVAILABLE, FIXTURE_PENDING_APPROVAL, FIXTURE_RUN_TIMELINE} from '../gateway/operator-fixtures.ts'
-
-// ---------------------------------------------------------------------------
-// Styles
-// ---------------------------------------------------------------------------
-
-const OPERATOR_PAGE_STYLES = `
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:system-ui,sans-serif;background:#f9fafb;color:#111827;padding:24px}
-  h1{font-size:1.5rem;font-weight:700;margin-bottom:4px}
-  h2{font-size:1.1rem;font-weight:600;margin-bottom:12px;color:#374151}
-  h3{font-size:0.95rem;font-weight:600;margin-bottom:8px;color:#374151}
-  .meta{font-size:0.8rem;color:#6b7280;margin-bottom:16px}
-  .section{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:20px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
-  .notice{background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af;padding:12px 16px;border-radius:6px;margin-bottom:16px;font-size:0.875rem}
-  .warning{background:#fffbeb;border:1px solid #fcd34d;color:#92400e;padding:12px 16px;border-radius:6px;margin-bottom:12px;font-size:0.875rem}
-  .unavailable{background:#f9fafb;border:1px solid #e5e7eb;color:#6b7280;padding:12px 16px;border-radius:6px;margin-bottom:12px;font-size:0.875rem}
-  .run-card{border:1px solid #e5e7eb;border-radius:6px;padding:14px 16px;margin-bottom:10px;background:#fff}
-  .run-card:focus-within{outline:2px solid #3b82f6;outline-offset:2px}
-  .run-status{display:inline-block;padding:2px 8px;border-radius:9999px;font-size:0.75rem;font-weight:600;white-space:nowrap}
-  .status-queued{background:#e0f2fe;color:#0369a1}
-  .status-running{background:#dcfce7;color:#15803d}
-  .status-waiting{background:#fef3c7;color:#92400e}
-  .status-blocked{background:#fee2e2;color:#991b1b}
-  .status-failed{background:#fee2e2;color:#991b1b}
-  .status-cancelled{background:#f3f4f6;color:#6b7280}
-  .status-succeeded{background:#dcfce7;color:#15803d}
-  .approval-card{border:1px solid #fcd34d;border-radius:6px;padding:16px;margin-bottom:12px;background:#fffbeb}
-  .approval-card:focus-within{outline:2px solid #3b82f6;outline-offset:2px}
-  .approval-terminal{border:1px solid #e5e7eb;border-radius:6px;padding:14px 16px;margin-bottom:10px;background:#f9fafb;color:#6b7280}
-  .btn{display:inline-block;padding:8px 16px;border-radius:6px;font-size:0.875rem;font-weight:600;cursor:pointer;border:none;font-family:inherit}
-  .btn-approve{background:#16a34a;color:#fff}
-  .btn-reject{background:#dc2626;color:#fff}
-  .btn-disabled{background:#e5e7eb;color:#9ca3af;cursor:not-allowed}
-  .timeline{list-style:none;padding:0;margin:0}
-  .timeline li{padding:6px 0;border-bottom:1px solid #f3f4f6;font-size:0.8rem;color:#374151}
-  .timeline li:last-child{border-bottom:none}
-  .event-type{font-family:monospace;font-size:0.75rem;color:#6b7280;margin-right:8px}
-  .mono{font-family:monospace;font-size:0.75rem;color:#6b7280}
-  .badge-mock{display:inline-block;padding:1px 6px;border-radius:4px;background:#fef3c7;color:#92400e;font-size:0.7rem;font-weight:600;margin-left:8px}
-  a{color:#1d4ed8}
-  .back{margin-bottom:16px;font-size:0.875rem}
-`
 
 // ---------------------------------------------------------------------------
 // Status pill helper
@@ -185,12 +143,16 @@ function runStatusSection(): ReturnType<typeof html> {
     const label = runStatusLabel(run.status)
     const cssClass = runStatusClass(run.status)
     return html`
-      <div class="run-card" tabindex="0" aria-label="Run ${run.runId}, status: ${label}">
+      <div class="run-card" tabindex="0" aria-label="Run ${run.runId}, status: ${label}" data-run-id="${run.runId}">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
-          <span class="run-status ${cssClass}">${label}</span>
+          <span class="run-status ${cssClass}" data-role="run-status">${label}</span>
           <span class="mono">${run.runId}</span>
         </div>
         <div style="font-size:0.8rem;color:#6b7280;">
+          <!-- When live run data is wired, repo identity must pass the redaction/denylist
+               gate before rendering here. The live path must not render a repo name
+               received from the stream without first checking it against the redacted
+               node-id set from the data branch. -->
           <span>${run.owner}/${run.repo}</span>
           · <span>Created: ${run.createdAt}</span>
           ${run.updatedAt == null ? '' : html` · <span>Updated: ${run.updatedAt}</span>`}
@@ -200,9 +162,9 @@ function runStatusSection(): ReturnType<typeof html> {
   })
 
   return html`
-    <section class="section" aria-labelledby="runs-heading">
+    <section id="run-status-section" class="section" aria-labelledby="runs-heading">
       <h2 id="runs-heading">Run Status <span class="badge-mock">Mock skeleton — fixture data</span></h2>
-      <div class="notice" style="margin-bottom:16px;">
+      <div class="notice" data-role="stream-status" style="margin-bottom:16px;">
         Live run observation is unavailable. This panel shows fixture data representing
         all possible run states. Live run streaming will be available once Gateway
         run observation is ready.
@@ -353,7 +315,7 @@ function operatorPage(gatewaySessionEnabled: boolean): ReturnType<typeof html> {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Fro Bot — Gateway Operator Controls (Skeleton)</title>
-  <style>${raw(OPERATOR_PAGE_STYLES)}</style>
+  <link rel="stylesheet" href="/static/operator.css" />
 </head>
 <body>
   <p class="back"><a href="/">← Back to monitoring dashboard</a></p>
@@ -373,6 +335,7 @@ function operatorPage(gatewaySessionEnabled: boolean): ReturnType<typeof html> {
   <p style="margin-top:24px;font-size:0.8rem;color:#6b7280;">
     <a href="/">← Back to monitoring dashboard</a>
   </p>
+  <script src="/static/operator-stream.js" type="module"></script>
 </body>
 </html>`
 }
