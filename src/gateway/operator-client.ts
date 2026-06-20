@@ -1,9 +1,9 @@
 /**
  * Typed Gateway operator API client contract.
  *
- * @contract-churn-prone — Gateway Phase B route units (4-6, 8) have not landed.
+ * @contract-churn-prone — several gateway operator routes have not landed yet.
  * This module defines the mocked boundary contract only; no live /operator/* calls
- * are made until Gateway Phase B Unit 8 smoke readiness is confirmed.
+ * are made until the gateway operator surface is ready and verified.
  *
  * Security invariants:
  * - All paths must be relative (/operator/*); absolute URLs are rejected.
@@ -58,8 +58,8 @@ export type CsrfDto = OperatorCsrfToken
 //   - OperatorWebStatus (RunStatus)
 //   - OperatorDecisionState (ApprovalDecisionState)
 //
-// These deferred types will be aligned to the canonical contract when
-// Gateway Phase B route units (4-6, 8) land. Do NOT add conformance
+// These deferred types will be aligned to the canonical contract when the
+// corresponding gateway operator routes land. Do NOT add conformance
 // assertions over these types until they are frozen upstream.
 // ---------------------------------------------------------------------------
 
