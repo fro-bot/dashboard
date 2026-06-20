@@ -84,8 +84,30 @@ export function createOperatorServerFetch(
       throw new Error('No inbound cookie to forward: an end-user session is required.')
     }
 
-    // Resolve the relative path to an absolute same-origin URL.
-    const absoluteUrl = new URL(input, origin).toString()
+    // The input MUST be a relative /operator or /operator/* path. Reject absolute
+    // URLs, protocol-relative paths (//host), scheme-like inputs, traversal, and
+    // any path outside /operator — otherwise `new URL(input, origin)` would honor
+    // an attacker-supplied target and forward the end-user cookie off-origin or
+    // off-path.
+    if (
+      input.startsWith('//') ||
+      input.includes('..') ||
+      (input !== '/operator' && !input.startsWith('/operator/'))
+    ) {
+      throw new Error('Refusing to forward cookie to a non-/operator path.')
+    }
+
+    // Resolve against the configured origin, then defensively confirm both the
+    // resolved origin AND the resolved path stayed within /operator — a clean
+    // relative path can never escape, but this fails closed if that ever changes.
+    const resolved = new URL(input, origin)
+    if (resolved.origin !== new URL(origin).origin) {
+      throw new Error('Refusing to forward cookie to a different origin.')
+    }
+    if (resolved.pathname !== '/operator' && !resolved.pathname.startsWith('/operator/')) {
+      throw new Error('Refusing to forward cookie to a path outside /operator.')
+    }
+    const absoluteUrl = resolved.toString()
 
     // Normalize caller-supplied headers via new Headers() so that a real Headers
     // object is handled correctly (not silently dropped by a plain object cast).

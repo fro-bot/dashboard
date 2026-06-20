@@ -175,6 +175,51 @@ describe('createOperatorServerFetch — missing cookie rejects', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Security: only relative /operator/* paths are forwarded — no off-origin target
+// ---------------------------------------------------------------------------
+
+describe('createOperatorServerFetch — rejects non-/operator targets', () => {
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ['absolute https URL', 'https://attacker.example/operator/session'],
+    ['absolute http URL', 'http://attacker.example/operator/session'],
+    ['protocol-relative URL', '//attacker.example/operator/session'],
+    ['scheme-like input', 'javascript:alert(1)'],
+    ['path outside /operator', '/admin/secrets'],
+    ['operator-prefixed but different segment', '/operatorx/session'],
+    ['traversal out of /operator', '/operator/../admin'],
+  ]
+
+  for (const [label, input] of cases) {
+    it(`rejects ${label} — no request issued, cookie not forwarded`, async () => {
+      const {fetchImpl, calls} = makeFakeFetch()
+      const fetch = createOperatorServerFetch({
+        origin: 'https://dashboard.fro.bot',
+        cookie: 'gateway_session=abc',
+        fetchImpl,
+      })
+
+      await expect(fetch(input)).rejects.toThrow()
+      expect(calls).toHaveLength(0)
+    })
+  }
+
+  it('allows the bare /operator path and /operator/* subpaths', async () => {
+    const {fetchImpl, calls} = makeFakeFetch()
+    const fetch = createOperatorServerFetch({
+      origin: 'https://dashboard.fro.bot',
+      cookie: 'gateway_session=abc',
+      fetchImpl,
+    })
+
+    await fetch('/operator')
+    await fetch('/operator/session')
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.url).toBe('https://dashboard.fro.bot/operator')
+    expect(calls[1]?.url).toBe('https://dashboard.fro.bot/operator/session')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Security: no service credential attached — no confused-deputy
 // ---------------------------------------------------------------------------
 
