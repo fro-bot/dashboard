@@ -17,7 +17,7 @@
 
 import type {Logger} from '../logger.ts'
 import type {Result} from '../result.ts'
-import type {OperatorCsrfToken, OperatorDecisionState, OperatorSessionInfo, OperatorWebStatus} from './operator-contract/index.ts'
+import type {OperatorCsrfToken, OperatorDecisionState, OperatorSessionInfo, OperatorWebStatus, RunStreamFrame} from './operator-contract/index.ts'
 import {err, ok} from '../result.ts'
 import {parseOperatorCsrfToken, parseOperatorSessionInfo} from './operator-contract/index.ts'
 
@@ -112,54 +112,17 @@ export interface ApprovalDecisionResponse {
 }
 
 // ---------------------------------------------------------------------------
-// SSE event union — MOCK-ONLY / DEFERRED (not part of frozen contract v1.0.0)
+// SSE run-stream event type — canonical named frames for /operator/runs/:runId/stream
 //
-// approval.expired is a mock-only/deferred SSE event. It is NOT a canonical
-// OperatorDecisionState — 'expired' was removed from the decision state taxonomy
-// in contract v1.0.0. If exposed at all, it is derived separately from the
-// deadline settlement path, not from OperatorDecisionState.
+// Sourced from the gateway's SSE surface (fro-bot/agent v0.72.0, PRs #961/#962).
+// Named events: ready, status, reset. Heartbeat is an SSE comment, not a frame.
 // ---------------------------------------------------------------------------
 
-export type RunStreamEvent =
-  | {readonly type: 'heartbeat'; readonly timestamp: string}
-  | {readonly type: 'run.state'; readonly runId: string; readonly status: RunStatus; readonly timestamp: string}
-  | {readonly type: 'run.output'; readonly runId: string; readonly text: string; readonly truncated: boolean}
-  | {readonly type: 'run.error'; readonly runId: string; readonly code: string; readonly description: string}
-  | {
-    readonly type: 'approval.pending'
-    readonly requestId: string
-    readonly runId: string
-    readonly safeSummary: string
-    readonly approvalScope: string
-    readonly timestamp: string
-  }
-  | {
-    readonly type: 'approval.claimed'
-    readonly requestId: string
-    readonly runId: string
-    readonly timestamp: string
-  }
-  | {
-    readonly type: 'approval.confirmed'
-    readonly requestId: string
-    readonly runId: string
-    readonly outcome: 'approved' | 'rejected'
-    readonly timestamp: string
-  }
-  | {
-    readonly type: 'approval.expired'
-    readonly requestId: string
-    readonly runId: string
-    readonly timestamp: string
-  }
-  | {
-    readonly type: 'approval.failed_to_settle'
-    readonly requestId: string
-    readonly runId: string
-    readonly reason: string
-    readonly timestamp: string
-  }
-  | {readonly type: 'stream.reset'; readonly reason: 'replay_unavailable' | 'resnapshot'}
+/**
+ * Canonical SSE frame union for the run stream endpoint.
+ * Re-exported from the operator contract for use by stream consumers.
+ */
+export type RunStreamEvent = RunStreamFrame
 
 // ---------------------------------------------------------------------------
 // SSE transport interface (injectable; no DOM EventSource)

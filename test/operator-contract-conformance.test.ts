@@ -1,13 +1,23 @@
 /**
  * Operator contract conformance tests.
  *
- * Verifies the vendored operator contract v1.0.0 is correctly pinned and
- * that parse helpers behave per spec.
+ * Verifies the vendored operator contract v1.1.0 is correctly pinned and
+ * that parse helpers behave per spec. Also verifies the SSE frame types
+ * vendored from fro-bot/agent v0.72.0 (PRs #961/#962) are structurally correct.
  *
- * Source: fro-bot/agent | Tag: v0.71.0 | PR: #952 | Commit: 92b621e1
+ * Source: fro-bot/agent | Tag: v0.72.0 | PRs: #952, #961, #962
  */
 import type {ApprovalDecisionState, RunStatus} from '../src/gateway/operator-client.ts'
-import type {OperatorDecisionState, OperatorWebStatus} from '../src/gateway/operator-contract/index.ts'
+import type {
+  OperatorDecisionState,
+  OperatorRunStatus,
+  OperatorWebStatus,
+  ReadyFrame,
+  ResetFrameData,
+  ResetReason,
+  RunStreamFrame,
+  StatusFrameData,
+} from '../src/gateway/operator-contract/index.ts'
 import {describe, expect, it} from 'vitest'
 import {
   OPERATOR_CONTRACT_VERSION,
@@ -40,12 +50,54 @@ const checkRunStatusBidirectional: CheckRunStatusToCanonical & CheckCanonicalToR
 export {checkRunStatusBidirectional}
 
 // ---------------------------------------------------------------------------
+// SSE frame type-assignability checks (compile-time)
+// ---------------------------------------------------------------------------
+// These are compile-time checks — if the types diverge, tsc fails.
+// Function-based style: declare type-checking functions that are never called.
+// Using satisfies/export to avoid unused-variable lint while keeping the type constraint.
+
+// ReadyFrame: must accept a literal with contractVersion string
+const checkReadyFrameLiteral: ReadyFrame = {contractVersion: '1.1.0'}
+export {checkReadyFrameLiteral}
+
+// ResetFrameData: must accept a literal with runId + ResetReason
+const checkResetFrameLiteral: ResetFrameData = {runId: 'run-001', reason: 'no-snapshot'}
+export {checkResetFrameLiteral}
+
+// StatusFrameData is aliased to OperatorRunStatus — mutual assignability
+type CheckStatusToRunStatus = (x: StatusFrameData) => OperatorRunStatus
+type CheckRunStatusToStatus = (x: OperatorRunStatus) => StatusFrameData
+const checkStatusBidirectional: CheckStatusToRunStatus & CheckRunStatusToStatus = x => x
+export {checkStatusBidirectional}
+
+// ResetReason: all 6 values must be assignable to the union
+const checkResetReasons: ResetReason[] = ['no-snapshot', 'terminal', 'shutdown', 'max-duration', 'writer-error', 'overflow']
+export {checkResetReasons}
+
+// RunStreamFrame discriminated union: each variant must be constructable
+const checkReadyFrame: RunStreamFrame = {type: 'ready', data: {contractVersion: '1.1.0'}}
+const checkResetFrame: RunStreamFrame = {type: 'reset', data: {runId: 'run-001', reason: 'terminal'}}
+const checkStatusFrame: RunStreamFrame = {
+  type: 'status',
+  data: {
+    runId: 'run-001',
+    entityRef: 'fro-bot/agent',
+    surface: 'github',
+    phase: 'EXECUTING',
+    status: 'running',
+    startedAt: '2026-06-20T00:00:00Z',
+    stale: false,
+  },
+}
+export {checkReadyFrame, checkResetFrame, checkStatusFrame}
+
+// ---------------------------------------------------------------------------
 // Version pin
 // ---------------------------------------------------------------------------
 
 describe('OPERATOR_CONTRACT_VERSION', () => {
-  it('is pinned to 1.0.0', () => {
-    expect(OPERATOR_CONTRACT_VERSION).toBe('1.0.0')
+  it('is pinned to 1.1.0', () => {
+    expect(OPERATOR_CONTRACT_VERSION).toBe('1.1.0')
   })
 })
 
