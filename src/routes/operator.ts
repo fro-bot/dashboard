@@ -87,7 +87,25 @@ function runStatusClass(status: RunStatus): string {
 // Page sections
 // ---------------------------------------------------------------------------
 
-function gatewayAuthSection(): ReturnType<typeof html> {
+function gatewayAuthSection(gatewaySessionEnabled: boolean): ReturnType<typeof html> {
+  if (gatewaySessionEnabled) {
+    return html`
+      <section class="section" aria-labelledby="gateway-auth-heading">
+        <h2 id="gateway-auth-heading">Gateway Operator Session</h2>
+        <div class="notice">
+          <strong>Your gateway session governs operator access.</strong>
+          The gateway session is the single authority for operator actions on this page.
+          Signing in to the dashboard does not authorize gateway actions — operator
+          authorization is determined solely by the gateway operator session.
+        </div>
+        <p style="font-size:0.875rem;color:#6b7280;margin-bottom:0;">
+          Gateway controls are available when a valid gateway operator session is present.
+          If you lose access, sign in again through the gateway.
+        </p>
+      </section>
+    `
+  }
+
   return html`
     <section class="section" aria-labelledby="gateway-auth-heading">
       <h2 id="gateway-auth-heading">Gateway Operator Session</h2>
@@ -328,7 +346,7 @@ function bindingUnavailableSection(): ReturnType<typeof html> {
 // Full page
 // ---------------------------------------------------------------------------
 
-function operatorPage(): ReturnType<typeof html> {
+function operatorPage(gatewaySessionEnabled: boolean): ReturnType<typeof html> {
   return html`<!doctype html>
 <html lang="en">
 <head>
@@ -345,7 +363,7 @@ function operatorPage(): ReturnType<typeof html> {
     No live Gateway calls are made. Gateway controls are pending Phase B readiness.
   </p>
 
-  ${gatewayAuthSection()}
+  ${gatewayAuthSection(gatewaySessionEnabled)}
   ${launchSection()}
   ${runStatusSection()}
   ${eventTimelineSection()}
@@ -367,12 +385,17 @@ function operatorPage(): ReturnType<typeof html> {
  * Builds the operator UI skeleton SSR router.
  * Mounted at /operator in server.ts — auth middleware is applied upstream.
  * Only mounted when operatorUiEnabled is true.
+ *
+ * @param gatewaySessionEnabled - When true, the gateway operator session is the
+ *   authority for operator actions and the page copy reflects that. When false
+ *   (default), the Arctic session governs and the page shows the separate-domains
+ *   wording accurate for that mode.
  */
-export function buildOperatorRouter(): Hono {
+export function buildOperatorRouter(gatewaySessionEnabled: boolean): Hono {
   const router = new Hono()
 
   router.get('/', async c => {
-    return c.html(operatorPage())
+    return c.html(operatorPage(gatewaySessionEnabled))
   })
 
   return router

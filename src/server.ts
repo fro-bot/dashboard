@@ -17,6 +17,7 @@
  */
 import type {ServerType} from '@hono/node-server'
 import type {GitHubOAuthClient} from './auth/oauth.ts'
+import type {OperatorClient, SessionDto} from './gateway/operator-client.ts'
 import type {AggregatorSnapshot} from './github/aggregator.ts'
 import type {MetadataReader} from './github/metadata.ts'
 import {Buffer} from 'node:buffer'
@@ -28,12 +29,15 @@ import {graphql} from '@octokit/graphql'
 import {Hono, type Context} from 'hono'
 import {getCookie} from 'hono/cookie'
 import {fetchGitHubUserLogin, makeGitHubOAuthClient} from './auth/oauth.ts'
-import {readOperatorUiConfig} from './gateway/operator-config.ts'
+import {createOperatorClient} from './gateway/operator-client.ts'
+import {readGatewayOperatorOrigin, readGatewayOperatorSessionConfig, readOperatorUiConfig} from './gateway/operator-config.ts'
+import {createOperatorServerFetch} from './gateway/operator-server-fetch.ts'
 import {createAggregator} from './github/aggregator.ts'
 import {createDashboardAppClient} from './github/app-client.ts'
 import {buildInstallationsClient, enumerateRepos, mintReadOnlyToken} from './github/installations.ts'
 import {makeNotFoundError, readRepoMetadata} from './github/metadata.ts'
 import {logger, sanitizeErrorMessage} from './logger.ts'
+import {isOk} from './result.ts'
 import {buildApiRouter} from './routes/api.ts'
 import {buildAuthRouter} from './routes/auth.ts'
 import {buildDashboardRouter} from './routes/dashboard.ts'
@@ -42,7 +46,16 @@ import {loadCookieKey, SessionManager} from './session.ts'
 
 /** Hono context variables set by auth middleware */
 interface Variables {
-  sessionLogin: string
+  /**
+   * Set by the Arctic branch only. Optional because the gateway branch does not
+   * set this value — it sets gatewaySession instead.
+   */
+  sessionLogin?: string
+  /**
+   * Set by the gateway branch only. Contains the validated operator session from
+   * the gateway's /operator/session endpoint. Never set by the Arctic branch.
+   */
+  gatewaySession?: SessionDto
 }
 
 /** Per-IP rate limiter state */
@@ -147,6 +160,44 @@ export interface DashboardAppConfig {
    * Tests inject this directly to avoid env dependencies.
    */
   operatorUiEnabled?: boolean | undefined
+  /**
+   * Whether to use the gateway operator session for auth instead of Arctic.
+   * If undefined, reads from DASHBOARD_GATEWAY_OPERATOR_SESSION_ENABLED env (default: false).
+   * When false (default), the existing Arctic OAuth + signed-cookie session is used.
+   * When true, the gateway operator session governs auth.
+   * Tests inject this directly to avoid env dependencies.
+   * Independent of operatorUiEnabled: separate env var, separate reader.
+   */
+  gatewayOperatorSessionEnabled?: boolean | undefined
+  /**
+   * Injectable OperatorClient for the gateway auth branch.
+   * If undefined and gatewayOperatorSessionEnabled is true, a real client is built
+   * per-request from the server-side fetch adapter (bound to the configured origin
+   * and inbound cookie). Tests inject a fake to avoid network calls.
+   * Never constructed when gatewayOperatorSessionEnabled is false, so the flag-off
+   * path builds zero gateway objects.
+   */
+  operatorClient?: OperatorClient | undefined
+  /**
+   * Trusted gateway operator origin for the /operator/session endpoint.
+   * If undefined, reads from DASHBOARD_GATEWAY_OPERATOR_ORIGIN env (default:
+   * 'https://dashboard.fro.bot'). Must be an absolute http(s) origin.
+   * On invalid/parse-failure the middleware fails closed (denies all requests).
+   *
+   * SECURITY: this must NEVER be derived from the inbound request Host header.
+   * The Host header is attacker-influenceable; a spoofed Host could redirect the
+   * forwarded cookie to an attacker-controlled server. This field is the seam
+   * that lets tests set a known-good origin without touching env.
+   */
+  gatewayOperatorOrigin?: string | undefined
+  /**
+   * Injectable fetch implementation for the production gateway client path.
+   * Only used when operatorClient is undefined (the production branch that builds
+   * a real client from createOperatorServerFetch). Inject a recording/fake fetch
+   * in tests to exercise the production client-construction path without network.
+   * Ignored when operatorClient is injected directly.
+   */
+  gatewayFetchImpl?: ((url: string, init?: RequestInit) => Promise<Response>) | undefined
 }
 
 /**
@@ -202,6 +253,37 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   const operatorUiEnabled =
     opts?.operatorUiEnabled === undefined ? readOperatorUiConfig().enabled : opts.operatorUiEnabled
 
+  // Resolve gateway operator session flag — default OFF (fail-closed).
+  // When undefined, reads from env. Tests inject directly via opts.gatewayOperatorSessionEnabled.
+  // Independent of operatorUiEnabled: separate env var, separate reader.
+  const gatewayOperatorSessionEnabled =
+    opts?.gatewayOperatorSessionEnabled === undefined
+      ? readGatewayOperatorSessionConfig().enabled
+      : opts.gatewayOperatorSessionEnabled
+
+  // Resolve the trusted gateway operator origin — SECURITY CRITICAL.
+  // Must be a configured, trusted value; never derived from the inbound request Host.
+  // When opts.gatewayOperatorOrigin is provided (tests), use it directly after
+  // validation. When undefined, read from env (with default fallback).
+  // null means the configured value is invalid → fail closed at middleware time.
+  let resolvedGatewayOrigin: string | null = null
+  if (gatewayOperatorSessionEnabled) {
+    if (opts?.gatewayOperatorOrigin === undefined) {
+      resolvedGatewayOrigin = readGatewayOperatorOrigin()
+    } else {
+      // Validate the injected origin (same rules as readGatewayOperatorOrigin).
+      try {
+        const parsed = new URL(opts.gatewayOperatorOrigin)
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+          resolvedGatewayOrigin = parsed.origin
+          // else: invalid scheme → stays null → fail closed
+        }
+      } catch {
+        // Invalid URL → stays null → fail closed
+      }
+    }
+  }
+
   const app = new Hono<{Variables: Variables}>()
 
   // ── Rate limiting middleware (applied to sensitive routes) ──────────────────
@@ -243,46 +325,151 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // session can never be issued (the /auth flow is replaced by a denied router).
   // Deny-by-default beats 404 here — an unauthenticated caller must not be able
   // to probe which routes exist.
+  //
+  // Strategy branch: the flag selects exactly ONE branch at the top. The two
+  // branches NEVER union and NEVER fall back to each other. Each branch runs its
+  // OWN isPublicPath check — a path added to one mode's allowlist cannot silently
+  // bypass the other.
   const isPublicPath = (path: string): boolean =>
     path === '/api/healthz' || path === '/auth/login' || path === '/auth/callback' || path === '/auth/logout'
 
   app.use('*', async (c: Context, next) => {
     const path = new URL(c.req.url).pathname
 
-    if (isPublicPath(path)) {
+    if (gatewayOperatorSessionEnabled) {
+      // ── GATEWAY BRANCH ────────────────────────────────────────────────────
+      // Authorizes purely on a valid gateway operator session. There is no
+      // DASHBOARD_OPERATOR_LOGIN check here, and no fallback to Arctic on failure.
+
+      // Own public-path check — duplicated intentionally (see strategy-branch note).
+      if (isPublicPath(path)) {
+        return next()
+      }
+
+      // Require an inbound cookie to forward as the end-user principal. If absent
+      // or whitespace-only, deny immediately — do NOT call getCurrentSession.
+      const inboundCookie = c.req.header('cookie')
+      if (inboundCookie === undefined || inboundCookie.trim() === '') {
+        // Deny: no principal to forward. Redirect to /auth/login for parity with Arctic.
+        // (In gateway mode there is no dashboard login UI, but the redirect is consistent
+        // with the Arctic branch's unauth response shape and avoids probing which routes exist.)
+        return c.redirect('/auth/login', 302)
+      }
+
+      // Fail closed if the configured gateway origin is invalid or unparseable.
+      // This protects against a misconfigured DASHBOARD_GATEWAY_OPERATOR_ORIGIN
+      // causing the middleware to silently fall back to an unsafe origin.
+      if (resolvedGatewayOrigin === null) {
+        logger.warning('gateway-auth: configured gateway origin is invalid or missing', {path})
+        return c.redirect('/auth/login', 302)
+      }
+
+      // Obtain the OperatorClient: use injected client (tests) or build per-request (production).
+      // Per-request construction is correct: the cookie comes from the request.
+      // The origin is ALWAYS the configured trusted value — never from the request Host.
+      // Flag-OFF never reaches this branch, so zero gateway objects are constructed when off.
+      let client: OperatorClient
+      if (opts?.operatorClient === undefined) {
+        // Production path: build a real client bound to the CONFIGURED origin and inbound cookie.
+        // SECURITY: origin is resolvedGatewayOrigin (configured), NOT new URL(c.req.url).origin.
+        // The inbound Host header is attacker-influenceable; using it would allow a spoofed
+        // Host to redirect the forwarded cookie to an attacker-controlled server.
+        const serverFetch = createOperatorServerFetch({
+          origin: resolvedGatewayOrigin,
+          cookie: inboundCookie,
+          fetchImpl: opts?.gatewayFetchImpl,
+        })
+        // Minimal no-op createEventStream stub — getCurrentSession does not use SSE.
+        // Throws if called to surface any accidental SSE usage loudly.
+        const noopEventStream = (_streamPath: string) => ({
+          start: () => {
+            throw new Error('SSE transport not available in server-side auth middleware')
+          },
+          close: () => undefined,
+        })
+        client = createOperatorClient({
+          fetch: serverFetch,
+          createEventStream: noopEventStream,
+          logger,
+        })
+      } else {
+        client = opts.operatorClient
+      }
+
+      // Call the gateway session endpoint. Fail closed on every non-success path.
+      // Coarse logging only — never log the cookie value or session body.
+      const result = await client.getCurrentSession()
+      if (!isOk(result)) {
+        // Every error kind (http/network/protocol/validation) → deny.
+        // Log only the path — never the error detail which may contain identity info.
+        logger.warning('gateway-auth: session validation failed', {path})
+        return c.redirect('/auth/login', 302)
+      }
+
+      // Expired-session defense — even on a 2xx, a non-future expiresAt → deny.
+      // The gateway is the authority but we do not rely solely on it never returning expired.
+      if (result.data.expiresAt <= Date.now()) {
+        logger.warning('gateway-auth: session expired', {path})
+        return c.redirect('/auth/login', 302)
+      }
+
+      // Nonsensical identity defense — deny sessions with a non-positive operatorId
+      // or a blank login. These are structurally valid per the parse contract but
+      // semantically impossible for a real operator account. Fail closed rather than
+      // propagate a garbage identity downstream.
+      if (result.data.operatorId <= 0) {
+        logger.warning('gateway-auth: session has non-positive operatorId', {path})
+        return c.redirect('/auth/login', 302)
+      }
+      if (result.data.login.trim() === '') {
+        logger.warning('gateway-auth: session has empty login', {path})
+        return c.redirect('/auth/login', 302)
+      }
+
+      // Valid gateway session: attach to context. Do NOT set sessionLogin —
+      // gatewaySession is the only identity signal in gateway mode.
+      c.set('gatewaySession', result.data)
+      return next()
+    } else {
+      // ── ARCTIC BRANCH (byte-for-byte today's logic) ───────────────────────
+      // Flag-OFF preserves the existing Arctic middleware behavior exactly.
+      // Own public-path check — duplicated intentionally (see strategy-branch note).
+
+      if (isPublicPath(path)) {
+        return next()
+      }
+
+      // Fail closed: with no configured operator, no protected route is served.
+      if (operatorLogin === undefined) {
+        return c.text('Unauthorized', 401)
+      }
+
+      // Validate session cookie.
+      // The middleware context type is slightly wider than getCookie's declared param type;
+      // this cast is safe — getCookie only reads headers from the context.
+      const cookieValue = getCookie(c, 'session')
+      if (typeof cookieValue !== 'string' || cookieValue.length === 0) {
+        return c.redirect('/auth/login', 302)
+      }
+
+      // sessionManager is guaranteed non-undefined here: operatorLogin is set (checked above)
+      // and we only construct SessionManager when operatorLogin is set.
+      const session = (sessionManager as SessionManager).verify(cookieValue)
+      if (session === null) {
+        return c.redirect('/auth/login', 302)
+      }
+
+      // FIX #4: Reject sessions minted for a different operator login.
+      // A stale session from a previously-configured login must not grant access
+      // after the operator changes.
+      if (session.login !== operatorLogin) {
+        return c.redirect('/auth/login', 302)
+      }
+
+      // Attach session login to context for downstream handlers (typed, no `as never`)
+      c.set('sessionLogin', session.login)
       return next()
     }
-
-    // Fail closed: with no configured operator, no protected route is served.
-    if (operatorLogin === undefined) {
-      return c.text('Unauthorized', 401)
-    }
-
-    // Validate session cookie.
-    // The middleware context type is slightly wider than getCookie's declared param type;
-    // this cast is safe — getCookie only reads headers from the context.
-    const cookieValue = getCookie(c, 'session')
-    if (typeof cookieValue !== 'string' || cookieValue.length === 0) {
-      return c.redirect('/auth/login', 302)
-    }
-
-    // sessionManager is guaranteed non-undefined here: operatorLogin is set (checked above)
-    // and we only construct SessionManager when operatorLogin is set.
-    const session = (sessionManager as SessionManager).verify(cookieValue)
-    if (session === null) {
-      return c.redirect('/auth/login', 302)
-    }
-
-    // FIX #4: Reject sessions minted for a different operator login.
-    // A stale session from a previously-configured login must not grant access
-    // after the operator changes.
-    if (session.login !== operatorLogin) {
-      return c.redirect('/auth/login', 302)
-    }
-
-    // Attach session login to context for downstream handlers (typed, no `as never`)
-    c.set('sessionLogin', session.login)
-    return next()
   })
 
   if (operatorLogin === undefined) {
@@ -328,7 +515,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // MUST be inside the auth boundary (protected) — NOT added to isPublicPath.
   if (operatorUiEnabled) {
     const {buildOperatorRouter} = await import('./routes/operator.ts')
-    app.route('/operator', buildOperatorRouter())
+    app.route('/operator', buildOperatorRouter(gatewayOperatorSessionEnabled))
   }
 
   return app
