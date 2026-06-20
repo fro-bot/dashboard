@@ -117,7 +117,7 @@ function gatewayAuthSection(gatewaySessionEnabled: boolean): ReturnType<typeof h
       </div>
       <p style="font-size:0.875rem;color:#6b7280;margin-bottom:12px;">
         Gateway controls are unavailable until a Gateway operator session is established.
-        Gateway sign-in will be available once Gateway Phase B authentication is ready.
+        Gateway sign-in will be available once Gateway operator authentication is ready.
       </p>
       <p class="unavailable" style="margin-bottom:0;">
         <strong>Gateway operator session:</strong> Not signed in to Gateway
@@ -138,7 +138,7 @@ function launchSection(): ReturnType<typeof html> {
       <div class="warning">
         <strong>Launch not ready:</strong> Gateway launch controls are unavailable.
         This form is shown as a skeleton only — no runs can be submitted until
-        Gateway Phase B Unit 5 (launch readiness) is confirmed.
+        Gateway launch is available.
       </div>
       <form aria-disabled="true" style="opacity:0.6;">
         <fieldset disabled style="border:none;padding:0;">
@@ -172,7 +172,7 @@ function launchSection(): ReturnType<typeof html> {
             />
           </div>
           <p id="launch-disabled-reason" style="font-size:0.8rem;color:#9ca3af;margin-top:4px;">
-            Launch is disabled: Gateway launch route not ready (pending Gateway Phase B Unit 5).
+            Launch is disabled: the Gateway launch route is not yet available.
           </p>
         </fieldset>
       </form>
@@ -204,8 +204,8 @@ function runStatusSection(): ReturnType<typeof html> {
       <h2 id="runs-heading">Run Status <span class="badge-mock">Mock skeleton — fixture data</span></h2>
       <div class="notice" style="margin-bottom:16px;">
         Live run observation is unavailable. This panel shows fixture data representing
-        all possible run states. SSE streaming will be available once Gateway Phase B
-        Unit 4 (run observation) is ready.
+        all possible run states. Live run streaming will be available once Gateway
+        run observation is ready.
       </div>
       ${runCards}
     </section>
@@ -228,8 +228,8 @@ function eventTimelineSection(): ReturnType<typeof html> {
     <section class="section" aria-labelledby="timeline-heading">
       <h2 id="timeline-heading">Run Event Timeline <span class="badge-mock">Mock skeleton — fixture events</span></h2>
       <div class="notice" style="margin-bottom:12px;">
-        This timeline shows fixture events only. Live SSE streaming is unavailable
-        until Gateway Phase B Unit 4 is ready. No real /operator/* calls are made.
+        This timeline shows fixture events only. Live run streaming is unavailable
+        until Gateway run observation is ready. No real /operator/* calls are made.
       </div>
       <ul class="timeline" aria-label="Run event timeline (fixture data)">
         ${eventItems}
@@ -245,8 +245,8 @@ function pendingApprovalSection(): ReturnType<typeof html> {
       <h2 id="approvals-heading">Pending Approvals <span class="badge-mock">Mock skeleton — fixture data</span></h2>
       <div class="notice" style="margin-bottom:16px;">
         Approval controls are unavailable. This panel shows fixture data.
-        Live approval actions will be available once Gateway Phase B Unit 6
-        (approvals readiness) is confirmed and CSRF is present.
+        Live approval actions will be available once Gateway approvals are ready
+        and CSRF is present.
       </div>
 
       <div class="approval-card" tabindex="0" aria-labelledby="approval-pending-heading">
@@ -281,8 +281,8 @@ function pendingApprovalSection(): ReturnType<typeof html> {
           </button>
         </div>
         <p id="approval-disabled-reason" style="font-size:0.8rem;color:#9ca3af;margin-top:8px;">
-          Approval actions are disabled: Gateway approval route not ready
-          (pending Gateway Phase B Unit 6 and CSRF readiness).
+          Approval actions are disabled: the Gateway approval route is not yet
+          available and CSRF is not present.
         </p>
       </div>
 
@@ -329,8 +329,8 @@ function bindingUnavailableSection(): ReturnType<typeof html> {
       <h2 id="binding-heading">Gateway Repository Selection</h2>
       <div class="unavailable">
         <strong>Gateway repository selection unavailable.</strong>
-        Gateway-backed repository selection requires Gateway Phase B Unit 7
-        (binding reads readiness). The monitoring repository table above remains
+        Gateway-backed repository selection requires Gateway repository binding,
+        which is not yet available. The monitoring repository table above remains
         independent and is not affected by this limitation.
       </div>
       <p style="font-size:0.8rem;color:#6b7280;">
@@ -360,7 +360,7 @@ function operatorPage(gatewaySessionEnabled: boolean): ReturnType<typeof html> {
   <h1>Gateway Operator Controls <span class="badge-mock">Mock skeleton</span></h1>
   <p class="meta">
     This is a mock-only skeleton. All data is from fixtures.
-    No live Gateway calls are made. Gateway controls are pending Phase B readiness.
+    No live Gateway calls are made. Gateway controls are pending readiness.
   </p>
 
   ${gatewayAuthSection(gatewaySessionEnabled)}
