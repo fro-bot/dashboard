@@ -6,7 +6,8 @@
  * - flag-ON  → Gateway branch (fail-closed validation via OperatorClient)
  *
  * All tests use app.request() against buildDashboardApp() with injected config.
- * No real network calls are made — OperatorClient is injected as a fake.
+ * No real network calls are made — OperatorClient is injected as a fake, or
+ * a recording fetchImpl is injected via gatewayFetchImpl for production-path tests.
  */
 import type {GatewayClientError, OperatorClient, SessionDto} from '../src/gateway/operator-client.ts'
 import type {Result} from '../src/result.ts'
@@ -191,8 +192,7 @@ describe('flag-ON: Gateway branch — happy path', () => {
     // /auth/login is in isPublicPath — the auth middleware passes it through.
     // In gateway mode with no operatorLogin, the /auth router is the deniedRouter (401).
     // The key invariant is that getCurrentSession is NOT called for public paths.
-    // The status depends on whether operatorLogin is set (401 from deniedRouter when not set).
-    expect([200, 302, 303, 401]).toContain(res.status)
+    expect(res.status).toBe(401)
     expect(getCurrentSessionSpy).not.toHaveBeenCalled()
   })
 })
@@ -202,7 +202,7 @@ describe('flag-ON: Gateway branch — happy path', () => {
 // ---------------------------------------------------------------------------
 
 describe('flag-ON: Gateway branch — fail-closed on validation failure', () => {
-  it('getCurrentSession → err {kind:"http", status:404} → denied', async () => {
+  it('getCurrentSession → err {kind:"http", status:404} → 302 redirect to /auth/login', async () => {
     const {client} = makeFakeOperatorClient(async () =>
       err({kind: 'http', status: 404} satisfies GatewayClientError),
     )
@@ -210,10 +210,11 @@ describe('flag-ON: Gateway branch — fail-closed on validation failure', () => 
     const res = await app.request('/', {
       headers: {cookie: 'gateway_session=some-cookie'},
     })
-    expect([302, 303, 401]).toContain(res.status)
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
   })
 
-  it('getCurrentSession → err {kind:"http", status:500} → denied', async () => {
+  it('getCurrentSession → err {kind:"http", status:500} → 302 redirect to /auth/login', async () => {
     const {client} = makeFakeOperatorClient(async () =>
       err({kind: 'http', status: 500} satisfies GatewayClientError),
     )
@@ -221,10 +222,11 @@ describe('flag-ON: Gateway branch — fail-closed on validation failure', () => 
     const res = await app.request('/', {
       headers: {cookie: 'gateway_session=some-cookie'},
     })
-    expect([302, 303, 401]).toContain(res.status)
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
   })
 
-  it('getCurrentSession → err {kind:"network"} (timeout/network failure) → denied', async () => {
+  it('getCurrentSession → err {kind:"network"} (timeout/network failure) → 302 redirect to /auth/login', async () => {
     const {client} = makeFakeOperatorClient(async () =>
       err({kind: 'network', message: 'Network error'} satisfies GatewayClientError),
     )
@@ -232,10 +234,11 @@ describe('flag-ON: Gateway branch — fail-closed on validation failure', () => 
     const res = await app.request('/', {
       headers: {cookie: 'gateway_session=some-cookie'},
     })
-    expect([302, 303, 401]).toContain(res.status)
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
   })
 
-  it('getCurrentSession → err {kind:"protocol"} (malformed/empty body) → denied', async () => {
+  it('getCurrentSession → err {kind:"protocol"} (malformed/empty body) → 302 redirect to /auth/login', async () => {
     const {client} = makeFakeOperatorClient(async () =>
       err({kind: 'protocol', message: 'Failed to parse response JSON'} satisfies GatewayClientError),
     )
@@ -243,10 +246,11 @@ describe('flag-ON: Gateway branch — fail-closed on validation failure', () => 
     const res = await app.request('/', {
       headers: {cookie: 'gateway_session=some-cookie'},
     })
-    expect([302, 303, 401]).toContain(res.status)
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
   })
 
-  it('getCurrentSession → err {kind:"validation"} (schema-drift / legacy string expiresAt) → denied', async () => {
+  it('getCurrentSession → err {kind:"validation"} (schema-drift / legacy string expiresAt) → 302 redirect to /auth/login', async () => {
     // The operator client's parseOperatorSessionInfo rejects non-integer expiresAt
     // and returns a protocol error. We simulate the validation error kind here.
     const {client} = makeFakeOperatorClient(async () =>
@@ -260,7 +264,8 @@ describe('flag-ON: Gateway branch — fail-closed on validation failure', () => 
     const res = await app.request('/', {
       headers: {cookie: 'gateway_session=some-cookie'},
     })
-    expect([302, 303, 401]).toContain(res.status)
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
   })
 })
 
@@ -269,7 +274,7 @@ describe('flag-ON: Gateway branch — fail-closed on validation failure', () => 
 // ---------------------------------------------------------------------------
 
 describe('flag-ON: expired session defense', () => {
-  it('ok but expiresAt <= Date.now() (expired) → denied', async () => {
+  it('ok but expiresAt <= Date.now() (expired) → 302 redirect to /auth/login', async () => {
     const expiredSession: SessionDto = {
       operatorId: 12345,
       login: 'octocat',
@@ -280,10 +285,11 @@ describe('flag-ON: expired session defense', () => {
     const res = await app.request('/', {
       headers: {cookie: 'gateway_session=some-cookie'},
     })
-    expect([302, 303, 401]).toContain(res.status)
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
   })
 
-  it('ok but expiresAt === Date.now() (exactly now, not future) → denied', async () => {
+  it('ok but expiresAt === Date.now() (exactly now, not future) → 302 redirect to /auth/login', async () => {
     const now = Date.now()
     const exactNowSession: SessionDto = {
       operatorId: 12345,
@@ -295,7 +301,8 @@ describe('flag-ON: expired session defense', () => {
     const res = await app.request('/', {
       headers: {cookie: 'gateway_session=some-cookie'},
     })
-    expect([302, 303, 401]).toContain(res.status)
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
   })
 
   it('ok with future expiresAt → allowed', async () => {
@@ -318,12 +325,13 @@ describe('flag-ON: expired session defense', () => {
 // ---------------------------------------------------------------------------
 
 describe('flag-ON: no inbound cookie', () => {
-  it('no cookie header → denied', async () => {
+  it('no cookie header → 302 redirect to /auth/login', async () => {
     const {client} = makeFakeOperatorClient(async () => ok(VALID_SESSION))
     const app = await buildGatewayApp(client)
     // No cookie header at all
     const res = await app.request('/')
-    expect([302, 303, 401]).toContain(res.status)
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
   })
 
   it('no cookie header → getCurrentSession is NEVER called', async () => {
@@ -334,11 +342,12 @@ describe('flag-ON: no inbound cookie', () => {
     expect(getCurrentSessionSpy).not.toHaveBeenCalled()
   })
 
-  it('empty cookie header → denied without calling getCurrentSession', async () => {
+  it('empty cookie header → 302 redirect without calling getCurrentSession', async () => {
     const {client, getCurrentSessionSpy} = makeFakeOperatorClient(async () => ok(VALID_SESSION))
     const app = await buildGatewayApp(client)
     const res = await app.request('/', {headers: {cookie: ''}})
-    expect([302, 303, 401]).toContain(res.status)
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
     expect(getCurrentSessionSpy).not.toHaveBeenCalled()
   })
 })
@@ -437,7 +446,7 @@ describe('flag-ON: gateway branch ignores DASHBOARD_OPERATOR_LOGIN', () => {
     expect(res.status).toBe(200)
   })
 
-  it('operatorLogin set but gateway session fails → denied (gateway governs, not Arctic)', async () => {
+  it('operatorLogin set but gateway session fails → 302 redirect (gateway governs, not Arctic)', async () => {
     // Even though operatorLogin is configured, gateway branch failure → deny
     // This proves the gateway branch does NOT fall back to Arctic
     const {client} = makeFakeOperatorClient(async () =>
@@ -454,8 +463,9 @@ describe('flag-ON: gateway branch ignores DASHBOARD_OPERATOR_LOGIN', () => {
     const res = await app.request('/', {
       headers: {cookie: 'gateway_session=some-cookie'},
     })
-    // Gateway failed → denied, even though a valid Arctic operatorLogin is configured
-    expect([302, 303, 401]).toContain(res.status)
+    // Gateway failed → 302 redirect, even though a valid Arctic operatorLogin is configured
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
   })
 })
 
@@ -464,7 +474,7 @@ describe('flag-ON: gateway branch ignores DASHBOARD_OPERATOR_LOGIN', () => {
 // ---------------------------------------------------------------------------
 
 describe('flag-ON: no union, no fallback between modes', () => {
-  it('flag-ON + gateway fails + valid Arctic cookie present → still denied (no fallback to Arctic)', async () => {
+  it('flag-ON + gateway fails + valid Arctic cookie present → 302 redirect (no fallback to Arctic)', async () => {
     // A valid Arctic session cookie is present, but gateway fails.
     // The gateway branch must NOT fall back to Arctic — deny is the only outcome.
     const {client} = makeFakeOperatorClient(async () =>
@@ -483,11 +493,12 @@ describe('flag-ON: no union, no fallback between modes', () => {
     const res = await app.request('/', {
       headers: {cookie: `session=${arcticCookie}; gateway_session=some-cookie`},
     })
-    // Gateway failed → denied, even though Arctic cookie is valid
-    expect([302, 303, 401]).toContain(res.status)
+    // Gateway failed → 302 redirect, even though Arctic cookie is valid
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
   })
 
-  it('flag-ON + no cookie + valid Arctic cookie → denied (gateway branch runs, no fallback)', async () => {
+  it('flag-ON + no cookie + valid Arctic cookie → 302 redirect (gateway branch runs, no fallback)', async () => {
     // Even with a valid Arctic cookie, if gateway mode is ON and no cookie is forwarded
     // to the gateway check, the request is denied.
     const {client, getCurrentSessionSpy} = makeFakeOperatorClient(async () => ok(VALID_SESSION))
@@ -501,7 +512,8 @@ describe('flag-ON: no union, no fallback between modes', () => {
 
     // No cookie at all
     const res = await app.request('/')
-    expect([302, 303, 401]).toContain(res.status)
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
     // getCurrentSession must not be called (no cookie to forward)
     expect(getCurrentSessionSpy).not.toHaveBeenCalled()
   })
@@ -519,6 +531,280 @@ describe('gateway branch sets gatewaySession context, not sessionLogin', () => {
       headers: {cookie: 'gateway_session=some-cookie'},
     })
     // /api/status is a protected route — should be accessible with valid gateway session
+    expect(res.status).toBe(200)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix 1: configured origin — spoofed Host does NOT change /operator/session target
+// ---------------------------------------------------------------------------
+
+describe('flag-ON: configured origin is always used, not the inbound Host', () => {
+  it('a spoofed Host header does not change the /operator/session target origin', async () => {
+    // This test exercises the production client-construction path (no operatorClient injected).
+    // We inject a recording gatewayFetchImpl to capture the outbound URL.
+    const capturedUrls: string[] = []
+
+    const recordingFetch = async (url: string, _init?: RequestInit): Promise<Response> => {
+      capturedUrls.push(url)
+      const body = JSON.stringify({
+        operatorId: 1,
+        login: 'octocat',
+        expiresAt: Date.now() + 3600_000,
+      })
+      return new Response(body, {status: 200, headers: {'content-type': 'application/json'}})
+    }
+
+    // Configure a specific trusted origin
+    const trustedOrigin = 'https://dashboard.fro.bot'
+    const app = await buildDashboardApp({
+      gatewayOperatorSessionEnabled: true,
+      gatewayOperatorOrigin: trustedOrigin,
+      gatewayFetchImpl: recordingFetch,
+    })
+
+    // Send a request with a spoofed Host header pointing to an attacker origin
+    const res = await app.request('http://attacker.example.com/', {
+      headers: {
+        cookie: 'gateway_session=some-cookie',
+        host: 'attacker.example.com',
+      },
+    })
+
+    // The request should succeed (valid session returned by recordingFetch)
+    expect(res.status).toBe(200)
+
+    // The outbound /operator/session URL must use the CONFIGURED origin, not the attacker's
+    const sessionCall = capturedUrls.find(u => u.includes('/operator/session'))
+    expect(sessionCall).toBeDefined()
+    expect(sessionCall).toMatch(/^https:\/\/dashboard\.fro\.bot\//)
+    expect(sessionCall).not.toMatch(/attacker\.example\.com/)
+  })
+
+  it('different inbound Host headers always produce the same configured-origin target', async () => {
+    const capturedUrls: string[] = []
+
+    const recordingFetch = async (url: string, _init?: RequestInit): Promise<Response> => {
+      capturedUrls.push(url)
+      const body = JSON.stringify({
+        operatorId: 1,
+        login: 'octocat',
+        expiresAt: Date.now() + 3600_000,
+      })
+      return new Response(body, {status: 200, headers: {'content-type': 'application/json'}})
+    }
+
+    const trustedOrigin = 'https://dashboard.fro.bot'
+    const app = await buildDashboardApp({
+      gatewayOperatorSessionEnabled: true,
+      gatewayOperatorOrigin: trustedOrigin,
+      gatewayFetchImpl: recordingFetch,
+    })
+
+    // First request with one Host
+    await app.request('http://host-a.example.com/', {
+      headers: {cookie: 'gw=cookie1', host: 'host-a.example.com'},
+    })
+    // Second request with a different Host
+    await app.request('http://host-b.example.com/', {
+      headers: {cookie: 'gw=cookie2', host: 'host-b.example.com'},
+    })
+
+    // Both outbound calls must target the configured origin
+    const sessionCalls = capturedUrls.filter(u => u.includes('/operator/session'))
+    expect(sessionCalls).toHaveLength(2)
+    for (const url of sessionCalls) {
+      expect(url).toMatch(/^https:\/\/dashboard\.fro\.bot\//)
+    }
+  })
+
+  it('invalid configured origin → fail closed (302 redirect, no request issued)', async () => {
+    const capturedUrls: string[] = []
+    const recordingFetch = async (url: string, _init?: RequestInit): Promise<Response> => {
+      capturedUrls.push(url)
+      return new Response('{}', {status: 200})
+    }
+
+    // Inject an invalid origin — should cause fail-closed behavior
+    const app = await buildDashboardApp({
+      gatewayOperatorSessionEnabled: true,
+      gatewayOperatorOrigin: 'not-a-valid-url',
+      gatewayFetchImpl: recordingFetch,
+    })
+
+    const res = await app.request('/', {
+      headers: {cookie: 'gw=some-cookie'},
+    })
+
+    // Must fail closed — no request to the gateway, 302 redirect
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(capturedUrls).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix 2: production client-construction path (no operatorClient injected)
+// ---------------------------------------------------------------------------
+
+describe('flag-ON: production client-construction path (gatewayFetchImpl seam)', () => {
+  it('production path: outbound request goes to configured origin + /operator/session', async () => {
+    const capturedRequests: {url: string; headers: Record<string, string>}[] = []
+
+    const recordingFetch = async (url: string, init?: RequestInit): Promise<Response> => {
+      capturedRequests.push({
+        url,
+        headers: (init?.headers ?? {}) as Record<string, string>,
+      })
+      const body = JSON.stringify({
+        operatorId: 42,
+        login: 'octocat',
+        expiresAt: Date.now() + 3600_000,
+      })
+      return new Response(body, {status: 200, headers: {'content-type': 'application/json'}})
+    }
+
+    const inboundCookie = 'gateway_session=prod-path-cookie-xyz'
+    const app = await buildDashboardApp({
+      gatewayOperatorSessionEnabled: true,
+      gatewayOperatorOrigin: 'https://dashboard.fro.bot',
+      gatewayFetchImpl: recordingFetch,
+      // operatorClient is NOT injected — the production branch runs
+    })
+
+    const res = await app.request('/', {
+      headers: {cookie: inboundCookie},
+    })
+
+    // Valid session → access granted
+    expect(res.status).toBe(200)
+
+    // The outbound request must go to the configured origin + /operator/session
+    const sessionCall = capturedRequests.find(r => r.url.includes('/operator/session'))
+    expect(sessionCall).toBeDefined()
+    expect(sessionCall?.url).toBe('https://dashboard.fro.bot/operator/session')
+
+    // The inbound end-user cookie must be forwarded
+    expect(sessionCall?.headers.cookie).toBe(inboundCookie)
+  })
+
+  it('production path: 404 from gateway → denied (fail-closed)', async () => {
+    const recordingFetch = async (_url: string, _init?: RequestInit): Promise<Response> => {
+      return new Response('Not Found', {status: 404})
+    }
+
+    const app = await buildDashboardApp({
+      gatewayOperatorSessionEnabled: true,
+      gatewayOperatorOrigin: 'https://dashboard.fro.bot',
+      gatewayFetchImpl: recordingFetch,
+    })
+
+    const res = await app.request('/', {
+      headers: {cookie: 'gateway_session=some-cookie'},
+    })
+
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
+  })
+
+  it('production path: aborted/timed-out fetch → denied (fail-closed)', async () => {
+    // Simulate a timeout by throwing an AbortError from the fetch
+    const abortingFetch = async (_url: string, _init?: RequestInit): Promise<Response> => {
+      throw new DOMException('The operation was aborted.', 'AbortError')
+    }
+
+    const app = await buildDashboardApp({
+      gatewayOperatorSessionEnabled: true,
+      gatewayOperatorOrigin: 'https://dashboard.fro.bot',
+      gatewayFetchImpl: abortingFetch,
+    })
+
+    const res = await app.request('/', {
+      headers: {cookie: 'gateway_session=some-cookie'},
+    })
+
+    // Timeout/abort → network error → deny
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix 6: nonsensical identity rejection (operatorId <= 0, empty login)
+// ---------------------------------------------------------------------------
+
+describe('flag-ON: nonsensical identity rejection', () => {
+  it('operatorId === 0 → 302 redirect (non-positive operatorId denied)', async () => {
+    const zeroIdSession: SessionDto = {
+      operatorId: 0,
+      login: 'octocat',
+      expiresAt: Date.now() + 3600_000,
+    }
+    const {client} = makeFakeOperatorClient(async () => ok(zeroIdSession))
+    const app = await buildGatewayApp(client)
+    const res = await app.request('/', {
+      headers: {cookie: 'gateway_session=some-cookie'},
+    })
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
+  })
+
+  it('operatorId === -1 → 302 redirect (negative operatorId denied)', async () => {
+    const negativeIdSession: SessionDto = {
+      operatorId: -1,
+      login: 'octocat',
+      expiresAt: Date.now() + 3600_000,
+    }
+    const {client} = makeFakeOperatorClient(async () => ok(negativeIdSession))
+    const app = await buildGatewayApp(client)
+    const res = await app.request('/', {
+      headers: {cookie: 'gateway_session=some-cookie'},
+    })
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
+  })
+
+  it('empty login string → 302 redirect (blank login denied)', async () => {
+    const emptyLoginSession: SessionDto = {
+      operatorId: 12345,
+      login: '',
+      expiresAt: Date.now() + 3600_000,
+    }
+    const {client} = makeFakeOperatorClient(async () => ok(emptyLoginSession))
+    const app = await buildGatewayApp(client)
+    const res = await app.request('/', {
+      headers: {cookie: 'gateway_session=some-cookie'},
+    })
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
+  })
+
+  it('whitespace-only login → 302 redirect (blank login denied)', async () => {
+    const whitespaceLoginSession: SessionDto = {
+      operatorId: 12345,
+      login: '   ',
+      expiresAt: Date.now() + 3600_000,
+    }
+    const {client} = makeFakeOperatorClient(async () => ok(whitespaceLoginSession))
+    const app = await buildGatewayApp(client)
+    const res = await app.request('/', {
+      headers: {cookie: 'gateway_session=some-cookie'},
+    })
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toContain('/auth/login')
+  })
+
+  it('valid operatorId > 0 and non-empty login → allowed', async () => {
+    const validSession: SessionDto = {
+      operatorId: 1,
+      login: 'octocat',
+      expiresAt: Date.now() + 3600_000,
+    }
+    const {client} = makeFakeOperatorClient(async () => ok(validSession))
+    const app = await buildGatewayApp(client)
+    const res = await app.request('/', {
+      headers: {cookie: 'gateway_session=some-cookie'},
+    })
     expect(res.status).toBe(200)
   })
 })

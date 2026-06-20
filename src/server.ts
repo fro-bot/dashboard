@@ -30,7 +30,7 @@ import {Hono, type Context} from 'hono'
 import {getCookie} from 'hono/cookie'
 import {fetchGitHubUserLogin, makeGitHubOAuthClient} from './auth/oauth.ts'
 import {createOperatorClient} from './gateway/operator-client.ts'
-import {readGatewayOperatorSessionConfig, readOperatorUiConfig} from './gateway/operator-config.ts'
+import {readGatewayOperatorOrigin, readGatewayOperatorSessionConfig, readOperatorUiConfig} from './gateway/operator-config.ts'
 import {createOperatorServerFetch} from './gateway/operator-server-fetch.ts'
 import {createAggregator} from './github/aggregator.ts'
 import {createDashboardAppClient} from './github/app-client.ts'
@@ -172,12 +172,32 @@ export interface DashboardAppConfig {
   /**
    * Injectable OperatorClient for the gateway auth branch.
    * If undefined and gatewayOperatorSessionEnabled is true, a real client is built
-   * per-request from the server-side fetch adapter (bound to the inbound request
-   * origin and cookie). Tests inject a fake to avoid network calls.
+   * per-request from the server-side fetch adapter (bound to the configured origin
+   * and inbound cookie). Tests inject a fake to avoid network calls.
    * Never constructed when gatewayOperatorSessionEnabled is false, so the flag-off
    * path builds zero gateway objects.
    */
   operatorClient?: OperatorClient | undefined
+  /**
+   * Trusted gateway operator origin for the /operator/session endpoint.
+   * If undefined, reads from DASHBOARD_GATEWAY_OPERATOR_ORIGIN env (default:
+   * 'https://dashboard.fro.bot'). Must be an absolute http(s) origin.
+   * On invalid/parse-failure the middleware fails closed (denies all requests).
+   *
+   * SECURITY: this must NEVER be derived from the inbound request Host header.
+   * The Host header is attacker-influenceable; a spoofed Host could redirect the
+   * forwarded cookie to an attacker-controlled server. This field is the seam
+   * that lets tests set a known-good origin without touching env.
+   */
+  gatewayOperatorOrigin?: string | undefined
+  /**
+   * Injectable fetch implementation for the production gateway client path.
+   * Only used when operatorClient is undefined (the production branch that builds
+   * a real client from createOperatorServerFetch). Inject a recording/fake fetch
+   * in tests to exercise the production client-construction path without network.
+   * Ignored when operatorClient is injected directly.
+   */
+  gatewayFetchImpl?: ((url: string, init?: RequestInit) => Promise<Response>) | undefined
 }
 
 /**
@@ -240,6 +260,29 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     opts?.gatewayOperatorSessionEnabled === undefined
       ? readGatewayOperatorSessionConfig().enabled
       : opts.gatewayOperatorSessionEnabled
+
+  // Resolve the trusted gateway operator origin — SECURITY CRITICAL.
+  // Must be a configured, trusted value; never derived from the inbound request Host.
+  // When opts.gatewayOperatorOrigin is provided (tests), use it directly after
+  // validation. When undefined, read from env (with default fallback).
+  // null means the configured value is invalid → fail closed at middleware time.
+  let resolvedGatewayOrigin: string | null = null
+  if (gatewayOperatorSessionEnabled) {
+    if (opts?.gatewayOperatorOrigin === undefined) {
+      resolvedGatewayOrigin = readGatewayOperatorOrigin()
+    } else {
+      // Validate the injected origin (same rules as readGatewayOperatorOrigin).
+      try {
+        const parsed = new URL(opts.gatewayOperatorOrigin)
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+          resolvedGatewayOrigin = parsed.origin
+          // else: invalid scheme → stays null → fail closed
+        }
+      } catch {
+        // Invalid URL → stays null → fail closed
+      }
+    }
+  }
 
   const app = new Hono<{Variables: Variables}>()
 
@@ -313,17 +356,28 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
         return c.redirect('/auth/login', 302)
       }
 
+      // Fail closed if the configured gateway origin is invalid or unparseable.
+      // This protects against a misconfigured DASHBOARD_GATEWAY_OPERATOR_ORIGIN
+      // causing the middleware to silently fall back to an unsafe origin.
+      if (resolvedGatewayOrigin === null) {
+        logger.warning('gateway-auth: configured gateway origin is invalid or missing', {path})
+        return c.redirect('/auth/login', 302)
+      }
+
       // Obtain the OperatorClient: use injected client (tests) or build per-request (production).
-      // Per-request construction is correct: the cookie and origin come from the request.
+      // Per-request construction is correct: the cookie comes from the request.
+      // The origin is ALWAYS the configured trusted value — never from the request Host.
       // Flag-OFF never reaches this branch, so zero gateway objects are constructed when off.
       let client: OperatorClient
       if (opts?.operatorClient === undefined) {
-        // Production path: build a real client bound to the inbound request's origin and cookie.
-        // The origin is derived from the inbound request URL so it survives staging/prod/local.
-        const origin = new URL(c.req.url).origin
+        // Production path: build a real client bound to the CONFIGURED origin and inbound cookie.
+        // SECURITY: origin is resolvedGatewayOrigin (configured), NOT new URL(c.req.url).origin.
+        // The inbound Host header is attacker-influenceable; using it would allow a spoofed
+        // Host to redirect the forwarded cookie to an attacker-controlled server.
         const serverFetch = createOperatorServerFetch({
-          origin,
+          origin: resolvedGatewayOrigin,
           cookie: inboundCookie,
+          fetchImpl: opts?.gatewayFetchImpl,
         })
         // Minimal no-op createEventStream stub — getCurrentSession does not use SSE.
         // Throws if called to surface any accidental SSE usage loudly.
@@ -356,6 +410,19 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
       // The gateway is the authority but we do not rely solely on it never returning expired.
       if (result.data.expiresAt <= Date.now()) {
         logger.warning('gateway-auth: session expired', {path})
+        return c.redirect('/auth/login', 302)
+      }
+
+      // Nonsensical identity defense — deny sessions with a non-positive operatorId
+      // or a blank login. These are structurally valid per the parse contract but
+      // semantically impossible for a real operator account. Fail closed rather than
+      // propagate a garbage identity downstream.
+      if (result.data.operatorId <= 0) {
+        logger.warning('gateway-auth: session has non-positive operatorId', {path})
+        return c.redirect('/auth/login', 302)
+      }
+      if (result.data.login.trim() === '') {
+        logger.warning('gateway-auth: session has empty login', {path})
         return c.redirect('/auth/login', 302)
       }
 
