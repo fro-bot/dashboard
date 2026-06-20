@@ -298,7 +298,10 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
       contentSecurityPolicy: {
         defaultSrc: ["'self'"],
         scriptSrc: ["'self'"],
-        styleSrc: ["'self'"],
+        // The SSR pages use inline style attributes throughout, so style-src
+        // permits inline styles. Scripts stay strict ('self', no inline) since
+        // inline script is the meaningful XSS vector here.
+        styleSrc: ["'self'", "'unsafe-inline'"],
         connectSrc: ["'self'"],
         imgSrc: ["'self'"],
         objectSrc: ["'none'"],

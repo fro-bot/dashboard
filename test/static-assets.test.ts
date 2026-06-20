@@ -71,12 +71,22 @@ describe('security headers — CSP', () => {
     expect(csp).toContain("script-src 'self'")
   })
 
-  it("CSP does NOT contain 'unsafe-inline' in script-src", async () => {
+  it("CSP keeps script-src strict — 'self' with no 'unsafe-inline'", async () => {
     const app = await buildTestApp(true)
     const res = await app.request('/api/healthz')
     const csp = res.headers.get('content-security-policy') ?? ''
-    // Verify no unsafe-inline appears anywhere in the CSP
-    expect(csp).not.toContain("'unsafe-inline'")
+    // Inline script is the meaningful XSS vector, so script-src must stay strict.
+    const scriptSrc = csp.split(';').map(d => d.trim()).find(d => d.startsWith('script-src')) ?? ''
+    expect(scriptSrc).toBe("script-src 'self'")
+    expect(scriptSrc).not.toContain("'unsafe-inline'")
+  })
+
+  it("CSP allows inline styles (style-src has 'unsafe-inline' for SSR style attributes)", async () => {
+    const app = await buildTestApp(true)
+    const res = await app.request('/api/healthz')
+    const csp = res.headers.get('content-security-policy') ?? ''
+    const styleSrc = csp.split(';').map(d => d.trim()).find(d => d.startsWith('style-src')) ?? ''
+    expect(styleSrc).toContain("'unsafe-inline'")
   })
 
   it("CSP contains default-src 'self'", async () => {

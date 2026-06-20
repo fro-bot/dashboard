@@ -146,3 +146,5 @@ export interface InitOptions {
 }
 
 export declare function initOperatorStream(opts: InitOptions): StreamHandle
+
+export declare function bootstrapOperatorStreams(): void

@@ -681,3 +681,37 @@ export function initOperatorStream(opts) {
     },
   }
 }
+
+/**
+ * Browser bootstrap. Discovers the run cards in the run-status section, starts a
+ * stream for each, and closes all handles on page unload. Runs only in a browser
+ * (guarded on `document`), so importing this module in Node for tests is a no-op.
+ */
+export function bootstrapOperatorStreams() {
+  const section = document.getElementById('run-status-section')
+  if (section === null) return
+
+  const noticeEl = section.querySelector('[data-role="stream-status"]')
+  const cards = section.querySelectorAll('[data-run-id]')
+  const handles = []
+
+  for (const card of cards) {
+    const runId = card.getAttribute('data-run-id')
+    if (runId === null || runId === '') continue
+    const statusEl = card.querySelector('[data-role="run-status"]')
+    handles.push(initOperatorStream({runId, statusEl, noticeEl}))
+  }
+
+  globalThis.addEventListener('pagehide', () => {
+    for (const handle of handles) handle.close()
+  })
+}
+
+// Auto-start in the browser. Guarded so a Node/test import never touches the DOM.
+if (typeof document !== 'undefined') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootstrapOperatorStreams)
+  } else {
+    bootstrapOperatorStreams()
+  }
+}
