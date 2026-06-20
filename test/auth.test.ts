@@ -520,6 +520,33 @@ describe('rate limiter — /auth/login is in sensitiveRoutes (FIX 3)', () => {
     const res = await app.request('/auth/login')
     expect(res.status).toBe(429)
   })
+
+  it('/operator is rate-limited: returns 429 when the connecting IP is exhausted', async () => {
+    // /operator must be in sensitiveRoutes so it is throttled before live
+    // operator mutation endpoints land. The rate-limit middleware runs before
+    // auth/mounting, so an exhausted IP gets 429 regardless of the operator flag.
+    const {checkRateLimit} = await import('../src/server.ts')
+    const now = Date.now()
+    for (let i = 0; i < 60; i++) {
+      checkRateLimit('unknown', now)
+    }
+
+    const app = await buildTestApp({operatorLogin: 'octocat'})
+    const res = await app.request('/operator')
+    expect(res.status).toBe(429)
+  })
+
+  it('/operator/* sub-paths are rate-limited: returns 429 when the IP is exhausted', async () => {
+    const {checkRateLimit} = await import('../src/server.ts')
+    const now = Date.now()
+    for (let i = 0; i < 60; i++) {
+      checkRateLimit('unknown', now)
+    }
+
+    const app = await buildTestApp({operatorLogin: 'octocat'})
+    const res = await app.request('/operator/runs')
+    expect(res.status).toBe(429)
+  })
 })
 
 describe('rate limiter (FIX P1 + P2)', () => {

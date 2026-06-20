@@ -293,8 +293,8 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // and XFF is client-controlled — trusting it would allow spoofing the throttle key.
   app.use('*', async (c: Context, next) => {
     const path = new URL(c.req.url).pathname
-    const sensitiveRoutes = ['/', '/auth/login', '/auth/callback']
-    const isSensitive = sensitiveRoutes.includes(path) || path.startsWith('/api/')
+    const sensitiveRoutes = ['/', '/auth/login', '/auth/callback', '/operator']
+    const isSensitive = sensitiveRoutes.includes(path) || path.startsWith('/api/') || path.startsWith('/operator/')
 
     if (isSensitive) {
       // Use the direct connection remote address — not XFF (client-spoofable).
