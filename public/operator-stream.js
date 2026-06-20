@@ -688,7 +688,7 @@ export function initOperatorStream(opts) {
  * (guarded on `document`), so importing this module in Node for tests is a no-op.
  */
 export function bootstrapOperatorStreams() {
-  const section = document.getElementById('run-status-section')
+  const section = document.querySelector('#run-status-section')
   if (section === null) return
 
   const noticeEl = section.querySelector('[data-role="stream-status"]')
@@ -696,7 +696,7 @@ export function bootstrapOperatorStreams() {
   const handles = []
 
   for (const card of cards) {
-    const runId = card.getAttribute('data-run-id')
+    const runId = card.dataset.runId
     if (runId === null || runId === '') continue
     const statusEl = card.querySelector('[data-role="run-status"]')
     handles.push(initOperatorStream({runId, statusEl, noticeEl}))

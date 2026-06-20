@@ -15,8 +15,9 @@
  */
 
 import type {StreamState} from '../public/operator-stream.js'
-import {describe, expect, it} from 'vitest'
+import {describe, expect, it, vi} from 'vitest'
 import {
+  bootstrapOperatorStreams,
   MAX_SSE_BUFFER_BYTES,
   nextStreamState,
   parseSseFrame,
@@ -25,7 +26,6 @@ import {
   RETRY_FACTOR,
   RETRY_MAX_COUNT,
   toSafeRunView,
-  bootstrapOperatorStreams,
 } from '../public/operator-stream.js'
 
 // ---------------------------------------------------------------------------
@@ -875,68 +875,91 @@ describe('nextStreamState — null-prototype runs map', () => {
 // Browser bootstrap (discovers run cards, starts a stream per card)
 // ---------------------------------------------------------------------------
 
-describe('bootstrapOperatorStreams', () => {
-  function makeFakeCard(runId: string) {
-    return {
-      getAttribute: (name: string) => (name === 'data-run-id' ? runId : null),
-      querySelector: () => ({textContent: '', className: '', classList: {add() {}, remove() {}}}),
-    }
+interface FakeStatusEl {
+  textContent: string
+  className: string
+  classList: {add: () => void; remove: () => void}
+}
+
+interface FakeCard {
+  dataset: {runId: string}
+  querySelector: () => FakeStatusEl
+}
+
+function makeFakeCard(runId: string): FakeCard {
+  return {
+    dataset: {runId},
+    querySelector: () => ({textContent: '', className: '', classList: {add() {}, remove() {}}}),
+  }
+}
+
+interface FakeSection {
+  querySelector: (sel: string) => {textContent: string; hidden: boolean} | null
+  querySelectorAll: () => FakeCard[]
+}
+
+interface FakeDocument {
+  querySelector: (sel: string) => FakeSection | null
+  readyState: string
+  addEventListener: () => void
+}
+
+async function withFakeBrowser(
+  cards: FakeCard[],
+  sectionPresent: boolean,
+  run: () => void,
+): Promise<string[]> {
+  const fetchCalls: string[] = []
+
+  const section: FakeSection = {
+    querySelector: (sel: string) =>
+      sel.includes('stream-status') ? {textContent: '', hidden: false} : null,
+    querySelectorAll: () => cards,
   }
 
-  function withFakeBrowser(
-    cards: ReturnType<typeof makeFakeCard>[],
-    sectionPresent: boolean,
-    run: () => void,
-  ) {
-    const fetchCalls: string[] = []
-    const prevDocument = (globalThis as {document?: unknown}).document
-    const prevFetch = (globalThis as {fetch?: unknown}).fetch
-    const prevAdd = globalThis.addEventListener
+  const fakeDocument: FakeDocument = {
+    querySelector: (sel: string) => (sel === '#run-status-section' && sectionPresent ? section : null),
+    readyState: 'complete',
+    addEventListener() {},
+  }
 
-    const section = {
-      querySelector: (sel: string) =>
-        sel.includes('stream-status') ? {textContent: '', hidden: false} : null,
-      querySelectorAll: () => cards,
-    }
-    ;(globalThis as {document?: unknown}).document = {
-      getElementById: (id: string) => (id === 'run-status-section' && sectionPresent ? section : null),
-      readyState: 'complete',
-      addEventListener() {},
-    }
-    ;(globalThis as {fetch?: unknown}).fetch = (url: string) => {
+  vi.stubGlobal('document', fakeDocument)
+  vi.stubGlobal(
+    'fetch',
+    async (url: string) => {
       fetchCalls.push(url)
-      return new Promise(() => {}) // never settles — no real streaming in the test
-    }
-    globalThis.addEventListener = (() => {}) as typeof globalThis.addEventListener
+      return new Promise<Response>(() => {}) // never settles — no real streaming in the test
+    },
+  )
+  vi.stubGlobal('addEventListener', () => {})
 
-    try {
-      run()
-    } finally {
-      ;(globalThis as {document?: unknown}).document = prevDocument
-      ;(globalThis as {fetch?: unknown}).fetch = prevFetch
-      globalThis.addEventListener = prevAdd
-    }
-
-    return fetchCalls
+  try {
+    run()
+  } finally {
+    vi.unstubAllGlobals()
   }
 
-  it('starts one stream per run card, fetching the per-run stream path', () => {
+  return fetchCalls
+}
+
+describe('bootstrapOperatorStreams', () => {
+  it('starts one stream per run card, fetching the per-run stream path', async () => {
     const cards = [makeFakeCard('run-001'), makeFakeCard('run-002')]
-    const fetchCalls = withFakeBrowser(cards, true, bootstrapOperatorStreams)
+    const fetchCalls = await withFakeBrowser(cards, true, bootstrapOperatorStreams)
 
     expect(fetchCalls).toHaveLength(2)
     expect(fetchCalls[0]).toBe('/operator/runs/run-001/stream')
     expect(fetchCalls[1]).toBe('/operator/runs/run-002/stream')
   })
 
-  it('does nothing when the run-status section is absent', () => {
-    const fetchCalls = withFakeBrowser([makeFakeCard('run-001')], false, bootstrapOperatorStreams)
+  it('does nothing when the run-status section is absent', async () => {
+    const fetchCalls = await withFakeBrowser([makeFakeCard('run-001')], false, bootstrapOperatorStreams)
     expect(fetchCalls).toHaveLength(0)
   })
 
-  it('skips cards with an empty run id', () => {
+  it('skips cards with an empty run id', async () => {
     const cards = [makeFakeCard(''), makeFakeCard('run-003')]
-    const fetchCalls = withFakeBrowser(cards, true, bootstrapOperatorStreams)
+    const fetchCalls = await withFakeBrowser(cards, true, bootstrapOperatorStreams)
     expect(fetchCalls).toHaveLength(1)
     expect(fetchCalls[0]).toBe('/operator/runs/run-003/stream')
   })
