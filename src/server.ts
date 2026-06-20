@@ -448,7 +448,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // MUST be inside the auth boundary (protected) — NOT added to isPublicPath.
   if (operatorUiEnabled) {
     const {buildOperatorRouter} = await import('./routes/operator.ts')
-    app.route('/operator', buildOperatorRouter())
+    app.route('/operator', buildOperatorRouter(gatewayOperatorSessionEnabled))
   }
 
   return app
