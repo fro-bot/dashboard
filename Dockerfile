@@ -13,6 +13,7 @@ RUN pnpm install --frozen-lockfile --prod
 
 # Copy source
 COPY src/ ./src/
+COPY public/ ./public/
 
 # Non-root user for read_only-friendly operation
 RUN addgroup --system --gid 1001 dashboard && \

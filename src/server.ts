@@ -24,10 +24,12 @@ import {Buffer} from 'node:buffer'
 import process from 'node:process'
 import {serve} from '@hono/node-server'
 import {getConnInfo} from '@hono/node-server/conninfo'
+import {serveStatic} from '@hono/node-server/serve-static'
 import {Octokit} from '@octokit/core'
 import {graphql} from '@octokit/graphql'
 import {Hono, type Context} from 'hono'
 import {getCookie} from 'hono/cookie'
+import {secureHeaders} from 'hono/secure-headers'
 import {fetchGitHubUserLogin, makeGitHubOAuthClient} from './auth/oauth.ts'
 import {createOperatorClient} from './gateway/operator-client.ts'
 import {readGatewayOperatorOrigin, readGatewayOperatorSessionConfig, readOperatorUiConfig} from './gateway/operator-config.ts'
@@ -286,6 +288,27 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
 
   const app = new Hono<{Variables: Variables}>()
 
+  // ── Security headers + CSP (applied to all responses) ──────────────────────
+  // Placed first so every response — including error responses — carries the
+  // security headers. The tight CSP (script-src 'self', no unsafe-inline)
+  // requires all styles to be external files (see public/operator.css).
+  app.use(
+    '*',
+    secureHeaders({
+      contentSecurityPolicy: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'"],
+        connectSrc: ["'self'"],
+        imgSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+        frameAncestors: ["'none'"],
+      },
+    }),
+  )
+
   // ── Rate limiting middleware (applied to sensitive routes) ──────────────────
   // NOTE: Real per-client rate limiting belongs at Caddy (the reverse proxy).
   // This is defense-in-depth only. We key on the direct connection remote address
@@ -331,7 +354,11 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // OWN isPublicPath check — a path added to one mode's allowlist cannot silently
   // bypass the other.
   const isPublicPath = (path: string): boolean =>
-    path === '/api/healthz' || path === '/auth/login' || path === '/auth/callback' || path === '/auth/logout'
+    path === '/api/healthz' ||
+    path === '/auth/login' ||
+    path === '/auth/callback' ||
+    path === '/auth/logout' ||
+    (operatorUiEnabled && path.startsWith('/static/'))
 
   app.use('*', async (c: Context, next) => {
     const path = new URL(c.req.url).pathname
@@ -516,6 +543,13 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   if (operatorUiEnabled) {
     const {buildOperatorRouter} = await import('./routes/operator.ts')
     app.route('/operator', buildOperatorRouter(gatewayOperatorSessionEnabled))
+
+    // ── Static asset serving ────────────────────────────────────────────────
+    // Serves public/ at /static/* — flag-gated alongside the operator route.
+    // The /static/ prefix is added to isPublicPath above so unauthenticated
+    // browsers can load CSS/JS assets without being 302'd to /auth/login.
+    // root is relative to WORKDIR (/app) in the container, matching Dockerfile.
+    app.use('/static/*', serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}))
   }
 
   return app
