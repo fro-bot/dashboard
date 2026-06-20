@@ -453,6 +453,118 @@ describe('operator UI — credential-domain copy when Arctic session governs (ga
   })
 })
 
+// ---------------------------------------------------------------------------
+// SSE stream wiring — DOM hooks and script tag
+// ---------------------------------------------------------------------------
+
+describe('operator UI — SSE stream wiring (flag ON + authenticated)', () => {
+  it('page includes the operator-stream script tag with src and type=module', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('src="/static/operator-stream.js"')
+    expect(body).toContain('type="module"')
+  })
+
+  it('run cards carry data-run-id attributes for all fixture runs', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // All fixture run IDs must appear as data-run-id attributes
+    expect(body).toContain('data-run-id="run-fixture-queued-001"')
+    expect(body).toContain('data-run-id="run-fixture-running-002"')
+    expect(body).toContain('data-run-id="run-fixture-approval-003"')
+    expect(body).toContain('data-run-id="run-fixture-blocked-004"')
+    expect(body).toContain('data-run-id="run-fixture-failed-005"')
+    expect(body).toContain('data-run-id="run-fixture-cancelled-006"')
+    expect(body).toContain('data-run-id="run-fixture-succeeded-007"')
+  })
+
+  it('status pill spans carry data-role="run-status"', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('data-role="run-status"')
+  })
+
+  it('run status section has a stable container id', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('id="run-status-section"')
+  })
+
+  it('stream-status notice element has a stable data-role hook', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('data-role="stream-status"')
+  })
+
+  it('no inline script tags with executable content (CSP clean)', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // All <script> elements must have a src= attribute (no inline scripts)
+    const scriptTagsWithoutSrc = body.match(/<script(?![^>]* src=)[^>]*>/g)
+    expect(scriptTagsWithoutSrc).toBeNull()
+  })
+
+  it('script src is a relative path (no absolute URL)', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // The script src must be /static/... not https://...
+    expect(body).not.toMatch(/src="https?:\/\//)
+  })
+
+  it('SSR render does not call connectRunStream', async () => {
+    // connectRunStream must never be called during server-side render —
+    // stream connections only happen in the browser.
+    const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
+    const app = await buildTestApp({
+      operatorUiEnabled: true,
+      gatewayOperatorSessionEnabled: true,
+      operatorClient,
+    })
+    // If connectRunStream were called, it would throw and the request would fail.
+    const res = await gatewayAuthedGet(app, '/operator')
+    expect(res.status).toBe(200)
+  })
+
+  it('flag OFF → no script tag and no run-status section', async () => {
+    const app = await buildTestApp(false)
+    const res = await authedGet(app, '/operator')
+    // Route is not mounted when flag is off
+    expect([302, 303, 401, 404]).toContain(res.status)
+    const body = await res.text()
+    expect(body).not.toContain('operator-stream.js')
+    expect(body).not.toContain('run-status-section')
+  })
+
+  it('no fixture/stream payload literals leak beyond existing rendered values', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // Existing no-leak assertions — these must continue to pass
+    expect(body).not.toContain('[Fixture prompt — not rendered in UI]')
+    expect(body).not.toContain('fixture-csrf-placeholder')
+    expect(body).not.toContain('fixture-idempotency-key-001')
+    expect(body).not.toContain('fixture-idempotency-key-002')
+    // Stream payload fields that must never appear in SSR output
+    expect(body).not.toContain('entityRef')
+    expect(body).not.toContain('contractVersion')
+  })
+})
+
 describe('operator UI — credential-domain copy when gateway session governs (gateway flag ON)', () => {
   // In gateway mode the auth middleware validates via the injected operatorClient.
   // We inject a fake that returns a valid session so the page renders.

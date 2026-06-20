@@ -143,9 +143,9 @@ function runStatusSection(): ReturnType<typeof html> {
     const label = runStatusLabel(run.status)
     const cssClass = runStatusClass(run.status)
     return html`
-      <div class="run-card" tabindex="0" aria-label="Run ${run.runId}, status: ${label}">
+      <div class="run-card" tabindex="0" aria-label="Run ${run.runId}, status: ${label}" data-run-id="${run.runId}">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
-          <span class="run-status ${cssClass}">${label}</span>
+          <span class="run-status ${cssClass}" data-role="run-status">${label}</span>
           <span class="mono">${run.runId}</span>
         </div>
         <div style="font-size:0.8rem;color:#6b7280;">
@@ -158,9 +158,9 @@ function runStatusSection(): ReturnType<typeof html> {
   })
 
   return html`
-    <section class="section" aria-labelledby="runs-heading">
+    <section id="run-status-section" class="section" aria-labelledby="runs-heading">
       <h2 id="runs-heading">Run Status <span class="badge-mock">Mock skeleton — fixture data</span></h2>
-      <div class="notice" style="margin-bottom:16px;">
+      <div class="notice" data-role="stream-status" style="margin-bottom:16px;">
         Live run observation is unavailable. This panel shows fixture data representing
         all possible run states. Live run streaming will be available once Gateway
         run observation is ready.
@@ -331,6 +331,7 @@ function operatorPage(gatewaySessionEnabled: boolean): ReturnType<typeof html> {
   <p style="margin-top:24px;font-size:0.8rem;color:#6b7280;">
     <a href="/">← Back to monitoring dashboard</a>
   </p>
+  <script src="/static/operator-stream.js" type="module"></script>
 </body>
 </html>`
 }
