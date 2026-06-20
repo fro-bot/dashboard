@@ -49,7 +49,7 @@ export interface GatewayOperatorSessionConfig {
  * Only 'true' (case-insensitive, trimmed) enables the gateway-session path.
  * All other values, including null, empty string, 'false', '1', 'yes', disable it.
  *
- * Independent of DASHBOARD_OPERATOR_UI_ENABLED (KTD5): separate env var, separate reader.
+ * Independent of DASHBOARD_OPERATOR_UI_ENABLED: separate env var, separate reader.
  */
 export function readGatewayOperatorSessionConfig(): GatewayOperatorSessionConfig {
   let raw: string | null

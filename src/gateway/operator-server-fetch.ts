@@ -3,10 +3,11 @@
  *
  * Produces a fetch function matching `OperatorClientOptions.fetch` that:
  * - Resolves relative /operator/* paths against the inbound request origin.
- * - Forwards the end-user's inbound Cookie header verbatim (TB1).
+ * - Forwards the end user's inbound Cookie header verbatim, so the gateway
+ *   validates the END USER's session — never the dashboard's own identity.
  * - Uses NO service-to-service credential — the only auth is the forwarded cookie.
  * - Rejects (throws) when no inbound cookie is present, so the operator client's
- *   fetchJson wrapper maps it to a GatewayNetworkError (TB1/TB3 fail-closed).
+ *   fetchJson wrapper maps it to a GatewayNetworkError and the caller fails closed.
  *
  * Security invariants:
  * - Never logs the cookie value — only the resolved path template is safe to log.
@@ -26,7 +27,8 @@ export interface OperatorServerFetchOptions {
   readonly origin: string
   /**
    * The inbound Cookie header value from the end user's request.
-   * If undefined or empty, the returned fetch will throw on every call (TB1).
+   * If undefined or empty, the returned fetch throws on every call — there is
+   * no end-user principal to forward.
    */
   readonly cookie: string | undefined
   /**
@@ -42,13 +44,14 @@ export interface OperatorServerFetchOptions {
 
 /**
  * Create a server-side fetch adapter that resolves relative /operator/* paths
- * against the inbound request origin and forwards the end-user's cookie (TB1).
+ * against the inbound request origin and forwards the end user's cookie.
  *
  * The returned function matches `OperatorClientOptions.fetch`:
  *   `(input: string, init?: RequestInit) => Promise<Response>`
  *
  * Throws when the inbound cookie is absent or blank — the operator client's
- * fetchJson wrapper maps a thrown fetch to a GatewayNetworkError (fail-closed).
+ * fetchJson wrapper maps a thrown fetch to a GatewayNetworkError, so the caller
+ * fails closed.
  */
 export function createOperatorServerFetch(
   options: OperatorServerFetchOptions,
@@ -56,10 +59,10 @@ export function createOperatorServerFetch(
   const {origin, cookie, fetchImpl = fetch} = options
 
   return async (input: string, init?: RequestInit): Promise<Response> => {
-    // TB1: reject immediately if no end-user principal to forward.
+    // Reject immediately if there is no end-user cookie to forward.
     // Whitespace-only is treated as absent — no meaningful cookie value.
     if (cookie === undefined || cookie.trim() === '') {
-      throw new Error('No inbound cookie to forward: end-user principal is required (TB1).')
+      throw new Error('No inbound cookie to forward: an end-user session is required.')
     }
 
     // Resolve the relative path to an absolute same-origin URL.
@@ -72,7 +75,7 @@ export function createOperatorServerFetch(
 
     const mergedHeaders: Record<string, string> = {
       ...callerHeaders,
-      // Forwarded end-user cookie is the principal — always wins (TB1).
+      // The forwarded end-user cookie is the principal — it always wins.
       cookie,
     }
 

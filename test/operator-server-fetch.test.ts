@@ -4,8 +4,8 @@
  * TDD: written before implementation.
  *
  * Security invariants tested:
- * - TB1: forwarded cookie is the end-user's inbound cookie, never a service credential.
- * - TB1: adapter rejects (throws) when no inbound cookie is present — no request issued.
+ * - The forwarded cookie is the end-user's inbound cookie, never a service credential.
+ * - The adapter rejects (throws) when no inbound cookie is present — no request issued.
  * - No Authorization header or other service credential is ever attached by the adapter.
  * - Relative /operator/* paths are resolved to absolute same-origin URLs.
  * - Caller-supplied init.headers are merged but the forwarded cookie wins.
@@ -131,10 +131,10 @@ describe('createOperatorServerFetch — origin binding', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Edge: missing or empty cookie → reject, no request issued (TB1)
+// Edge: missing or empty cookie → reject, no request issued
 // ---------------------------------------------------------------------------
 
-describe('createOperatorServerFetch — missing cookie rejects (TB1)', () => {
+describe('createOperatorServerFetch — missing cookie rejects', () => {
   it('throws when cookie is undefined — no request issued', async () => {
     const {fetchImpl, calls} = makeFakeFetch()
     const fetch = createOperatorServerFetch({
@@ -173,10 +173,10 @@ describe('createOperatorServerFetch — missing cookie rejects (TB1)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Security: no service credential attached (TB1 — no confused-deputy)
+// Security: no service credential attached — no confused-deputy
 // ---------------------------------------------------------------------------
 
-describe('createOperatorServerFetch — no service credential (TB1 security)', () => {
+describe('createOperatorServerFetch — no service credential', () => {
   it('does not attach an Authorization header', async () => {
     const {fetchImpl, calls} = makeFakeFetch()
     const fetch = createOperatorServerFetch({
