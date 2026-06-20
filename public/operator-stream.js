@@ -407,6 +407,16 @@ export function nextStreamState(current, event) {
       }
     }
 
+    case 'buffer-overflow': {
+      // A stream that exceeds the buffer cap is hostile or broken — fail closed
+      // terminally with no reconnect, regardless of retry budget.
+      return {
+        ...current,
+        connection: 'failed',
+        shouldReconnect: false,
+      }
+    }
+
     default: {
       return current
     }
@@ -603,9 +613,13 @@ export function initOperatorStream(opts) {
                 buffer += normalizeCrlf(decoder.decode(value, {stream: true}))
               }
 
-              // F2: Hard buffer cap — abort + failed if exceeded without boundary
+              // F2: Hard buffer cap — abort the reader and fail closed terminally
+              // (no reconnect) if exceeded without a record boundary.
               if (buffer.length > MAX_SSE_BUFFER_BYTES) {
-                dispatch({type: 'network-error'})
+                if (abortController) {
+                  abortController.abort()
+                }
+                dispatch({type: 'buffer-overflow'})
                 return
               }
 

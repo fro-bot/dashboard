@@ -91,6 +91,7 @@ export type StreamEvent =
   | {readonly type: 'network-error'}
   | {readonly type: 'stream-closed'}
   | {readonly type: 'unexpected-close'}
+  | {readonly type: 'buffer-overflow'}
 
 // ---------------------------------------------------------------------------
 // Safe render model

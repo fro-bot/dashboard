@@ -964,3 +964,34 @@ describe('bootstrapOperatorStreams', () => {
     expect(fetchCalls[0]).toBe('/operator/runs/run-003/stream')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Buffer overflow fails closed terminally (no reconnect)
+// ---------------------------------------------------------------------------
+
+describe('nextStreamState — buffer overflow', () => {
+  it('buffer-overflow → failed with no reconnect, regardless of retry budget', () => {
+    const live: StreamState = nextStreamState(
+      nextStreamState(
+        {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false},
+        {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}},
+      ),
+      {type: 'status', data: ACTIVE_STATUS},
+    )
+    const overflowed = nextStreamState(live, {type: 'buffer-overflow'})
+    expect(overflowed.connection).toBe('failed')
+    expect(overflowed.shouldReconnect).toBe(false)
+  })
+
+  it('buffer-overflow fails closed even with retries remaining', () => {
+    const state: StreamState = {
+      connection: 'reconnecting',
+      runs: {},
+      retryCount: 0,
+      shouldReconnect: true,
+    }
+    const overflowed = nextStreamState(state, {type: 'buffer-overflow'})
+    expect(overflowed.connection).toBe('failed')
+    expect(overflowed.shouldReconnect).toBe(false)
+  })
+})
