@@ -17,6 +17,11 @@
  * - All 404s collapse to one not-found state; no cause inference from body or timing.
  * - Read-only: GET stream only; no POST/PUT/DELETE, no telemetry endpoint.
  * - Same-origin: credentials:'include', no URL rewriting.
+ * - redirect:'error' prevents auth-redirect loops from being parsed as streams.
+ * - Content-Type must be text/event-stream on 200; otherwise fail closed.
+ * - Buffer is capped at MAX_SSE_BUFFER_BYTES; overflow → abort + failed state.
+ * - status/phase/surface are allowlist-gated; out-of-set values → parse failure.
+ * - Status labels are rendered from a local map, never from the raw wire string.
  */
 
 // ---------------------------------------------------------------------------
@@ -35,6 +40,9 @@ export const RETRY_FACTOR = 2
 /** Maximum number of reconnect attempts before transitioning to failed. */
 export const RETRY_MAX_COUNT = 5
 
+/** Hard cap on the incremental SSE buffer in bytes. Overflow → abort + failed. */
+export const MAX_SSE_BUFFER_BYTES = 1_000_000
+
 /** Terminal OperatorWebStatus values — a run in one of these states will not progress. */
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
 
@@ -47,6 +55,58 @@ const VALID_RESET_REASONS = new Set([
   'writer-error',
   'overflow',
 ])
+
+/** Allowlisted status values — out-of-set values are parse failures. */
+const VALID_STATUSES = new Set([
+  'queued',
+  'blocked',
+  'running',
+  'waiting_for_approval',
+  'succeeded',
+  'failed',
+  'cancelled',
+])
+
+/** Allowlisted phase values — out-of-set values are parse failures. */
+const VALID_PHASES = new Set([
+  'PENDING',
+  'ACKNOWLEDGED',
+  'EXECUTING',
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+])
+
+/** Allowlisted surface values — out-of-set values are parse failures. */
+const VALID_SURFACES = new Set(['github', 'discord', 'web'])
+
+/**
+ * Safe status label map — render labels from this map, never the raw wire string.
+ * classList.add throws on whitespace; raw wire values like 'waiting_for_approval'
+ * are safe for classList but must still go through this map for display text.
+ */
+const STATUS_LABELS = {
+  queued: 'Queued',
+  blocked: 'Blocked',
+  running: 'Running',
+  waiting_for_approval: 'Waiting for approval',
+  succeeded: 'Succeeded',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+}
+
+// ---------------------------------------------------------------------------
+// CRLF normalization
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize CRLF and lone CR line endings to LF.
+ * Must be applied before searching for record boundaries.
+ */
+function normalizeCrlf(text) {
+  // Replace \r\n first (order matters — avoids double-replacing the \r)
+  return text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
+}
 
 // ---------------------------------------------------------------------------
 // Pure SSE frame parser
@@ -63,9 +123,12 @@ const VALID_RESET_REASONS = new Set([
  *
  * NO-ORACLE: error strings are fixed. They never echo, interpolate, or stringify
  * any part of the input.
+ *
+ * Input is normalized for CRLF before parsing.
  */
 export function parseSseFrame(record) {
-  const lines = record.split('\n')
+  const normalized = normalizeCrlf(record)
+  const lines = normalized.split('\n')
   let eventName
   let dataLine
 
@@ -125,6 +188,16 @@ export function parseSseFrame(record) {
     ) {
       return {success: false, error: 'status frame missing required fields'}
     }
+    // F6: Allowlist-gate enumerated fields — fail closed on out-of-set values
+    if (!VALID_STATUSES.has(parsed.status)) {
+      return {success: false, error: 'status frame status value not in allowlist'}
+    }
+    if (!VALID_PHASES.has(parsed.phase)) {
+      return {success: false, error: 'status frame phase value not in allowlist'}
+    }
+    if (!VALID_SURFACES.has(parsed.surface)) {
+      return {success: false, error: 'status frame surface value not in allowlist'}
+    }
     return {
       success: true,
       frame: {
@@ -169,7 +242,7 @@ export function parseSseFrame(record) {
  * State shape:
  *   connection: 'connecting' | 'live' | 'reconnecting' | 'drift' | 'not-found' |
  *               'backpressure' | 'failed' | 'closed'
- *   runs: { [runId]: { runId, status, phase, startedAt, stale, terminal } }
+ *   runs: Object.create(null) — null-prototype map keyed by runId (F13)
  *   retryCount: number
  *   shouldReconnect: boolean
  *
@@ -181,15 +254,22 @@ export function parseSseFrame(record) {
  *   { type: 'network-error' }
  *   { type: 'stream-closed' }
  *   { type: 'unexpected-close' }
+ *
+ * Drift is absorbing: once in drift, ready/status do not move back to live.
+ * A status before any ready is not rendered (F5b).
  */
 export function nextStreamState(current, event) {
   switch (event.type) {
     case 'ready': {
+      // F5b: drift is absorbing — a second ready does not escape drift
+      if (current.connection === 'drift') {
+        return current
+      }
       if (event.data.contractVersion !== PINNED_CONTRACT_VERSION) {
         // Contract version mismatch — fail closed, clear all run state
         return {
           connection: 'drift',
-          runs: {},
+          runs: Object.create(null),
           retryCount: current.retryCount,
           shouldReconnect: false,
         }
@@ -202,12 +282,16 @@ export function nextStreamState(current, event) {
     }
 
     case 'status': {
+      // F5b: status before ready (connection !== 'live') is not rendered
+      if (current.connection !== 'live') {
+        return current
+      }
       const {runId, status, phase, startedAt, stale} = event.data
       const isTerminal = TERMINAL_STATUSES.has(status)
-      const updatedRuns = {
-        ...current.runs,
+      // F13: use null-prototype object to guard against __proto__ pollution
+      const updatedRuns = Object.assign(Object.create(null), current.runs, {
         [runId]: {runId, status, phase, startedAt, stale, terminal: isTerminal},
-      }
+      })
       // If all observed runs are terminal, close the stream
       const allTerminal =
         Object.keys(updatedRuns).length > 0 &&
@@ -222,6 +306,16 @@ export function nextStreamState(current, event) {
 
     case 'reset': {
       const {reason} = event.data
+
+      // F3: terminal reset reason → close (no reconnect)
+      if (reason === 'terminal') {
+        return {
+          ...current,
+          connection: 'closed',
+          shouldReconnect: false,
+        }
+      }
+
       // max-duration: reconnect only if the run is still active
       if (reason === 'max-duration') {
         const runEntry = current.runs[event.data.runId]
@@ -234,9 +328,19 @@ export function nextStreamState(current, event) {
           }
         }
       }
+
+      // F3: increment retryCount on reset and cap at RETRY_MAX_COUNT
+      if (current.retryCount >= RETRY_MAX_COUNT) {
+        return {
+          ...current,
+          connection: 'failed',
+          shouldReconnect: false,
+        }
+      }
       return {
         ...current,
         connection: 'reconnecting',
+        retryCount: current.retryCount + 1,
         shouldReconnect: true,
       }
     }
@@ -338,6 +442,7 @@ export function toSafeRunView(runStatus) {
 /**
  * Calculate the delay in milliseconds for a given retry attempt (0-indexed).
  * Uses exponential backoff: base * factor^attempt.
+ * backoffDelay(0) === RETRY_BASE_MS (1000ms on first retry).
  */
 function backoffDelay(attempt) {
   return RETRY_BASE_MS * RETRY_FACTOR ** attempt
@@ -361,6 +466,7 @@ function backoffDelay(attempt) {
  * Security:
  * - Never logs frame data, run IDs, repo names, or stream URLs.
  * - Renders only phase/status/timestamps via toSafeRunView.
+ * - Status labels rendered from STATUS_LABELS map, never raw wire strings.
  * - All 404s → one not-found state, one retry policy.
  * - Read-only: GET only, no POST/PUT/DELETE.
  */
@@ -369,12 +475,14 @@ export function initOperatorStream(opts) {
 
   let state = {
     connection: 'connecting',
-    runs: {},
+    runs: Object.create(null), // F13: null-prototype to guard __proto__ keys
     retryCount: 0,
     shouldReconnect: false,
   }
 
   let abortController = null
+  let reconnectTimer = null // F9: track pending reconnect timer
+  let aborted = false // F9: set by close() to prevent late timer from fetching
 
   function updateDOM() {
     if (noticeEl) {
@@ -405,10 +513,12 @@ export function initOperatorStream(opts) {
 
     if (statusEl) {
       const runEntry = state.runs[runId]
-      if (runEntry && state.connection !== 'drift') {
+      if (runEntry && state.connection === 'live') {
         const view = toSafeRunView(runEntry)
-        statusEl.textContent = view.status
-        // Update status class for styling
+        // F6: render label from local map, never the raw wire string into textContent
+        const label = STATUS_LABELS[view.status] ?? ''
+        statusEl.textContent = label
+        // Update status class for styling — use allowlisted status value (no whitespace)
         statusEl.className = statusEl.className.replaceAll(/\bstatus-\S+/g, '')
         statusEl.classList.add(`status-${view.status.replaceAll('_', '-')}`)
       }
@@ -421,6 +531,9 @@ export function initOperatorStream(opts) {
   }
 
   function connect() {
+    // F9: don't fetch if close() was called
+    if (aborted) return
+
     abortController = new AbortController()
     const signal = abortController.signal
 
@@ -429,6 +542,7 @@ export function initOperatorStream(opts) {
 
     fetch(path, {
       credentials: 'include',
+      redirect: 'error', // F7: prevent auth-redirect loops
       signal,
       headers: {accept: 'text/event-stream'},
     })
@@ -446,6 +560,12 @@ export function initOperatorStream(opts) {
           scheduleReconnect()
           return
         }
+        // F7: Require Content-Type text/event-stream on 200
+        const contentType = response.headers.get('content-type') ?? ''
+        if (!contentType.startsWith('text/event-stream')) {
+          dispatch({type: 'network-error'})
+          return
+        }
         if (!response.body) {
           dispatch({type: 'network-error'})
           scheduleReconnect()
@@ -461,6 +581,14 @@ export function initOperatorStream(opts) {
             .read()
             .then(({done, value}) => {
               if (done) {
+                // F4: Flush remaining buffer before handling done
+                if (buffer.trim() !== '') {
+                  const flushResult = parseSseFrame(`${buffer}\n\n`)
+                  if (flushResult !== null && flushResult.success) {
+                    dispatch(flushResult.frame)
+                  }
+                  buffer = ''
+                }
                 // Stream ended — check if we should reconnect
                 if (state.shouldReconnect) {
                   scheduleReconnect()
@@ -471,7 +599,14 @@ export function initOperatorStream(opts) {
               }
 
               if (value) {
-                buffer += decoder.decode(value, {stream: true})
+                // F1: normalize CRLF on each appended chunk
+                buffer += normalizeCrlf(decoder.decode(value, {stream: true}))
+              }
+
+              // F2: Hard buffer cap — abort + failed if exceeded without boundary
+              if (buffer.length > MAX_SSE_BUFFER_BYTES) {
+                dispatch({type: 'network-error'})
+                return
               }
 
               // Process complete SSE records (terminated by \n\n)
@@ -490,7 +625,12 @@ export function initOperatorStream(opts) {
               }
 
               // Continue reading if still connected
-              if (state.connection !== 'closed' && state.connection !== 'failed' && state.connection !== 'not-found') {
+              if (
+                state.connection !== 'closed' &&
+                state.connection !== 'failed' &&
+                state.connection !== 'not-found' &&
+                state.connection !== 'drift' // F5b: stop reading on drift
+              ) {
                 readChunk()
               }
             })
@@ -516,8 +656,10 @@ export function initOperatorStream(opts) {
 
   function scheduleReconnect() {
     if (!state.shouldReconnect) return
-    const delay = backoffDelay(state.retryCount - 1)
-    setTimeout(connect, delay)
+    if (aborted) return // F9: don't schedule if close() was called
+    // F8: use backoffDelay(retryCount) — retryCount >= 0 → 1000ms on first retry
+    const delay = backoffDelay(state.retryCount)
+    reconnectTimer = setTimeout(connect, delay)
   }
 
   // Start the connection
@@ -526,6 +668,12 @@ export function initOperatorStream(opts) {
   // Return a handle to allow external abort (e.g. page unload)
   return {
     close() {
+      aborted = true // F9: prevent late timer from fetching
+      // F9: clear any pending reconnect timer
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer)
+        reconnectTimer = null
+      }
       if (abortController) {
         abortController.abort()
       }

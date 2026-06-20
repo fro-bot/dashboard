@@ -149,6 +149,10 @@ function runStatusSection(): ReturnType<typeof html> {
           <span class="mono">${run.runId}</span>
         </div>
         <div style="font-size:0.8rem;color:#6b7280;">
+          <!-- When live run data is wired, repo identity must pass the redaction/denylist
+               gate before rendering here. The live path must not render a repo name
+               received from the stream without first checking it against the redacted
+               node-id set from the data branch. -->
           <span>${run.owner}/${run.repo}</span>
           · <span>Created: ${run.createdAt}</span>
           ${run.updatedAt == null ? '' : html` · <span>Updated: ${run.updatedAt}</span>`}

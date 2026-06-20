@@ -15,11 +15,47 @@
  * - 429 → typed rate-limited error.
  * - Network throw / abort → network-style error, fail closed.
  * - Fetch uses credentials:'include' and Accept: text/event-stream.
+ * - redirect:'error' prevents auth-redirect loops from being parsed as streams.
+ * - Content-Type must be text/event-stream on 200; otherwise fail closed.
+ * - Path must be a relative /operator/runs/ path; absolute URLs rejected.
+ * - Buffer is capped at MAX_SSE_BUFFER_BYTES; overflow → fail closed.
  */
 
 import type {Logger} from '../logger.ts'
 import type {ResetReason, RunStreamFrame} from './operator-contract/sse-frames.ts'
 import {OPERATOR_CONTRACT_VERSION} from './operator-contract/version.ts'
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/** Hard cap on the incremental SSE buffer. Overflow → fail closed. */
+export const MAX_SSE_BUFFER_BYTES = 1_000_000
+
+// ---------------------------------------------------------------------------
+// Allowlists for value-gated fields (F6)
+// ---------------------------------------------------------------------------
+
+const VALID_STATUSES: ReadonlySet<string> = new Set([
+  'queued',
+  'blocked',
+  'running',
+  'waiting_for_approval',
+  'succeeded',
+  'failed',
+  'cancelled',
+])
+
+const VALID_PHASES: ReadonlySet<string> = new Set([
+  'PENDING',
+  'ACKNOWLEDGED',
+  'EXECUTING',
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+])
+
+const VALID_SURFACES: ReadonlySet<string> = new Set(['github', 'discord', 'web'])
 
 // ---------------------------------------------------------------------------
 // Parse result types
@@ -48,6 +84,15 @@ const VALID_RESET_REASONS: ReadonlySet<string> = new Set<ResetReason>([
 
 function isValidResetReason(value: unknown): value is ResetReason {
   return typeof value === 'string' && VALID_RESET_REASONS.has(value)
+}
+
+/**
+ * Normalize CRLF and lone CR line endings to LF in an SSE buffer chunk.
+ * Must be applied before searching for record boundaries.
+ */
+function normalizeCrlf(text: string): string {
+  // Replace \r\n first (order matters — avoids double-replacing the \r)
+  return text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
 }
 
 /**
@@ -109,7 +154,7 @@ function parseSseRecord(record: string): SseParseResult | null {
   }
 
   if (eventName === 'status') {
-    // Validate required OperatorRunStatus fields
+    // Validate required OperatorRunStatus fields — type check first
     if (
       typeof candidate.runId !== 'string' ||
       typeof candidate.entityRef !== 'string' ||
@@ -120,6 +165,16 @@ function parseSseRecord(record: string): SseParseResult | null {
       typeof candidate.stale !== 'boolean'
     ) {
       return {success: false, error: new Error('status frame missing required fields')}
+    }
+    // Allowlist-gate the enumerated fields (F6) — fail closed on out-of-set values
+    if (!VALID_STATUSES.has(candidate.status)) {
+      return {success: false, error: new Error('status frame status value not in allowlist')}
+    }
+    if (!VALID_PHASES.has(candidate.phase)) {
+      return {success: false, error: new Error('status frame phase value not in allowlist')}
+    }
+    if (!VALID_SURFACES.has(candidate.surface)) {
+      return {success: false, error: new Error('status frame surface value not in allowlist')}
     }
     return {
       success: true,
@@ -165,9 +220,11 @@ function parseSseRecord(record: string): SseParseResult | null {
  * per non-comment record. Comment-only records (heartbeats) produce no entry.
  *
  * Exported as a pure function so tests can drive it directly with raw bytes.
+ * Input is normalized for CRLF before splitting.
  */
 export function parseSseChunk(text: string): SseParseResult[] {
-  const records = text.split('\n\n')
+  const normalized = normalizeCrlf(text)
+  const records = normalized.split('\n\n')
   const results: SseParseResult[] = []
 
   for (const record of records) {
@@ -220,15 +277,19 @@ export interface OperatorSseReaderOptions {
  * Create a fetch-based SSE reader for the operator run stream.
  *
  * The returned reader's open() method:
- * 1. Fetches the given path with credentials:'include' and Accept: text/event-stream.
- * 2. Branches on HTTP status: 200 → stream; 404 → not-found; 429 → rate-limited;
+ * 1. Validates the path is a relative /operator/runs/ path (no absolute URLs).
+ * 2. Fetches the given path with credentials:'include', redirect:'error', and
+ *    Accept: text/event-stream.
+ * 3. Branches on HTTP status: 200 → stream; 404 → not-found; 429 → rate-limited;
  *    other → network-style error. All non-200 paths call onError then onClose.
- * 3. On 200, reads the body as a ReadableStream, feeds an incremental SSE parser,
- *    and dispatches each RunStreamFrame via onEvent.
- * 4. Enforces the contract-version gate: the first frame must be 'ready' with
- *    contractVersion === OPERATOR_CONTRACT_VERSION. A mismatch triggers a
- *    fail-closed drift error (onError) and stops all further frame dispatch.
- * 5. On stream end, calls onClose.
+ * 4. On 200, verifies Content-Type is text/event-stream; otherwise fail closed.
+ * 5. Reads the body as a ReadableStream, feeds an incremental SSE parser with
+ *    CRLF normalization and a hard buffer cap (MAX_SSE_BUFFER_BYTES).
+ * 6. Enforces the contract-version gate via handleFrame(): the first frame must
+ *    be 'ready' with contractVersion === OPERATOR_CONTRACT_VERSION. A mismatch
+ *    triggers a fail-closed drift error and stops all further frame dispatch.
+ *    Both the streaming path and the EOF flush path go through handleFrame().
+ * 7. On stream end, calls onClose.
  *
  * Security: never logs the dynamic runId or path — only the route template.
  * Never includes response body text in errors (no-oracle).
@@ -242,11 +303,24 @@ export function createOperatorSseReader(options: OperatorSseReaderOptions = {}):
   async function open(path: string, opts: SseReaderOpenOptions): Promise<void> {
     const {onEvent, onError, onClose, signal} = opts
 
+    // F11: Validate path is a relative /operator/runs/ path — no absolute URLs, no //
+    if (
+      !path.startsWith('/operator/runs/') ||
+      path.startsWith('//') ||
+      /^[a-z][a-z\d+\-.]*:/i.test(path)
+    ) {
+      logger?.error('sse-reader: rejected invalid path', {route: ROUTE_TEMPLATE})
+      onError(new Error('network error: invalid stream path'))
+      onClose()
+      return
+    }
+
     // Fetch the SSE stream
     let response: Response
     try {
       response = await fetchImpl(path, {
         credentials: 'include',
+        redirect: 'error', // F7: prevent auth-redirect loops
         signal,
         headers: {accept: 'text/event-stream'},
       })
@@ -280,6 +354,15 @@ export function createOperatorSseReader(options: OperatorSseReaderOptions = {}):
       return
     }
 
+    // F7: Require Content-Type text/event-stream on 200
+    const contentType = response.headers.get('content-type') ?? ''
+    if (!contentType.startsWith('text/event-stream')) {
+      logger?.error('sse-reader: unexpected content-type', {route: ROUTE_TEMPLATE})
+      onError(new Error('network error: unexpected content-type'))
+      onClose()
+      return
+    }
+
     // 200 — read the body as a ReadableStream
     if (response.body === null) {
       logger?.error('sse-reader: response body is null', {route: ROUTE_TEMPLATE})
@@ -292,6 +375,44 @@ export function createOperatorSseReader(options: OperatorSseReaderOptions = {}):
     let buffer = ''
     let contractVerified = false
     let drifted = false
+
+    /**
+     * Unified frame handler — enforces the contract-version gate for BOTH the
+     * streaming path and the EOF flush path. Returns false if the reader should
+     * stop (drift detected).
+     */
+    function handleFrame(result: SseParseResult): boolean {
+      if (!result.success) {
+        logger?.error('sse-reader: frame parse failure', {route: ROUTE_TEMPLATE})
+        return true // continue reading
+      }
+
+      const frame = result.frame
+
+      // Contract-version gate
+      if (!contractVerified) {
+        if (frame.type !== 'ready') {
+          logger?.error('sse-reader: first frame is not ready', {route: ROUTE_TEMPLATE})
+          drifted = true
+          onError(new Error('contract-drift: first frame was not a ready frame'))
+          onClose()
+          return false // stop
+        }
+        if (frame.data.contractVersion !== OPERATOR_CONTRACT_VERSION) {
+          logger?.error('sse-reader: contract version mismatch', {route: ROUTE_TEMPLATE})
+          drifted = true
+          onError(new Error('contract-drift: server contract version does not match client'))
+          onClose()
+          return false // stop
+        }
+        contractVerified = true
+      }
+
+      if (drifted) return true // absorb
+
+      onEvent(frame)
+      return true // continue
+    }
 
     try {
       const reader = response.body.getReader()
@@ -314,12 +435,19 @@ export function createOperatorSseReader(options: OperatorSseReaderOptions = {}):
         if (done) break
 
         if (value !== undefined) {
-          buffer += decoder.decode(value, {stream: true})
+          // Normalize CRLF on each appended chunk before boundary search
+          buffer += normalizeCrlf(decoder.decode(value, {stream: true}))
+        }
+
+        // F2: Hard buffer cap — fail closed if exceeded without a boundary
+        if (buffer.length > MAX_SSE_BUFFER_BYTES) {
+          logger?.error('sse-reader: buffer overflow', {route: ROUTE_TEMPLATE})
+          onError(new Error('network error: stream buffer overflow'))
+          onClose()
+          return
         }
 
         // Extract complete SSE records (terminated by \n\n)
-        // We process all complete records in the buffer, leaving any partial
-        // record in the buffer for the next chunk.
         let boundary = buffer.indexOf('\n\n')
         while (boundary !== -1) {
           const record = buffer.slice(0, boundary)
@@ -327,55 +455,21 @@ export function createOperatorSseReader(options: OperatorSseReaderOptions = {}):
 
           const results = parseSseChunk(`${record}\n\n`)
           for (const result of results) {
-            if (!result.success) {
-              // Parse failure — log and skip (fail closed for this frame)
-              logger?.error('sse-reader: frame parse failure', {route: ROUTE_TEMPLATE})
-              continue
-            }
-
-            const frame = result.frame
-
-            // Contract-version gate
-            if (!contractVerified) {
-              if (frame.type !== 'ready') {
-                // First frame must be 'ready' — fail closed
-                logger?.error('sse-reader: first frame is not ready', {route: ROUTE_TEMPLATE})
-                drifted = true
-                onError(new Error('contract-drift: first frame was not a ready frame'))
-                onClose()
-                return
-              }
-              if (frame.data.contractVersion !== OPERATOR_CONTRACT_VERSION) {
-                // Version mismatch — fail closed
-                logger?.error('sse-reader: contract version mismatch', {route: ROUTE_TEMPLATE})
-                drifted = true
-                onError(new Error('contract-drift: server contract version does not match client'))
-                onClose()
-                return
-              }
-              contractVerified = true
-            }
-
-            if (drifted) continue
-
-            onEvent(frame)
+            const shouldContinue = handleFrame(result)
+            if (!shouldContinue) return
           }
 
           boundary = buffer.indexOf('\n\n')
         }
       }
 
-      // Flush any remaining buffer content (handles streams that don't end with \n\n)
+      // F4/F5: Flush any remaining buffer content through the unified handleFrame path
+      // (handles streams that don't end with \n\n)
       if (buffer.trim() !== '') {
         const results = parseSseChunk(`${buffer}\n\n`)
         for (const result of results) {
-          if (!result.success) {
-            logger?.error('sse-reader: frame parse failure in flush', {route: ROUTE_TEMPLATE})
-            continue
-          }
-          if (!drifted) {
-            onEvent(result.frame)
-          }
+          const shouldContinue = handleFrame(result)
+          if (!shouldContinue) return
         }
       }
     } catch {

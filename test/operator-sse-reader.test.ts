@@ -15,7 +15,7 @@
 import type {RunStreamFrame} from '../src/gateway/operator-contract/sse-frames.ts'
 import type {Logger} from '../src/logger.ts'
 import {describe, expect, it, vi} from 'vitest'
-import {createOperatorSseReader, parseSseChunk} from '../src/gateway/operator-sse-reader.ts'
+import {createOperatorSseReader, MAX_SSE_BUFFER_BYTES, parseSseChunk} from '../src/gateway/operator-sse-reader.ts'
 
 // ---------------------------------------------------------------------------
 // Helpers: build a fake ReadableStream from text chunks
@@ -835,5 +835,468 @@ describe('createOperatorSseReader — callback discipline', () => {
     })
 
     expect(onClose).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F1 — CRLF line-ending normalization (pure parser)
+// ---------------------------------------------------------------------------
+
+describe('parseSseChunk — CRLF normalization', () => {
+  it('parses a ready frame delimited by CRLF record separators', () => {
+    const text = 'event: ready\r\ndata: {"contractVersion":"1.1.0"}\r\n\r\n'
+    const results = parseSseChunk(text)
+    expect(results).toHaveLength(1)
+    expect(results[0]?.success).toBe(true)
+    if (results[0]?.success) {
+      expect(results[0].frame.type).toBe('ready')
+    }
+  })
+
+  it('parses a status frame delimited by CRLF identically to LF-only', () => {
+    const payload = {
+      runId: 'run-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'EXECUTING',
+      status: 'running',
+      startedAt: '2026-06-18T20:00:00Z',
+      stale: false,
+    }
+    const crlfText = `event: status\r\ndata: ${JSON.stringify(payload)}\r\n\r\n`
+    const lfText = `event: status\ndata: ${JSON.stringify(payload)}\n\n`
+    const crlfResults = parseSseChunk(crlfText)
+    const lfResults = parseSseChunk(lfText)
+    expect(crlfResults).toHaveLength(1)
+    expect(lfResults).toHaveLength(1)
+    expect(crlfResults[0]?.success).toBe(true)
+    expect(lfResults[0]?.success).toBe(true)
+    if (crlfResults[0]?.success && lfResults[0]?.success) {
+      expect(crlfResults[0].frame.type).toBe(lfResults[0].frame.type)
+      if (crlfResults[0].frame.type === 'status' && lfResults[0].frame.type === 'status') {
+        expect(crlfResults[0].frame.data.runId).toBe(lfResults[0].frame.data.runId)
+        expect(crlfResults[0].frame.data.status).toBe(lfResults[0].frame.data.status)
+      }
+    }
+  })
+
+  it('parses a reset frame delimited by CRLF record separators', () => {
+    const payload = {runId: 'run-001', reason: 'shutdown'}
+    const text = `event: reset\r\ndata: ${JSON.stringify(payload)}\r\n\r\n`
+    const results = parseSseChunk(text)
+    expect(results).toHaveLength(1)
+    expect(results[0]?.success).toBe(true)
+    if (results[0]?.success) {
+      expect(results[0].frame.type).toBe('reset')
+    }
+  })
+
+  it('parses a ready frame with lone CR line endings', () => {
+    const text = 'event: ready\rdata: {"contractVersion":"1.1.0"}\r\r'
+    const results = parseSseChunk(text)
+    expect(results).toHaveLength(1)
+    expect(results[0]?.success).toBe(true)
+    if (results[0]?.success) {
+      expect(results[0].frame.type).toBe('ready')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F1 — CRLF normalization in the streaming reader
+// ---------------------------------------------------------------------------
+
+describe('createOperatorSseReader — CRLF normalization in stream', () => {
+  it('parses ready+status frames delivered with CRLF delimiters', async () => {
+    const statusPayload = {
+      runId: 'run-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'EXECUTING',
+      status: 'running',
+      startedAt: '2026-06-18T20:00:00Z',
+      stale: false,
+    }
+    const sseText =
+      `event: ready\r\ndata: {"contractVersion":"1.1.0"}\r\n\r\n` +
+      `event: status\r\ndata: ${JSON.stringify(statusPayload)}\r\n\r\n`
+    const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseText]))
+    const reader = createOperatorSseReader({fetchImpl})
+
+    const events: RunStreamFrame[] = []
+    const errors: Error[] = []
+    await reader.open('/operator/runs/run-001/stream', {
+      onEvent: frame => events.push(frame),
+      onError: err => errors.push(err),
+      onClose: () => {},
+    })
+
+    expect(errors).toHaveLength(0)
+    expect(events).toHaveLength(2)
+    expect(events[0]?.type).toBe('ready')
+    expect(events[1]?.type).toBe('status')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F2 — Bounded incremental buffer (reader)
+// ---------------------------------------------------------------------------
+
+describe('createOperatorSseReader — buffer overflow', () => {
+  it('fails closed with onError+onClose when buffer exceeds MAX_SSE_BUFFER_BYTES without a boundary', async () => {
+    // A chunk larger than the cap with no \n\n boundary
+    const oversizedChunk = 'x'.repeat(MAX_SSE_BUFFER_BYTES + 1)
+    const {fetchImpl} = makeFakeFetch(makeResponse(200, [oversizedChunk]))
+    const reader = createOperatorSseReader({fetchImpl})
+
+    const errors: Error[] = []
+    let closed = false
+    await reader.open('/operator/runs/run-001/stream', {
+      onEvent: () => {},
+      onError: err => errors.push(err),
+      onClose: () => { closed = true },
+    })
+
+    expect(errors).toHaveLength(1)
+    // Error must not echo buffer contents (no-oracle)
+    expect(errors[0]?.message).not.toContain('x'.repeat(10))
+    expect(closed).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F5 — first-frame-must-be-ready: flush path goes through handleFrame
+// ---------------------------------------------------------------------------
+
+describe('createOperatorSseReader — flush path contract gate', () => {
+  it('flush of a status-only buffer with no prior ready dispatches nothing', async () => {
+    // Stream ends without \n\n — the flush path must enforce the contract gate
+    const statusPayload = {
+      runId: 'run-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'EXECUTING',
+      status: 'running',
+      startedAt: '2026-06-18T20:00:00Z',
+      stale: false,
+    }
+    // No trailing \n\n — triggers the flush path; no ready frame precedes it
+    const sseText = `event: status\ndata: ${JSON.stringify(statusPayload)}`
+    const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseText]))
+    const reader = createOperatorSseReader({fetchImpl})
+
+    const events: RunStreamFrame[] = []
+    const errors: Error[] = []
+    await reader.open('/operator/runs/run-001/stream', {
+      onEvent: frame => events.push(frame),
+      onError: err => errors.push(err),
+      onClose: () => {},
+    })
+
+    // First frame is not ready → drift → no status dispatched
+    expect(errors).toHaveLength(1)
+    expect(errors[0]?.message).toContain('contract-drift')
+    const statusFrames = events.filter(e => e.type === 'status')
+    expect(statusFrames).toHaveLength(0)
+  })
+
+  it('flush of a complete frame without trailing blank line dispatches the frame', async () => {
+    // Stream ends without \n\n but has a complete ready frame
+    const sseText = 'event: ready\ndata: {"contractVersion":"1.1.0"}'
+    const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseText]))
+    const reader = createOperatorSseReader({fetchImpl})
+
+    const events: RunStreamFrame[] = []
+    const errors: Error[] = []
+    await reader.open('/operator/runs/run-001/stream', {
+      onEvent: frame => events.push(frame),
+      onError: err => errors.push(err),
+      onClose: () => {},
+    })
+
+    expect(errors).toHaveLength(0)
+    expect(events).toHaveLength(1)
+    expect(events[0]?.type).toBe('ready')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F6 — Value-allowlist for status/phase/surface (reader)
+// ---------------------------------------------------------------------------
+
+describe('createOperatorSseReader — allowlist gate for status/phase/surface', () => {
+  it('rejects a status frame with an out-of-allowlist status value — not dispatched', async () => {
+    const payload = {
+      runId: 'run-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'EXECUTING',
+      status: 'fro-bot/private-repo leak',
+      startedAt: '2026-06-18T20:00:00Z',
+      stale: false,
+    }
+    const sseText =
+      `event: ready\ndata: {"contractVersion":"1.1.0"}\n\n` +
+      `event: status\ndata: ${JSON.stringify(payload)}\n\n`
+    const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseText]))
+    const reader = createOperatorSseReader({fetchImpl})
+
+    const events: RunStreamFrame[] = []
+    const errors: Error[] = []
+    await reader.open('/operator/runs/run-001/stream', {
+      onEvent: frame => events.push(frame),
+      onError: err => errors.push(err),
+      onClose: () => {},
+    })
+
+    // ready dispatched, status rejected
+    expect(errors).toHaveLength(0)
+    const statusFrames = events.filter(e => e.type === 'status')
+    expect(statusFrames).toHaveLength(0)
+    // The hostile value must not appear in any error
+    for (const err of errors) {
+      expect(err.message).not.toContain('private-repo')
+    }
+  })
+
+  it('rejects a status frame with an out-of-allowlist phase value', async () => {
+    const payload = {
+      runId: 'run-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'UNKNOWN_PHASE',
+      status: 'running',
+      startedAt: '2026-06-18T20:00:00Z',
+      stale: false,
+    }
+    const sseText =
+      `event: ready\ndata: {"contractVersion":"1.1.0"}\n\n` +
+      `event: status\ndata: ${JSON.stringify(payload)}\n\n`
+    const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseText]))
+    const reader = createOperatorSseReader({fetchImpl})
+
+    const events: RunStreamFrame[] = []
+    await reader.open('/operator/runs/run-001/stream', {
+      onEvent: frame => events.push(frame),
+      onError: () => {},
+      onClose: () => {},
+    })
+
+    const statusFrames = events.filter(e => e.type === 'status')
+    expect(statusFrames).toHaveLength(0)
+  })
+
+  it('rejects a status frame with an out-of-allowlist surface value', async () => {
+    const payload = {
+      runId: 'run-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'unknown-surface',
+      phase: 'EXECUTING',
+      status: 'running',
+      startedAt: '2026-06-18T20:00:00Z',
+      stale: false,
+    }
+    const sseText =
+      `event: ready\ndata: {"contractVersion":"1.1.0"}\n\n` +
+      `event: status\ndata: ${JSON.stringify(payload)}\n\n`
+    const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseText]))
+    const reader = createOperatorSseReader({fetchImpl})
+
+    const events: RunStreamFrame[] = []
+    await reader.open('/operator/runs/run-001/stream', {
+      onEvent: frame => events.push(frame),
+      onError: () => {},
+      onClose: () => {},
+    })
+
+    const statusFrames = events.filter(e => e.type === 'status')
+    expect(statusFrames).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F6 — Value-allowlist in parseSseChunk
+// ---------------------------------------------------------------------------
+
+describe('parseSseChunk — allowlist gate for status/phase/surface', () => {
+  it('returns a parse failure for a status frame with out-of-allowlist status', () => {
+    const payload = {
+      runId: 'run-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'EXECUTING',
+      status: 'fro-bot/private-repo leak',
+      startedAt: '2026-06-18T20:00:00Z',
+      stale: false,
+    }
+    const text = `event: status\ndata: ${JSON.stringify(payload)}\n\n`
+    const results = parseSseChunk(text)
+    expect(results).toHaveLength(1)
+    expect(results[0]?.success).toBe(false)
+    // Must not echo the hostile value
+    if (results[0] !== undefined && !results[0].success) {
+      expect(results[0].error.message).not.toContain('private-repo')
+    }
+  })
+
+  it('returns a parse failure for a status frame with out-of-allowlist phase', () => {
+    const payload = {
+      runId: 'run-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'UNKNOWN_PHASE',
+      status: 'running',
+      startedAt: '2026-06-18T20:00:00Z',
+      stale: false,
+    }
+    const text = `event: status\ndata: ${JSON.stringify(payload)}\n\n`
+    const results = parseSseChunk(text)
+    expect(results).toHaveLength(1)
+    expect(results[0]?.success).toBe(false)
+  })
+
+  it('returns a parse failure for a status frame with out-of-allowlist surface', () => {
+    const payload = {
+      runId: 'run-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'unknown-surface',
+      phase: 'EXECUTING',
+      status: 'running',
+      startedAt: '2026-06-18T20:00:00Z',
+      stale: false,
+    }
+    const text = `event: status\ndata: ${JSON.stringify(payload)}\n\n`
+    const results = parseSseChunk(text)
+    expect(results).toHaveLength(1)
+    expect(results[0]?.success).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F7 — redirect:'error' + content-type check (reader)
+// ---------------------------------------------------------------------------
+
+describe('createOperatorSseReader — redirect and content-type', () => {
+  it('sets redirect:error on the outgoing fetch init', async () => {
+    const {fetchImpl, calls} = makeFakeFetch(makeEmptyResponse(404))
+    const reader = createOperatorSseReader({fetchImpl})
+
+    await reader.open('/operator/runs/run-001/stream', {
+      onEvent: () => {},
+      onError: () => {},
+      onClose: () => {},
+    })
+
+    expect(calls[0]?.init?.redirect).toBe('error')
+  })
+
+  it('fails closed when 200 response has non-event-stream content-type', async () => {
+    const response = new Response(makeStreamBody(['data: {}\n\n']), {
+      status: 200,
+      headers: {'content-type': 'text/html; charset=utf-8'},
+    })
+    const {fetchImpl} = makeFakeFetch(response)
+    const reader = createOperatorSseReader({fetchImpl})
+
+    const errors: Error[] = []
+    let closed = false
+    await reader.open('/operator/runs/run-001/stream', {
+      onEvent: () => {},
+      onError: err => errors.push(err),
+      onClose: () => { closed = true },
+    })
+
+    expect(errors).toHaveLength(1)
+    expect(closed).toBe(true)
+  })
+
+  it('fails closed when 200 response has application/json content-type', async () => {
+    const response = new Response(makeStreamBody(['{"error":"unauthorized"}\n\n']), {
+      status: 200,
+      headers: {'content-type': 'application/json'},
+    })
+    const {fetchImpl} = makeFakeFetch(response)
+    const reader = createOperatorSseReader({fetchImpl})
+
+    const errors: Error[] = []
+    let closed = false
+    await reader.open('/operator/runs/run-001/stream', {
+      onEvent: () => {},
+      onError: err => errors.push(err),
+      onClose: () => { closed = true },
+    })
+
+    expect(errors).toHaveLength(1)
+    expect(closed).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F11 — open() path-prefix validation
+// ---------------------------------------------------------------------------
+
+describe('createOperatorSseReader — path validation', () => {
+  it('rejects an absolute URL — no fetch issued, fails closed', async () => {
+    const {fetchImpl, calls} = makeFakeFetch(makeEmptyResponse(200))
+    const reader = createOperatorSseReader({fetchImpl})
+
+    const errors: Error[] = []
+    let closed = false
+    await reader.open('https://evil.example.com/operator/runs/run-001/stream', {
+      onEvent: () => {},
+      onError: err => errors.push(err),
+      onClose: () => { closed = true },
+    })
+
+    expect(calls).toHaveLength(0)
+    expect(errors).toHaveLength(1)
+    expect(closed).toBe(true)
+  })
+
+  it('rejects a protocol-relative URL (//evil) — no fetch issued, fails closed', async () => {
+    const {fetchImpl, calls} = makeFakeFetch(makeEmptyResponse(200))
+    const reader = createOperatorSseReader({fetchImpl})
+
+    const errors: Error[] = []
+    let closed = false
+    await reader.open('//evil.example.com/operator/runs/run-001/stream', {
+      onEvent: () => {},
+      onError: err => errors.push(err),
+      onClose: () => { closed = true },
+    })
+
+    expect(calls).toHaveLength(0)
+    expect(errors).toHaveLength(1)
+    expect(closed).toBe(true)
+  })
+
+  it('rejects a non-/operator/runs/ relative path — no fetch issued, fails closed', async () => {
+    const {fetchImpl, calls} = makeFakeFetch(makeEmptyResponse(200))
+    const reader = createOperatorSseReader({fetchImpl})
+
+    const errors: Error[] = []
+    let closed = false
+    await reader.open('/api/some-other-endpoint', {
+      onEvent: () => {},
+      onError: err => errors.push(err),
+      onClose: () => { closed = true },
+    })
+
+    expect(calls).toHaveLength(0)
+    expect(errors).toHaveLength(1)
+    expect(closed).toBe(true)
+  })
+
+  it('accepts a valid /operator/runs/ relative path', async () => {
+    const {fetchImpl, calls} = makeFakeFetch(makeEmptyResponse(404))
+    const reader = createOperatorSseReader({fetchImpl})
+
+    await reader.open('/operator/runs/run-001/stream', {
+      onEvent: () => {},
+      onError: () => {},
+      onClose: () => {},
+    })
+
+    expect(calls).toHaveLength(1)
   })
 })

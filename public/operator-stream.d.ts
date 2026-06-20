@@ -13,6 +13,7 @@ export declare const PINNED_CONTRACT_VERSION: string
 export declare const RETRY_BASE_MS: number
 export declare const RETRY_FACTOR: number
 export declare const RETRY_MAX_COUNT: number
+export declare const MAX_SSE_BUFFER_BYTES: number
 
 // ---------------------------------------------------------------------------
 // Frame types (mirrors src/gateway/operator-contract/sse-frames.ts shapes)

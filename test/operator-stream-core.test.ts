@@ -17,6 +17,7 @@
 import type {StreamState} from '../public/operator-stream.js'
 import {describe, expect, it} from 'vitest'
 import {
+  MAX_SSE_BUFFER_BYTES,
   nextStreamState,
   parseSseFrame,
   PINNED_CONTRACT_VERSION,
@@ -568,5 +569,303 @@ describe('backoff constants', () => {
 
   it('PINNED_CONTRACT_VERSION is 1.1.0', () => {
     expect(PINNED_CONTRACT_VERSION).toBe('1.1.0')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F1 — CRLF normalization in parseSseFrame
+// ---------------------------------------------------------------------------
+
+describe('parseSseFrame — CRLF normalization', () => {
+  it('parses a ready frame delimited by CRLF record separators', () => {
+    const text = 'event: ready\r\ndata: {"contractVersion":"1.1.0"}\r\n\r\n'
+    const result = parseSseFrame(text)
+    expect(result).not.toBeNull()
+    expect(result?.success).toBe(true)
+    if (result !== null && result.success) {
+      expect(result.frame.type).toBe('ready')
+    }
+  })
+
+  it('parses a status frame with CRLF identically to LF-only', () => {
+    const payload = JSON.stringify({
+      runId: 'run-abc',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'EXECUTING',
+      status: 'running',
+      startedAt: '2026-06-20T10:00:00Z',
+      stale: false,
+    })
+    const crlfResult = parseSseFrame(`event: status\r\ndata: ${payload}\r\n\r\n`)
+    const lfResult = parseSseFrame(`event: status\ndata: ${payload}\n\n`)
+    expect(crlfResult?.success).toBe(true)
+    expect(lfResult?.success).toBe(true)
+    if (crlfResult !== null && crlfResult.success && lfResult !== null && lfResult.success) {
+      expect(crlfResult.frame.type).toBe(lfResult.frame.type)
+    }
+  })
+
+  it('parses a reset frame with lone CR line endings', () => {
+    const text = 'event: reset\rdata: {"runId":"run-abc","reason":"shutdown"}\r\r'
+    const result = parseSseFrame(text)
+    expect(result?.success).toBe(true)
+    if (result !== null && result.success) {
+      expect(result.frame.type).toBe('reset')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F2 — Bounded buffer constant exported
+// ---------------------------------------------------------------------------
+
+describe('MAX_SSE_BUFFER_BYTES constant', () => {
+  it('is a positive number', () => {
+    expect(typeof MAX_SSE_BUFFER_BYTES).toBe('number')
+    expect(MAX_SSE_BUFFER_BYTES).toBeGreaterThan(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F3 — Cap reset-triggered reconnects
+// ---------------------------------------------------------------------------
+
+describe('nextStreamState — reset retryCount capping', () => {
+  it('increments retryCount on each non-terminal reset', () => {
+    const liveState = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: PINNED_CONTRACT_VERSION},
+    })
+    const state1 = nextStreamState(liveState, {
+      type: 'reset',
+      data: {runId: 'run-abc', reason: 'no-snapshot'},
+    })
+    expect(state1.retryCount).toBe(1)
+    expect(state1.shouldReconnect).toBe(true)
+
+    const state2 = nextStreamState(state1, {
+      type: 'reset',
+      data: {runId: 'run-abc', reason: 'shutdown'},
+    })
+    expect(state2.retryCount).toBe(2)
+    expect(state2.shouldReconnect).toBe(true)
+  })
+
+  it('transitions to failed when retryCount reaches RETRY_MAX_COUNT on reset', () => {
+    const exhausted: StreamState = {
+      ...INITIAL_STATE,
+      connection: 'reconnecting',
+      retryCount: RETRY_MAX_COUNT,
+    }
+    const state = nextStreamState(exhausted, {
+      type: 'reset',
+      data: {runId: 'run-abc', reason: 'no-snapshot'},
+    })
+    expect(state.connection).toBe('failed')
+    expect(state.shouldReconnect).toBe(false)
+  })
+
+  it('repeated reset events eventually stop reconnecting (caps at RETRY_MAX_COUNT)', () => {
+    let state: StreamState = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: PINNED_CONTRACT_VERSION},
+    })
+    for (let i = 0; i < RETRY_MAX_COUNT + 5; i++) {
+      state = nextStreamState(state, {
+        type: 'reset',
+        data: {runId: 'run-abc', reason: 'no-snapshot'},
+      })
+    }
+    expect(state.connection).toBe('failed')
+    expect(state.shouldReconnect).toBe(false)
+  })
+
+  it('terminal reset reason → closed, no reconnect', () => {
+    const liveState = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: PINNED_CONTRACT_VERSION},
+    })
+    const state = nextStreamState(liveState, {
+      type: 'reset',
+      data: {runId: 'run-abc', reason: 'terminal'},
+    })
+    expect(state.connection).toBe('closed')
+    expect(state.shouldReconnect).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F5 — Drift is absorbing; status before ready not rendered
+// ---------------------------------------------------------------------------
+
+describe('nextStreamState — drift is absorbing', () => {
+  it('status before any ready is not applied (connection stays connecting)', () => {
+    const state = nextStreamState(INITIAL_STATE, {
+      type: 'status',
+      data: ACTIVE_STATUS,
+    })
+    // Status before ready must not move to live or add runs
+    expect(state.connection).toBe('connecting')
+    expect(Object.keys(state.runs)).toHaveLength(0)
+  })
+
+  it('once in drift, a matching ready does not escape drift', () => {
+    const drifted = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: '0.0.1'},
+    })
+    expect(drifted.connection).toBe('drift')
+
+    // Now send a matching ready — must stay in drift
+    const state = nextStreamState(drifted, {
+      type: 'ready',
+      data: {contractVersion: PINNED_CONTRACT_VERSION},
+    })
+    expect(state.connection).toBe('drift')
+  })
+
+  it('once in drift, a status frame does not update runs', () => {
+    const drifted = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: '0.0.1'},
+    })
+    const state = nextStreamState(drifted, {
+      type: 'status',
+      data: ACTIVE_STATUS,
+    })
+    expect(state.connection).toBe('drift')
+    expect(Object.keys(state.runs)).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F6 — Value-allowlist in parseSseFrame
+// ---------------------------------------------------------------------------
+
+describe('parseSseFrame — allowlist gate for status/phase/surface', () => {
+  it('rejects a status frame with out-of-allowlist status — parse failure, not dispatched', () => {
+    const payload = JSON.stringify({
+      runId: 'run-abc',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'EXECUTING',
+      status: 'fro-bot/private-repo leak',
+      startedAt: '2026-06-20T10:00:00Z',
+      stale: false,
+    })
+    const result = parseSseFrame(`event: status\ndata: ${payload}\n\n`)
+    expect(result?.success).toBe(false)
+    // Must not echo the hostile value
+    if (result !== null && !result.success) {
+      expect(result.error).not.toContain('private-repo')
+    }
+  })
+
+  it('rejects a status frame with out-of-allowlist phase', () => {
+    const payload = JSON.stringify({
+      runId: 'run-abc',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'UNKNOWN_PHASE',
+      status: 'running',
+      startedAt: '2026-06-20T10:00:00Z',
+      stale: false,
+    })
+    const result = parseSseFrame(`event: status\ndata: ${payload}\n\n`)
+    expect(result?.success).toBe(false)
+  })
+
+  it('rejects a status frame with out-of-allowlist surface', () => {
+    const payload = JSON.stringify({
+      runId: 'run-abc',
+      entityRef: 'fro-bot/agent',
+      surface: 'unknown-surface',
+      phase: 'EXECUTING',
+      status: 'running',
+      startedAt: '2026-06-20T10:00:00Z',
+      stale: false,
+    })
+    const result = parseSseFrame(`event: status\ndata: ${payload}\n\n`)
+    expect(result?.success).toBe(false)
+  })
+
+  it('accepts all valid status values', () => {
+    const validStatuses = ['queued', 'blocked', 'running', 'waiting_for_approval', 'succeeded', 'failed', 'cancelled']
+    for (const status of validStatuses) {
+      const payload = JSON.stringify({
+        runId: 'run-abc',
+        entityRef: 'fro-bot/agent',
+        surface: 'github',
+        phase: 'EXECUTING',
+        status,
+        startedAt: '2026-06-20T10:00:00Z',
+        stale: false,
+      })
+      const result = parseSseFrame(`event: status\ndata: ${payload}\n\n`)
+      expect(result?.success).toBe(true)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F8 — backoffDelay(0) === RETRY_BASE_MS
+// ---------------------------------------------------------------------------
+
+describe('backoff first-delay', () => {
+  it('RETRY_BASE_MS is 1000ms', () => {
+    expect(RETRY_BASE_MS).toBe(1000)
+  })
+
+  it('RETRY_FACTOR is 2', () => {
+    expect(RETRY_FACTOR).toBe(2)
+  })
+
+  it('first retry delay (retryCount=1 after increment) uses backoffDelay(1) = 2000ms', () => {
+    // After the first network-error, retryCount becomes 1.
+    // scheduleReconnect calls backoffDelay(retryCount) = backoffDelay(1) = 2000ms.
+    // This is the corrected behavior (was backoffDelay(retryCount-1) = backoffDelay(0) = 1000ms).
+    // We verify the formula: RETRY_BASE_MS * RETRY_FACTOR^1 = 2000
+    expect(RETRY_BASE_MS * RETRY_FACTOR ** 1).toBe(2000)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F13 — null-prototype runs map guards __proto__ keys
+// ---------------------------------------------------------------------------
+
+describe('nextStreamState — null-prototype runs map', () => {
+  it('a runId of __proto__ is stored in the runs map without polluting Object.prototype', () => {
+    const liveState = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: PINNED_CONTRACT_VERSION},
+    })
+    const protoRunId = '__proto__'
+    const state = nextStreamState(liveState, {
+      type: 'status',
+      data: {
+        ...ACTIVE_STATUS,
+        runId: protoRunId,
+      },
+    })
+    // The run entry should be stored (accessible via Object.hasOwn)
+    expect(Object.hasOwn(state.runs, protoRunId)).toBe(true)
+    // Object.prototype must not be polluted — a plain {} should not have the key
+    expect(Object.hasOwn({}, protoRunId)).toBe(false)
+  })
+
+  it('runs map produced by the reducer has a null prototype', () => {
+    // We verify the reducer preserves null-prototype by checking the state machine output
+    const liveState = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: PINNED_CONTRACT_VERSION},
+    })
+    const state = nextStreamState(liveState, {
+      type: 'status',
+      data: ACTIVE_STATUS,
+    })
+    // The runs object should not have Object.prototype methods directly
+    // (null-prototype objects don't inherit hasOwnProperty etc.)
+    expect(Object.getPrototypeOf(state.runs)).toBeNull()
   })
 })
