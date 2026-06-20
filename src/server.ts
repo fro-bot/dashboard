@@ -147,6 +147,15 @@ export interface DashboardAppConfig {
    * Tests inject this directly to avoid env dependencies.
    */
   operatorUiEnabled?: boolean | undefined
+  /**
+   * Whether to use the gateway operator session for auth instead of Arctic.
+   * If undefined, reads from DASHBOARD_GATEWAY_OPERATOR_SESSION_ENABLED env (default: false).
+   * When false (default), the existing Arctic OAuth + signed-cookie session is used.
+   * When true, the gateway operator session path is used (Unit 3 wires the middleware).
+   * Tests inject this directly to avoid env dependencies.
+   * Independent of operatorUiEnabled (KTD5).
+   */
+  gatewayOperatorSessionEnabled?: boolean | undefined
 }
 
 /**
@@ -201,6 +210,14 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // When undefined, reads from env. Tests inject directly via opts.operatorUiEnabled.
   const operatorUiEnabled =
     opts?.operatorUiEnabled === undefined ? readOperatorUiConfig().enabled : opts.operatorUiEnabled
+
+  // NOTE: gatewayOperatorSessionEnabled resolution is deferred to Unit 3, which wires
+  // it into the auth middleware strategy branch. The reader (readGatewayOperatorSessionConfig)
+  // and the DashboardAppConfig field (opts.gatewayOperatorSessionEnabled) are staged here.
+  // Unit 3 adds: const gatewayOperatorSessionEnabled =
+  //   opts?.gatewayOperatorSessionEnabled === undefined
+  //     ? readGatewayOperatorSessionConfig().enabled
+  //     : opts.gatewayOperatorSessionEnabled
 
   const app = new Hono<{Variables: Variables}>()
 
