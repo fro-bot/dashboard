@@ -179,7 +179,7 @@ describe('createOperatorServerFetch — missing cookie rejects', () => {
 // ---------------------------------------------------------------------------
 
 describe('createOperatorServerFetch — rejects non-/operator targets', () => {
-  const cases: ReadonlyArray<readonly [string, string]> = [
+  const cases: readonly (readonly [string, string])[] = [
     ['absolute https URL', 'https://attacker.example/operator/session'],
     ['absolute http URL', 'http://attacker.example/operator/session'],
     ['protocol-relative URL', '//attacker.example/operator/session'],
