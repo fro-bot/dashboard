@@ -78,6 +78,21 @@ jobs:
       - name: 🧪 Run Tests
         run: pnpm test
 
+  check-workflows:
+    name: Check Workflows
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: ⤵ Checkout Branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: 🛠 Lint Workflows
+        uses: raven-actions/actionlint@205b530c5d9fa8f44ae9ed59f341a0db994aa6f8 # v2.1.2
+
   test-scripts-load:
     name: Test Scripts Load
     permissions:
