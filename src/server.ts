@@ -553,6 +553,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
       getSnapshot,
       cookieKey: opts?.cookieKey,
       operatorLogin,
+      gatewayOperatorSessionEnabled,
     }),
   )
 

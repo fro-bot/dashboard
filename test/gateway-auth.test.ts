@@ -210,6 +210,25 @@ describe('flag-ON: Gateway branch — happy path', () => {
     expect(res.status).toBe(404)
     expect(res.headers.get('set-cookie')).toBeNull()
   })
+
+  it('gateway mode: POST /auth/logout is NOT mounted (404) — gateway owns the session', async () => {
+    const {client} = makeFakeOperatorClient(async () => ok(VALID_SESSION))
+    const app = await buildGatewayApp(client)
+    const res = await app.request('/auth/logout', {method: 'POST'})
+    expect(res.status).toBe(404)
+  })
+
+  it('gateway mode + operatorLogin set: the SSR page renders NO dashboard logout form', async () => {
+    // Mixed config (gateway mode AND an operator login configured) must not render
+    // the dashboard logout form — it would POST to /auth/logout, which is not
+    // mounted in gateway mode. The gateway owns __Host-session.
+    const {client} = makeFakeOperatorClient(async () => ok(VALID_SESSION))
+    const app = await buildGatewayApp(client, {operatorLogin: 'octocat'})
+    const res = await app.request('/', {headers: {cookie: 'gateway_session=valid'}})
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).not.toContain('/auth/logout')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -217,7 +236,7 @@ describe('flag-ON: Gateway branch — happy path', () => {
 // ---------------------------------------------------------------------------
 
 describe('flag-ON: Gateway branch — fail-closed on validation failure', () => {
-  it('getCurrentSession → err {kind:"http", status:404} → 302 redirect to /auth/login', async () => {
+  it('getCurrentSession → err {kind:"http", status:404} → 302 redirect to the gateway login', async () => {
     const {client} = makeFakeOperatorClient(async () =>
       err({kind: 'http', status: 404} satisfies GatewayClientError),
     )
@@ -229,7 +248,7 @@ describe('flag-ON: Gateway branch — fail-closed on validation failure', () => 
     expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
-  it('getCurrentSession → err {kind:"http", status:500} → 302 redirect to /auth/login', async () => {
+  it('getCurrentSession → err {kind:"http", status:500} → 302 redirect to the gateway login', async () => {
     const {client} = makeFakeOperatorClient(async () =>
       err({kind: 'http', status: 500} satisfies GatewayClientError),
     )
@@ -241,7 +260,7 @@ describe('flag-ON: Gateway branch — fail-closed on validation failure', () => 
     expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
-  it('getCurrentSession → err {kind:"network"} (timeout/network failure) → 302 redirect to /auth/login', async () => {
+  it('getCurrentSession → err {kind:"network"} (timeout/network failure) → 302 redirect to the gateway login', async () => {
     const {client} = makeFakeOperatorClient(async () =>
       err({kind: 'network', message: 'Network error'} satisfies GatewayClientError),
     )
@@ -253,7 +272,7 @@ describe('flag-ON: Gateway branch — fail-closed on validation failure', () => 
     expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
-  it('getCurrentSession → err {kind:"protocol"} (malformed/empty body) → 302 redirect to /auth/login', async () => {
+  it('getCurrentSession → err {kind:"protocol"} (malformed/empty body) → 302 redirect to the gateway login', async () => {
     const {client} = makeFakeOperatorClient(async () =>
       err({kind: 'protocol', message: 'Failed to parse response JSON'} satisfies GatewayClientError),
     )
@@ -265,7 +284,7 @@ describe('flag-ON: Gateway branch — fail-closed on validation failure', () => 
     expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
-  it('getCurrentSession → err {kind:"validation"} (schema-drift / legacy string expiresAt) → 302 redirect to /auth/login', async () => {
+  it('getCurrentSession → err {kind:"validation"} (schema-drift / legacy string expiresAt) → 302 redirect to the gateway login', async () => {
     // The operator client's parseOperatorSessionInfo rejects non-integer expiresAt
     // and returns a protocol error. We simulate the validation error kind here.
     const {client} = makeFakeOperatorClient(async () =>
@@ -289,7 +308,7 @@ describe('flag-ON: Gateway branch — fail-closed on validation failure', () => 
 // ---------------------------------------------------------------------------
 
 describe('flag-ON: expired session defense', () => {
-  it('ok but expiresAt <= Date.now() (expired) → 302 redirect to /auth/login', async () => {
+  it('ok but expiresAt <= Date.now() (expired) → 302 redirect to the gateway login', async () => {
     const expiredSession: SessionDto = {
       operatorId: 12345,
       login: 'octocat',
@@ -304,7 +323,7 @@ describe('flag-ON: expired session defense', () => {
     expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
-  it('ok but expiresAt === Date.now() (exactly now, not future) → 302 redirect to /auth/login', async () => {
+  it('ok but expiresAt === Date.now() (exactly now, not future) → 302 redirect to the gateway login', async () => {
     const now = Date.now()
     const exactNowSession: SessionDto = {
       operatorId: 12345,
@@ -340,7 +359,7 @@ describe('flag-ON: expired session defense', () => {
 // ---------------------------------------------------------------------------
 
 describe('flag-ON: no inbound cookie', () => {
-  it('no cookie header → 302 redirect to /auth/login', async () => {
+  it('no cookie header → 302 redirect to the gateway login', async () => {
     const {client} = makeFakeOperatorClient(async () => ok(VALID_SESSION))
     const app = await buildGatewayApp(client)
     // No cookie header at all

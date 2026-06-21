@@ -33,6 +33,12 @@ export interface DashboardRouterConfig {
    * When undefined (deny-all mode), the logout form is not rendered.
    */
   readonly operatorLogin: string | undefined
+  /**
+   * Gateway operator-session mode. When true, the gateway owns the
+   * `__Host-session` and the dashboard mounts no `/auth/logout` route, so the
+   * dashboard logout form is not rendered (it would POST to a 404).
+   */
+  readonly gatewayOperatorSessionEnabled: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -205,15 +211,17 @@ function dashboardPage(snapshot: AggregatorSnapshot, csrfToken: string | undefin
  * Mounted at `/` in server.ts — auth middleware is applied upstream.
  */
 export function buildDashboardRouter(config: DashboardRouterConfig): Hono {
-  const {getSnapshot, cookieKey, operatorLogin} = config
+  const {getSnapshot, cookieKey, operatorLogin, gatewayOperatorSessionEnabled} = config
   const router = new Hono()
 
   router.get('/', async c => {
     const snapshot = getSnapshot()
-    // Derive the CSRF token for the logout form.
-    // Both cookieKey and operatorLogin must be present (auth is active).
+    // Derive the CSRF token for the logout form. Both cookieKey and operatorLogin
+    // must be present (Arctic auth active) AND the dashboard must own the session:
+    // in gateway-session mode the gateway owns __Host-session and /auth/logout is
+    // not mounted, so rendering the form would POST to a 404.
     const csrfToken =
-      cookieKey !== undefined && operatorLogin !== undefined
+      !gatewayOperatorSessionEnabled && cookieKey !== undefined && operatorLogin !== undefined
         ? deriveLogoutCsrfToken(cookieKey, operatorLogin)
         : undefined
     return c.html(dashboardPage(snapshot, csrfToken))
