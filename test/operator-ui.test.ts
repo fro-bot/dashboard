@@ -759,4 +759,37 @@ describe('operator UI — credential-domain copy when gateway session governs (g
     // No raw gateway cookie values
     expect(body).not.toContain('test-gateway-cookie')
   })
+
+  // The dashboard app deliberately does NOT serve the operator data/launch
+  // endpoints — the public reverse proxy routes those same-origin paths to the
+  // gateway. Serving them here would make this read-only app a
+  // credential-forwarding proxy. These assertions pin that invariant: even with
+  // the operator UI mounted and an authenticated operator, /operator/repos and
+  // POST /operator/runs are not handled by the dashboard (Hono 404s the
+  // unmounted sub-paths after auth passes).
+  it('does not mount the operator data/launch endpoints (reverse proxy owns them)', async () => {
+    const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
+    const app = await buildTestApp({
+      operatorUiEnabled: true,
+      gatewayOperatorSessionEnabled: true,
+      operatorClient,
+    })
+
+    const repos = await app.request('/operator/repos', {
+      headers: {cookie: 'gateway_session=test-gateway-cookie'},
+    })
+    expect(repos.status).toBe(404)
+
+    const launch = await app.request('/operator/runs', {
+      method: 'POST',
+      headers: {cookie: 'gateway_session=test-gateway-cookie', 'content-type': 'application/json'},
+      body: JSON.stringify({repo: 'fro-bot/agent', prompt: 'x'}),
+    })
+    expect(launch.status).toBe(404)
+
+    const csrf = await app.request('/operator/session/csrf', {
+      headers: {cookie: 'gateway_session=test-gateway-cookie'},
+    })
+    expect(csrf.status).toBe(404)
+  })
 })

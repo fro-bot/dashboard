@@ -206,7 +206,12 @@ export async function initOperatorLaunch() {
       redirect: 'error',
     })
 
-  // Minimal inline browser client — calls the gateway directly with credentials:'include'.
+  // These same-origin relative /operator/* paths (session/csrf, repos, runs) are
+  // owned by the public reverse proxy, which routes them to the gateway. The
+  // dashboard app deliberately does NOT mount or proxy them — serving them here
+  // would make this read-only app a credential-forwarding component. The browser
+  // calls them same-origin so the cookie, Origin, and Sec-Fetch metadata ride
+  // automatically and the gateway enforces its own auth/CSRF/origin checks.
   const client = {
     async refreshCsrf() {
       try {
