@@ -181,28 +181,42 @@ describe('refreshCsrf', () => {
 
 describe('launchRun', () => {
   const validRequest: LaunchRunRequest = {
-    owner: 'fro-bot',
-    repo: 'agent',
+    repo: 'owner/repo',
     prompt: 'fix the bug',
     idempotencyKey: 'idem-key-abc',
     csrfToken: 'csrf-token-xyz',
   }
 
-  it('returns run data on success', async () => {
-    const runData = {runId: 'run-001', status: 'queued' as const}
+  it('returns runId on success (202 wire shape)', async () => {
+    const runData = {runId: 'run-xyz'}
     const client = createOperatorClient({
-      fetch: makeOkFetch(runData),
+      fetch: makeOkFetch(runData, 202),
       createEventStream: makeEventStream([]),
     })
     const result = await client.launchRun(validRequest)
     expect(result.success).toBe(true)
     if (result.success) {
-      expect(result.data.runId).toBe('run-001')
-      expect(result.data.status).toBe('queued')
+      expect(result.data.runId).toBe('run-xyz')
     }
   })
 
-  it('rejects before fetch when csrfToken is missing', async () => {
+  it('sends body with only repo and prompt — no csrf or idempotency in body', async () => {
+    let capturedBody: unknown
+    const client = createOperatorClient({
+      fetch: async (_input, init) => {
+        capturedBody = JSON.parse(init?.body as string)
+        return new Response(JSON.stringify({runId: 'run-xyz'}), {
+          status: 202,
+          headers: {'content-type': 'application/json'},
+        })
+      },
+      createEventStream: makeEventStream([]),
+    })
+    await client.launchRun({repo: 'owner/repo', prompt: 'p', csrfToken: 'csrf-token-xyz', idempotencyKey: 'idem-key-abc'})
+    expect(capturedBody).toEqual({repo: 'owner/repo', prompt: 'p'})
+  })
+
+  it('rejects before fetch when csrfToken is blank — fetchCalled is false', async () => {
     let fetchCalled = false
     const neverFetch: OperatorClientOptions['fetch'] = async () => {
       fetchCalled = true
@@ -224,7 +238,7 @@ describe('launchRun', () => {
     }
   })
 
-  it('rejects before fetch when idempotencyKey is missing', async () => {
+  it('rejects before fetch when idempotencyKey is blank — fetchCalled is false', async () => {
     let fetchCalled = false
     const neverFetch: OperatorClientOptions['fetch'] = async () => {
       fetchCalled = true
@@ -267,8 +281,8 @@ describe('launchRun', () => {
     const client = createOperatorClient({
       fetch: async (input, _init) => {
         calls.push(typeof input === 'string' ? input : String(input))
-        return new Response(JSON.stringify({runId: 'r1', status: 'queued'}), {
-          status: 200,
+        return new Response(JSON.stringify({runId: 'r1'}), {
+          status: 202,
           headers: {'content-type': 'application/json'},
         })
       },
@@ -278,14 +292,14 @@ describe('launchRun', () => {
     expect(calls[0]).toBe('/operator/runs')
   })
 
-  it('sends CSRF token as X-CSRF-Token header', async () => {
+  it('sends x-csrf-token header with csrfToken value', async () => {
     const headers: Record<string, string> = {}
     const client = createOperatorClient({
       fetch: async (_input, init) => {
         const h = init?.headers as Record<string, string> | undefined
         if (h) Object.assign(headers, h)
-        return new Response(JSON.stringify({runId: 'r1', status: 'queued'}), {
-          status: 200,
+        return new Response(JSON.stringify({runId: 'r1'}), {
+          status: 202,
           headers: {'content-type': 'application/json'},
         })
       },
@@ -295,14 +309,14 @@ describe('launchRun', () => {
     expect(headers['x-csrf-token']).toBe('csrf-token-xyz')
   })
 
-  it('sends idempotency key as Idempotency-Key header', async () => {
+  it('sends idempotency-key header with idempotencyKey value', async () => {
     const headers: Record<string, string> = {}
     const client = createOperatorClient({
       fetch: async (_input, init) => {
         const h = init?.headers as Record<string, string> | undefined
         if (h) Object.assign(headers, h)
-        return new Response(JSON.stringify({runId: 'r1', status: 'queued'}), {
-          status: 200,
+        return new Response(JSON.stringify({runId: 'r1'}), {
+          status: 202,
           headers: {'content-type': 'application/json'},
         })
       },
@@ -310,6 +324,90 @@ describe('launchRun', () => {
     })
     await client.launchRun(validRequest)
     expect(headers['idempotency-key']).toBe('idem-key-abc')
+  })
+
+  it('maps 400 response to http error with status 400', async () => {
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(400),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.launchRun(validRequest)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('http')
+      if (result.error.kind === 'http') {
+        expect(result.error.status).toBe(400)
+      }
+    }
+  })
+
+  it('maps 404 response to http error with status 404', async () => {
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(404),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.launchRun(validRequest)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('http')
+      if (result.error.kind === 'http') {
+        expect(result.error.status).toBe(404)
+      }
+    }
+  })
+
+  it('maps 429 response to http error with status 429', async () => {
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(429),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.launchRun(validRequest)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('http')
+      if (result.error.kind === 'http') {
+        expect(result.error.status).toBe(429)
+      }
+    }
+  })
+
+  it('does not log prompt value in any log entry', async () => {
+    const loggedMessages: string[] = []
+    const capturingLogger = {
+      info: (msg: string) => loggedMessages.push(msg),
+      error: (msg: string) => loggedMessages.push(msg),
+      warning: (msg: string) => loggedMessages.push(msg),
+      debug: (msg: string) => loggedMessages.push(msg),
+    }
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(400),
+      createEventStream: makeEventStream([]),
+      logger: capturingLogger,
+    })
+    await client.launchRun({...validRequest, prompt: 'SECRET_PROMPT_VALUE'})
+    const allLogged = loggedMessages.join(' ')
+    expect(allLogged).not.toContain('SECRET_PROMPT_VALUE')
+  })
+
+  it('route template logged is /operator/runs only (no dynamic segments)', async () => {
+    const loggedMeta: Record<string, unknown>[] = []
+    const capturingLogger = {
+      info: (_msg: string, meta?: Record<string, unknown>) => { if (meta) loggedMeta.push(meta) },
+      error: (_msg: string, meta?: Record<string, unknown>) => { if (meta) loggedMeta.push(meta) },
+      warning: (_msg: string, meta?: Record<string, unknown>) => { if (meta) loggedMeta.push(meta) },
+      debug: (_msg: string, meta?: Record<string, unknown>) => { if (meta) loggedMeta.push(meta) },
+    }
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(400),
+      createEventStream: makeEventStream([]),
+      logger: capturingLogger,
+    })
+    await client.launchRun(validRequest)
+    for (const meta of loggedMeta) {
+      if (meta.route !== undefined) {
+        expect(meta.route).toBe('/operator/runs')
+      }
+    }
   })
 })
 
@@ -665,6 +763,191 @@ describe('decideApproval', () => {
     expect(result.success).toBe(true)
     if (result.success) {
       expect(result.data.state).toBe('already_claimed')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// listRepos
+// ---------------------------------------------------------------------------
+
+describe('listRepos', () => {
+  it('returns parsed repo list on success', async () => {
+    const repos = [
+      {owner: 'fro-bot', repo: 'agent'},
+      {owner: 'x', repo: 'y', channelName: 'z'},
+    ]
+    const client = createOperatorClient({
+      fetch: makeOkFetch(repos),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.listRepos()
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toHaveLength(2)
+      expect(result.data[0]?.owner).toBe('fro-bot')
+      expect(result.data[0]?.repo).toBe('agent')
+      expect(result.data[1]?.channelName).toBe('z')
+    }
+  })
+
+  it('uses relative path /operator/repos', async () => {
+    const capturedPaths: string[] = []
+    const client = createOperatorClient({
+      fetch: async (input, _init) => {
+        capturedPaths.push(typeof input === 'string' ? input : String(input))
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      },
+      createEventStream: makeEventStream([]),
+    })
+    await client.listRepos()
+    expect(capturedPaths[0]).toBe('/operator/repos')
+  })
+
+  it('returns ok with empty array when response is []', async () => {
+    const client = createOperatorClient({
+      fetch: makeOkFetch([]),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.listRepos()
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toHaveLength(0)
+    }
+  })
+
+  it('returns protocol error when response is a non-array object', async () => {
+    const client = createOperatorClient({
+      fetch: makeOkFetch({}),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.listRepos()
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('protocol')
+    }
+  })
+
+  it('returns protocol error and no partial list when an item is missing repo field', async () => {
+    // [{owner:'a'}] is missing required repo — whole list must fail closed
+    const client = createOperatorClient({
+      fetch: makeOkFetch([{owner: 'a'}]),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.listRepos()
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('protocol')
+    }
+  })
+
+  it('returns http error on 401', async () => {
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(401),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.listRepos()
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('http')
+      if (result.error.kind === 'http') {
+        expect(result.error.status).toBe(401)
+      }
+    }
+  })
+
+  it('returns http error on 429', async () => {
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(429),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.listRepos()
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('http')
+      if (result.error.kind === 'http') {
+        expect(result.error.status).toBe(429)
+      }
+    }
+  })
+
+  it('returns http error on 503', async () => {
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(503),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.listRepos()
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('http')
+      if (result.error.kind === 'http') {
+        expect(result.error.status).toBe(503)
+      }
+    }
+  })
+
+  it('does not log repo owner or name in any log entry', async () => {
+    const loggedEntries: {message: string; meta: Record<string, unknown>}[] = []
+    const capturingLogger = {
+      info: (message: string, meta?: Record<string, unknown>) => {
+        loggedEntries.push({message, meta: meta ?? {}})
+      },
+      error: (message: string, meta?: Record<string, unknown>) => {
+        loggedEntries.push({message, meta: meta ?? {}})
+      },
+      warning: (message: string, meta?: Record<string, unknown>) => {
+        loggedEntries.push({message, meta: meta ?? {}})
+      },
+      debug: (message: string, meta?: Record<string, unknown>) => {
+        loggedEntries.push({message, meta: meta ?? {}})
+      },
+    }
+    const repos = [{owner: 'secret-owner', repo: 'secret-repo'}]
+    const client = createOperatorClient({
+      fetch: makeOkFetch(repos),
+      createEventStream: makeEventStream([]),
+      logger: capturingLogger,
+    })
+    await client.listRepos()
+
+    // Verify no log entry contains the owner or repo name
+    for (const entry of loggedEntries) {
+      const serialized = JSON.stringify(entry)
+      expect(serialized).not.toContain('secret-owner')
+      expect(serialized).not.toContain('secret-repo')
+    }
+  })
+
+  it('does not log repo owner or name when parse fails', async () => {
+    const loggedEntries: {message: string; meta: Record<string, unknown>}[] = []
+    const capturingLogger = {
+      info: (message: string, meta?: Record<string, unknown>) => {
+        loggedEntries.push({message, meta: meta ?? {}})
+      },
+      error: (message: string, meta?: Record<string, unknown>) => {
+        loggedEntries.push({message, meta: meta ?? {}})
+      },
+      warning: (message: string, meta?: Record<string, unknown>) => {
+        loggedEntries.push({message, meta: meta ?? {}})
+      },
+      debug: (message: string, meta?: Record<string, unknown>) => {
+        loggedEntries.push({message, meta: meta ?? {}})
+      },
+    }
+    // Malformed item — parse will fail; logger must not echo the input
+    const client = createOperatorClient({
+      fetch: makeOkFetch([{owner: 'secret-owner'}]),
+      createEventStream: makeEventStream([]),
+      logger: capturingLogger,
+    })
+    await client.listRepos()
+
+    for (const entry of loggedEntries) {
+      const serialized = JSON.stringify(entry)
+      expect(serialized).not.toContain('secret-owner')
     }
   })
 })
@@ -1442,8 +1725,7 @@ describe('sensitive value redaction', () => {
       },
     })
     await client.launchRun({
-      owner: 'fro-bot',
-      repo: 'agent',
+      repo: 'fro-bot/agent',
       prompt: 'SECRET_PROMPT_CONTENT_DO_NOT_LOG',
       idempotencyKey: 'idem-key-abc',
       csrfToken: 'csrf-token-xyz',
@@ -1465,8 +1747,7 @@ describe('sensitive value redaction', () => {
       },
     })
     await client.launchRun({
-      owner: 'fro-bot',
-      repo: 'agent',
+      repo: 'fro-bot/agent',
       prompt: 'do something',
       idempotencyKey: 'idem-key-abc',
       csrfToken: 'SUPER_SECRET_CSRF_VALUE_12345',
@@ -1488,8 +1769,7 @@ describe('sensitive value redaction', () => {
       },
     })
     await client.launchRun({
-      owner: 'fro-bot',
-      repo: 'agent',
+      repo: 'fro-bot/agent',
       prompt: 'do something',
       idempotencyKey: 'UNIQUE_IDEM_KEY_DO_NOT_LOG_9999',
       csrfToken: 'csrf-token-xyz',
@@ -1559,8 +1839,7 @@ describe('sensitive value redaction', () => {
       },
     })
     await client.launchRun({
-      owner: 'fro-bot',
-      repo: 'agent',
+      repo: 'fro-bot/agent',
       prompt: 'run bash with args: SECRET_TOOL_ARG_VALUE_XYZ',
       idempotencyKey: 'idem-key-abc',
       csrfToken: 'csrf-token-xyz',
@@ -1582,8 +1861,7 @@ describe('sensitive value redaction', () => {
       },
     })
     await client.launchRun({
-      owner: 'fro-bot',
-      repo: 'agent',
+      repo: 'fro-bot/agent',
       prompt: 'do something',
       idempotencyKey: 'idem-key-abc',
       csrfToken: 'Bearer_SUPER_SECRET_TOKEN_VALUE_ABCDEF',
@@ -2151,8 +2429,7 @@ describe('launchRun — redirect: error', () => {
       createEventStream: makeEventStream([]),
     })
     await client.launchRun({
-      owner: 'fro-bot',
-      repo: 'agent',
+      repo: 'fro-bot/agent',
       prompt: 'fix the bug',
       idempotencyKey: 'idem-key-abc',
       csrfToken: 'csrf-token-xyz',
@@ -2279,8 +2556,7 @@ describe('launchRun — whitespace-only idempotencyKey', () => {
       createEventStream: makeEventStream([]),
     })
     const result = await client.launchRun({
-      owner: 'fro-bot',
-      repo: 'agent',
+      repo: 'fro-bot/agent',
       prompt: 'fix the bug',
       idempotencyKey: '   ',
       csrfToken: 'csrf-token-xyz',

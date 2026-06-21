@@ -17,9 +17,9 @@
 
 import type {Logger} from '../logger.ts'
 import type {Result} from '../result.ts'
-import type {OperatorCsrfToken, OperatorDecisionState, OperatorSessionInfo, OperatorWebStatus, RunStreamFrame} from './operator-contract/index.ts'
+import type {OperatorCsrfToken, OperatorDecisionState, OperatorSessionInfo, OperatorWebStatus, RepoSummary, RunStreamFrame} from './operator-contract/index.ts'
 import {err, ok} from '../result.ts'
-import {parseOperatorCsrfToken, parseOperatorSessionInfo} from './operator-contract/index.ts'
+import {parseOperatorCsrfToken, parseOperatorSessionInfo, parseRepoSummaryList} from './operator-contract/index.ts'
 
 // ---------------------------------------------------------------------------
 // Run status union
@@ -64,7 +64,6 @@ export type CsrfDto = OperatorCsrfToken
 // ---------------------------------------------------------------------------
 
 export interface LaunchRunRequest {
-  readonly owner: string
   readonly repo: string
   readonly prompt: string
   readonly idempotencyKey: string
@@ -73,7 +72,6 @@ export interface LaunchRunRequest {
 
 export interface LaunchRunResponse {
   readonly runId: string
-  readonly status: RunStatus
 }
 
 export interface RunSnapshotDto {
@@ -184,6 +182,7 @@ export type GatewayClientError = GatewayHttpError | GatewayValidationError | Gat
 export interface OperatorClient {
   readonly getCurrentSession: () => Promise<Result<SessionDto, GatewayClientError>>
   readonly refreshCsrf: () => Promise<Result<CsrfDto, GatewayClientError>>
+  readonly listRepos: () => Promise<Result<RepoSummary[], GatewayClientError>>
   readonly launchRun: (req: LaunchRunRequest) => Promise<Result<LaunchRunResponse, GatewayClientError>>
   readonly getRunSnapshot: (runId: string) => Promise<Result<RunSnapshotDto, GatewayClientError>>
   readonly connectRunStream: (
@@ -438,6 +437,18 @@ export function createOperatorClient(options: OperatorClientOptions): OperatorCl
     return ok(parsed.data)
   }
 
+  async function listRepos(): Promise<Result<RepoSummary[], GatewayClientError>> {
+    const raw = await fetchJson<unknown>('/operator/repos', '/operator/repos')
+    if (!raw.success) return raw
+    const parsed = parseRepoSummaryList(raw.data)
+    if (!parsed.success) {
+      const protocolErr: GatewayProtocolError = {kind: 'protocol', message: 'Failed to parse repos response'}
+      logger?.error('operator-client: repos parse error', {route: '/operator/repos'})
+      return err(protocolErr)
+    }
+    return ok(parsed.data)
+  }
+
   async function launchRun(req: LaunchRunRequest): Promise<Result<LaunchRunResponse, GatewayClientError>> {
     const csrfGuard = requireCsrf(req.csrfToken)
     if (csrfGuard !== null) return err(csrfGuard)
@@ -448,7 +459,6 @@ export function createOperatorClient(options: OperatorClientOptions): OperatorCl
     // Build request body — exclude csrfToken and idempotencyKey from body;
     // they travel as headers. Never include prompt in logs.
     const body = JSON.stringify({
-      owner: req.owner,
       repo: req.repo,
       prompt: req.prompt,
     })
@@ -573,6 +583,7 @@ export function createOperatorClient(options: OperatorClientOptions): OperatorCl
   return {
     getCurrentSession,
     refreshCsrf,
+    listRepos,
     launchRun,
     getRunSnapshot,
     connectRunStream,

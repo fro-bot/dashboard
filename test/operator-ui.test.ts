@@ -76,6 +76,9 @@ function makeFakeOperatorClient(
     connectRunStream: () => {
       throw new Error('connectRunStream must not be called during page render')
     },
+    listRepos: () => {
+      throw new Error('listRepos must not be called during page render')
+    },
     listPendingApprovals: () => {
       throw new Error('listPendingApprovals must not be called during page render')
     },
