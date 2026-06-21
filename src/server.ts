@@ -80,6 +80,16 @@ let rateLimitCallCount = 0
 const EVICT_INTERVAL = 500 // sweep every 500 calls
 const EVICT_STALE_AGE = 2 * RATE_LIMIT_WINDOW_MS
 
+// In gateway operator-session mode, an unauthenticated/invalid request must recover
+// through the GATEWAY operator login (which mints the __Host-session the gateway
+// authority requires), never the dashboard's own Arctic flow (which mints a
+// dashboard `session` cookie the gateway rejects, causing a re-auth loop on gateway
+// restart — see issue #70). return_to is fixed to /operator: the gateway validates
+// it against an exact allowlist (default ['/operator']) and rejects anything else.
+// The value is a fixed same-origin relative literal — no request-derived component,
+// so it introduces no open redirect.
+const GATEWAY_LOGIN_REDIRECT = '/operator/auth/github/start?return_to=/operator'
+
 function sweepRateLimitMap(now: number): void {
   for (const [key, entry] of rateLimitMap) {
     if (now - entry.windowStart > EVICT_STALE_AGE) {
@@ -380,10 +390,9 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
       // or whitespace-only, deny immediately — do NOT call getCurrentSession.
       const inboundCookie = c.req.header('cookie')
       if (inboundCookie === undefined || inboundCookie.trim() === '') {
-        // Deny: no principal to forward. Redirect to /auth/login for parity with Arctic.
-        // (In gateway mode there is no dashboard login UI, but the redirect is consistent
-        // with the Arctic branch's unauth response shape and avoids probing which routes exist.)
-        return c.redirect('/auth/login', 302)
+        // Deny: no principal to forward. Recover through the gateway operator login so
+        // the operator mints the __Host-session the gateway requires (see issue #70).
+        return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
       }
 
       // Fail closed if the configured gateway origin is invalid or unparseable.
@@ -391,7 +400,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
       // causing the middleware to silently fall back to an unsafe origin.
       if (resolvedGatewayOrigin === null) {
         logger.warning('gateway-auth: configured gateway origin is invalid or missing', {path})
-        return c.redirect('/auth/login', 302)
+        return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
       }
 
       // Obtain the OperatorClient: use injected client (tests) or build per-request (production).
@@ -433,14 +442,14 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
         // Every error kind (http/network/protocol/validation) → deny.
         // Log only the path — never the error detail which may contain identity info.
         logger.warning('gateway-auth: session validation failed', {path})
-        return c.redirect('/auth/login', 302)
+        return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
       }
 
       // Expired-session defense — even on a 2xx, a non-future expiresAt → deny.
       // The gateway is the authority but we do not rely solely on it never returning expired.
       if (result.data.expiresAt <= Date.now()) {
         logger.warning('gateway-auth: session expired', {path})
-        return c.redirect('/auth/login', 302)
+        return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
       }
 
       // Nonsensical identity defense — deny sessions with a non-positive operatorId
@@ -449,11 +458,11 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
       // propagate a garbage identity downstream.
       if (result.data.operatorId <= 0) {
         logger.warning('gateway-auth: session has non-positive operatorId', {path})
-        return c.redirect('/auth/login', 302)
+        return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
       }
       if (result.data.login.trim() === '') {
         logger.warning('gateway-auth: session has empty login', {path})
-        return c.redirect('/auth/login', 302)
+        return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
       }
 
       // Valid gateway session: attach to context. Do NOT set sessionLogin —
@@ -502,7 +511,17 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     }
   })
 
-  if (operatorLogin === undefined) {
+  if (gatewayOperatorSessionEnabled) {
+    // Gateway operator-session mode: the gateway is the session authority. The
+    // dashboard Arctic flow must NOT be reachable here — minting a dashboard
+    // `session` cookie cannot satisfy the gateway and causes the re-auth loop on
+    // gateway restart (issue #70). Mount a minimal router that sends /auth/login to
+    // the gateway operator login; deliberately do NOT mount /auth/callback or any
+    // other Arctic path, so the dashboard session-minting flow returns 404.
+    const gatewayAuthRouter = new Hono()
+    gatewayAuthRouter.get('/login', c => c.redirect(GATEWAY_LOGIN_REDIRECT, 302))
+    app.route('/auth', gatewayAuthRouter)
+  } else if (operatorLogin === undefined) {
     // Fail-closed: no operator login → the auth flow itself denies all requests,
     // so no session can ever be minted.
     const deniedRouter = new Hono()
@@ -534,6 +553,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
       getSnapshot,
       cookieKey: opts?.cookieKey,
       operatorLogin,
+      gatewayOperatorSessionEnabled,
     }),
   )
 
