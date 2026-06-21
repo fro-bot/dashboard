@@ -14,6 +14,7 @@ export declare const RETRY_BASE_MS: number
 export declare const RETRY_FACTOR: number
 export declare const RETRY_MAX_COUNT: number
 export declare const MAX_SSE_BUFFER_BYTES: number
+export declare const FIRST_FRAME_TIMEOUT_MS: number
 
 // ---------------------------------------------------------------------------
 // Frame types (mirrors src/gateway/operator-contract/sse-frames.ts shapes)
@@ -64,6 +65,7 @@ export type ConnectionStatus =
   | 'backpressure'
   | 'failed'
   | 'closed'
+  | 'submitted-unobservable'
 
 export interface RunEntry {
   readonly runId: string
@@ -92,6 +94,7 @@ export type StreamEvent =
   | {readonly type: 'stream-closed'}
   | {readonly type: 'unexpected-close'}
   | {readonly type: 'buffer-overflow'}
+  | {readonly type: 'first-frame-timeout'}
 
 // ---------------------------------------------------------------------------
 // Safe render model
