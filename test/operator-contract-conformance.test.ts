@@ -1,11 +1,11 @@
 /**
  * Operator contract conformance tests.
  *
- * Verifies the vendored operator contract v1.1.0 is correctly pinned and
+ * Verifies the vendored operator contract v1.2.0 is correctly pinned and
  * that parse helpers behave per spec. Also verifies the SSE frame types
- * vendored from fro-bot/agent v0.72.0 (PRs #961/#962) are structurally correct.
+ * vendored from fro-bot/agent v0.73.0 (PRs #961/#962, #968) are structurally correct.
  *
- * Source: fro-bot/agent | Tag: v0.72.0 | PRs: #952, #961, #962
+ * Source: fro-bot/agent | Tag: v0.73.0 | PRs: #952, #961, #962, #968
  */
 import type {ApprovalDecisionState, RunStatus} from '../src/gateway/operator-client.ts'
 import type {
@@ -13,6 +13,7 @@ import type {
   OperatorRunStatus,
   OperatorWebStatus,
   ReadyFrame,
+  RepoSummary,
   ResetFrameData,
   ResetReason,
   RunStreamFrame,
@@ -25,6 +26,8 @@ import {
   parseOperatorError,
   parseOperatorOk,
   parseOperatorSessionInfo,
+  parseRepoSummary,
+  parseRepoSummaryList,
 } from '../src/gateway/operator-contract/index.ts'
 
 // ---------------------------------------------------------------------------
@@ -57,7 +60,7 @@ export {checkRunStatusBidirectional}
 // Using satisfies/export to avoid unused-variable lint while keeping the type constraint.
 
 // ReadyFrame: must accept a literal with contractVersion string
-const checkReadyFrameLiteral: ReadyFrame = {contractVersion: '1.1.0'}
+const checkReadyFrameLiteral: ReadyFrame = {contractVersion: '1.2.0'}
 export {checkReadyFrameLiteral}
 
 // ResetFrameData: must accept a literal with runId + ResetReason
@@ -74,8 +77,13 @@ export {checkStatusBidirectional}
 const checkResetReasons: ResetReason[] = ['no-snapshot', 'terminal', 'shutdown', 'max-duration', 'writer-error', 'overflow']
 export {checkResetReasons}
 
+// RepoSummary: must accept literals with and without channelName
+const checkRepoSummaryMinimal: RepoSummary = {owner: 'fro-bot', repo: 'agent'}
+const checkRepoSummaryWithChannel: RepoSummary = {owner: 'fro-bot', repo: 'agent', channelName: 'main'}
+export {checkRepoSummaryMinimal, checkRepoSummaryWithChannel}
+
 // RunStreamFrame discriminated union: each variant must be constructable
-const checkReadyFrame: RunStreamFrame = {type: 'ready', data: {contractVersion: '1.1.0'}}
+const checkReadyFrame: RunStreamFrame = {type: 'ready', data: {contractVersion: '1.2.0'}}
 const checkResetFrame: RunStreamFrame = {type: 'reset', data: {runId: 'run-001', reason: 'terminal'}}
 const checkStatusFrame: RunStreamFrame = {
   type: 'status',
@@ -96,8 +104,8 @@ export {checkReadyFrame, checkResetFrame, checkStatusFrame}
 // ---------------------------------------------------------------------------
 
 describe('OPERATOR_CONTRACT_VERSION', () => {
-  it('is pinned to 1.1.0', () => {
-    expect(OPERATOR_CONTRACT_VERSION).toBe('1.1.0')
+  it('is pinned to 1.2.0', () => {
+    expect(OPERATOR_CONTRACT_VERSION).toBe('1.2.0')
   })
 })
 
@@ -290,5 +298,207 @@ describe('parseOperatorOk', () => {
   it('rejects null', () => {
     const result = parseOperatorOk(null)
     expect(result.success).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseRepoSummary
+// ---------------------------------------------------------------------------
+
+describe('parseRepoSummary', () => {
+  it('accepts {owner, repo} without channelName', () => {
+    const input = {owner: 'fro-bot', repo: 'agent'}
+    const result = parseRepoSummary(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.owner).toBe('fro-bot')
+      expect(result.data.repo).toBe('agent')
+      expect(result.data.channelName).toBeUndefined()
+    }
+  })
+
+  it('accepts {owner, repo, channelName} with channelName present', () => {
+    const input = {owner: 'fro-bot', repo: 'agent', channelName: 'main'}
+    const result = parseRepoSummary(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.owner).toBe('fro-bot')
+      expect(result.data.repo).toBe('agent')
+      expect(result.data.channelName).toBe('main')
+    }
+  })
+
+  it('accepts extra fields (permissive structural subtyping)', () => {
+    const input = {owner: 'fro-bot', repo: 'agent', extra: 'ignored', count: 42}
+    const result = parseRepoSummary(input)
+    expect(result.success).toBe(true)
+  })
+
+  it('rejects missing owner', () => {
+    const result = parseRepoSummary({repo: 'agent'})
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error.message).toBe('invalid repo summary shape')
+    }
+  })
+
+  it('rejects non-string owner', () => {
+    const result = parseRepoSummary({owner: 42, repo: 'agent'})
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error.message).toBe('invalid repo summary shape')
+    }
+  })
+
+  it('rejects missing repo', () => {
+    const result = parseRepoSummary({owner: 'fro-bot'})
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error.message).toBe('invalid repo summary shape')
+    }
+  })
+
+  it('rejects non-string repo', () => {
+    const result = parseRepoSummary({owner: 'fro-bot', repo: true})
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error.message).toBe('invalid repo summary shape')
+    }
+  })
+
+  it('rejects non-string channelName when present', () => {
+    const result = parseRepoSummary({owner: 'fro-bot', repo: 'agent', channelName: 99})
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error.message).toBe('invalid repo summary shape')
+    }
+  })
+
+  it('rejects null', () => {
+    const result = parseRepoSummary(null)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error.message).toBe('invalid repo summary shape')
+    }
+  })
+
+  it('rejects a non-object (string)', () => {
+    const result = parseRepoSummary('fro-bot/agent')
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects an array', () => {
+    const result = parseRepoSummary([{owner: 'fro-bot', repo: 'agent'}])
+    expect(result.success).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseRepoSummaryList
+// ---------------------------------------------------------------------------
+
+describe('parseRepoSummaryList', () => {
+  it('accepts an empty array', () => {
+    const result = parseRepoSummaryList([])
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toEqual([])
+    }
+  })
+
+  it('accepts an array of valid items without channelName', () => {
+    const input = [
+      {owner: 'fro-bot', repo: 'agent'},
+      {owner: 'fro-bot', repo: 'dashboard'},
+    ]
+    const result = parseRepoSummaryList(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toHaveLength(2)
+      expect(result.data[0]?.owner).toBe('fro-bot')
+      expect(result.data[1]?.repo).toBe('dashboard')
+    }
+  })
+
+  it('accepts an array of valid items with channelName', () => {
+    const input = [
+      {owner: 'fro-bot', repo: 'agent', channelName: 'main'},
+      {owner: 'fro-bot', repo: 'dashboard'},
+    ]
+    const result = parseRepoSummaryList(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data[0]?.channelName).toBe('main')
+      expect(result.data[1]?.channelName).toBeUndefined()
+    }
+  })
+
+  it('rejects a non-array input (object)', () => {
+    const result = parseRepoSummaryList({owner: 'fro-bot', repo: 'agent'})
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error.message).toBe('invalid repo summary list: expected array')
+    }
+  })
+
+  it('rejects a non-array input (null)', () => {
+    const result = parseRepoSummaryList(null)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error.message).toBe('invalid repo summary list: expected array')
+    }
+  })
+
+  it('rejects a non-array input (string)', () => {
+    const result = parseRepoSummaryList('fro-bot/agent')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error.message).toBe('invalid repo summary list: expected array')
+    }
+  })
+
+  it('fails the whole list if any item is invalid (fail closed)', () => {
+    const input = [
+      {owner: 'fro-bot', repo: 'agent'},
+      {owner: 'fro-bot'}, // missing repo — invalid
+    ]
+    const result = parseRepoSummaryList(input)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error.message).toBe('invalid repo summary list: item failed validation')
+    }
+  })
+
+  it('fails the whole list if the first item is invalid', () => {
+    const input = [
+      {repo: 'agent'}, // missing owner — invalid
+      {owner: 'fro-bot', repo: 'dashboard'},
+    ]
+    const result = parseRepoSummaryList(input)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.message).toBe('invalid repo summary list: item failed validation')
+    }
+  })
+
+  it('fails the whole list if any item has a non-string channelName', () => {
+    const input = [
+      {owner: 'fro-bot', repo: 'agent', channelName: 0},
+    ]
+    const result = parseRepoSummaryList(input)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.message).toBe('invalid repo summary list: item failed validation')
+    }
   })
 })
