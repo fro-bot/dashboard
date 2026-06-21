@@ -29,7 +29,7 @@
 // ---------------------------------------------------------------------------
 
 /** Contract version this client expects on the ready frame. */
-export const PINNED_CONTRACT_VERSION = '1.1.0'
+export const PINNED_CONTRACT_VERSION = '1.2.0'
 
 /** Base delay in milliseconds for exponential backoff. */
 export const RETRY_BASE_MS = 1000
@@ -42,6 +42,14 @@ export const RETRY_MAX_COUNT = 5
 
 /** Hard cap on the incremental SSE buffer in bytes. Overflow → abort + failed. */
 export const MAX_SSE_BUFFER_BYTES = 1_000_000
+
+/**
+ * Bounded timeout in milliseconds for receiving the first SSE frame after opening
+ * a stream. If no frame arrives within this window, the connection transitions to
+ * 'submitted-unobservable' — the run was accepted but is not yet streaming (e.g.
+ * queued behind the concurrency cap or still starting). A manual retry re-opens.
+ */
+export const FIRST_FRAME_TIMEOUT_MS = 15_000
 
 /** Terminal OperatorWebStatus values — a run in one of these states will not progress. */
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
@@ -368,6 +376,13 @@ export function nextStreamState(current, event) {
     }
 
     case 'network-error': {
+      // Guard terminal-ish display states: abort-rejection from close() must not reopen
+      if (
+        current.connection === 'closed' ||
+        current.connection === 'submitted-unobservable'
+      ) {
+        return current
+      }
       if (current.retryCount >= RETRY_MAX_COUNT) {
         return {
           ...current,
@@ -392,6 +407,13 @@ export function nextStreamState(current, event) {
     }
 
     case 'unexpected-close': {
+      // Guard terminal-ish display states: abort-rejection from close() must not reopen
+      if (
+        current.connection === 'closed' ||
+        current.connection === 'submitted-unobservable'
+      ) {
+        return current
+      }
       if (current.retryCount >= RETRY_MAX_COUNT) {
         return {
           ...current,
@@ -415,6 +437,24 @@ export function nextStreamState(current, event) {
         connection: 'failed',
         shouldReconnect: false,
       }
+    }
+
+    case 'first-frame-timeout': {
+      // Only applies when no frame has arrived yet (still in the initial connecting
+      // or reconnecting phase). Any state that already received a frame (live, drift,
+      // not-found, failed, closed, backpressure) is left unchanged — the timeout
+      // fires only when the stream opened but stayed silent.
+      if (
+        current.connection === 'connecting' ||
+        current.connection === 'reconnecting'
+      ) {
+        return {
+          ...current,
+          connection: 'submitted-unobservable',
+          shouldReconnect: false,
+        }
+      }
+      return current
     }
 
     default: {
@@ -491,8 +531,9 @@ export function initOperatorStream(opts) {
   }
 
   let abortController = null
-  let reconnectTimer = null // F9: track pending reconnect timer
-  let aborted = false // F9: set by close() to prevent late timer from fetching
+  let reconnectTimer = null // track pending reconnect timer
+  let firstFrameTimer = null // track pending first-frame timeout
+  let aborted = false // set by close() to prevent late timer from fetching
 
   function updateDOM() {
     if (noticeEl) {
@@ -515,6 +556,10 @@ export function initOperatorStream(opts) {
       } else if (conn === 'failed') {
         noticeEl.textContent = 'Stream connection failed.'
         noticeEl.hidden = false
+      } else if (conn === 'submitted-unobservable') {
+        noticeEl.textContent =
+          'Run submitted \u2014 not yet observable (it may be queued or still starting).'
+        noticeEl.hidden = false
       } else if (conn === 'closed') {
         noticeEl.textContent = ''
         noticeEl.hidden = true
@@ -535,48 +580,73 @@ export function initOperatorStream(opts) {
     }
   }
 
+  function clearFirstFrameTimer() {
+    if (firstFrameTimer !== null) {
+      clearTimeout(firstFrameTimer)
+      firstFrameTimer = null
+    }
+  }
+
   function dispatch(event) {
     state = nextStreamState(state, event)
     updateDOM()
   }
 
   function connect() {
-    // F9: don't fetch if close() was called
+    // Don't fetch if close() was called
     if (aborted) return
+
+    // Clear any previously-pending first-frame timer before arming a new one.
+    // Without this, a reconnect would leak the old timer, which could fire later
+    // and wrongly dispatch first-frame-timeout on a recovering stream.
+    clearFirstFrameTimer()
 
     abortController = new AbortController()
     const signal = abortController.signal
+
+    // Arm the first-frame timeout. If no ready/status/reset frame arrives within
+    // FIRST_FRAME_TIMEOUT_MS, the run is considered submitted but not yet observable.
+    // The timer is cleared as soon as the first frame is dispatched or on close().
+    firstFrameTimer = setTimeout(() => {
+      firstFrameTimer = null
+      dispatch({type: 'first-frame-timeout'})
+    }, FIRST_FRAME_TIMEOUT_MS)
 
     // Build the stream URL — runId is used only here, never logged
     const path = `/operator/runs/${encodeURIComponent(runId)}/stream`
 
     fetch(path, {
       credentials: 'include',
-      redirect: 'error', // F7: prevent auth-redirect loops
+      redirect: 'error', // prevent auth-redirect loops
       signal,
       headers: {accept: 'text/event-stream'},
     })
       .then(response => {
         if (response.status === 404) {
+          clearFirstFrameTimer()
           dispatch({type: 'http-status', code: 404})
           return
         }
         if (response.status === 429) {
+          clearFirstFrameTimer()
           dispatch({type: 'http-status', code: 429})
           return
         }
         if (response.status !== 200) {
+          clearFirstFrameTimer()
           dispatch({type: 'network-error'})
           scheduleReconnect()
           return
         }
-        // F7: Require Content-Type text/event-stream on 200
+        // Require Content-Type text/event-stream on 200
         const contentType = response.headers.get('content-type') ?? ''
         if (!contentType.startsWith('text/event-stream')) {
+          clearFirstFrameTimer()
           dispatch({type: 'network-error'})
           return
         }
         if (!response.body) {
+          clearFirstFrameTimer()
           dispatch({type: 'network-error'})
           scheduleReconnect()
           return
@@ -591,10 +661,11 @@ export function initOperatorStream(opts) {
             .read()
             .then(({done, value}) => {
               if (done) {
-                // F4: Flush remaining buffer before handling done
+                // Flush remaining buffer before handling done
                 if (buffer.trim() !== '') {
                   const flushResult = parseSseFrame(`${buffer}\n\n`)
                   if (flushResult !== null && flushResult.success) {
+                    clearFirstFrameTimer()
                     dispatch(flushResult.frame)
                   }
                   buffer = ''
@@ -609,13 +680,14 @@ export function initOperatorStream(opts) {
               }
 
               if (value) {
-                // F1: normalize CRLF on each appended chunk
+                // Normalize CRLF on each appended chunk
                 buffer += normalizeCrlf(decoder.decode(value, {stream: true}))
               }
 
-              // F2: Hard buffer cap — abort the reader and fail closed terminally
+              // Hard buffer cap — abort the reader and fail closed terminally
               // (no reconnect) if exceeded without a record boundary.
               if (buffer.length > MAX_SSE_BUFFER_BYTES) {
+                clearFirstFrameTimer()
                 if (abortController) {
                   abortController.abort()
                 }
@@ -631,6 +703,8 @@ export function initOperatorStream(opts) {
 
                 const result = parseSseFrame(`${record}\n\n`)
                 if (result !== null && result.success) {
+                  // Clear the first-frame timer on the first successfully parsed frame
+                  clearFirstFrameTimer()
                   dispatch(result.frame)
                   // Parse failures are silently dropped (fail closed, no logging of frame data)
                 }
@@ -643,13 +717,15 @@ export function initOperatorStream(opts) {
                 state.connection !== 'closed' &&
                 state.connection !== 'failed' &&
                 state.connection !== 'not-found' &&
-                state.connection !== 'drift' // F5b: stop reading on drift
+                state.connection !== 'drift' && // stop reading on drift
+                state.connection !== 'submitted-unobservable' // stop reading after first-frame timeout
               ) {
                 readChunk()
               }
             })
             .catch(() => {
               // Stream read error — fail closed, no logging of error details
+              clearFirstFrameTimer()
               dispatch({type: 'unexpected-close'})
               if (state.shouldReconnect) {
                 scheduleReconnect()
@@ -661,6 +737,7 @@ export function initOperatorStream(opts) {
       })
       .catch(() => {
         // Network error — fail closed, no logging of error details
+        clearFirstFrameTimer()
         dispatch({type: 'network-error'})
         if (state.shouldReconnect) {
           scheduleReconnect()
@@ -670,8 +747,8 @@ export function initOperatorStream(opts) {
 
   function scheduleReconnect() {
     if (!state.shouldReconnect) return
-    if (aborted) return // F9: don't schedule if close() was called
-    // F8: use backoffDelay(retryCount) — retryCount >= 0 → 1000ms on first retry
+    if (aborted) return // don't schedule if close() was called
+    // use backoffDelay(retryCount) — retryCount >= 0 → 1000ms on first retry
     const delay = backoffDelay(state.retryCount)
     reconnectTimer = setTimeout(connect, delay)
   }
@@ -682,12 +759,13 @@ export function initOperatorStream(opts) {
   // Return a handle to allow external abort (e.g. page unload)
   return {
     close() {
-      aborted = true // F9: prevent late timer from fetching
-      // F9: clear any pending reconnect timer
+      aborted = true // prevent late timer from fetching
+      // Clear any pending timers
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer)
         reconnectTimer = null
       }
+      clearFirstFrameTimer()
       if (abortController) {
         abortController.abort()
       }

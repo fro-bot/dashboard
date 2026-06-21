@@ -92,47 +92,42 @@ function gatewayAuthSection(gatewaySessionEnabled: boolean): ReturnType<typeof h
 function launchSection(): ReturnType<typeof html> {
   return html`
     <section class="section" aria-labelledby="launch-heading">
-      <h2 id="launch-heading">Launch Run <span class="badge-mock">Mock skeleton</span></h2>
-      <div class="warning">
-        <strong>Launch not ready:</strong> Gateway launch controls are unavailable.
-        This form is shown as a skeleton only — no runs can be submitted until
-        Gateway launch is available.
+      <h2 id="launch-heading">Launch Run</h2>
+      <div class="notice" style="margin-bottom:12px;">
+        <strong>v1 capabilities:</strong> This launch surface provides status-only
+        observation. Tool approval requests are automatically denied in v1.
+        Launchable repositories are scoped to your gateway operator access.
       </div>
-      <form aria-disabled="true" style="opacity:0.6;">
-        <fieldset disabled style="border:none;padding:0;">
-          <legend style="font-size:0.875rem;font-weight:600;margin-bottom:8px;color:#374151;">
-            Launch a new run (unavailable — Gateway launch not ready)
-          </legend>
-          <div style="margin-bottom:10px;">
-            <label for="launch-owner" style="display:block;font-size:0.8rem;font-weight:600;margin-bottom:4px;color:#374151;">
-              Owner
-            </label>
-            <input
-              id="launch-owner"
-              type="text"
-              value="fro-bot"
-              disabled
-              aria-describedby="launch-disabled-reason"
-              style="width:100%;max-width:300px;padding:6px 10px;border:1px solid #d1d5db;border-radius:4px;font-size:0.875rem;background:#f9fafb;color:#9ca3af;"
-            />
+      <form id="launch-form" aria-label="Launch a new run">
+        <div style="margin-bottom:12px;">
+          <label for="launch-repo-select" style="display:block;font-size:0.8rem;font-weight:600;margin-bottom:4px;color:#374151;">
+            Repository
+          </label>
+          <div id="repo-picker-container" style="min-height:36px;">
+            <span style="font-size:0.875rem;color:#6b7280;">Loading repositories&hellip;</span>
           </div>
-          <div style="margin-bottom:10px;">
-            <label for="launch-repo" style="display:block;font-size:0.8rem;font-weight:600;margin-bottom:4px;color:#374151;">
-              Repository
-            </label>
-            <input
-              id="launch-repo"
-              type="text"
-              value="agent"
-              disabled
-              aria-describedby="launch-disabled-reason"
-              style="width:100%;max-width:300px;padding:6px 10px;border:1px solid #d1d5db;border-radius:4px;font-size:0.875rem;background:#f9fafb;color:#9ca3af;"
-            />
-          </div>
-          <p id="launch-disabled-reason" style="font-size:0.8rem;color:#9ca3af;margin-top:4px;">
-            Launch is disabled: the Gateway launch route is not yet available.
-          </p>
-        </fieldset>
+        </div>
+        <div style="margin-bottom:12px;">
+          <label for="launch-prompt" style="display:block;font-size:0.8rem;font-weight:600;margin-bottom:4px;color:#374151;">
+            Prompt
+          </label>
+          <textarea
+            id="launch-prompt"
+            name="prompt"
+            rows="4"
+            placeholder="Describe the task for the agent&hellip;"
+            style="width:100%;max-width:500px;padding:6px 10px;border:1px solid #d1d5db;border-radius:4px;font-size:0.875rem;resize:vertical;"
+            aria-describedby="launch-error"
+          ></textarea>
+        </div>
+        <div id="launch-error" hidden style="color:#dc2626;font-size:0.875rem;margin-bottom:8px;" role="alert" aria-live="polite"></div>
+        <button
+          type="submit"
+          class="btn"
+          style="padding:8px 18px;background:#2563eb;color:#fff;border:none;border-radius:4px;font-size:0.875rem;font-weight:600;cursor:pointer;"
+        >
+          Launch Run
+        </button>
       </form>
     </section>
   `
@@ -288,18 +283,13 @@ function terminalApprovalCard(decision: {
 function bindingUnavailableSection(): ReturnType<typeof html> {
   return html`
     <section class="section" aria-labelledby="binding-heading">
-      <h2 id="binding-heading">Gateway Repository Selection</h2>
-      <div class="unavailable">
-        <strong>Gateway repository selection unavailable.</strong>
-        Gateway-backed repository selection requires Gateway repository binding,
-        which is not yet available. The monitoring repository table above remains
-        independent and is not affected by this limitation.
+      <h2 id="binding-heading">Gateway Repository Access</h2>
+      <div id="repo-picker-info" class="notice">
+        <strong>Repository access is gateway-scoped.</strong>
+        Only repositories authorized under your gateway operator session are
+        available for launch. Dashboard monitoring access does not grant launch
+        authorization — gateway repository access is determined separately.
       </div>
-      <p style="font-size:0.8rem;color:#6b7280;">
-        Note: Repositories visible in the monitoring dashboard are not automatically
-        available for Gateway launch. Gateway repository authorization is separate
-        from dashboard monitoring access.
-      </p>
     </section>
   `
 }
@@ -336,6 +326,7 @@ function operatorPage(gatewaySessionEnabled: boolean): ReturnType<typeof html> {
     <a href="/">← Back to monitoring dashboard</a>
   </p>
   <script src="/static/operator-stream.js" type="module"></script>
+  <script src="/static/operator-launch.js" type="module"></script>
 </body>
 </html>`
 }

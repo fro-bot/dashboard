@@ -206,8 +206,7 @@ export const FIXTURE_DECISION_UNAVAILABLE: ApprovalDecisionResponse = {
 // ---------------------------------------------------------------------------
 
 export const FIXTURE_LAUNCH_REQUEST: LaunchRunRequest = {
-  owner: 'fro-bot',
-  repo: 'agent',
+  repo: 'fro-bot/agent',
   // NOTE: This is a fixture placeholder — never a real prompt.
   // The prompt is intentionally generic and not rendered in the UI.
   prompt: '[Fixture prompt — not rendered in UI]',
@@ -217,7 +216,6 @@ export const FIXTURE_LAUNCH_REQUEST: LaunchRunRequest = {
 
 export const FIXTURE_LAUNCH_RESPONSE: LaunchRunResponse = {
   runId: 'run-fixture-queued-001',
-  status: 'queued',
 }
 
 export const FIXTURE_APPROVAL_DECISION_REQUEST: ApprovalDecisionRequest = {

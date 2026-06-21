@@ -63,6 +63,9 @@ function makeFakeOperatorClient(
     connectRunStream: () => {
       throw new Error('connectRunStream must not be called in auth middleware')
     },
+    listRepos: () => {
+      throw new Error('listRepos must not be called in auth middleware')
+    },
     listPendingApprovals: () => {
       throw new Error('listPendingApprovals must not be called in auth middleware')
     },

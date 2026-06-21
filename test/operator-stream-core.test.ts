@@ -18,6 +18,7 @@ import type {StreamState} from '../public/operator-stream.js'
 import {describe, expect, it, vi} from 'vitest'
 import {
   bootstrapOperatorStreams,
+  FIRST_FRAME_TIMEOUT_MS,
   MAX_SSE_BUFFER_BYTES,
   nextStreamState,
   parseSseFrame,
@@ -65,14 +66,14 @@ const INITIAL_STATE: StreamState = {
 
 describe('parseSseFrame — pure parser', () => {
   it('parses a ready frame', () => {
-    const text = `event: ready\ndata: {"contractVersion":"1.1.0"}\n\n`
+    const text = `event: ready\ndata: {"contractVersion":"1.2.0"}\n\n`
     const result = parseSseFrame(text)
     expect(result).not.toBeNull()
     expect(result?.success).toBe(true)
     if (result !== null && result.success) {
       expect(result.frame.type).toBe('ready')
       if (result.frame.type === 'ready') {
-        expect(result.frame.data.contractVersion).toBe('1.1.0')
+        expect(result.frame.data.contractVersion).toBe('1.2.0')
       }
     }
   })
@@ -161,7 +162,7 @@ describe('parseSseFrame — pure parser', () => {
   })
 
   it('returns a failure for a data-only record (no event name)', () => {
-    const text = 'data: {"contractVersion":"1.1.0"}\n\n'
+    const text = 'data: {"contractVersion":"1.2.0"}\n\n'
     const result = parseSseFrame(text)
     expect(result?.success).toBe(false)
   })
@@ -568,8 +569,8 @@ describe('backoff constants', () => {
     expect(Number.isInteger(RETRY_MAX_COUNT)).toBe(true)
   })
 
-  it('PINNED_CONTRACT_VERSION is 1.1.0', () => {
-    expect(PINNED_CONTRACT_VERSION).toBe('1.1.0')
+  it('PINNED_CONTRACT_VERSION is 1.2.0', () => {
+    expect(PINNED_CONTRACT_VERSION).toBe('1.2.0')
   })
 })
 
@@ -962,6 +963,165 @@ describe('bootstrapOperatorStreams', () => {
     const fetchCalls = await withFakeBrowser(cards, true, bootstrapOperatorStreams)
     expect(fetchCalls).toHaveLength(1)
     expect(fetchCalls[0]).toBe('/operator/runs/run-003/stream')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// First-frame timeout — reducer-level tests
+// ---------------------------------------------------------------------------
+
+describe('nextStreamState — first-frame timeout', () => {
+  it('connecting + first-frame-timeout → submitted-unobservable, shouldReconnect false', () => {
+    const state = nextStreamState(INITIAL_STATE, {type: 'first-frame-timeout'})
+    expect(state.connection).toBe('submitted-unobservable')
+    expect(state.shouldReconnect).toBe(false)
+  })
+
+  it('reconnecting + first-frame-timeout → submitted-unobservable, shouldReconnect false', () => {
+    const reconnecting: StreamState = {
+      ...INITIAL_STATE,
+      connection: 'reconnecting',
+      retryCount: 1,
+    }
+    const state = nextStreamState(reconnecting, {type: 'first-frame-timeout'})
+    expect(state.connection).toBe('submitted-unobservable')
+    expect(state.shouldReconnect).toBe(false)
+  })
+
+  it('live + first-frame-timeout → stays live (no-op)', () => {
+    const liveState = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: PINNED_CONTRACT_VERSION},
+    })
+    const state = nextStreamState(liveState, {type: 'first-frame-timeout'})
+    expect(state.connection).toBe('live')
+  })
+
+  it('a state that already received a frame (live with run data) + first-frame-timeout → no overwrite', () => {
+    const liveState = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: PINNED_CONTRACT_VERSION},
+    })
+    const withRun = nextStreamState(liveState, {type: 'status', data: ACTIVE_STATUS})
+    const state = nextStreamState(withRun, {type: 'first-frame-timeout'})
+    expect(state.connection).toBe('live')
+    expect(Object.keys(state.runs)).toHaveLength(1)
+  })
+
+  it('not-found + first-frame-timeout → stays not-found', () => {
+    const notFound = nextStreamState(INITIAL_STATE, {type: 'http-status', code: 404})
+    const state = nextStreamState(notFound, {type: 'first-frame-timeout'})
+    expect(state.connection).toBe('not-found')
+  })
+
+  it('failed + first-frame-timeout → stays failed', () => {
+    const failed: StreamState = {...INITIAL_STATE, connection: 'failed', shouldReconnect: false}
+    const state = nextStreamState(failed, {type: 'first-frame-timeout'})
+    expect(state.connection).toBe('failed')
+  })
+
+  it('closed + first-frame-timeout → stays closed', () => {
+    const closed: StreamState = {...INITIAL_STATE, connection: 'closed', shouldReconnect: false}
+    const state = nextStreamState(closed, {type: 'first-frame-timeout'})
+    expect(state.connection).toBe('closed')
+  })
+
+  it('drift + first-frame-timeout → stays drift (drift is absorbing)', () => {
+    const drifted = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: '0.0.1'},
+    })
+    const state = nextStreamState(drifted, {type: 'first-frame-timeout'})
+    expect(state.connection).toBe('drift')
+  })
+
+  it('a ready frame before the timeout leaves state live (timer-clear is DOM-shell only; reducer is fully tested here)', () => {
+    // The pure reducer path: ready → live, then timeout is a no-op
+    const liveState = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: PINNED_CONTRACT_VERSION},
+    })
+    expect(liveState.connection).toBe('live')
+    // Timeout after live is a no-op
+    const afterTimeout = nextStreamState(liveState, {type: 'first-frame-timeout'})
+    expect(afterTimeout.connection).toBe('live')
+  })
+
+  it('FIRST_FRAME_TIMEOUT_MS is a positive number', () => {
+    expect(typeof FIRST_FRAME_TIMEOUT_MS).toBe('number')
+    expect(FIRST_FRAME_TIMEOUT_MS).toBeGreaterThan(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F2 — closed/submitted-unobservable guard: abort-rejection must not reopen
+// ---------------------------------------------------------------------------
+
+describe('nextStreamState — closed and submitted-unobservable are terminal for network events', () => {
+  it('closed + network-error → stays closed (abort-rejection must not reopen the stream)', () => {
+    const closed: StreamState = {
+      ...INITIAL_STATE,
+      connection: 'closed',
+      shouldReconnect: false,
+    }
+    const state = nextStreamState(closed, {type: 'network-error'})
+    expect(state.connection).toBe('closed')
+    expect(state.shouldReconnect).toBe(false)
+  })
+
+  it('closed + unexpected-close → stays closed (abort-rejection must not reopen the stream)', () => {
+    const closed: StreamState = {
+      ...INITIAL_STATE,
+      connection: 'closed',
+      shouldReconnect: false,
+    }
+    const state = nextStreamState(closed, {type: 'unexpected-close'})
+    expect(state.connection).toBe('closed')
+    expect(state.shouldReconnect).toBe(false)
+  })
+
+  it('submitted-unobservable + network-error → stays submitted-unobservable', () => {
+    const unobservable: StreamState = {
+      ...INITIAL_STATE,
+      connection: 'submitted-unobservable',
+      shouldReconnect: false,
+    }
+    const state = nextStreamState(unobservable, {type: 'network-error'})
+    expect(state.connection).toBe('submitted-unobservable')
+    expect(state.shouldReconnect).toBe(false)
+  })
+
+  it('submitted-unobservable + unexpected-close → stays submitted-unobservable', () => {
+    const unobservable: StreamState = {
+      ...INITIAL_STATE,
+      connection: 'submitted-unobservable',
+      shouldReconnect: false,
+    }
+    const state = nextStreamState(unobservable, {type: 'unexpected-close'})
+    expect(state.connection).toBe('submitted-unobservable')
+    expect(state.shouldReconnect).toBe(false)
+  })
+
+  it('closed + network-error does not increment retryCount', () => {
+    const closed: StreamState = {
+      ...INITIAL_STATE,
+      connection: 'closed',
+      retryCount: 2,
+      shouldReconnect: false,
+    }
+    const state = nextStreamState(closed, {type: 'network-error'})
+    expect(state.retryCount).toBe(2)
+  })
+
+  it('closed + unexpected-close does not increment retryCount', () => {
+    const closed: StreamState = {
+      ...INITIAL_STATE,
+      connection: 'closed',
+      retryCount: 3,
+      shouldReconnect: false,
+    }
+    const state = nextStreamState(closed, {type: 'unexpected-close'})
+    expect(state.retryCount).toBe(3)
   })
 })
 

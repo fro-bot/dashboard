@@ -76,6 +76,9 @@ function makeFakeOperatorClient(
     connectRunStream: () => {
       throw new Error('connectRunStream must not be called during page render')
     },
+    listRepos: () => {
+      throw new Error('listRepos must not be called during page render')
+    },
     listPendingApprovals: () => {
       throw new Error('listPendingApprovals must not be called during page render')
     },
@@ -565,6 +568,127 @@ describe('operator UI — SSE stream wiring (flag ON + authenticated)', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Launch surface — operator-launch.js script, repo picker, live form, v1 caveats
+// ---------------------------------------------------------------------------
+
+describe('operator UI — launch surface (flag ON + authenticated)', () => {
+  it('page includes the operator-launch script tag with src and type=module', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('src="/static/operator-launch.js"')
+    expect(body).toContain('type="module"')
+  })
+
+  it('repo-picker container is present in the rendered HTML', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('id="repo-picker-container"')
+  })
+
+  it('launch form is present and not wrapped in a disabled fieldset', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // The live form must be present
+    expect(body).toContain('id="launch-form"')
+    // The form must NOT have a disabled fieldset (the old skeleton had one)
+    expect(body).not.toContain('<fieldset disabled')
+    // The form itself must not carry aria-disabled
+    expect(body).not.toContain('id="launch-form" aria-disabled')
+    expect(body).not.toContain('aria-disabled="true" id="launch-form"')
+  })
+
+  it('launch form has a prompt textarea', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('name="prompt"')
+    expect(body).toContain('<textarea')
+  })
+
+  it('launch form has a submit button', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('type="submit"')
+  })
+
+  it('v1-caveat copy is present: status-only observation', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toMatch(/status.only/i)
+  })
+
+  it('v1-caveat copy is present: tool approval auto-deny', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toMatch(/tool approval|automatically denied|auto.deny/i)
+  })
+
+  it('v1-caveat copy is present: repos are access-scoped', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toMatch(/scoped|gateway.*access|access.*gateway/i)
+  })
+
+  it('no inline script tags (CSP clean — all scripts have src=)', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    const scriptTagsWithoutSrc = body.match(/<script(?![^>]* src=)[^>]*>/g)
+    expect(scriptTagsWithoutSrc).toBeNull()
+  })
+
+  it('no-leak: fixture sensitive values never in rendered HTML', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).not.toContain('[Fixture prompt — not rendered in UI]')
+    expect(body).not.toContain('fixture-csrf-placeholder')
+    expect(body).not.toContain('fixture-idempotency-key-001')
+    expect(body).not.toContain('fixture-idempotency-key-002')
+  })
+
+  it('SSR render does not call listRepos, launchRun, or refreshCsrf', async () => {
+    // The throwing fake surfaces any accidental SSR call to these methods.
+    const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
+    const app = await buildTestApp({
+      operatorUiEnabled: true,
+      gatewayOperatorSessionEnabled: true,
+      operatorClient,
+    })
+    // If listRepos/launchRun/refreshCsrf were called, they would throw and the request would fail.
+    const res = await gatewayAuthedGet(app, '/operator')
+    expect(res.status).toBe(200)
+  })
+
+  it('flag OFF → no operator-launch.js script, no launch form', async () => {
+    const app = await buildTestApp(false)
+    const res = await authedGet(app, '/operator')
+    expect([302, 303, 401, 404]).toContain(res.status)
+    const body = await res.text()
+    expect(body).not.toContain('operator-launch.js')
+    expect(body).not.toContain('launch-form')
+    expect(body).not.toContain('repo-picker-container')
+  })
+})
+
 describe('operator UI — credential-domain copy when gateway session governs (gateway flag ON)', () => {
   // In gateway mode the auth middleware validates via the injected operatorClient.
   // We inject a fake that returns a valid session so the page renders.
@@ -634,5 +758,38 @@ describe('operator UI — credential-domain copy when gateway session governs (g
     expect(body).not.toContain('fixture-idempotency-key-002')
     // No raw gateway cookie values
     expect(body).not.toContain('test-gateway-cookie')
+  })
+
+  // The dashboard app deliberately does NOT serve the operator data/launch
+  // endpoints — the public reverse proxy routes those same-origin paths to the
+  // gateway. Serving them here would make this read-only app a
+  // credential-forwarding proxy. These assertions pin that invariant: even with
+  // the operator UI mounted and an authenticated operator, /operator/repos and
+  // POST /operator/runs are not handled by the dashboard (Hono 404s the
+  // unmounted sub-paths after auth passes).
+  it('does not mount the operator data/launch endpoints (reverse proxy owns them)', async () => {
+    const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
+    const app = await buildTestApp({
+      operatorUiEnabled: true,
+      gatewayOperatorSessionEnabled: true,
+      operatorClient,
+    })
+
+    const repos = await app.request('/operator/repos', {
+      headers: {cookie: 'gateway_session=test-gateway-cookie'},
+    })
+    expect(repos.status).toBe(404)
+
+    const launch = await app.request('/operator/runs', {
+      method: 'POST',
+      headers: {cookie: 'gateway_session=test-gateway-cookie', 'content-type': 'application/json'},
+      body: JSON.stringify({repo: 'fro-bot/agent', prompt: 'x'}),
+    })
+    expect(launch.status).toBe(404)
+
+    const csrf = await app.request('/operator/session/csrf', {
+      headers: {cookie: 'gateway_session=test-gateway-cookie'},
+    })
+    expect(csrf.status).toBe(404)
   })
 })
