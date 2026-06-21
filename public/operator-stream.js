@@ -376,6 +376,13 @@ export function nextStreamState(current, event) {
     }
 
     case 'network-error': {
+      // Guard terminal-ish display states: abort-rejection from close() must not reopen
+      if (
+        current.connection === 'closed' ||
+        current.connection === 'submitted-unobservable'
+      ) {
+        return current
+      }
       if (current.retryCount >= RETRY_MAX_COUNT) {
         return {
           ...current,
@@ -400,6 +407,13 @@ export function nextStreamState(current, event) {
     }
 
     case 'unexpected-close': {
+      // Guard terminal-ish display states: abort-rejection from close() must not reopen
+      if (
+        current.connection === 'closed' ||
+        current.connection === 'submitted-unobservable'
+      ) {
+        return current
+      }
       if (current.retryCount >= RETRY_MAX_COUNT) {
         return {
           ...current,
@@ -582,6 +596,11 @@ export function initOperatorStream(opts) {
     // Don't fetch if close() was called
     if (aborted) return
 
+    // Clear any previously-pending first-frame timer before arming a new one.
+    // Without this, a reconnect would leak the old timer, which could fire later
+    // and wrongly dispatch first-frame-timeout on a recovering stream.
+    clearFirstFrameTimer()
+
     abortController = new AbortController()
     const signal = abortController.signal
 
@@ -698,7 +717,8 @@ export function initOperatorStream(opts) {
                 state.connection !== 'closed' &&
                 state.connection !== 'failed' &&
                 state.connection !== 'not-found' &&
-                state.connection !== 'drift' // stop reading on drift
+                state.connection !== 'drift' && // stop reading on drift
+                state.connection !== 'submitted-unobservable' // stop reading after first-frame timeout
               ) {
                 readChunk()
               }

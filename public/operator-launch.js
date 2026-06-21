@@ -23,6 +23,32 @@
  */
 
 // ---------------------------------------------------------------------------
+// Pure: repo item validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate a single repo item from the listRepos response.
+ *
+ * A valid item must be a non-null object with string owner and string repo.
+ * channelName is optional but must be a string if present.
+ *
+ * Returns true if the item is valid, false otherwise.
+ * Exported so tests can exercise the validation logic directly.
+ */
+export function validateRepoItem(item) {
+  if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+    return false
+  }
+  if (typeof item.owner !== 'string' || typeof item.repo !== 'string') {
+    return false
+  }
+  if (item.channelName !== undefined && typeof item.channelName !== 'string') {
+    return false
+  }
+  return true
+}
+
+// ---------------------------------------------------------------------------
 // Pure: idempotency key minting
 // ---------------------------------------------------------------------------
 
@@ -208,6 +234,13 @@ export async function initOperatorLaunch() {
         if (!Array.isArray(data)) {
           return {success: false, error: {kind: 'protocol', message: 'invalid repos response'}}
         }
+        // Validate each item — fail closed if any item is malformed.
+        // A null or missing-field item would crash the picker render loop.
+        for (const item of data) {
+          if (!validateRepoItem(item)) {
+            return {success: false, error: {kind: 'protocol', message: 'invalid repos response'}}
+          }
+        }
         return {success: true, data}
       } catch {
         return {success: false, error: {kind: 'network', message: 'network error'}}
@@ -234,6 +267,10 @@ export async function initOperatorLaunch() {
         })
         if (res.status === 202) {
           const data = await res.json()
+          // Validate runId — a missing or non-string runId would produce a bogus stream URL
+          if (typeof data.runId !== 'string' || data.runId === '') {
+            return {success: false, error: {kind: 'protocol', message: 'invalid runId in 202 response'}}
+          }
           return {success: true, data: {runId: data.runId}}
         }
         return {success: false, error: {kind: 'http', status: res.status}}
@@ -286,13 +323,22 @@ export async function initOperatorLaunch() {
   const sharedNoticeEl = runStatusSection?.querySelector('[data-role="stream-status"]') ?? null
 
   if (launchForm !== null) {
+    // In-flight submit mutex: prevents double-launch even when requestSubmit()
+    // bypasses the disabled button (e.g. DevTools or browser extensions).
+    let launching = false
+
     launchForm.addEventListener('submit', async event => {
       event.preventDefault()
+
+      // Mutex guard — re-entry is impossible regardless of how submit is triggered
+      if (launching) return
+      launching = true
 
       // Pre-fetch validation: empty prompt
       const formData = new FormData(launchForm)
       const prompt = (formData.get('prompt') ?? '').toString().trim()
       if (prompt === '') {
+        launching = false
         if (launchError !== null) {
           launchError.textContent = 'Please enter a prompt before launching.'
           launchError.hidden = false
@@ -304,6 +350,7 @@ export async function initOperatorLaunch() {
       const repoSelectEl = document.querySelector('#launch-repo-select')
       const repo = repoSelectEl?.value ?? formData.get('repo')?.toString() ?? ''
       if (repo === '') {
+        launching = false
         if (launchError !== null) {
           launchError.textContent = 'Please select a repository.'
           launchError.hidden = false
@@ -324,9 +371,22 @@ export async function initOperatorLaunch() {
       // Mint a fresh idempotency key for this submission
       const idempotencyKey = mintIdempotencyKey()
 
-      const outcome = await submitLaunch(client, {repo, prompt}, idempotencyKey)
-
-      if (submitBtn !== null) submitBtn.disabled = false
+      let outcome
+      try {
+        outcome = await submitLaunch(client, {repo, prompt}, idempotencyKey)
+      } catch {
+        // Unexpected throw (e.g. mintIdempotencyKey or submitLaunch itself throws) —
+        // set generic failure copy so the form is never stuck.
+        if (launchError !== null) {
+          launchError.textContent = 'Launch failed. Please try again.'
+          launchError.hidden = false
+        }
+        return
+      } finally {
+        // Always re-enable the button and clear the mutex, even on throw
+        if (submitBtn !== null) submitBtn.disabled = false
+        launching = false
+      }
 
       if (outcome.kind === 'launched') {
         const {runId} = outcome

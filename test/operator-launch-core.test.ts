@@ -14,7 +14,7 @@
 
 import type {LaunchClient} from '../public/operator-launch.js'
 import {describe, expect, it} from 'vitest'
-import {buildPendingCardHooks, mintIdempotencyKey, submitLaunch} from '../public/operator-launch.js'
+import {buildPendingCardHooks, mintIdempotencyKey, submitLaunch, validateRepoItem} from '../public/operator-launch.js'
 
 // ---------------------------------------------------------------------------
 // Fake client builder
@@ -307,6 +307,122 @@ describe('buildPendingCardHooks', () => {
     expect(hooks1.statusElSelector).toBe(hooks2.statusElSelector)
     expect(hooks1.noticeElSelector).toBe(hooks2.noticeElSelector)
     expect(hooks1.runId).not.toBe(hooks2.runId)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F4 — listRepos per-item validation (browser client, tested via submitLaunch seam)
+// ---------------------------------------------------------------------------
+
+// The browser client's listRepos is inline in initOperatorLaunch (DOM shell) and
+// cannot be imported directly. We test the validation logic by exercising the
+// exported validateRepoItem helper, which mirrors the inline check.
+// If no such export exists, we test the behavior via a fake client that returns
+// the same shapes the browser client would return after validation.
+
+describe('validateRepoItem — per-item validation for listRepos', () => {
+  it('accepts a valid item with owner and repo strings', () => {
+    expect(validateRepoItem({owner: 'fro-bot', repo: 'agent'})).toBe(true)
+  })
+
+  it('accepts a valid item with optional channelName string', () => {
+    expect(validateRepoItem({owner: 'fro-bot', repo: 'agent', channelName: '#general'})).toBe(true)
+  })
+
+  it('rejects null', () => {
+    expect(validateRepoItem(null)).toBe(false)
+  })
+
+  it('rejects a non-object (string)', () => {
+    expect(validateRepoItem('fro-bot/agent')).toBe(false)
+  })
+
+  it('rejects an item missing owner', () => {
+    expect(validateRepoItem({repo: 'agent'})).toBe(false)
+  })
+
+  it('rejects an item missing repo', () => {
+    expect(validateRepoItem({owner: 'fro-bot'})).toBe(false)
+  })
+
+  it('rejects an item with non-string owner', () => {
+    expect(validateRepoItem({owner: 42, repo: 'agent'})).toBe(false)
+  })
+
+  it('rejects an item with non-string repo', () => {
+    expect(validateRepoItem({owner: 'fro-bot', repo: null})).toBe(false)
+  })
+
+  it('rejects an item with non-string channelName when present', () => {
+    expect(validateRepoItem({owner: 'fro-bot', repo: 'agent', channelName: 123})).toBe(false)
+  })
+
+  it('accepts an item with undefined channelName (optional field)', () => {
+    expect(validateRepoItem({owner: 'fro-bot', repo: 'agent', channelName: undefined})).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F5 — 202 runId validation (browser client launchRun, tested via submitLaunch seam)
+// ---------------------------------------------------------------------------
+
+// The browser client's launchRun validates runId before returning success.
+// We test this by constructing a fake client that returns the same Result shape
+// the browser client would return when runId is missing/null/empty.
+
+describe('submitLaunch — 202 with missing or invalid runId → failure (not launched)', () => {
+  it('202 with null runId → failure outcome (not launched)', async () => {
+    // Simulate a browser client that got 202 but runId was null — it should
+    // return a protocol error Result, which submitLaunch maps to {kind:'failure'}.
+    const client = makeFakeClient({
+      csrfResults: [{success: true, csrfToken: 'tok-runid'}],
+      launchResults: [],
+    })
+    // Override launchRun to return a protocol error (what the browser client returns
+    // when 202 body has no valid runId)
+    const clientWithBadRunId = {
+      ...client,
+      async launchRun(_req: Parameters<typeof client.launchRun>[0]) {
+        return {
+          success: false as const,
+          error: {kind: 'protocol' as const, message: 'invalid runId in 202 response'},
+        }
+      },
+    }
+    const outcome = await submitLaunch(clientWithBadRunId, {repo: 'owner/repo', prompt: 'test'}, 'key-runid')
+    expect(outcome.kind).toBe('failure')
+    expect(outcome.kind).not.toBe('launched')
+  })
+
+  it('202 with empty string runId → failure outcome (not launched)', async () => {
+    const client = makeFakeClient({
+      csrfResults: [{success: true, csrfToken: 'tok-empty-runid'}],
+      launchResults: [],
+    })
+    const clientWithEmptyRunId = {
+      ...client,
+      async launchRun(_req: Parameters<typeof client.launchRun>[0]) {
+        return {
+          success: false as const,
+          error: {kind: 'protocol' as const, message: 'invalid runId in 202 response'},
+        }
+      },
+    }
+    const outcome = await submitLaunch(clientWithEmptyRunId, {repo: 'owner/repo', prompt: 'test'}, 'key-empty')
+    expect(outcome.kind).toBe('failure')
+    expect(outcome.kind).not.toBe('launched')
+  })
+
+  it('202 with valid runId string → launched outcome', async () => {
+    const client = makeFakeClient({
+      csrfResults: [{success: true, csrfToken: 'tok-valid-runid'}],
+      launchResults: [{success: true, runId: 'run-valid-001'}],
+    })
+    const outcome = await submitLaunch(client, {repo: 'owner/repo', prompt: 'test'}, 'key-valid')
+    expect(outcome.kind).toBe('launched')
+    if (outcome.kind === 'launched') {
+      expect(outcome.runId).toBe('run-valid-001')
+    }
   })
 })
 

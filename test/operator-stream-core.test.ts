@@ -1054,6 +1054,78 @@ describe('nextStreamState — first-frame timeout', () => {
 })
 
 // ---------------------------------------------------------------------------
+// F2 — closed/submitted-unobservable guard: abort-rejection must not reopen
+// ---------------------------------------------------------------------------
+
+describe('nextStreamState — closed and submitted-unobservable are terminal for network events', () => {
+  it('closed + network-error → stays closed (abort-rejection must not reopen the stream)', () => {
+    const closed: StreamState = {
+      ...INITIAL_STATE,
+      connection: 'closed',
+      shouldReconnect: false,
+    }
+    const state = nextStreamState(closed, {type: 'network-error'})
+    expect(state.connection).toBe('closed')
+    expect(state.shouldReconnect).toBe(false)
+  })
+
+  it('closed + unexpected-close → stays closed (abort-rejection must not reopen the stream)', () => {
+    const closed: StreamState = {
+      ...INITIAL_STATE,
+      connection: 'closed',
+      shouldReconnect: false,
+    }
+    const state = nextStreamState(closed, {type: 'unexpected-close'})
+    expect(state.connection).toBe('closed')
+    expect(state.shouldReconnect).toBe(false)
+  })
+
+  it('submitted-unobservable + network-error → stays submitted-unobservable', () => {
+    const unobservable: StreamState = {
+      ...INITIAL_STATE,
+      connection: 'submitted-unobservable',
+      shouldReconnect: false,
+    }
+    const state = nextStreamState(unobservable, {type: 'network-error'})
+    expect(state.connection).toBe('submitted-unobservable')
+    expect(state.shouldReconnect).toBe(false)
+  })
+
+  it('submitted-unobservable + unexpected-close → stays submitted-unobservable', () => {
+    const unobservable: StreamState = {
+      ...INITIAL_STATE,
+      connection: 'submitted-unobservable',
+      shouldReconnect: false,
+    }
+    const state = nextStreamState(unobservable, {type: 'unexpected-close'})
+    expect(state.connection).toBe('submitted-unobservable')
+    expect(state.shouldReconnect).toBe(false)
+  })
+
+  it('closed + network-error does not increment retryCount', () => {
+    const closed: StreamState = {
+      ...INITIAL_STATE,
+      connection: 'closed',
+      retryCount: 2,
+      shouldReconnect: false,
+    }
+    const state = nextStreamState(closed, {type: 'network-error'})
+    expect(state.retryCount).toBe(2)
+  })
+
+  it('closed + unexpected-close does not increment retryCount', () => {
+    const closed: StreamState = {
+      ...INITIAL_STATE,
+      connection: 'closed',
+      retryCount: 3,
+      shouldReconnect: false,
+    }
+    const state = nextStreamState(closed, {type: 'unexpected-close'})
+    expect(state.retryCount).toBe(3)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Buffer overflow fails closed terminally (no reconnect)
 // ---------------------------------------------------------------------------
 

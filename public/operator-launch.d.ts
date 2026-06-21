@@ -52,6 +52,16 @@ export interface LaunchClient {
 // ---------------------------------------------------------------------------
 
 /**
+ * Validate a single repo item from the listRepos response.
+ *
+ * A valid item must be a non-null object with string owner and string repo.
+ * channelName is optional but must be a string if present.
+ *
+ * Returns true if the item is valid, false otherwise.
+ */
+export declare function validateRepoItem(item: unknown): boolean
+
+/**
  * Mint a fresh unique idempotency key for a launch submission.
  * Uses crypto.randomUUID() with a fallback.
  */
