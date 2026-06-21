@@ -22,15 +22,19 @@ on:
 permissions:
   contents: read
 
-# For pull_request events, key the group on the PR head SHA so each push gets its
-# own slot. The previous PR-number key shared one group across every PR event, so
-# a push landing while a prior run for the same PR was still in-flight was dropped
-# (only one pending run is allowed per group and cancel-in-progress is false).
+# For push/synchronize on a PR, key the group on the PR head SHA so each push gets
+# its own slot. The previous PR-number key shared one group across every event for
+# a PR, so a push landing while a prior run for the same PR was still in-flight was
+# dropped (only one pending run is allowed per group and cancel-in-progress is
+# false). Gate the head-SHA key on the pull_request event specifically — other
+# events (review comments, issues) carry a pull_request payload too and must keep
+# their own keys rather than collapsing onto the same SHA group.
 concurrency:
   group: >-
     fro-bot-${{
-      github.event.pull_request.head.sha ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.sha) ||
       github.event.issue.number ||
+      github.event.pull_request.number ||
       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'daily')
       || github.run_id
     }}
