@@ -188,15 +188,27 @@ describe('flag-ON: Gateway branch — happy path', () => {
     expect(getCurrentSessionSpy).not.toHaveBeenCalled()
   })
 
-  it('public path /auth/login → passes through auth middleware without calling getCurrentSession', async () => {
+  it('public path /auth/login → redirects to the gateway operator login without calling getCurrentSession', async () => {
     const {client, getCurrentSessionSpy} = makeFakeOperatorClient(async () => ok(VALID_SESSION))
     const app = await buildGatewayApp(client)
     const res = await app.request('/auth/login')
-    // /auth/login is in isPublicPath — the auth middleware passes it through.
-    // In gateway mode with no operatorLogin, the /auth router is the deniedRouter (401).
-    // The key invariant is that getCurrentSession is NOT called for public paths.
-    expect(res.status).toBe(401)
+    // /auth/login is in isPublicPath — the auth middleware passes it through. In
+    // gateway-session mode the /auth router redirects /login to the gateway operator
+    // login so a direct hit self-heals into the correct flow instead of minting a
+    // dashboard `session` cookie. getCurrentSession is NOT called for public paths.
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
     expect(getCurrentSessionSpy).not.toHaveBeenCalled()
+  })
+
+  it('gateway mode: /auth/callback is NOT mounted — no dashboard session can be minted', async () => {
+    const {client} = makeFakeOperatorClient(async () => ok(VALID_SESSION))
+    const app = await buildGatewayApp(client)
+    const res = await app.request('/auth/callback?code=x&state=y')
+    // The Arctic callback (which mints the dashboard `session` cookie) must be
+    // unreachable in gateway-session mode — it returns 404, not a Set-Cookie.
+    expect(res.status).toBe(404)
+    expect(res.headers.get('set-cookie')).toBeNull()
   })
 })
 
@@ -214,7 +226,7 @@ describe('flag-ON: Gateway branch — fail-closed on validation failure', () => 
       headers: {cookie: 'gateway_session=some-cookie'},
     })
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
   it('getCurrentSession → err {kind:"http", status:500} → 302 redirect to /auth/login', async () => {
@@ -226,7 +238,7 @@ describe('flag-ON: Gateway branch — fail-closed on validation failure', () => 
       headers: {cookie: 'gateway_session=some-cookie'},
     })
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
   it('getCurrentSession → err {kind:"network"} (timeout/network failure) → 302 redirect to /auth/login', async () => {
@@ -238,7 +250,7 @@ describe('flag-ON: Gateway branch — fail-closed on validation failure', () => 
       headers: {cookie: 'gateway_session=some-cookie'},
     })
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
   it('getCurrentSession → err {kind:"protocol"} (malformed/empty body) → 302 redirect to /auth/login', async () => {
@@ -250,7 +262,7 @@ describe('flag-ON: Gateway branch — fail-closed on validation failure', () => 
       headers: {cookie: 'gateway_session=some-cookie'},
     })
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
   it('getCurrentSession → err {kind:"validation"} (schema-drift / legacy string expiresAt) → 302 redirect to /auth/login', async () => {
@@ -268,7 +280,7 @@ describe('flag-ON: Gateway branch — fail-closed on validation failure', () => 
       headers: {cookie: 'gateway_session=some-cookie'},
     })
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 })
 
@@ -289,7 +301,7 @@ describe('flag-ON: expired session defense', () => {
       headers: {cookie: 'gateway_session=some-cookie'},
     })
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
   it('ok but expiresAt === Date.now() (exactly now, not future) → 302 redirect to /auth/login', async () => {
@@ -305,7 +317,7 @@ describe('flag-ON: expired session defense', () => {
       headers: {cookie: 'gateway_session=some-cookie'},
     })
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
   it('ok with future expiresAt → allowed', async () => {
@@ -334,7 +346,7 @@ describe('flag-ON: no inbound cookie', () => {
     // No cookie header at all
     const res = await app.request('/')
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
   it('no cookie header → getCurrentSession is NEVER called', async () => {
@@ -350,7 +362,7 @@ describe('flag-ON: no inbound cookie', () => {
     const app = await buildGatewayApp(client)
     const res = await app.request('/', {headers: {cookie: ''}})
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
     expect(getCurrentSessionSpy).not.toHaveBeenCalled()
   })
 })
@@ -468,7 +480,7 @@ describe('flag-ON: gateway branch ignores DASHBOARD_OPERATOR_LOGIN', () => {
     })
     // Gateway failed → 302 redirect, even though a valid Arctic operatorLogin is configured
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 })
 
@@ -498,7 +510,7 @@ describe('flag-ON: no union, no fallback between modes', () => {
     })
     // Gateway failed → 302 redirect, even though Arctic cookie is valid
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
   it('flag-ON + no cookie + valid Arctic cookie → 302 redirect (gateway branch runs, no fallback)', async () => {
@@ -516,7 +528,7 @@ describe('flag-ON: no union, no fallback between modes', () => {
     // No cookie at all
     const res = await app.request('/')
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
     // getCurrentSession must not be called (no cookie to forward)
     expect(getCurrentSessionSpy).not.toHaveBeenCalled()
   })
@@ -641,7 +653,7 @@ describe('flag-ON: configured origin is always used, not the inbound Host', () =
 
     // Must fail closed — no request to the gateway, 302 redirect
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
     expect(capturedUrls).toHaveLength(0)
   })
 })
@@ -707,7 +719,7 @@ describe('flag-ON: production client-construction path (gatewayFetchImpl seam)',
     })
 
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
   it('production path: aborted/timed-out fetch → denied (fail-closed)', async () => {
@@ -728,7 +740,7 @@ describe('flag-ON: production client-construction path (gatewayFetchImpl seam)',
 
     // Timeout/abort → network error → deny
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 })
 
@@ -749,7 +761,7 @@ describe('flag-ON: nonsensical identity rejection', () => {
       headers: {cookie: 'gateway_session=some-cookie'},
     })
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
   it('operatorId === -1 → 302 redirect (negative operatorId denied)', async () => {
@@ -764,7 +776,7 @@ describe('flag-ON: nonsensical identity rejection', () => {
       headers: {cookie: 'gateway_session=some-cookie'},
     })
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
   it('empty login string → 302 redirect (blank login denied)', async () => {
@@ -779,7 +791,7 @@ describe('flag-ON: nonsensical identity rejection', () => {
       headers: {cookie: 'gateway_session=some-cookie'},
     })
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
   it('whitespace-only login → 302 redirect (blank login denied)', async () => {
@@ -794,7 +806,7 @@ describe('flag-ON: nonsensical identity rejection', () => {
       headers: {cookie: 'gateway_session=some-cookie'},
     })
     expect(res.status).toBe(302)
-    expect(res.headers.get('location')).toContain('/auth/login')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
   it('valid operatorId > 0 and non-empty login → allowed', async () => {
