@@ -1,7 +1,7 @@
 ---
 module: src/server.ts
 tags: [auth, oauth, session, gateway, recovery, mode-aware, open-redirect, csrf]
-problem_type: security-issue
+problem_type: security_issue
 issue: fro-bot/dashboard#70
 related:
   - docs/solutions/security-issues/gateway-operator-session-cookie-forwarding-trust-boundary-2026-06-20.md
