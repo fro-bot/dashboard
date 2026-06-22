@@ -164,6 +164,8 @@ export interface InitOptions {
   readonly runId: string
   readonly statusEl: Element | null
   readonly noticeEl: Element | null
+  readonly outputEl?: (HTMLElement & {hidden: boolean}) | null
+  readonly coalescedEl?: (HTMLElement & {hidden: boolean}) | null
 }
 
 export declare function initOperatorStream(opts: InitOptions): StreamHandle

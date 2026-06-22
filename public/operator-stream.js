@@ -582,7 +582,7 @@ function backoffDelay(attempt) {
  * - Read-only: GET only, no POST/PUT/DELETE.
  */
 export function initOperatorStream(opts) {
-  const {runId, statusEl, noticeEl} = opts
+  const {runId, statusEl, noticeEl, outputEl, coalescedEl} = opts
 
   let state = {
     connection: 'connecting',
@@ -637,6 +637,22 @@ export function initOperatorStream(opts) {
         // Update status class for styling — use allowlisted status value (no whitespace)
         statusEl.className = statusEl.className.replaceAll(/\bstatus-\S+/g, '')
         statusEl.classList.add(`status-${view.status.replaceAll('_', '-')}`)
+      }
+    }
+
+    // Run output: render the accumulated answer via textContent only — `text` is
+    // free-form agent output and must NEVER be interpolated as HTML. droppedCount is
+    // never echoed; a fixed-label hint is toggled instead. Other output-frame fields
+    // are not rendered.
+    if (outputEl) {
+      const runEntry = state.runs[runId]
+      const outputText = runEntry?.outputText
+      if (typeof outputText === 'string' && outputText !== '') {
+        outputEl.textContent = outputText
+        outputEl.hidden = false
+      }
+      if (coalescedEl && runEntry?.outputCoalesced === true) {
+        coalescedEl.hidden = false
       }
     }
   }
@@ -852,7 +868,9 @@ export function bootstrapOperatorStreams() {
     const runId = card.dataset.runId
     if (runId === null || runId === '') continue
     const statusEl = card.querySelector('[data-role="run-status"]')
-    handles.push(initOperatorStream({runId, statusEl, noticeEl}))
+    const outputEl = card.querySelector('[data-role="run-output"]')
+    const coalescedEl = card.querySelector('[data-role="run-output-coalesced"]')
+    handles.push(initOperatorStream({runId, statusEl, noticeEl, outputEl, coalescedEl}))
   }
 
   globalThis.addEventListener('pagehide', () => {
