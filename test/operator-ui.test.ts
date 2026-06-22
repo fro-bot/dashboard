@@ -229,6 +229,25 @@ describe('operator UI — flag ON + authenticated', () => {
     expect(body).not.toContain('failed_to_settle')
   })
 
+  it('renders a run-output surface element per run card (flag ON)', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // The browser client writes accumulated run output into this element via safe DOM.
+    expect(body).toContain('data-role="run-output"')
+  })
+
+  it('the SSR run-output surface starts empty and hidden (no fixture output rendered)', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    const body = await res.text()
+    // The output element ships hidden with no content — output only appears when the
+    // live stream writes it client-side. The SSR must not render any output text.
+    expect(body).toMatch(/<pre class="run-output" data-role="run-output" hidden/)
+    expect(body).toMatch(/data-role="run-output"[^>]*><\/pre>/)
+  })
+
   it('copy distinguishes dashboard auth from Gateway auth', async () => {
     const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')

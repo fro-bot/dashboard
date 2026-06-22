@@ -33,7 +33,7 @@ import {OPERATOR_CONTRACT_VERSION} from './operator-contract/version.ts'
 export const MAX_SSE_BUFFER_BYTES = 1_000_000
 
 // ---------------------------------------------------------------------------
-// Allowlists for value-gated fields (F6)
+// Allowlists for value-gated fields
 // ---------------------------------------------------------------------------
 
 const VALID_STATUSES: ReadonlySet<string> = new Set([
@@ -166,7 +166,7 @@ function parseSseRecord(record: string): SseParseResult | null {
     ) {
       return {success: false, error: new Error('status frame missing required fields')}
     }
-    // Allowlist-gate the enumerated fields (F6) — fail closed on out-of-set values
+    // Allowlist-gate the enumerated fields — fail closed on out-of-set values
     if (!VALID_STATUSES.has(candidate.status)) {
       return {success: false, error: new Error('status frame status value not in allowlist')}
     }
@@ -207,6 +207,40 @@ function parseSseRecord(record: string): SseParseResult | null {
         data: {runId: candidate.runId, reason: candidate.reason},
       },
     }
+  }
+
+  if (eventName === 'output') {
+    // Type-check the required fields; reject otherwise. droppedCount is optional
+    // and must be a number when present. Never echo wire content in the error.
+    if (
+      typeof candidate.runId !== 'string' ||
+      typeof candidate.text !== 'string' ||
+      typeof candidate.final !== 'boolean' ||
+      typeof candidate.seq !== 'number' ||
+      !Number.isSafeInteger(candidate.seq) ||
+      candidate.seq < 0
+    ) {
+      return {success: false, error: new Error('output frame missing required fields')}
+    }
+    if (
+      candidate.droppedCount !== undefined &&
+      (typeof candidate.droppedCount !== 'number' ||
+        !Number.isSafeInteger(candidate.droppedCount) ||
+        candidate.droppedCount < 0)
+    ) {
+      return {success: false, error: new Error('output frame droppedCount is not a non-negative integer')}
+    }
+    const data =
+      candidate.droppedCount === undefined
+        ? {runId: candidate.runId, text: candidate.text, final: candidate.final, seq: candidate.seq}
+        : {
+            runId: candidate.runId,
+            text: candidate.text,
+            final: candidate.final,
+            seq: candidate.seq,
+            droppedCount: candidate.droppedCount,
+          }
+    return {success: true, frame: {type: 'output', data}}
   }
 
   // Unknown event name — fixed error string, never echoes the name
@@ -303,7 +337,7 @@ export function createOperatorSseReader(options: OperatorSseReaderOptions = {}):
   async function open(path: string, opts: SseReaderOpenOptions): Promise<void> {
     const {onEvent, onError, onClose, signal} = opts
 
-    // F11: Validate path is a relative /operator/runs/ path — no absolute URLs, no //
+    // Validate path is a relative /operator/runs/ path — no absolute URLs, no //
     if (
       !path.startsWith('/operator/runs/') ||
       path.startsWith('//') ||
@@ -320,7 +354,7 @@ export function createOperatorSseReader(options: OperatorSseReaderOptions = {}):
     try {
       response = await fetchImpl(path, {
         credentials: 'include',
-        redirect: 'error', // F7: prevent auth-redirect loops
+        redirect: 'error', // prevent auth-redirect loops
         signal,
         headers: {accept: 'text/event-stream'},
       })
@@ -354,7 +388,7 @@ export function createOperatorSseReader(options: OperatorSseReaderOptions = {}):
       return
     }
 
-    // F7: Require Content-Type text/event-stream on 200
+    // Require Content-Type text/event-stream on 200
     const contentType = response.headers.get('content-type') ?? ''
     if (!contentType.startsWith('text/event-stream')) {
       logger?.error('sse-reader: unexpected content-type', {route: ROUTE_TEMPLATE})
@@ -439,7 +473,7 @@ export function createOperatorSseReader(options: OperatorSseReaderOptions = {}):
           buffer += normalizeCrlf(decoder.decode(value, {stream: true}))
         }
 
-        // F2: Hard buffer cap — fail closed if exceeded without a boundary
+        // Hard buffer cap — fail closed if exceeded without a boundary
         if (buffer.length > MAX_SSE_BUFFER_BYTES) {
           logger?.error('sse-reader: buffer overflow', {route: ROUTE_TEMPLATE})
           onError(new Error('network error: stream buffer overflow'))
@@ -463,7 +497,7 @@ export function createOperatorSseReader(options: OperatorSseReaderOptions = {}):
         }
       }
 
-      // F4/F5: Flush any remaining buffer content through the unified handleFrame path
+      // Flush any remaining buffer content through the unified handleFrame path
       // (handles streams that don't end with \n\n)
       if (buffer.trim() !== '') {
         const results = parseSseChunk(`${buffer}\n\n`)

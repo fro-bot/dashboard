@@ -14,11 +14,12 @@
  * - No console output of frame data.
  */
 
-import type {StreamState} from '../public/operator-stream.js'
+import type {OutputFrameData, RunEntry, StreamState} from '../public/operator-stream.js'
 import {describe, expect, it, vi} from 'vitest'
 import {
   bootstrapOperatorStreams,
   FIRST_FRAME_TIMEOUT_MS,
+  MAX_OUTPUT_TEXT_CHARS,
   MAX_SSE_BUFFER_BYTES,
   nextStreamState,
   parseSseFrame,
@@ -66,14 +67,14 @@ const INITIAL_STATE: StreamState = {
 
 describe('parseSseFrame — pure parser', () => {
   it('parses a ready frame', () => {
-    const text = `event: ready\ndata: {"contractVersion":"1.2.0"}\n\n`
+    const text = `event: ready\ndata: {"contractVersion":"1.3.0"}\n\n`
     const result = parseSseFrame(text)
     expect(result).not.toBeNull()
     expect(result?.success).toBe(true)
     if (result !== null && result.success) {
       expect(result.frame.type).toBe('ready')
       if (result.frame.type === 'ready') {
-        expect(result.frame.data.contractVersion).toBe('1.2.0')
+        expect(result.frame.data.contractVersion).toBe('1.3.0')
       }
     }
   })
@@ -162,9 +163,153 @@ describe('parseSseFrame — pure parser', () => {
   })
 
   it('returns a failure for a data-only record (no event name)', () => {
-    const text = 'data: {"contractVersion":"1.2.0"}\n\n'
+    const text = 'data: {"contractVersion":"1.3.0"}\n\n'
     const result = parseSseFrame(text)
     expect(result?.success).toBe(false)
+  })
+
+  it('parses an output delta frame', () => {
+    const text = `event: output\ndata: {"runId":"run-abc","text":"hello","final":false,"seq":0}\n\n`
+    const result = parseSseFrame(text)
+    expect(result?.success).toBe(true)
+    if (result?.success && result.frame.type === 'output') {
+      expect(result.frame.data.text).toBe('hello')
+      expect(result.frame.data.final).toBe(false)
+      expect(result.frame.data.seq).toBe(0)
+    } else {
+      expect.fail('expected an output frame')
+    }
+  })
+
+  it('parses an output frame with droppedCount', () => {
+    const text = `event: output\ndata: {"runId":"run-abc","text":"x","final":false,"seq":3,"droppedCount":2}\n\n`
+    const result = parseSseFrame(text)
+    if (result?.success && result.frame.type === 'output') {
+      expect(result.frame.data.droppedCount).toBe(2)
+    } else {
+      expect.fail('expected an output frame')
+    }
+  })
+
+  it('rejects an output frame missing required fields', () => {
+    for (const data of [
+      '{"text":"x","final":false,"seq":0}',
+      '{"runId":"r","final":false,"seq":0}',
+      '{"runId":"r","text":"x","seq":0}',
+      '{"runId":"r","text":"x","final":false}',
+      '{"runId":"r","text":"x","final":"no","seq":0}',
+      '{"runId":"r","text":"x","final":false,"seq":"0"}',
+      '{"runId":"r","text":"x","final":false,"seq":0,"droppedCount":"many"}',
+    ]) {
+      const result = parseSseFrame(`event: output\ndata: ${data}\n\n`)
+      expect(result?.success).toBe(false)
+    }
+  })
+
+  it('rejects an output frame with a non-integer, negative, or non-finite seq', () => {
+    for (const data of [
+      '{"runId":"r","text":"x","final":false,"seq":-1}',
+      '{"runId":"r","text":"x","final":false,"seq":1.5}',
+      '{"runId":"r","text":"x","final":false,"seq":1e999}',
+    ]) {
+      const result = parseSseFrame(`event: output\ndata: ${data}\n\n`)
+      expect(result?.success).toBe(false)
+    }
+  })
+
+  it('rejects an output frame with a negative or fractional droppedCount', () => {
+    for (const data of [
+      '{"runId":"r","text":"x","final":false,"seq":0,"droppedCount":-2}',
+      '{"runId":"r","text":"x","final":false,"seq":0,"droppedCount":2.5}',
+    ]) {
+      const result = parseSseFrame(`event: output\ndata: ${data}\n\n`)
+      expect(result?.success).toBe(false)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// nextStreamState — output accumulation
+// ---------------------------------------------------------------------------
+
+describe('nextStreamState — output accumulation', () => {
+  // Reach 'live' so output frames are applied (mirrors status: pre-ready is ignored).
+  const live = (): StreamState =>
+    nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+  const applyOutput = (state: StreamState, data: OutputFrameData): StreamState =>
+    nextStreamState(state, {type: 'output', data})
+  const runOf = (state: StreamState, runId: string): RunEntry => {
+    const entry = state.runs[runId]
+    if (entry === undefined) throw new Error(`expected run ${runId} in state`)
+    return entry
+  }
+
+  it('does not apply output before ready (not live)', () => {
+    const state = applyOutput(INITIAL_STATE, {runId: 'run-abc', text: 'x', final: false, seq: 0})
+    expect(state.runs['run-abc']).toBeUndefined()
+  })
+
+  it('accumulates deltas in seq order', () => {
+    let state = live()
+    state = applyOutput(state, {runId: 'run-abc', text: 'Hel', final: false, seq: 0})
+    state = applyOutput(state, {runId: 'run-abc', text: 'lo ', final: false, seq: 1})
+    state = applyOutput(state, {runId: 'run-abc', text: 'world', final: false, seq: 2})
+    expect(runOf(state, 'run-abc').outputText).toBe('Hello world')
+    expect(runOf(state, 'run-abc').outputFinal).toBe(false)
+  })
+
+  it('a final frame replaces the accumulated text with the authoritative answer', () => {
+    let state = live()
+    state = applyOutput(state, {runId: 'run-abc', text: 'partial', final: false, seq: 0})
+    state = applyOutput(state, {runId: 'run-abc', text: 'AUTHORITATIVE', final: true, seq: 1})
+    expect(runOf(state, 'run-abc').outputText).toBe('AUTHORITATIVE')
+    expect(runOf(state, 'run-abc').outputFinal).toBe(true)
+  })
+
+  it('does not apply a delta with a seq <= the last applied seq (out-of-order/duplicate)', () => {
+    let state = live()
+    state = applyOutput(state, {runId: 'run-abc', text: 'first', final: false, seq: 1})
+    state = applyOutput(state, {runId: 'run-abc', text: 'stale', final: false, seq: 0})
+    state = applyOutput(state, {runId: 'run-abc', text: 'dup', final: false, seq: 1})
+    expect(runOf(state, 'run-abc').outputText).toBe('first')
+  })
+
+  it('sets the coalesced flag when droppedCount > 0', () => {
+    let state = live()
+    state = applyOutput(state, {runId: 'run-abc', text: 'x', final: false, seq: 0, droppedCount: 2})
+    expect(runOf(state, 'run-abc').outputCoalesced).toBe(true)
+  })
+
+  it('a final frame always replaces, even if its seq is not greater (authoritative wins)', () => {
+    let state = live()
+    state = applyOutput(state, {runId: 'run-abc', text: 'acc', final: false, seq: 5})
+    state = applyOutput(state, {runId: 'run-abc', text: 'final-answer', final: true, seq: 0})
+    expect(runOf(state, 'run-abc').outputText).toBe('final-answer')
+    expect(runOf(state, 'run-abc').outputFinal).toBe(true)
+  })
+
+  it('a status frame after output preserves the accumulated output fields', () => {
+    let state = live()
+    state = applyOutput(state, {runId: 'run-abc', text: 'answer-text', final: true, seq: 0})
+    // A terminal status frame arrives AFTER the final output — it must not drop output state.
+    state = nextStreamState(state, {type: 'status', data: TERMINAL_STATUS})
+    expect(runOf(state, 'run-abc').outputText).toBe('answer-text')
+    expect(runOf(state, 'run-abc').outputFinal).toBe(true)
+    expect(runOf(state, 'run-abc').status).toBe('succeeded')
+    expect(runOf(state, 'run-abc').terminal).toBe(true)
+  })
+
+  it('caps cumulative output growth and flags truncation', () => {
+    let state = live()
+    // Append deltas well past the cap; accumulated text must not grow without bound.
+    const chunk = 'x'.repeat(50_000)
+    for (let seq = 0; seq < 10; seq++) {
+      state = applyOutput(state, {runId: 'run-abc', text: chunk, final: false, seq})
+    }
+    const entry = runOf(state, 'run-abc')
+    expect(entry.outputText).toBeDefined()
+    expect((entry.outputText ?? '').length).toBeLessThanOrEqual(MAX_OUTPUT_TEXT_CHARS)
+    expect(entry.outputTruncated).toBe(true)
   })
 })
 
@@ -569,13 +714,13 @@ describe('backoff constants', () => {
     expect(Number.isInteger(RETRY_MAX_COUNT)).toBe(true)
   })
 
-  it('PINNED_CONTRACT_VERSION is 1.2.0', () => {
-    expect(PINNED_CONTRACT_VERSION).toBe('1.2.0')
+  it('PINNED_CONTRACT_VERSION is 1.3.0', () => {
+    expect(PINNED_CONTRACT_VERSION).toBe('1.3.0')
   })
 })
 
 // ---------------------------------------------------------------------------
-// F1 — CRLF normalization in parseSseFrame
+// CRLF normalization in parseSseFrame
 // ---------------------------------------------------------------------------
 
 describe('parseSseFrame — CRLF normalization', () => {
@@ -619,7 +764,7 @@ describe('parseSseFrame — CRLF normalization', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F2 — Bounded buffer constant exported
+// Bounded buffer constant exported
 // ---------------------------------------------------------------------------
 
 describe('MAX_SSE_BUFFER_BYTES constant', () => {
@@ -630,7 +775,7 @@ describe('MAX_SSE_BUFFER_BYTES constant', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F3 — Cap reset-triggered reconnects
+// Cap reset-triggered reconnects
 // ---------------------------------------------------------------------------
 
 describe('nextStreamState — reset retryCount capping', () => {
@@ -698,7 +843,7 @@ describe('nextStreamState — reset retryCount capping', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F5 — Drift is absorbing; status before ready not rendered
+// Drift is absorbing; status before ready not rendered
 // ---------------------------------------------------------------------------
 
 describe('nextStreamState — drift is absorbing', () => {
@@ -742,7 +887,7 @@ describe('nextStreamState — drift is absorbing', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F6 — Value-allowlist in parseSseFrame
+// Value-allowlist in parseSseFrame
 // ---------------------------------------------------------------------------
 
 describe('parseSseFrame — allowlist gate for status/phase/surface', () => {
@@ -811,7 +956,7 @@ describe('parseSseFrame — allowlist gate for status/phase/surface', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F8 — backoffDelay(0) === RETRY_BASE_MS
+// backoffDelay(0) === RETRY_BASE_MS
 // ---------------------------------------------------------------------------
 
 describe('backoff first-delay', () => {
@@ -833,7 +978,7 @@ describe('backoff first-delay', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F13 — null-prototype runs map guards __proto__ keys
+// null-prototype runs map guards __proto__ keys
 // ---------------------------------------------------------------------------
 
 describe('nextStreamState — null-prototype runs map', () => {
@@ -1054,7 +1199,7 @@ describe('nextStreamState — first-frame timeout', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F2 — closed/submitted-unobservable guard: abort-rejection must not reopen
+// closed/submitted-unobservable guard: abort-rejection must not reopen
 // ---------------------------------------------------------------------------
 
 describe('nextStreamState — closed and submitted-unobservable are terminal for network events', () => {
@@ -1122,6 +1267,80 @@ describe('nextStreamState — closed and submitted-unobservable are terminal for
     }
     const state = nextStreamState(closed, {type: 'unexpected-close'})
     expect(state.retryCount).toBe(3)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #47 scope-5: output accumulation edge cases
+// ---------------------------------------------------------------------------
+
+describe('nextStreamState — output accumulation edge cases', () => {
+  // Helpers mirroring the existing output accumulation describe block
+  const live = (): StreamState =>
+    nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+  const applyOutput = (state: StreamState, data: OutputFrameData): StreamState =>
+    nextStreamState(state, {type: 'output', data})
+  const runOf = (state: StreamState, runId: string): RunEntry => {
+    const entry = state.runs[runId]
+    if (entry === undefined) throw new Error(`expected run ${runId} in state`)
+    return entry
+  }
+
+  // Gap 2: no-output run — terminal status with no prior output frame
+  it('terminal status with no prior output frame leaves run with no outputText (no-output case)', () => {
+    let state = live()
+    // Receive a terminal status with no preceding output frame
+    state = nextStreamState(state, {type: 'status', data: TERMINAL_STATUS})
+    const run = runOf(state, 'run-abc')
+    // outputText must be absent or empty — never a required empty terminal frame
+    expect(run.outputText === undefined || run.outputText === '').toBe(true)
+    // Must not block or error — terminal state is still reached
+    expect(run.terminal).toBe(true)
+    expect(run.status).toBe('succeeded')
+  })
+
+  // Gap 3: late-subscriber final-only — only a final:true frame, no deltas
+  it('a subscriber receiving only a final:true frame ends with authoritative outputText and outputFinal===true', () => {
+    let state = live()
+    // No deltas — only the authoritative final frame (mirrors gateway replay cache)
+    state = applyOutput(state, {runId: 'run-001', text: 'Authoritative final answer', final: true, seq: 7})
+    const run = runOf(state, 'run-001')
+    expect(run.outputText).toBe('Authoritative final answer')
+    expect(run.outputFinal).toBe(true)
+  })
+
+  // Gap 4: droppedCount on a final/terminal frame
+  it('a final:true frame with droppedCount > 0 sets outputCoalesced AND replaces text', () => {
+    let state = live()
+    // Some prior deltas
+    state = applyOutput(state, {runId: 'run-001', text: 'partial ', final: false, seq: 0})
+    // Final frame carries droppedCount (coalesced under backpressure)
+    state = applyOutput(state, {runId: 'run-001', text: 'complete answer', final: true, seq: 3, droppedCount: 2})
+    const run = runOf(state, 'run-001')
+    expect(run.outputText).toBe('complete answer')
+    expect(run.outputFinal).toBe(true)
+    expect(run.outputCoalesced).toBe(true)
+  })
+
+  // Gap 6: no-leak — accumulated output path never surfaces frame metadata as free text
+  it('accumulated output state does not surface runId, droppedCount, or other frame fields as free text', () => {
+    let state = live()
+    state = applyOutput(state, {runId: 'run-001', text: 'hello', final: false, seq: 0, droppedCount: 1})
+    state = applyOutput(state, {runId: 'run-001', text: ' world', final: true, seq: 1})
+    const run = runOf(state, 'run-001')
+
+    // Only outputText carries user-visible text — the other frame fields must not
+    // appear as free-text values in the accumulated output string
+    expect(run.outputText).not.toContain('run-001')
+    expect(run.outputText).not.toContain('droppedCount')
+    expect(run.outputText).not.toContain('final')
+    expect(run.outputText).not.toContain('seq')
+
+    // The run entry itself must not have a field whose value is the raw runId string
+    // embedded in the outputText (only the runId key is expected, not as output content)
+    const serialized = JSON.stringify({outputText: run.outputText, outputFinal: run.outputFinal, outputCoalesced: run.outputCoalesced})
+    expect(serialized).not.toContain('run-001')
+    expect(serialized).not.toContain('droppedCount')
   })
 })
 

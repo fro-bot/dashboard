@@ -152,6 +152,10 @@ function runStatusSection(): ReturnType<typeof html> {
           · <span>Created: ${run.createdAt}</span>
           ${run.updatedAt == null ? '' : html` · <span>Updated: ${run.updatedAt}</span>`}
         </div>
+        <p class="run-output-coalesced" data-role="run-output-coalesced" hidden style="font-size:0.75rem;color:#9ca3af;margin:6px 0 0;">
+          Some output was coalesced under load.
+        </p>
+        <pre class="run-output" data-role="run-output" hidden aria-live="polite" style="white-space:pre-wrap;word-break:break-word;margin:6px 0 0;font-size:0.8rem;"></pre>
       </div>
     `
   })
