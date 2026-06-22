@@ -14,11 +14,13 @@
  * - No console output of frame data.
  */
 
-import type {OutputFrameData, RunEntry, StreamState} from '../public/operator-stream.js'
+import type {ApprovalFrameDataOpen, OutputFrameData, RunEntry, StreamState} from '../public/operator-stream.js'
 import {describe, expect, it, vi} from 'vitest'
 import {
   bootstrapOperatorStreams,
   FIRST_FRAME_TIMEOUT_MS,
+  getOpenApprovals,
+  hasOpenApprovals,
   MAX_OUTPUT_TEXT_CHARS,
   MAX_SSE_BUFFER_BYTES,
   nextStreamState,
@@ -1567,6 +1569,329 @@ describe('nextStreamState — output accumulation edge cases', () => {
     const serialized = JSON.stringify({outputText: run.outputText, outputFinal: run.outputFinal, outputCoalesced: run.outputCoalesced})
     expect(serialized).not.toContain('run-001')
     expect(serialized).not.toContain('droppedCount')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// nextStreamState — approval reducer state (Unit 3)
+// ---------------------------------------------------------------------------
+
+describe('nextStreamState — approval reducer state', () => {
+  // Helper: reach 'live' state (mirrors existing output-accumulation helpers)
+  const live = (): StreamState =>
+    nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+
+  // Helper: get run entry or throw
+  const runOf = (state: StreamState, runId: string): RunEntry => {
+    const entry = state.runs[runId]
+    if (entry === undefined) throw new Error(`expected run ${runId} in state`)
+    return entry
+  }
+
+  // Helper: dispatch an open approval frame
+  const openApproval = (
+    state: StreamState,
+    runId: string,
+    requestID: string,
+    permission: string,
+    command?: string,
+  ): StreamState =>
+    nextStreamState(state, {
+      type: 'approval',
+      data: {
+        runId,
+        requestID,
+        permission,
+        settled: false,
+        ...(command === undefined ? {} : {command}),
+      },
+    })
+
+  // Helper: dispatch a settle approval frame
+  const settleApproval = (state: StreamState, runId: string, requestID: string): StreamState =>
+    nextStreamState(state, {
+      type: 'approval',
+      data: {runId, requestID, settled: true},
+    })
+
+  // ---------------------------------------------------------------------------
+  // Happy path
+  // ---------------------------------------------------------------------------
+
+  it('happy: open(req-001) → open-prompts has req-001 with permission/command', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-001', 'shell', 'echo hello')
+    const run = runOf(state, 'run-001')
+    const prompts = getOpenApprovals(run)
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]?.requestID).toBe('req-001')
+    expect(prompts[0]?.permission).toBe('shell')
+    expect(prompts[0]?.command).toBe('echo hello')
+    expect(hasOpenApprovals(run)).toBe(true)
+  })
+
+  it('happy: settle(req-001) → prompt gone AND req-001 tombstoned', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-001', 'shell', 'echo hello')
+    state = settleApproval(state, 'run-001', 'req-001')
+    const run = runOf(state, 'run-001')
+    expect(hasOpenApprovals(run)).toBe(false)
+    expect(getOpenApprovals(run)).toHaveLength(0)
+    // A subsequent open for the same id must be ignored (tombstone wins)
+    state = openApproval(state, 'run-001', 'req-001', 'shell', 'echo again')
+    const runAfterReopen = runOf(state, 'run-001')
+    expect(hasOpenApprovals(runAfterReopen)).toBe(false)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Pre-live: approval frame before ready is ignored
+  // ---------------------------------------------------------------------------
+
+  it('pre-live: approval frame before ready (connection !== live) → ignored, no prompt', () => {
+    // INITIAL_STATE is 'connecting', not 'live'
+    const state = openApproval(INITIAL_STATE, 'run-001', 'req-001', 'shell')
+    // run-001 must not appear in runs at all
+    expect(state.runs['run-001']).toBeUndefined()
+  })
+
+  // ---------------------------------------------------------------------------
+  // Race: open-after-settle
+  // ---------------------------------------------------------------------------
+
+  it('race — open-after-settle: settle(req-001) THEN open(req-001) → open is ignored (tombstone wins)', () => {
+    let state = live()
+    // Settle first (without a prior open — settle-unseen is valid)
+    state = settleApproval(state, 'run-001', 'req-001')
+    // Now open arrives — must be ignored
+    state = openApproval(state, 'run-001', 'req-001', 'shell', 'echo late')
+    const run = runOf(state, 'run-001')
+    expect(hasOpenApprovals(run)).toBe(false)
+    expect(getOpenApprovals(run)).toHaveLength(0)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Race: settle-unseen
+  // ---------------------------------------------------------------------------
+
+  it('race — settle-unseen: settle(req-002) with no prior open → no prompt added, req-002 tombstoned', () => {
+    let state = live()
+    state = settleApproval(state, 'run-001', 'req-002')
+    const run = runOf(state, 'run-001')
+    expect(hasOpenApprovals(run)).toBe(false)
+    // A later open for req-002 must also be ignored (tombstone wins)
+    state = openApproval(state, 'run-001', 'req-002', 'network')
+    const runAfter = runOf(state, 'run-001')
+    expect(hasOpenApprovals(runAfter)).toBe(false)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Race: id-reuse (same as open-after-settle, explicit test)
+  // ---------------------------------------------------------------------------
+
+  it('race — id-reuse: settle(req-001) then fresh open(req-001) → ignored (tombstone wins)', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-001', 'shell', 'echo first')
+    state = settleApproval(state, 'run-001', 'req-001')
+    // Simulate id reuse: a new open with the same requestID
+    state = openApproval(state, 'run-001', 'req-001', 'shell', 'echo reused')
+    const run = runOf(state, 'run-001')
+    expect(hasOpenApprovals(run)).toBe(false)
+    expect(getOpenApprovals(run)).toHaveLength(0)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Race: terminal absorbing
+  // ---------------------------------------------------------------------------
+
+  it('race — terminal absorbing: open(req-001) then terminal status → all prompts cleared', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-001', 'shell', 'echo hello')
+    // Verify prompt is open before terminal
+    expect(hasOpenApprovals(runOf(state, 'run-001'))).toBe(true)
+    // Apply terminal status
+    state = nextStreamState(state, {
+      type: 'status',
+      data: {
+        runId: 'run-001',
+        entityRef: 'testowner/test-repo',
+        surface: 'github',
+        phase: 'COMPLETED',
+        status: 'succeeded',
+        startedAt: '2026-06-22T10:00:00Z',
+        stale: false,
+      },
+    })
+    const run = runOf(state, 'run-001')
+    expect(hasOpenApprovals(run)).toBe(false)
+    expect(run.terminal).toBe(true)
+  })
+
+  it('race — terminal absorbing: after terminal status, a later open(req-003) for that run → ignored', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-001', 'shell', 'echo hello')
+    // Apply terminal status
+    state = nextStreamState(state, {
+      type: 'status',
+      data: {
+        runId: 'run-001',
+        entityRef: 'testowner/test-repo',
+        surface: 'github',
+        phase: 'COMPLETED',
+        status: 'succeeded',
+        startedAt: '2026-06-22T10:00:00Z',
+        stale: false,
+      },
+    })
+    // A new open for a different requestID after terminal → must be ignored
+    state = openApproval(state, 'run-001', 'req-003', 'network')
+    const run = runOf(state, 'run-001')
+    expect(hasOpenApprovals(run)).toBe(false)
+    expect(getOpenApprovals(run)).toHaveLength(0)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Idempotent: duplicate open
+  // ---------------------------------------------------------------------------
+
+  it('idempotent: duplicate open(req-001) → single prompt, no corruption', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-001', 'shell', 'echo hello')
+    state = openApproval(state, 'run-001', 'req-001', 'shell', 'echo hello')
+    const run = runOf(state, 'run-001')
+    const prompts = getOpenApprovals(run)
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]?.requestID).toBe('req-001')
+  })
+
+  // ---------------------------------------------------------------------------
+  // Derivation: hasOpenApprovals
+  // ---------------------------------------------------------------------------
+
+  it('derivation: hasOpenApprovals true with ≥1 open prompt, false after all settled/cleared', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-001', 'shell')
+    state = openApproval(state, 'run-001', 'req-002', 'network')
+    expect(hasOpenApprovals(runOf(state, 'run-001'))).toBe(true)
+    state = settleApproval(state, 'run-001', 'req-001')
+    expect(hasOpenApprovals(runOf(state, 'run-001'))).toBe(true) // req-002 still open
+    state = settleApproval(state, 'run-001', 'req-002')
+    expect(hasOpenApprovals(runOf(state, 'run-001'))).toBe(false)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Immutability: prior state not mutated
+  // ---------------------------------------------------------------------------
+
+  it('immutability: prior state object is not mutated by an approval transition', () => {
+    const liveState = live()
+    const beforeOpen = openApproval(liveState, 'run-001', 'req-001', 'shell')
+    // Capture a reference to the prior runs map
+    const priorRuns = beforeOpen.runs
+    const priorEntry = beforeOpen.runs['run-001']
+    // Apply a settle
+    const afterSettle = settleApproval(beforeOpen, 'run-001', 'req-001')
+    // The prior state's runs map must be unchanged
+    expect(beforeOpen.runs).toBe(priorRuns) // same reference (not mutated)
+    expect(beforeOpen.runs['run-001']).toBe(priorEntry) // same entry reference
+    // The new state must have a different runs map
+    expect(afterSettle.runs).not.toBe(priorRuns)
+    // The prior entry must still show the prompt as open
+    expect(hasOpenApprovals(priorEntry)).toBe(true)
+    // The new entry must show it settled
+    expect(hasOpenApprovals(afterSettle.runs['run-001'])).toBe(false)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Multi-prompt
+  // ---------------------------------------------------------------------------
+
+  it('multi-prompt: open(req-001) + open(req-002) on one run → both present; settle(req-001) → only req-002 remains', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-001', 'shell', 'echo first')
+    state = openApproval(state, 'run-001', 'req-002', 'fs-write', undefined)
+    const run = runOf(state, 'run-001')
+    expect(getOpenApprovals(run)).toHaveLength(2)
+    expect(hasOpenApprovals(run)).toBe(true)
+    // Settle req-001
+    state = settleApproval(state, 'run-001', 'req-001')
+    const runAfter = runOf(state, 'run-001')
+    const remaining = getOpenApprovals(runAfter)
+    expect(remaining).toHaveLength(1)
+    expect(remaining[0]?.requestID).toBe('req-002')
+    expect(hasOpenApprovals(runAfter)).toBe(true)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Approval state preserved across status updates (non-terminal)
+  // ---------------------------------------------------------------------------
+
+  it('approval state survives a non-terminal status update', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-001', 'shell', 'echo hello')
+    // Apply a non-terminal status update
+    state = nextStreamState(state, {
+      type: 'status',
+      data: {
+        runId: 'run-001',
+        entityRef: 'testowner/test-repo',
+        surface: 'github',
+        phase: 'EXECUTING',
+        status: 'waiting_for_approval',
+        startedAt: '2026-06-22T10:00:00Z',
+        stale: false,
+      },
+    })
+    const run = runOf(state, 'run-001')
+    expect(hasOpenApprovals(run)).toBe(true)
+    expect(getOpenApprovals(run)[0]?.requestID).toBe('req-001')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// hasOpenApprovals / getOpenApprovals — derivation helpers
+// ---------------------------------------------------------------------------
+
+describe('hasOpenApprovals / getOpenApprovals — derivation helpers', () => {
+  it('hasOpenApprovals returns false for a run entry with no approval fields', () => {
+    // A run entry that has never seen an approval frame
+    const entry: RunEntry = {
+      runId: 'run-001',
+      status: 'running',
+      phase: 'EXECUTING',
+      startedAt: '2026-06-22T10:00:00Z',
+      stale: false,
+      terminal: false,
+    }
+    expect(hasOpenApprovals(entry)).toBe(false)
+  })
+
+  it('getOpenApprovals returns an empty array for a run entry with no approval fields', () => {
+    const entry: RunEntry = {
+      runId: 'run-001',
+      status: 'running',
+      phase: 'EXECUTING',
+      startedAt: '2026-06-22T10:00:00Z',
+      stale: false,
+      terminal: false,
+    }
+    expect(getOpenApprovals(entry)).toEqual([])
+  })
+
+  it('getOpenApprovals returns typed ApprovalFrameDataOpen objects', () => {
+    const liveState = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: PINNED_CONTRACT_VERSION},
+    })
+    const state = nextStreamState(liveState, {
+      type: 'approval',
+      data: {runId: 'run-001', requestID: 'req-001', permission: 'shell', command: 'ls', settled: false},
+    })
+    const run = state.runs['run-001']
+    if (run === undefined) throw new Error('expected run-001')
+    const prompts: readonly ApprovalFrameDataOpen[] = getOpenApprovals(run)
+    expect(prompts[0]?.permission).toBe('shell')
+    expect(prompts[0]?.command).toBe('ls')
+    expect(prompts[0]?.settled).toBe(false)
   })
 })
 

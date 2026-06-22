@@ -112,6 +112,18 @@ export interface RunEntry {
   readonly outputCoalesced?: boolean
   /** True if accumulated output exceeded the cap and was truncated. */
   readonly outputTruncated?: boolean
+  /**
+   * Null-prototype map of open (non-tombstoned) approval prompts, keyed by requestID.
+   * Absent until the first approval frame is received for this run.
+   * Use `getOpenApprovals(runEntry)` to read; never access directly.
+   */
+  readonly approvalOpenPrompts?: Readonly<Record<string, ApprovalFrameDataOpen>>
+  /**
+   * Null-prototype map of tombstoned requestIDs (requestID → true).
+   * A tombstoned id means the prompt was settled; any later open for the same id is ignored.
+   * Absent until the first settle frame is received for this run.
+   */
+  readonly approvalTombstones?: Readonly<Record<string, true>>
 }
 
 export interface StreamState {
@@ -172,6 +184,23 @@ export declare function toSafeRunView(runStatus: {
   readonly startedAt: string
   readonly stale: boolean
 }): SafeRunView
+
+/**
+ * Returns true iff the run entry has at least one open (non-tombstoned) approval prompt.
+ *
+ * This is the canonical visibility signal for the `waiting_for_approval` overlay and
+ * the in-page open-prompt indicator (R11). Both must derive from this one state so
+ * they cannot desync.
+ */
+export declare function hasOpenApprovals(runEntry: RunEntry | undefined | null): boolean
+
+/**
+ * Returns the list of open (non-tombstoned) approval prompts for a run entry,
+ * in insertion order. Each element is an open ApprovalFrameDataOpen object.
+ *
+ * Returns an empty array when there are no open prompts.
+ */
+export declare function getOpenApprovals(runEntry: RunEntry | undefined | null): readonly ApprovalFrameDataOpen[]
 
 // ---------------------------------------------------------------------------
 // DOM shell (browser-only — never called at module top-level)
