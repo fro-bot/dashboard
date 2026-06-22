@@ -1,6 +1,7 @@
 ---
 title: Consuming an authenticated SSE stream safely in a read-only dashboard
 date: 2026-06-20
+last_updated: 2026-06-22
 category: best-practices
 module: dashboard
 component: operator-run-stream
@@ -24,7 +25,9 @@ issue: fro-bot/dashboard#63
 ## Context
 
 The dashboard consumes the gateway's authenticated operator run-stream
-(`GET /operator/runs/:runId/stream`, contract 1.1.0) to render live run status,
+(`GET /operator/runs/:runId/stream`, contract 1.1.0 at the time of writing; the
+channel has since grown an `output` frame — see the Related output-consumption doc)
+to render live run status,
 replacing a mock. This was the dashboard's first client-side JavaScript, first
 Content-Security-Policy, and first static-asset serving — introduced into an
 SSR-only Hono app with no build step, on a read-only, redaction-strict surface.
@@ -161,4 +164,7 @@ located) than the version number implies.
   — the mock-only/flag-gated posture this work was built behind.
 - `docs/solutions/security-issues/gateway-operator-session-cookie-forwarding-trust-boundary-2026-06-20.md`
   — the auth cutover this stream's live connection is gated on.
+- `docs/solutions/best-practices/operator-sse-output-consumption-2026-06-22.md`
+  — extends this transport to the contract 1.3.0 `output` frame: delta/authoritative-final
+  accumulation, no-output-as-absence semantics, and dual-parser parity.
 - Issues: closes #63; part of #47; gated by #53/#59.
