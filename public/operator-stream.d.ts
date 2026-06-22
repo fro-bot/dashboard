@@ -48,11 +48,29 @@ export interface OutputFrameData {
   readonly droppedCount?: number
 }
 
+export interface ApprovalFrameDataOpen {
+  readonly runId: string
+  readonly requestID: string
+  readonly permission: string
+  readonly command?: string
+  readonly filepath?: string
+  readonly settled: false
+}
+
+export interface ApprovalFrameDataSettle {
+  readonly runId: string
+  readonly requestID: string
+  readonly settled: true
+}
+
+export type ApprovalFrameData = ApprovalFrameDataOpen | ApprovalFrameDataSettle
+
 export type StreamFrame =
   | {readonly type: 'ready'; readonly data: ReadyFrameData}
   | {readonly type: 'status'; readonly data: StatusFrameData}
   | {readonly type: 'reset'; readonly data: ResetFrameData}
   | {readonly type: 'output'; readonly data: OutputFrameData}
+  | {readonly type: 'approval'; readonly data: ApprovalFrameData}
 
 // ---------------------------------------------------------------------------
 // Parse result

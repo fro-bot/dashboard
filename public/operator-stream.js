@@ -29,7 +29,7 @@
 // ---------------------------------------------------------------------------
 
 /** Contract version this client expects on the ready frame. */
-export const PINNED_CONTRACT_VERSION = '1.3.0'
+export const PINNED_CONTRACT_VERSION = '1.4.0'
 
 /** Base delay in milliseconds for exponential backoff. */
 export const RETRY_BASE_MS = 1000
@@ -268,6 +268,46 @@ export function parseSseFrame(record) {
         ? {runId: parsed.runId, text: parsed.text, final: parsed.final, seq: parsed.seq}
         : {runId: parsed.runId, text: parsed.text, final: parsed.final, seq: parsed.seq, droppedCount: parsed.droppedCount}
     return {success: true, frame: {type: 'output', data}}
+  }
+
+  if (eventName === 'approval') {
+    // Validate runId and requestID — required on both variants
+    if (typeof parsed.runId !== 'string' || typeof parsed.requestID !== 'string') {
+      return {success: false, error: 'approval frame missing required fields'}
+    }
+    // settled must be a boolean — reject anything else (string, number, null, etc.)
+    if (typeof parsed.settled !== 'boolean') {
+      return {success: false, error: 'approval frame has invalid settled discriminator'}
+    }
+    if (parsed.settled === false) {
+      // Open variant: permission is required; command and filepath are optional strings
+      if (typeof parsed.permission !== 'string') {
+        return {success: false, error: 'approval frame missing required fields'}
+      }
+      if (parsed.command !== undefined && typeof parsed.command !== 'string') {
+        return {success: false, error: 'approval frame missing required fields'}
+      }
+      if (parsed.filepath !== undefined && typeof parsed.filepath !== 'string') {
+        return {success: false, error: 'approval frame missing required fields'}
+      }
+      const data = {
+        runId: parsed.runId,
+        requestID: parsed.requestID,
+        permission: parsed.permission,
+        settled: false,
+        ...(parsed.command === undefined ? {} : {command: parsed.command}),
+        ...(parsed.filepath === undefined ? {} : {filepath: parsed.filepath}),
+      }
+      return {success: true, frame: {type: 'approval', data}}
+    } else {
+      // Settle variant: only runId/requestID/settled required
+      const data = {
+        runId: parsed.runId,
+        requestID: parsed.requestID,
+        settled: true,
+      }
+      return {success: true, frame: {type: 'approval', data}}
+    }
   }
 
   // Unknown event name — fixed error string, never echoes the name

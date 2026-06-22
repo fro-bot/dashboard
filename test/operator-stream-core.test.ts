@@ -67,14 +67,14 @@ const INITIAL_STATE: StreamState = {
 
 describe('parseSseFrame — pure parser', () => {
   it('parses a ready frame', () => {
-    const text = `event: ready\ndata: {"contractVersion":"1.3.0"}\n\n`
+    const text = `event: ready\ndata: {"contractVersion":"1.4.0"}\n\n`
     const result = parseSseFrame(text)
     expect(result).not.toBeNull()
     expect(result?.success).toBe(true)
     if (result !== null && result.success) {
       expect(result.frame.type).toBe('ready')
       if (result.frame.type === 'ready') {
-        expect(result.frame.data.contractVersion).toBe('1.3.0')
+        expect(result.frame.data.contractVersion).toBe('1.4.0')
       }
     }
   })
@@ -163,7 +163,7 @@ describe('parseSseFrame — pure parser', () => {
   })
 
   it('returns a failure for a data-only record (no event name)', () => {
-    const text = 'data: {"contractVersion":"1.3.0"}\n\n'
+    const text = 'data: {"contractVersion":"1.4.0"}\n\n'
     const result = parseSseFrame(text)
     expect(result?.success).toBe(false)
   })
@@ -224,6 +224,232 @@ describe('parseSseFrame — pure parser', () => {
     ]) {
       const result = parseSseFrame(`event: output\ndata: ${data}\n\n`)
       expect(result?.success).toBe(false)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseSseFrame — approval frame parsing
+// ---------------------------------------------------------------------------
+
+describe('parseSseFrame — approval frame (open variant)', () => {
+  it('parses an open approval frame with command', () => {
+    const payload = {
+      runId: 'run-001',
+      requestID: 'req-001',
+      permission: 'shell',
+      command: 'echo hello',
+      settled: false,
+    }
+    const text = `event: approval\ndata: ${JSON.stringify(payload)}\n\n`
+    const result = parseSseFrame(text)
+    expect(result?.success).toBe(true)
+    if (result?.success && result.frame.type === 'approval') {
+      expect(result.frame.data.runId).toBe('run-001')
+      expect(result.frame.data.requestID).toBe('req-001')
+      expect(result.frame.data.settled).toBe(false)
+      if (!result.frame.data.settled) {
+        expect(result.frame.data.permission).toBe('shell')
+        expect(result.frame.data.command).toBe('echo hello')
+      }
+    } else {
+      expect.fail('expected an approval frame')
+    }
+  })
+
+  it('parses an open approval frame with filepath', () => {
+    const payload = {
+      runId: 'run-001',
+      requestID: 'req-001',
+      permission: 'fs-write',
+      filepath: '/workspace/output.txt',
+      settled: false,
+    }
+    const text = `event: approval\ndata: ${JSON.stringify(payload)}\n\n`
+    const result = parseSseFrame(text)
+    expect(result?.success).toBe(true)
+    if (result?.success && result.frame.type === 'approval') {
+      expect(result.frame.data.settled).toBe(false)
+      if (!result.frame.data.settled) {
+        expect(result.frame.data.permission).toBe('fs-write')
+        expect(result.frame.data.filepath).toBe('/workspace/output.txt')
+      }
+    } else {
+      expect.fail('expected an approval frame')
+    }
+  })
+
+  it('parses an open approval frame with neither command nor filepath', () => {
+    const payload = {
+      runId: 'run-001',
+      requestID: 'req-001',
+      permission: 'network',
+      settled: false,
+    }
+    const text = `event: approval\ndata: ${JSON.stringify(payload)}\n\n`
+    const result = parseSseFrame(text)
+    expect(result?.success).toBe(true)
+    if (result?.success && result.frame.type === 'approval') {
+      expect(result.frame.data.settled).toBe(false)
+      if (!result.frame.data.settled) {
+        expect(result.frame.data.permission).toBe('network')
+        expect(result.frame.data.command).toBeUndefined()
+        expect(result.frame.data.filepath).toBeUndefined()
+      }
+    } else {
+      expect.fail('expected an approval frame')
+    }
+  })
+
+  it('parses an open approval frame with empty string command (valid string)', () => {
+    const payload = {
+      runId: 'run-001',
+      requestID: 'req-001',
+      permission: 'shell',
+      command: '',
+      settled: false,
+    }
+    const text = `event: approval\ndata: ${JSON.stringify(payload)}\n\n`
+    const result = parseSseFrame(text)
+    expect(result?.success).toBe(true)
+    if (result?.success && result.frame.type === 'approval') {
+      if (!result.frame.data.settled) {
+        expect(result.frame.data.command).toBe('')
+      }
+    } else {
+      expect.fail('expected an approval frame')
+    }
+  })
+})
+
+describe('parseSseFrame — approval frame (settle variant)', () => {
+  it('parses a settle approval frame', () => {
+    const payload = {
+      runId: 'run-001',
+      requestID: 'req-001',
+      settled: true,
+    }
+    const text = `event: approval\ndata: ${JSON.stringify(payload)}\n\n`
+    const result = parseSseFrame(text)
+    expect(result?.success).toBe(true)
+    if (result?.success && result.frame.type === 'approval') {
+      expect(result.frame.data.runId).toBe('run-001')
+      expect(result.frame.data.requestID).toBe('req-001')
+      expect(result.frame.data.settled).toBe(true)
+    } else {
+      expect.fail('expected an approval frame')
+    }
+  })
+
+  it('parses a settle frame with extra unexpected fields (only required fields used)', () => {
+    const payload = {
+      runId: 'run-001',
+      requestID: 'req-001',
+      settled: true,
+      extraField: 'ignored',
+      anotherExtra: 42,
+    }
+    const text = `event: approval\ndata: ${JSON.stringify(payload)}\n\n`
+    const result = parseSseFrame(text)
+    expect(result?.success).toBe(true)
+    if (result?.success) {
+      expect(result.frame.type).toBe('approval')
+    }
+  })
+})
+
+describe('parseSseFrame — approval frame (error cases, fail-closed, no wire echo)', () => {
+  it('rejects approval frame with missing runId', () => {
+    const payload = {requestID: 'req-001', permission: 'shell', settled: false}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
+    if (result && !result.success) {
+      expect(result.error).not.toContain('req-001')
+    }
+  })
+
+  it('rejects approval frame with non-string runId', () => {
+    const payload = {runId: 42, requestID: 'req-001', permission: 'shell', settled: false}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
+    if (result && !result.success) {
+      expect(result.error).not.toContain('42')
+    }
+  })
+
+  it('rejects approval frame with missing requestID', () => {
+    const payload = {runId: 'run-001', permission: 'shell', settled: false}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
+    if (result && !result.success) {
+      expect(result.error).not.toContain('run-001')
+    }
+  })
+
+  it('rejects approval frame with non-string requestID', () => {
+    const payload = {runId: 'run-001', requestID: true, permission: 'shell', settled: false}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
+  })
+
+  it('rejects open approval frame with missing permission', () => {
+    const payload = {runId: 'run-001', requestID: 'req-001', settled: false}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
+    if (result && !result.success) {
+      expect(result.error).not.toContain('run-001')
+      expect(result.error).not.toContain('req-001')
+    }
+  })
+
+  it('rejects open approval frame with non-string permission', () => {
+    const payload = {runId: 'run-001', requestID: 'req-001', permission: 99, settled: false}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
+    if (result && !result.success) {
+      expect(result.error).not.toContain('99')
+    }
+  })
+
+  it('rejects approval frame with non-boolean settled', () => {
+    const payload = {runId: 'run-001', requestID: 'req-001', permission: 'shell', settled: 'false'}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
+    if (result && !result.success) {
+      expect(result.error).not.toContain('false')
+    }
+  })
+
+  it('rejects open approval frame with non-string command (present but wrong type)', () => {
+    const payload = {runId: 'run-001', requestID: 'req-001', permission: 'shell', command: 123, settled: false}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
+    if (result && !result.success) {
+      expect(result.error).not.toContain('123')
+    }
+  })
+
+  it('rejects open approval frame with non-string filepath (present but wrong type)', () => {
+    const payload = {runId: 'run-001', requestID: 'req-001', permission: 'shell', filepath: [], settled: false}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
+  })
+
+  it('error string for missing required fields is fixed and does not echo wire content', () => {
+    const payload = {runId: 'run-001', requestID: 'req-001', settled: false}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
+    if (result && !result.success) {
+      expect(result.error).toBe('approval frame missing required fields')
+    }
+  })
+
+  it('error string for invalid settled discriminator is fixed and does not echo wire content', () => {
+    const payload = {runId: 'run-001', requestID: 'req-001', settled: 'yes'}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
+    if (result && !result.success) {
+      expect(result.error).toBe('approval frame has invalid settled discriminator')
     }
   })
 })
@@ -714,8 +940,8 @@ describe('backoff constants', () => {
     expect(Number.isInteger(RETRY_MAX_COUNT)).toBe(true)
   })
 
-  it('PINNED_CONTRACT_VERSION is 1.3.0', () => {
-    expect(PINNED_CONTRACT_VERSION).toBe('1.3.0')
+  it('PINNED_CONTRACT_VERSION is 1.4.0', () => {
+    expect(PINNED_CONTRACT_VERSION).toBe('1.4.0')
   })
 })
 
