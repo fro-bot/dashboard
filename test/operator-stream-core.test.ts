@@ -1225,6 +1225,80 @@ describe('nextStreamState — closed and submitted-unobservable are terminal for
 })
 
 // ---------------------------------------------------------------------------
+// #47 scope-5: output accumulation edge cases
+// ---------------------------------------------------------------------------
+
+describe('nextStreamState — output accumulation edge cases', () => {
+  // Helpers mirroring the existing output accumulation describe block
+  const live = (): StreamState =>
+    nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+  const applyOutput = (state: StreamState, data: OutputFrameData): StreamState =>
+    nextStreamState(state, {type: 'output', data})
+  const runOf = (state: StreamState, runId: string): RunEntry => {
+    const entry = state.runs[runId]
+    if (entry === undefined) throw new Error(`expected run ${runId} in state`)
+    return entry
+  }
+
+  // Gap 2: no-output run — terminal status with no prior output frame
+  it('terminal status with no prior output frame leaves run with no outputText (no-output case)', () => {
+    let state = live()
+    // Receive a terminal status with no preceding output frame
+    state = nextStreamState(state, {type: 'status', data: TERMINAL_STATUS})
+    const run = runOf(state, 'run-abc')
+    // outputText must be absent or empty — never a required empty terminal frame
+    expect(run.outputText === undefined || run.outputText === '').toBe(true)
+    // Must not block or error — terminal state is still reached
+    expect(run.terminal).toBe(true)
+    expect(run.status).toBe('succeeded')
+  })
+
+  // Gap 3: late-subscriber final-only — only a final:true frame, no deltas
+  it('a subscriber receiving only a final:true frame ends with authoritative outputText and outputFinal===true', () => {
+    let state = live()
+    // No deltas — only the authoritative final frame (mirrors gateway replay cache)
+    state = applyOutput(state, {runId: 'run-001', text: 'Authoritative final answer', final: true, seq: 7})
+    const run = runOf(state, 'run-001')
+    expect(run.outputText).toBe('Authoritative final answer')
+    expect(run.outputFinal).toBe(true)
+  })
+
+  // Gap 4: droppedCount on a final/terminal frame
+  it('a final:true frame with droppedCount > 0 sets outputCoalesced AND replaces text', () => {
+    let state = live()
+    // Some prior deltas
+    state = applyOutput(state, {runId: 'run-001', text: 'partial ', final: false, seq: 0})
+    // Final frame carries droppedCount (coalesced under backpressure)
+    state = applyOutput(state, {runId: 'run-001', text: 'complete answer', final: true, seq: 3, droppedCount: 2})
+    const run = runOf(state, 'run-001')
+    expect(run.outputText).toBe('complete answer')
+    expect(run.outputFinal).toBe(true)
+    expect(run.outputCoalesced).toBe(true)
+  })
+
+  // Gap 6: no-leak — accumulated output path never surfaces frame metadata as free text
+  it('accumulated output state does not surface runId, droppedCount, or other frame fields as free text', () => {
+    let state = live()
+    state = applyOutput(state, {runId: 'run-001', text: 'hello', final: false, seq: 0, droppedCount: 1})
+    state = applyOutput(state, {runId: 'run-001', text: ' world', final: true, seq: 1})
+    const run = runOf(state, 'run-001')
+
+    // Only outputText carries user-visible text — the other frame fields must not
+    // appear as free-text values in the accumulated output string
+    expect(run.outputText).not.toContain('run-001')
+    expect(run.outputText).not.toContain('droppedCount')
+    expect(run.outputText).not.toContain('final')
+    expect(run.outputText).not.toContain('seq')
+
+    // The run entry itself must not have a field whose value is the raw runId string
+    // embedded in the outputText (only the runId key is expected, not as output content)
+    const serialized = JSON.stringify({outputText: run.outputText, outputFinal: run.outputFinal, outputCoalesced: run.outputCoalesced})
+    expect(serialized).not.toContain('run-001')
+    expect(serialized).not.toContain('droppedCount')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Buffer overflow fails closed terminally (no reconnect)
 // ---------------------------------------------------------------------------
 

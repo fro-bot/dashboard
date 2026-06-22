@@ -8,7 +8,7 @@ import type {ApprovalDecisionState, RunStatus} from '../src/gateway/operator-cli
  * All RunStatus and ApprovalDecisionState values must have safe copy.
  */
 import {describe, expect, it} from 'vitest'
-import {approvalStateLabel, runStatusLabel} from '../src/gateway/operator-copy.ts'
+import {approvalStateLabel, runStatusLabel, streamEventLabel} from '../src/gateway/operator-copy.ts'
 
 describe('runStatusLabel', () => {
   const allStatuses: RunStatus[] = [
@@ -149,5 +149,37 @@ describe('approvalStateLabel', () => {
   it('unavailable → human-readable label', () => {
     const label = approvalStateLabel('unavailable')
     expect(label).toMatch(/unavailable|not available|inaccessible/i)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// streamEventLabel — #47 scope-5 gap 5
+// ---------------------------------------------------------------------------
+
+describe('streamEventLabel', () => {
+  it("'output' returns its safe fixed label and never echoes wire content", () => {
+    const label = streamEventLabel('output')
+    // Must be a non-empty string
+    expect(typeof label).toBe('string')
+    expect(label.length).toBeGreaterThan(0)
+    // Must be the fixed safe label — not a raw wire token
+    expect(label).toBe('Run output received')
+    // Must not contain any wire-level field names that could leak frame content
+    expect(label).not.toContain('runId')
+    expect(label).not.toContain('droppedCount')
+    expect(label).not.toContain('seq')
+    expect(label).not.toContain('final')
+  })
+
+  it("'ready' returns its safe fixed label", () => {
+    expect(streamEventLabel('ready')).toBe('Stream connected')
+  })
+
+  it("'status' returns its safe fixed label", () => {
+    expect(streamEventLabel('status')).toBe('Run status updated')
+  })
+
+  it("'reset' returns its safe fixed label", () => {
+    expect(streamEventLabel('reset')).toBe('Stream reconnected')
   })
 })
