@@ -1,7 +1,7 @@
 ---
 title: 'feat: consume operator run-output channel (contract 1.3.0) — #47'
 type: feat
-status: active
+status: completed
 date: 2026-06-22
 issue: fro-bot/dashboard#47
 contract: fro-bot/agent operator-contract 1.3.0 (v0.74.0, verified live)
