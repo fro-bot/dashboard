@@ -209,6 +209,33 @@ function parseSseRecord(record: string): SseParseResult | null {
     }
   }
 
+  if (eventName === 'output') {
+    // Type-check the required fields; reject otherwise. droppedCount is optional
+    // and must be a number when present. Never echo wire content in the error.
+    if (
+      typeof candidate.runId !== 'string' ||
+      typeof candidate.text !== 'string' ||
+      typeof candidate.final !== 'boolean' ||
+      typeof candidate.seq !== 'number'
+    ) {
+      return {success: false, error: new Error('output frame missing required fields')}
+    }
+    if (candidate.droppedCount !== undefined && typeof candidate.droppedCount !== 'number') {
+      return {success: false, error: new Error('output frame droppedCount is not a number')}
+    }
+    const data =
+      candidate.droppedCount === undefined
+        ? {runId: candidate.runId, text: candidate.text, final: candidate.final, seq: candidate.seq}
+        : {
+            runId: candidate.runId,
+            text: candidate.text,
+            final: candidate.final,
+            seq: candidate.seq,
+            droppedCount: candidate.droppedCount,
+          }
+    return {success: true, frame: {type: 'output', data}}
+  }
+
   // Unknown event name — fixed error string, never echoes the name
   return {success: false, error: new Error('sse record has unrecognized event name')}
 }
