@@ -29,7 +29,7 @@
 // ---------------------------------------------------------------------------
 
 /** Contract version this client expects on the ready frame. */
-export const PINNED_CONTRACT_VERSION = '1.2.0'
+export const PINNED_CONTRACT_VERSION = '1.3.0'
 
 /** Base delay in milliseconds for exponential backoff. */
 export const RETRY_BASE_MS = 1000
@@ -236,6 +236,25 @@ export function parseSseFrame(record) {
     }
   }
 
+  if (eventName === 'output') {
+    if (
+      typeof parsed.runId !== 'string' ||
+      typeof parsed.text !== 'string' ||
+      typeof parsed.final !== 'boolean' ||
+      typeof parsed.seq !== 'number'
+    ) {
+      return {success: false, error: 'output frame missing required fields'}
+    }
+    if (parsed.droppedCount !== undefined && typeof parsed.droppedCount !== 'number') {
+      return {success: false, error: 'output frame droppedCount is not a number'}
+    }
+    const data =
+      parsed.droppedCount === undefined
+        ? {runId: parsed.runId, text: parsed.text, final: parsed.final, seq: parsed.seq}
+        : {runId: parsed.runId, text: parsed.text, final: parsed.final, seq: parsed.seq, droppedCount: parsed.droppedCount}
+    return {success: true, frame: {type: 'output', data}}
+  }
+
   // Unknown event name — fixed error string, never echoes the name
   return {success: false, error: 'sse record has unrecognized event name'}
 }
@@ -310,6 +329,48 @@ export function nextStreamState(current, event) {
         connection: allTerminal ? 'closed' : current.connection,
         shouldReconnect: allTerminal ? false : current.shouldReconnect,
       }
+    }
+
+    case 'output': {
+      // F5b parity: output before ready (connection !== 'live') is not applied.
+      if (current.connection !== 'live') {
+        return current
+      }
+      const {runId, text, final, seq, droppedCount} = event.data
+      const prev = current.runs[runId]
+      const prevText = prev?.outputText ?? ''
+      const prevSeq = prev?.outputSeq ?? -1
+      const prevCoalesced = prev?.outputCoalesced ?? false
+      const coalesced = prevCoalesced || (typeof droppedCount === 'number' && droppedCount > 0)
+
+      let nextText = prevText
+      let nextSeq = prevSeq
+      if (final) {
+        // Authoritative complete answer replaces the accumulated text regardless of seq.
+        nextText = text
+        nextSeq = seq
+      } else if (seq > prevSeq) {
+        // Apply deltas only in strictly increasing seq order; drop stale/duplicate seqs.
+        nextText = prevText + text
+        nextSeq = seq
+      } else if (coalesced === prevCoalesced) {
+        // Out-of-order / duplicate delta with no new coalesced signal — ignore entirely.
+        return current
+      }
+      // else: stale-seq delta but a new coalesced signal — fall through to record it.
+
+      const base = prev ?? {runId, status: '', phase: '', startedAt: '', stale: false, terminal: false}
+      const updatedRuns = Object.assign(Object.create(null), current.runs, {
+        [runId]: {
+          ...base,
+          runId,
+          outputText: nextText,
+          outputSeq: nextSeq,
+          outputFinal: final ? true : (prev?.outputFinal ?? false),
+          outputCoalesced: coalesced,
+        },
+      })
+      return {...current, runs: updatedRuns}
     }
 
     case 'reset': {

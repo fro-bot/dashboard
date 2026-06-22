@@ -89,7 +89,7 @@ const checkOutputDelta: OperatorOutputFrame = {runId: 'run-001', text: 'partial'
 const checkOutputFinal: OperatorOutputFrame = {runId: 'run-001', text: 'complete', final: true, seq: 3}
 const checkOutputCoalesced: OperatorOutputFrame = {runId: 'run-001', text: 'partial', final: false, seq: 1, droppedCount: 2}
 const checkOutputEmptyFinal: OperatorOutputFrame = {runId: 'run-001', text: '', final: true, seq: 0}
-export {checkOutputDelta, checkOutputFinal, checkOutputCoalesced, checkOutputEmptyFinal}
+export {checkOutputCoalesced, checkOutputDelta, checkOutputEmptyFinal, checkOutputFinal}
 
 // RunStreamFrame discriminated union: each variant must be constructable
 const checkReadyFrame: RunStreamFrame = {type: 'ready', data: {contractVersion: '1.3.0'}}

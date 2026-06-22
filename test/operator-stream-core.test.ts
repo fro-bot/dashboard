@@ -14,7 +14,7 @@
  * - No console output of frame data.
  */
 
-import type {StreamState} from '../public/operator-stream.js'
+import type {OutputFrameData, RunEntry, StreamState} from '../public/operator-stream.js'
 import {describe, expect, it, vi} from 'vitest'
 import {
   bootstrapOperatorStreams,
@@ -66,14 +66,14 @@ const INITIAL_STATE: StreamState = {
 
 describe('parseSseFrame — pure parser', () => {
   it('parses a ready frame', () => {
-    const text = `event: ready\ndata: {"contractVersion":"1.2.0"}\n\n`
+    const text = `event: ready\ndata: {"contractVersion":"1.3.0"}\n\n`
     const result = parseSseFrame(text)
     expect(result).not.toBeNull()
     expect(result?.success).toBe(true)
     if (result !== null && result.success) {
       expect(result.frame.type).toBe('ready')
       if (result.frame.type === 'ready') {
-        expect(result.frame.data.contractVersion).toBe('1.2.0')
+        expect(result.frame.data.contractVersion).toBe('1.3.0')
       }
     }
   })
@@ -162,9 +162,108 @@ describe('parseSseFrame — pure parser', () => {
   })
 
   it('returns a failure for a data-only record (no event name)', () => {
-    const text = 'data: {"contractVersion":"1.2.0"}\n\n'
+    const text = 'data: {"contractVersion":"1.3.0"}\n\n'
     const result = parseSseFrame(text)
     expect(result?.success).toBe(false)
+  })
+
+  it('parses an output delta frame', () => {
+    const text = `event: output\ndata: {"runId":"run-abc","text":"hello","final":false,"seq":0}\n\n`
+    const result = parseSseFrame(text)
+    expect(result?.success).toBe(true)
+    if (result?.success && result.frame.type === 'output') {
+      expect(result.frame.data.text).toBe('hello')
+      expect(result.frame.data.final).toBe(false)
+      expect(result.frame.data.seq).toBe(0)
+    } else {
+      expect.fail('expected an output frame')
+    }
+  })
+
+  it('parses an output frame with droppedCount', () => {
+    const text = `event: output\ndata: {"runId":"run-abc","text":"x","final":false,"seq":3,"droppedCount":2}\n\n`
+    const result = parseSseFrame(text)
+    if (result?.success && result.frame.type === 'output') {
+      expect(result.frame.data.droppedCount).toBe(2)
+    } else {
+      expect.fail('expected an output frame')
+    }
+  })
+
+  it('rejects an output frame missing required fields', () => {
+    for (const data of [
+      '{"text":"x","final":false,"seq":0}',
+      '{"runId":"r","final":false,"seq":0}',
+      '{"runId":"r","text":"x","seq":0}',
+      '{"runId":"r","text":"x","final":false}',
+      '{"runId":"r","text":"x","final":"no","seq":0}',
+      '{"runId":"r","text":"x","final":false,"seq":"0"}',
+      '{"runId":"r","text":"x","final":false,"seq":0,"droppedCount":"many"}',
+    ]) {
+      const result = parseSseFrame(`event: output\ndata: ${data}\n\n`)
+      expect(result?.success).toBe(false)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// nextStreamState — output accumulation
+// ---------------------------------------------------------------------------
+
+describe('nextStreamState — output accumulation', () => {
+  // Reach 'live' so output frames are applied (mirrors status: pre-ready is ignored).
+  const live = (): StreamState =>
+    nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+  const applyOutput = (state: StreamState, data: OutputFrameData): StreamState =>
+    nextStreamState(state, {type: 'output', data})
+  const runOf = (state: StreamState, runId: string): RunEntry => {
+    const entry = state.runs[runId]
+    if (entry === undefined) throw new Error(`expected run ${runId} in state`)
+    return entry
+  }
+
+  it('does not apply output before ready (not live)', () => {
+    const state = applyOutput(INITIAL_STATE, {runId: 'run-abc', text: 'x', final: false, seq: 0})
+    expect(state.runs['run-abc']).toBeUndefined()
+  })
+
+  it('accumulates deltas in seq order', () => {
+    let state = live()
+    state = applyOutput(state, {runId: 'run-abc', text: 'Hel', final: false, seq: 0})
+    state = applyOutput(state, {runId: 'run-abc', text: 'lo ', final: false, seq: 1})
+    state = applyOutput(state, {runId: 'run-abc', text: 'world', final: false, seq: 2})
+    expect(runOf(state, 'run-abc').outputText).toBe('Hello world')
+    expect(runOf(state, 'run-abc').outputFinal).toBe(false)
+  })
+
+  it('a final frame replaces the accumulated text with the authoritative answer', () => {
+    let state = live()
+    state = applyOutput(state, {runId: 'run-abc', text: 'partial', final: false, seq: 0})
+    state = applyOutput(state, {runId: 'run-abc', text: 'AUTHORITATIVE', final: true, seq: 1})
+    expect(runOf(state, 'run-abc').outputText).toBe('AUTHORITATIVE')
+    expect(runOf(state, 'run-abc').outputFinal).toBe(true)
+  })
+
+  it('does not apply a delta with a seq <= the last applied seq (out-of-order/duplicate)', () => {
+    let state = live()
+    state = applyOutput(state, {runId: 'run-abc', text: 'first', final: false, seq: 1})
+    state = applyOutput(state, {runId: 'run-abc', text: 'stale', final: false, seq: 0})
+    state = applyOutput(state, {runId: 'run-abc', text: 'dup', final: false, seq: 1})
+    expect(runOf(state, 'run-abc').outputText).toBe('first')
+  })
+
+  it('sets the coalesced flag when droppedCount > 0', () => {
+    let state = live()
+    state = applyOutput(state, {runId: 'run-abc', text: 'x', final: false, seq: 0, droppedCount: 2})
+    expect(runOf(state, 'run-abc').outputCoalesced).toBe(true)
+  })
+
+  it('a final frame always replaces, even if its seq is not greater (authoritative wins)', () => {
+    let state = live()
+    state = applyOutput(state, {runId: 'run-abc', text: 'acc', final: false, seq: 5})
+    state = applyOutput(state, {runId: 'run-abc', text: 'final-answer', final: true, seq: 0})
+    expect(runOf(state, 'run-abc').outputText).toBe('final-answer')
+    expect(runOf(state, 'run-abc').outputFinal).toBe(true)
   })
 })
 
@@ -569,8 +668,8 @@ describe('backoff constants', () => {
     expect(Number.isInteger(RETRY_MAX_COUNT)).toBe(true)
   })
 
-  it('PINNED_CONTRACT_VERSION is 1.2.0', () => {
-    expect(PINNED_CONTRACT_VERSION).toBe('1.2.0')
+  it('PINNED_CONTRACT_VERSION is 1.3.0', () => {
+    expect(PINNED_CONTRACT_VERSION).toBe('1.3.0')
   })
 })
 

@@ -74,6 +74,8 @@ export function streamEventLabel(type: RunStreamEvent['type']): string {
       return 'Run status updated'
     case 'reset':
       return 'Stream reconnected'
+    case 'output':
+      return 'Run output received'
     default:
       return 'Event received'
   }

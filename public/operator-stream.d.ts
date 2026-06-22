@@ -39,10 +39,19 @@ export interface ResetFrameData {
   readonly reason: string
 }
 
+export interface OutputFrameData {
+  readonly runId: string
+  readonly text: string
+  readonly final: boolean
+  readonly seq: number
+  readonly droppedCount?: number
+}
+
 export type StreamFrame =
   | {readonly type: 'ready'; readonly data: ReadyFrameData}
   | {readonly type: 'status'; readonly data: StatusFrameData}
   | {readonly type: 'reset'; readonly data: ResetFrameData}
+  | {readonly type: 'output'; readonly data: OutputFrameData}
 
 // ---------------------------------------------------------------------------
 // Parse result
@@ -74,6 +83,14 @@ export interface RunEntry {
   readonly startedAt: string
   readonly stale: boolean
   readonly terminal: boolean
+  /** Accumulated run-output answer text (deltas appended; final replaces). */
+  readonly outputText?: string
+  /** Highest applied output seq; -1 / absent before any output. */
+  readonly outputSeq?: number
+  /** True once an authoritative final output frame has been applied. */
+  readonly outputFinal?: boolean
+  /** True if any output frame reported coalesced (dropped) deltas. */
+  readonly outputCoalesced?: boolean
 }
 
 export interface StreamState {
