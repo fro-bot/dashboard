@@ -44,6 +44,14 @@ export const RETRY_MAX_COUNT = 5
 export const MAX_SSE_BUFFER_BYTES = 1_000_000
 
 /**
+ * Hard cap on cumulative accumulated run-output characters. The raw SSE buffer cap
+ * bounds a single frame; this bounds the reducer's growing answer string so a stream
+ * of many valid deltas cannot exhaust browser memory. On overflow the text is
+ * truncated and a fixed truncation hint is shown — never an echoed count.
+ */
+export const MAX_OUTPUT_TEXT_CHARS = 256_000
+
+/**
  * Bounded timeout in milliseconds for receiving the first SSE frame after opening
  * a stream. If no frame arrives within this window, the connection transitions to
  * 'submitted-unobservable' — the run was accepted but is not yet streaming (e.g.
@@ -196,7 +204,7 @@ export function parseSseFrame(record) {
     ) {
       return {success: false, error: 'status frame missing required fields'}
     }
-    // F6: Allowlist-gate enumerated fields — fail closed on out-of-set values
+    // Allowlist-gate enumerated fields — fail closed on out-of-set values
     if (!VALID_STATUSES.has(parsed.status)) {
       return {success: false, error: 'status frame status value not in allowlist'}
     }
@@ -241,12 +249,19 @@ export function parseSseFrame(record) {
       typeof parsed.runId !== 'string' ||
       typeof parsed.text !== 'string' ||
       typeof parsed.final !== 'boolean' ||
-      typeof parsed.seq !== 'number'
+      typeof parsed.seq !== 'number' ||
+      !Number.isSafeInteger(parsed.seq) ||
+      parsed.seq < 0
     ) {
       return {success: false, error: 'output frame missing required fields'}
     }
-    if (parsed.droppedCount !== undefined && typeof parsed.droppedCount !== 'number') {
-      return {success: false, error: 'output frame droppedCount is not a number'}
+    if (
+      parsed.droppedCount !== undefined &&
+      (typeof parsed.droppedCount !== 'number' ||
+        !Number.isSafeInteger(parsed.droppedCount) ||
+        parsed.droppedCount < 0)
+    ) {
+      return {success: false, error: 'output frame droppedCount is not a non-negative integer'}
     }
     const data =
       parsed.droppedCount === undefined
@@ -269,7 +284,7 @@ export function parseSseFrame(record) {
  * State shape:
  *   connection: 'connecting' | 'live' | 'reconnecting' | 'drift' | 'not-found' |
  *               'backpressure' | 'failed' | 'closed'
- *   runs: Object.create(null) — null-prototype map keyed by runId (F13)
+ *   runs: Object.create(null) — null-prototype map keyed by runId
  *   retryCount: number
  *   shouldReconnect: boolean
  *
@@ -283,12 +298,12 @@ export function parseSseFrame(record) {
  *   { type: 'unexpected-close' }
  *
  * Drift is absorbing: once in drift, ready/status do not move back to live.
- * A status before any ready is not rendered (F5b).
+ * A status before any ready is not rendered.
  */
 export function nextStreamState(current, event) {
   switch (event.type) {
     case 'ready': {
-      // F5b: drift is absorbing — a second ready does not escape drift
+      // Drift is absorbing — a second ready does not escape drift
       if (current.connection === 'drift') {
         return current
       }
@@ -309,15 +324,19 @@ export function nextStreamState(current, event) {
     }
 
     case 'status': {
-      // F5b: status before ready (connection !== 'live') is not rendered
+      // Status before ready (connection !== 'live') is not rendered
       if (current.connection !== 'live') {
         return current
       }
       const {runId, status, phase, startedAt, stale} = event.data
       const isTerminal = TERMINAL_STATUSES.has(status)
-      // F13: use null-prototype object to guard against __proto__ pollution
+      // Use a null-prototype object to guard against __proto__ key pollution.
+      // Spread the prior entry so accumulated output fields (outputText/outputSeq/
+      // outputFinal/outputCoalesced) survive a status update — a terminal status frame
+      // arrives AFTER the final output frame, so a bare replacement would drop it.
+      const prevStatusEntry = current.runs[runId]
       const updatedRuns = Object.assign(Object.create(null), current.runs, {
-        [runId]: {runId, status, phase, startedAt, stale, terminal: isTerminal},
+        [runId]: {...prevStatusEntry, runId, status, phase, startedAt, stale, terminal: isTerminal},
       })
       // If all observed runs are terminal, close the stream
       const allTerminal =
@@ -332,7 +351,7 @@ export function nextStreamState(current, event) {
     }
 
     case 'output': {
-      // F5b parity: output before ready (connection !== 'live') is not applied.
+      // Output before ready (connection !== 'live') is not applied.
       if (current.connection !== 'live') {
         return current
       }
@@ -359,6 +378,15 @@ export function nextStreamState(current, event) {
       }
       // else: stale-seq delta but a new coalesced signal — fall through to record it.
 
+      // Bound cumulative growth: a stream of valid deltas must not grow the answer
+      // without limit. Truncate and flag — never echo a count.
+      const prevTruncated = prev?.outputTruncated ?? false
+      let truncated = prevTruncated
+      if (nextText.length > MAX_OUTPUT_TEXT_CHARS) {
+        nextText = nextText.slice(0, MAX_OUTPUT_TEXT_CHARS)
+        truncated = true
+      }
+
       const base = prev ?? {runId, status: '', phase: '', startedAt: '', stale: false, terminal: false}
       const updatedRuns = Object.assign(Object.create(null), current.runs, {
         [runId]: {
@@ -368,6 +396,7 @@ export function nextStreamState(current, event) {
           outputSeq: nextSeq,
           outputFinal: final ? true : (prev?.outputFinal ?? false),
           outputCoalesced: coalesced,
+          outputTruncated: truncated,
         },
       })
       return {...current, runs: updatedRuns}
@@ -376,7 +405,7 @@ export function nextStreamState(current, event) {
     case 'reset': {
       const {reason} = event.data
 
-      // F3: terminal reset reason → close (no reconnect)
+      // Terminal reset reason → close (no reconnect)
       if (reason === 'terminal') {
         return {
           ...current,
@@ -398,7 +427,7 @@ export function nextStreamState(current, event) {
         }
       }
 
-      // F3: increment retryCount on reset and cap at RETRY_MAX_COUNT
+      // Increment retryCount on reset and cap at RETRY_MAX_COUNT
       if (current.retryCount >= RETRY_MAX_COUNT) {
         return {
           ...current,
@@ -586,7 +615,7 @@ export function initOperatorStream(opts) {
 
   let state = {
     connection: 'connecting',
-    runs: Object.create(null), // F13: null-prototype to guard __proto__ keys
+    runs: Object.create(null), // null-prototype to guard against __proto__ key pollution
     retryCount: 0,
     shouldReconnect: false,
   }
@@ -631,7 +660,7 @@ export function initOperatorStream(opts) {
       const runEntry = state.runs[runId]
       if (runEntry && state.connection === 'live') {
         const view = toSafeRunView(runEntry)
-        // F6: render label from local map, never the raw wire string into textContent
+        // Render label from local map, never the raw wire string into textContent
         const label = STATUS_LABELS[view.status] ?? ''
         statusEl.textContent = label
         // Update status class for styling — use allowlisted status value (no whitespace)
@@ -650,9 +679,15 @@ export function initOperatorStream(opts) {
       if (typeof outputText === 'string' && outputText !== '') {
         outputEl.textContent = outputText
         outputEl.hidden = false
+      } else {
+        // No output (or an authoritative empty final): clear any stale text and re-hide.
+        outputEl.textContent = ''
+        outputEl.hidden = true
       }
-      if (coalescedEl && runEntry?.outputCoalesced === true) {
-        coalescedEl.hidden = false
+      if (coalescedEl) {
+        // Show the fixed hint when output was coalesced or truncated — never an echoed count.
+        const flagged = runEntry?.outputCoalesced === true || runEntry?.outputTruncated === true
+        coalescedEl.hidden = !flagged
       }
     }
   }

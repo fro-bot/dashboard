@@ -19,6 +19,7 @@ import {describe, expect, it, vi} from 'vitest'
 import {
   bootstrapOperatorStreams,
   FIRST_FRAME_TIMEOUT_MS,
+  MAX_OUTPUT_TEXT_CHARS,
   MAX_SSE_BUFFER_BYTES,
   nextStreamState,
   parseSseFrame,
@@ -204,6 +205,27 @@ describe('parseSseFrame — pure parser', () => {
       expect(result?.success).toBe(false)
     }
   })
+
+  it('rejects an output frame with a non-integer, negative, or non-finite seq', () => {
+    for (const data of [
+      '{"runId":"r","text":"x","final":false,"seq":-1}',
+      '{"runId":"r","text":"x","final":false,"seq":1.5}',
+      '{"runId":"r","text":"x","final":false,"seq":1e999}',
+    ]) {
+      const result = parseSseFrame(`event: output\ndata: ${data}\n\n`)
+      expect(result?.success).toBe(false)
+    }
+  })
+
+  it('rejects an output frame with a negative or fractional droppedCount', () => {
+    for (const data of [
+      '{"runId":"r","text":"x","final":false,"seq":0,"droppedCount":-2}',
+      '{"runId":"r","text":"x","final":false,"seq":0,"droppedCount":2.5}',
+    ]) {
+      const result = parseSseFrame(`event: output\ndata: ${data}\n\n`)
+      expect(result?.success).toBe(false)
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -264,6 +286,30 @@ describe('nextStreamState — output accumulation', () => {
     state = applyOutput(state, {runId: 'run-abc', text: 'final-answer', final: true, seq: 0})
     expect(runOf(state, 'run-abc').outputText).toBe('final-answer')
     expect(runOf(state, 'run-abc').outputFinal).toBe(true)
+  })
+
+  it('a status frame after output preserves the accumulated output fields', () => {
+    let state = live()
+    state = applyOutput(state, {runId: 'run-abc', text: 'answer-text', final: true, seq: 0})
+    // A terminal status frame arrives AFTER the final output — it must not drop output state.
+    state = nextStreamState(state, {type: 'status', data: TERMINAL_STATUS})
+    expect(runOf(state, 'run-abc').outputText).toBe('answer-text')
+    expect(runOf(state, 'run-abc').outputFinal).toBe(true)
+    expect(runOf(state, 'run-abc').status).toBe('succeeded')
+    expect(runOf(state, 'run-abc').terminal).toBe(true)
+  })
+
+  it('caps cumulative output growth and flags truncation', () => {
+    let state = live()
+    // Append deltas well past the cap; accumulated text must not grow without bound.
+    const chunk = 'x'.repeat(50_000)
+    for (let seq = 0; seq < 10; seq++) {
+      state = applyOutput(state, {runId: 'run-abc', text: chunk, final: false, seq})
+    }
+    const entry = runOf(state, 'run-abc')
+    expect(entry.outputText).toBeDefined()
+    expect((entry.outputText ?? '').length).toBeLessThanOrEqual(MAX_OUTPUT_TEXT_CHARS)
+    expect(entry.outputTruncated).toBe(true)
   })
 })
 
@@ -674,7 +720,7 @@ describe('backoff constants', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F1 — CRLF normalization in parseSseFrame
+// CRLF normalization in parseSseFrame
 // ---------------------------------------------------------------------------
 
 describe('parseSseFrame — CRLF normalization', () => {
@@ -718,7 +764,7 @@ describe('parseSseFrame — CRLF normalization', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F2 — Bounded buffer constant exported
+// Bounded buffer constant exported
 // ---------------------------------------------------------------------------
 
 describe('MAX_SSE_BUFFER_BYTES constant', () => {
@@ -729,7 +775,7 @@ describe('MAX_SSE_BUFFER_BYTES constant', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F3 — Cap reset-triggered reconnects
+// Cap reset-triggered reconnects
 // ---------------------------------------------------------------------------
 
 describe('nextStreamState — reset retryCount capping', () => {
@@ -797,7 +843,7 @@ describe('nextStreamState — reset retryCount capping', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F5 — Drift is absorbing; status before ready not rendered
+// Drift is absorbing; status before ready not rendered
 // ---------------------------------------------------------------------------
 
 describe('nextStreamState — drift is absorbing', () => {
@@ -841,7 +887,7 @@ describe('nextStreamState — drift is absorbing', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F6 — Value-allowlist in parseSseFrame
+// Value-allowlist in parseSseFrame
 // ---------------------------------------------------------------------------
 
 describe('parseSseFrame — allowlist gate for status/phase/surface', () => {
@@ -910,7 +956,7 @@ describe('parseSseFrame — allowlist gate for status/phase/surface', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F8 — backoffDelay(0) === RETRY_BASE_MS
+// backoffDelay(0) === RETRY_BASE_MS
 // ---------------------------------------------------------------------------
 
 describe('backoff first-delay', () => {
@@ -932,7 +978,7 @@ describe('backoff first-delay', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F13 — null-prototype runs map guards __proto__ keys
+// null-prototype runs map guards __proto__ keys
 // ---------------------------------------------------------------------------
 
 describe('nextStreamState — null-prototype runs map', () => {
@@ -1153,7 +1199,7 @@ describe('nextStreamState — first-frame timeout', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F2 — closed/submitted-unobservable guard: abort-rejection must not reopen
+// closed/submitted-unobservable guard: abort-rejection must not reopen
 // ---------------------------------------------------------------------------
 
 describe('nextStreamState — closed and submitted-unobservable are terminal for network events', () => {

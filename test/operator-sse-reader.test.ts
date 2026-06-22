@@ -224,6 +224,20 @@ describe('parseSseChunk — pure parser', () => {
     }
   })
 
+  it('rejects output frames with non-integer/negative/non-finite seq or droppedCount', () => {
+    const bad = [
+      '{"runId":"r","text":"x","final":false,"seq":-1}',
+      '{"runId":"r","text":"x","final":false,"seq":1.5}',
+      '{"runId":"r","text":"x","final":false,"seq":1e999}',
+      '{"runId":"r","text":"x","final":false,"seq":0,"droppedCount":-2}',
+      '{"runId":"r","text":"x","final":false,"seq":0,"droppedCount":2.5}',
+    ]
+    for (const data of bad) {
+      const frame = parseSseChunk(`event: output\ndata: ${data}\n\n`)[0]
+      expect(frame?.success).toBe(false)
+    }
+  })
+
   it('parses an output frame followed by a terminal status frame in sequence', () => {
     const output = {runId: 'run-001', text: 'done', final: true, seq: 1}
     const status = {
@@ -925,7 +939,7 @@ describe('createOperatorSseReader — callback discipline', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F1 — CRLF line-ending normalization (pure parser)
+// CRLF line-ending normalization (pure parser)
 // ---------------------------------------------------------------------------
 
 describe('parseSseChunk — CRLF normalization', () => {
@@ -989,7 +1003,7 @@ describe('parseSseChunk — CRLF normalization', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F1 — CRLF normalization in the streaming reader
+// CRLF normalization in the streaming reader
 // ---------------------------------------------------------------------------
 
 describe('createOperatorSseReader — CRLF normalization in stream', () => {
@@ -1025,7 +1039,7 @@ describe('createOperatorSseReader — CRLF normalization in stream', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F2 — Bounded incremental buffer (reader)
+// Bounded incremental buffer (reader)
 // ---------------------------------------------------------------------------
 
 describe('createOperatorSseReader — buffer overflow', () => {
@@ -1051,7 +1065,7 @@ describe('createOperatorSseReader — buffer overflow', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F5 — first-frame-must-be-ready: flush path goes through handleFrame
+// first-frame-must-be-ready: flush path goes through handleFrame
 // ---------------------------------------------------------------------------
 
 describe('createOperatorSseReader — flush path contract gate', () => {
@@ -1107,7 +1121,7 @@ describe('createOperatorSseReader — flush path contract gate', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F6 — Value-allowlist for status/phase/surface (reader)
+// Value-allowlist for status/phase/surface (reader)
 // ---------------------------------------------------------------------------
 
 describe('createOperatorSseReader — allowlist gate for status/phase/surface', () => {
@@ -1201,7 +1215,7 @@ describe('createOperatorSseReader — allowlist gate for status/phase/surface', 
 })
 
 // ---------------------------------------------------------------------------
-// F6 — Value-allowlist in parseSseChunk
+// Value-allowlist in parseSseChunk
 // ---------------------------------------------------------------------------
 
 describe('parseSseChunk — allowlist gate for status/phase/surface', () => {
@@ -1259,7 +1273,7 @@ describe('parseSseChunk — allowlist gate for status/phase/surface', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F7 — redirect:'error' + content-type check (reader)
+// redirect:'error' + content-type check (reader)
 // ---------------------------------------------------------------------------
 
 describe('createOperatorSseReader — redirect and content-type', () => {
@@ -1318,7 +1332,7 @@ describe('createOperatorSseReader — redirect and content-type', () => {
 })
 
 // ---------------------------------------------------------------------------
-// F11 — open() path-prefix validation
+// open() path-prefix validation
 // ---------------------------------------------------------------------------
 
 describe('createOperatorSseReader — path validation', () => {

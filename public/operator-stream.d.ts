@@ -14,6 +14,7 @@ export declare const RETRY_BASE_MS: number
 export declare const RETRY_FACTOR: number
 export declare const RETRY_MAX_COUNT: number
 export declare const MAX_SSE_BUFFER_BYTES: number
+export declare const MAX_OUTPUT_TEXT_CHARS: number
 export declare const FIRST_FRAME_TIMEOUT_MS: number
 
 // ---------------------------------------------------------------------------
@@ -91,6 +92,8 @@ export interface RunEntry {
   readonly outputFinal?: boolean
   /** True if any output frame reported coalesced (dropped) deltas. */
   readonly outputCoalesced?: boolean
+  /** True if accumulated output exceeded the cap and was truncated. */
+  readonly outputTruncated?: boolean
 }
 
 export interface StreamState {
