@@ -9,6 +9,7 @@
  *   event: ready  → data: ReadyFrame
  *   event: status → data: StatusFrameData  (same shape as OperatorRunStatus)
  *   event: reset  → data: ResetFrameData
+ *   event: output → data: OperatorOutputFrame (contract 1.3.0)
  *
  * Heartbeat is an SSE comment (": heartbeat") — it is NOT a named event and
  * has no corresponding frame type here.
@@ -17,6 +18,7 @@
  *   OperatorRunStatus imported from ./run-status.ts (local vendored copy)
  */
 
+import type {OperatorOutputFrame} from './output.ts'
 import type {OperatorRunStatus} from './run-status.ts'
 
 // ---------------------------------------------------------------------------
@@ -78,9 +80,11 @@ export interface ResetFrameData {
  *     case 'ready':  // frame.data is ReadyFrame
  *     case 'status': // frame.data is StatusFrameData (OperatorRunStatus)
  *     case 'reset':  // frame.data is ResetFrameData
+ *     case 'output': // frame.data is OperatorOutputFrame
  *   }
  */
 export type RunStreamFrame =
   | {readonly type: 'ready'; readonly data: ReadyFrame}
   | {readonly type: 'status'; readonly data: StatusFrameData}
   | {readonly type: 'reset'; readonly data: ResetFrameData}
+  | {readonly type: 'output'; readonly data: OperatorOutputFrame}

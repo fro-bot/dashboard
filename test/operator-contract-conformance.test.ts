@@ -1,15 +1,16 @@
 /**
  * Operator contract conformance tests.
  *
- * Verifies the vendored operator contract v1.2.0 is correctly pinned and
+ * Verifies the vendored operator contract v1.3.0 is correctly pinned and
  * that parse helpers behave per spec. Also verifies the SSE frame types
- * vendored from fro-bot/agent v0.73.0 (PRs #961/#962, #968) are structurally correct.
+ * vendored from fro-bot/agent (including the run-output channel) are structurally correct.
  *
- * Source: fro-bot/agent | Tag: v0.73.0 | PRs: #952, #961, #962, #968
+ * Source: fro-bot/agent | Tag: v0.74.0
  */
 import type {ApprovalDecisionState, RunStatus} from '../src/gateway/operator-client.ts'
 import type {
   OperatorDecisionState,
+  OperatorOutputFrame,
   OperatorRunStatus,
   OperatorWebStatus,
   ReadyFrame,
@@ -60,7 +61,7 @@ export {checkRunStatusBidirectional}
 // Using satisfies/export to avoid unused-variable lint while keeping the type constraint.
 
 // ReadyFrame: must accept a literal with contractVersion string
-const checkReadyFrameLiteral: ReadyFrame = {contractVersion: '1.2.0'}
+const checkReadyFrameLiteral: ReadyFrame = {contractVersion: '1.3.0'}
 export {checkReadyFrameLiteral}
 
 // ResetFrameData: must accept a literal with runId + ResetReason
@@ -82,8 +83,21 @@ const checkRepoSummaryMinimal: RepoSummary = {owner: 'fro-bot', repo: 'agent'}
 const checkRepoSummaryWithChannel: RepoSummary = {owner: 'fro-bot', repo: 'agent', channelName: 'main'}
 export {checkRepoSummaryMinimal, checkRepoSummaryWithChannel}
 
+// OperatorOutputFrame: must accept literals with and without droppedCount,
+// and an empty-text authoritative final frame.
+const checkOutputDelta: OperatorOutputFrame = {runId: 'run-001', text: 'partial', final: false, seq: 0}
+const checkOutputFinal: OperatorOutputFrame = {runId: 'run-001', text: 'complete', final: true, seq: 3}
+const checkOutputCoalesced: OperatorOutputFrame = {runId: 'run-001', text: 'partial', final: false, seq: 1, droppedCount: 2}
+const checkOutputEmptyFinal: OperatorOutputFrame = {runId: 'run-001', text: '', final: true, seq: 0}
+export {checkOutputDelta, checkOutputFinal, checkOutputCoalesced, checkOutputEmptyFinal}
+
 // RunStreamFrame discriminated union: each variant must be constructable
-const checkReadyFrame: RunStreamFrame = {type: 'ready', data: {contractVersion: '1.2.0'}}
+const checkReadyFrame: RunStreamFrame = {type: 'ready', data: {contractVersion: '1.3.0'}}
+const checkOutputFrame: RunStreamFrame = {
+  type: 'output',
+  data: {runId: 'run-001', text: 'partial', final: false, seq: 0},
+}
+export {checkOutputFrame}
 const checkResetFrame: RunStreamFrame = {type: 'reset', data: {runId: 'run-001', reason: 'terminal'}}
 const checkStatusFrame: RunStreamFrame = {
   type: 'status',
@@ -104,8 +118,8 @@ export {checkReadyFrame, checkResetFrame, checkStatusFrame}
 // ---------------------------------------------------------------------------
 
 describe('OPERATOR_CONTRACT_VERSION', () => {
-  it('is pinned to 1.2.0', () => {
-    expect(OPERATOR_CONTRACT_VERSION).toBe('1.2.0')
+  it('is pinned to 1.3.0', () => {
+    expect(OPERATOR_CONTRACT_VERSION).toBe('1.3.0')
   })
 })
 

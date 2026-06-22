@@ -20,6 +20,7 @@
 
 export type {OperatorDecisionState, PermissionReply} from './approval.ts'
 export type {OperatorIdentity} from './identity.ts'
+export type {OperatorOutputFrame} from './output.ts'
 export {parseOperatorCsrfToken, parseOperatorError, parseOperatorOk, parseOperatorSessionInfo} from './parse.ts'
 export {assertRedactionApplied, AUTHORIZATION_OBLIGATION, REDACTION_OBLIGATION} from './redaction.ts'
 export type {RedactionContext} from './redaction.ts'
