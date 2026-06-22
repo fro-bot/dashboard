@@ -1,14 +1,16 @@
 /**
  * Operator contract conformance tests.
  *
- * Verifies the vendored operator contract v1.3.0 is correctly pinned and
+ * Verifies the vendored operator contract v1.4.0 is correctly pinned and
  * that parse helpers behave per spec. Also verifies the SSE frame types
- * vendored from fro-bot/agent (including the run-output channel) are structurally correct.
+ * vendored from fro-bot/agent (including the run-output and approval channels)
+ * are structurally correct.
  *
- * Source: fro-bot/agent | Tag: v0.74.0
+ * Source: fro-bot/agent | Tag: v0.76.0
  */
 import type {ApprovalDecisionState, RunStatus} from '../src/gateway/operator-client.ts'
 import type {
+  OperatorApprovalFrame,
   OperatorDecisionState,
   OperatorOutputFrame,
   OperatorRunStatus,
@@ -61,7 +63,7 @@ export {checkRunStatusBidirectional}
 // Using satisfies/export to avoid unused-variable lint while keeping the type constraint.
 
 // ReadyFrame: must accept a literal with contractVersion string
-const checkReadyFrameLiteral: ReadyFrame = {contractVersion: '1.3.0'}
+const checkReadyFrameLiteral: ReadyFrame = {contractVersion: '1.4.0'}
 export {checkReadyFrameLiteral}
 
 // ResetFrameData: must accept a literal with runId + ResetReason
@@ -91,8 +93,43 @@ const checkOutputCoalesced: OperatorOutputFrame = {runId: 'run-001', text: 'part
 const checkOutputEmptyFinal: OperatorOutputFrame = {runId: 'run-001', text: '', final: true, seq: 0}
 export {checkOutputCoalesced, checkOutputDelta, checkOutputEmptyFinal, checkOutputFinal}
 
+// OperatorApprovalFrame: both discriminated variants must be assignable
+// Open variant — with command
+const checkApprovalFrameOpenWithCommand: OperatorApprovalFrame = {
+  runId: 'run-001',
+  requestID: 'req-001',
+  permission: 'shell',
+  command: 'ls -la',
+  settled: false,
+}
+export {checkApprovalFrameOpenWithCommand}
+// Open variant — with filepath
+const checkApprovalFrameOpenWithFilepath: OperatorApprovalFrame = {
+  runId: 'run-001',
+  requestID: 'req-001',
+  permission: 'fs/write',
+  filepath: '/tmp/output.txt',
+  settled: false,
+}
+export {checkApprovalFrameOpenWithFilepath}
+// Open variant — with neither command nor filepath (both optional)
+const checkApprovalFrameOpenMinimal: OperatorApprovalFrame = {
+  runId: 'run-001',
+  requestID: 'req-001',
+  permission: 'network',
+  settled: false,
+}
+export {checkApprovalFrameOpenMinimal}
+// Settle variant — exactly 3 fields
+const checkApprovalFrameSettle: OperatorApprovalFrame = {
+  runId: 'run-001',
+  requestID: 'req-001',
+  settled: true,
+}
+export {checkApprovalFrameSettle}
+
 // RunStreamFrame discriminated union: each variant must be constructable
-const checkReadyFrame: RunStreamFrame = {type: 'ready', data: {contractVersion: '1.3.0'}}
+const checkReadyFrame: RunStreamFrame = {type: 'ready', data: {contractVersion: '1.4.0'}}
 const checkOutputFrame: RunStreamFrame = {
   type: 'output',
   data: {runId: 'run-001', text: 'partial', final: false, seq: 0},
@@ -111,15 +148,26 @@ const checkStatusFrame: RunStreamFrame = {
     stale: false,
   },
 }
-export {checkReadyFrame, checkResetFrame, checkStatusFrame}
+// Approval frame as RunStreamFrame union member
+const checkApprovalRunStreamFrame: RunStreamFrame = {
+  type: 'approval',
+  data: {
+    runId: 'run-001',
+    requestID: 'req-001',
+    permission: 'shell',
+    command: 'echo hello',
+    settled: false,
+  },
+}
+export {checkApprovalRunStreamFrame, checkReadyFrame, checkResetFrame, checkStatusFrame}
 
 // ---------------------------------------------------------------------------
 // Version pin
 // ---------------------------------------------------------------------------
 
 describe('OPERATOR_CONTRACT_VERSION', () => {
-  it('is pinned to 1.3.0', () => {
-    expect(OPERATOR_CONTRACT_VERSION).toBe('1.3.0')
+  it('is pinned to 1.4.0', () => {
+    expect(OPERATOR_CONTRACT_VERSION).toBe('1.4.0')
   })
 })
 

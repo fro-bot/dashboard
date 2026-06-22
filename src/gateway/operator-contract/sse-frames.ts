@@ -18,6 +18,7 @@
  *   OperatorRunStatus imported from ./run-status.ts (local vendored copy)
  */
 
+import type {OperatorApprovalFrame} from './approval-frame.ts'
 import type {OperatorOutputFrame} from './output.ts'
 import type {OperatorRunStatus} from './run-status.ts'
 
@@ -88,3 +89,4 @@ export type RunStreamFrame =
   | {readonly type: 'status'; readonly data: StatusFrameData}
   | {readonly type: 'reset'; readonly data: ResetFrameData}
   | {readonly type: 'output'; readonly data: OperatorOutputFrame}
+  | {readonly type: 'approval'; readonly data: OperatorApprovalFrame}

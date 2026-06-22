@@ -18,6 +18,7 @@
  * - The contract version is build-time pinned and never negotiated over the wire.
  */
 
+export type {OperatorApprovalFrame} from './approval-frame.ts'
 export type {OperatorDecisionState, PermissionReply} from './approval.ts'
 export type {OperatorIdentity} from './identity.ts'
 export type {OperatorOutputFrame} from './output.ts'
