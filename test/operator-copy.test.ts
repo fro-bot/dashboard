@@ -197,7 +197,7 @@ describe('streamEventLabel', () => {
 })
 
 // ---------------------------------------------------------------------------
-// permissionLabel — Unit 5 approval prompt copy
+// permissionLabel — approval prompt copy
 // ---------------------------------------------------------------------------
 
 describe('permissionLabel', () => {
@@ -241,7 +241,7 @@ describe('permissionLabel', () => {
 })
 
 // ---------------------------------------------------------------------------
-// isEditClassPermission — Unit 5
+// isEditClassPermission
 // ---------------------------------------------------------------------------
 
 describe('isEditClassPermission', () => {
@@ -267,10 +267,10 @@ describe('isEditClassPermission', () => {
 })
 
 // ---------------------------------------------------------------------------
-// R10 failure-class copy constants — Unit 5
+// Approval decision failure-class copy constants
 // ---------------------------------------------------------------------------
 
-describe('R10 failure-class copy constants', () => {
+describe('approval decision failure-class copy constants', () => {
   it('APPROVAL_CANT_APPROVE_COPY is a non-empty string', () => {
     expect(typeof APPROVAL_CANT_APPROVE_COPY).toBe('string')
     expect(APPROVAL_CANT_APPROVE_COPY.length).toBeGreaterThan(0)
@@ -301,7 +301,7 @@ describe('R10 failure-class copy constants', () => {
     expect(APPROVAL_EDIT_CLASS_CAVEAT_COPY.length).toBeGreaterThan(0)
   })
 
-  it('CRITICAL: denial copy and transport-failure copy are distinct (R10 — must not conflate)', () => {
+  it('CRITICAL: denial copy and transport-failure copy are distinct (must not conflate)', () => {
     expect(APPROVAL_CANT_APPROVE_COPY).not.toBe(APPROVAL_TRANSPORT_FAILURE_COPY)
     // The transport copy must not contain "access" language that implies denial
     expect(APPROVAL_TRANSPORT_FAILURE_COPY).not.toMatch(/may not have.*access|approval access/i)

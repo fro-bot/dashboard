@@ -740,7 +740,7 @@ export function toSafeRunView(runStatus) {
  * Returns true iff the run entry has at least one open (non-tombstoned) approval prompt.
  *
  * This is the canonical visibility signal for the `waiting_for_approval` overlay and
- * the in-page open-prompt indicator (R11). Both must derive from this one state so
+ * the in-page open-prompt indicator. Both must derive from this one state so
  * they cannot desync.
  *
  * @param {object} runEntry - A RunEntry from the stream state's runs map.
@@ -801,12 +801,12 @@ function backoffDelay(attempt) {
  * Security:
  * - Never logs runId, requestId, decision, csrf, or idempotency key.
  * - All 404s collapse to one denial-class signal (no cause inference).
- * - Transport errors are distinct from denial (R10).
+ * - Transport errors are distinct from denial (approval decision failure handling).
  * - CSRF-400 retried once with the same idempotency key (mirrors launch pattern).
  *
  * @returns {object} An object with refreshCsrf() and decideRunApproval() methods.
  */
-function buildApprovalClient() {
+export function buildApprovalClient() {
   const browserFetch = (input, init) =>
     globalThis.fetch(input, {
       ...init,
@@ -898,6 +898,13 @@ function buildApprovalClient() {
   /**
    * GET open approvals for a run (reconcile on reconnect).
    * Returns the list of open approval summaries, or an empty array on failure.
+   *
+   * Reconcile is best-effort: failures (network, non-200, malformed body) are
+   * intentionally swallowed and return []. The SSE stream is the authoritative
+   * channel for approval state; the reconcile GET is a late-join catch-up only.
+   * Silently returning [] on failure is correct — a missed reconcile means the
+   * operator may not see a prompt until the next SSE open frame, which is
+   * acceptable given the stream is the primary delivery path.
    */
   async function listRunApprovals(runId) {
     try {
@@ -942,7 +949,7 @@ function buildApprovalClient() {
  * @param {function} _onSettle - Called when the prompt is settled (to trigger DOM cleanup).
  * @returns {HTMLElement} The rendered prompt element.
  */
-function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
+export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
   const {requestID, permission, command, filepath} = prompt
 
   // Determine if this is an edit-class prompt (filepath-based, contents not previewed)
@@ -984,7 +991,7 @@ function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
     el.append(actionEl)
   }
 
-  // Edit-class caveat (PD3)
+  // Edit-class caveat
   if (isEditClass) {
     const caveEl = document.createElement('p')
     caveEl.style.cssText = 'font-size:0.75rem;color:#92400e;margin:2px 0 6px;'
@@ -992,7 +999,7 @@ function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
     el.append(caveEl)
   }
 
-  // Access caveat (PD1)
+  // Access caveat
   const accessCaveEl = document.createElement('p')
   accessCaveEl.style.cssText = 'font-size:0.75rem;color:#6b7280;margin:2px 0 6px;'
   accessCaveEl.textContent = 'Approval requires write access to this run. Unavailable decisions fail safely.'
@@ -1039,9 +1046,10 @@ function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
 
   function setTransportFailure() {
     promptState = 'transport-failure'
-    statusEl.textContent = 'Decision didn\u2019t go through \u2014 try again.'
-    // Re-enable controls
+    // Re-enable controls first (renderControls clears statusEl.textContent),
+    // then set the status message so it survives and is visible alongside the controls.
     renderControls()
+    statusEl.textContent = 'Decision didn\u2019t go through \u2014 try again.'
   }
 
   function setCantApprove() {
@@ -1075,17 +1083,38 @@ function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
       const {state} = result.data
       if (state === 'already_claimed' || state === 'unavailable') {
         setAlreadySettled()
+      } else if (state === 'scope_mismatch') {
+        // Terminal non-retryable: the decision was not applied due to a scope mismatch.
+        // Show the label and clear controls (mirrors already-settled behavior).
+        promptState = 'already-settled'
+        statusEl.textContent = 'Approval scope didn\u2019t match \u2014 decision not applied.'
+        controlsEl.textContent = ''
+        alwaysConfirmEl.hidden = true
+      } else if (state === 'failed_to_settle') {
+        // Retryable: the gateway couldn't finalize the decision. Re-enable controls.
+        // Uses transport-failure path so the operator can retry.
+        setTransportFailure()
+        statusEl.textContent = 'Couldn\u2019t finalize the decision \u2014 please try again.'
+      } else if (state === 'pending') {
+        // Defensive: pending shouldn't come back from a decision POST, but if it does
+        // re-enable controls so the operator is not left in a disabled limbo.
+        renderControls()
       } else {
-        // claimed / scope_mismatch / failed_to_settle / other → treat as settled/success
+        // claimed / other → treat as in-progress success.
         // The settle frame will arrive over the stream and remove the prompt via the reducer.
-        // For now, show a brief "decision sent" state; the reducer will clean up.
         statusEl.textContent = ''
-        // onSettle will be called when the settle frame arrives; no action needed here.
       }
     } else {
       const {error} = result
       if (error.kind === 'http' && error.status === 404) {
         setCantApprove()
+      } else if (error.kind === 'http' && (error.status === 400 || error.status === 401 || error.status === 403)) {
+        // Persistent auth/session failure after CSRF retry — non-retryable loop guard.
+        // Clear controls so the operator cannot loop; instruct them to reload.
+        promptState = 'cant-approve'
+        statusEl.textContent = 'Your session may have expired \u2014 reload the page to approve.'
+        controlsEl.textContent = ''
+        alwaysConfirmEl.hidden = true
       } else {
         setTransportFailure()
       }
@@ -1113,7 +1142,7 @@ function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
     alwaysBtn.addEventListener('click', () => {
       if (promptState !== 'open' && promptState !== 'transport-failure') return
       promptState = 'always-confirm'
-      // Suppress once/reject during confirm-pending (PD2)
+      // Suppress once/reject during always-confirm pending
       controlsEl.textContent = ''
       alwaysConfirmEl.hidden = false
 
@@ -1167,7 +1196,7 @@ function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
  *   statusEl    — element with [data-role="run-status"] to update
  *   noticeEl    — element to show stream connection state notices
  *   approvalsEl — element with [data-role="run-approvals"] to render approval prompts
- *   badgeEl     — element with [data-role="approval-badge"] for the R12 indicator
+ *   badgeEl     — element with [data-role="approval-badge"] for the approval count badge
  *   approvalClient — optional pre-built approval client (for testing); if absent,
  *                    buildApprovalClient() is called when the flag is on
  *
@@ -1271,13 +1300,13 @@ export function initOperatorStream(opts) {
 
     // Approval prompts: render open prompts from getOpenApprovals(runEntry).
     // Uses safe DOM (textContent only — never innerHTML). Prompts are added/removed
-    // as the reducer state changes; settled prompts are removed silently (PD4).
+    // as the reducer state changes; settled prompts are removed silently.
     if (approvalsEl !== undefined && approvalsEl !== null && approvalClient !== null) {
       const runEntry = state.runs[runId]
       const openPrompts = getOpenApprovals(runEntry)
       const openIds = new Set(openPrompts.map(p => p.requestID))
 
-      // Remove prompts that are no longer open (settled/dismissed — PD4)
+      // Remove prompts that are no longer open (settled/dismissed)
       for (const [reqId, promptEl] of renderedPrompts) {
         if (!openIds.has(reqId)) {
           promptEl.remove()
@@ -1300,7 +1329,7 @@ export function initOperatorStream(opts) {
       // Show/hide the approvals container
       approvalsEl.hidden = openPrompts.length === 0
 
-      // R12: update the badge indicator (hasOpenApprovals)
+      // Update the badge indicator (hasOpenApprovals)
       if (badgeEl !== undefined && badgeEl !== null) {
         const hasOpen = hasOpenApprovals(runEntry)
         if (hasOpen) {
@@ -1330,7 +1359,7 @@ export function initOperatorStream(opts) {
     state = nextStreamState(state, event)
     updateDOM()
     // Trigger reconcile when the stream first goes live (or re-goes live after reconnect).
-    // This is the one-shot GET on (re)connect (KTD4, R5).
+    // This is the one-shot GET on (re)connect.
     if (prevConnection !== 'live' && state.connection === 'live') {
       reconcileApprovals()
     }
@@ -1339,8 +1368,8 @@ export function initOperatorStream(opts) {
   /**
    * Reconcile open approvals on (re)connect: one-shot GET on stream open.
    * Feeds returned open prompts into the reducer as synthetic open frames.
-   * The reducer's tombstone logic drops any already-settled prompts (PD5).
-   * Never called on a timer — only once per connect() invocation (KTD4).
+   * The reducer's tombstone logic drops any already-settled prompts.
+   * Never called on a timer — only once per connect() invocation.
    */
   async function reconcileApprovals() {
     if (approvalClient === null) return
@@ -1359,7 +1388,7 @@ export function initOperatorStream(opts) {
         continue
       }
       // Dispatch as a synthetic open approval frame — the reducer's tombstone
-      // logic will drop it if already settled (PD5 reconcile-additive-only).
+      // logic will drop it if already settled (reconcile-additive-only).
       const syntheticFrame = {
         type: 'approval',
         data: {
@@ -1580,7 +1609,7 @@ export function bootstrapOperatorStreams() {
     const statusEl = card.querySelector('[data-role="run-status"]')
     const outputEl = card.querySelector('[data-role="run-output"]')
     const coalescedEl = card.querySelector('[data-role="run-output-coalesced"]')
-    // Unit 5: discover the approval region and badge elements
+    // Discover the approval region and badge elements
     const approvalsEl = card.querySelector('[data-role="run-approvals"]')
     const badgeEl = card.querySelector('[data-role="approval-badge"]')
     handles.push(initOperatorStream({runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl}))

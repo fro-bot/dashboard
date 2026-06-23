@@ -970,9 +970,9 @@ describe('decideRunApproval', () => {
     }
   })
 
-  // R10 failure classes: denial-404 vs transport-error vs already-settled state values
+  // Approval decision failure classes: denial-404 vs transport-error vs already-settled state values
 
-  it('R10: 404 response surfaces as denial-class http error (distinct from network throw)', async () => {
+  it('404 response surfaces as denial-class http error (distinct from network throw)', async () => {
     const client = createOperatorClient({
       fetch: makeErrorFetch(404),
       createEventStream: makeEventStream([]),
@@ -987,7 +987,7 @@ describe('decideRunApproval', () => {
     }
   })
 
-  it('R10: network throw surfaces as transport-error (distinct from 404 denial)', async () => {
+  it('network throw surfaces as transport-error (distinct from 404 denial)', async () => {
     const client = createOperatorClient({
       fetch: async () => { throw new Error('ECONNREFUSED') },
       createEventStream: makeEventStream([]),
@@ -999,7 +999,7 @@ describe('decideRunApproval', () => {
     }
   })
 
-  it('R10: 404 and network throw are distinguishable (different error kinds)', async () => {
+  it('404 and network throw are distinguishable (different error kinds)', async () => {
     const clientDenial = createOperatorClient({
       fetch: makeErrorFetch(404),
       createEventStream: makeEventStream([]),
@@ -1019,7 +1019,7 @@ describe('decideRunApproval', () => {
     }
   })
 
-  it('R10: already_claimed state is returned to caller (not thrown)', async () => {
+  it('already_claimed state is returned to caller (not thrown)', async () => {
     const client = createOperatorClient({
       fetch: makeOkFetch({state: 'already_claimed'}),
       createEventStream: makeEventStream([]),
@@ -1031,7 +1031,7 @@ describe('decideRunApproval', () => {
     }
   })
 
-  it('R10: unavailable state is returned to caller', async () => {
+  it('unavailable state is returned to caller', async () => {
     const client = createOperatorClient({
       fetch: makeOkFetch({state: 'unavailable'}),
       createEventStream: makeEventStream([]),
@@ -1043,7 +1043,7 @@ describe('decideRunApproval', () => {
     }
   })
 
-  it('R10: scope_mismatch state is returned to caller', async () => {
+  it('scope_mismatch state is returned to caller', async () => {
     const client = createOperatorClient({
       fetch: makeOkFetch({state: 'scope_mismatch'}),
       createEventStream: makeEventStream([]),
@@ -1055,7 +1055,7 @@ describe('decideRunApproval', () => {
     }
   })
 
-  it('R10: failed_to_settle state is returned to caller', async () => {
+  it('failed_to_settle state is returned to caller', async () => {
     const client = createOperatorClient({
       fetch: makeOkFetch({state: 'failed_to_settle'}),
       createEventStream: makeEventStream([]),

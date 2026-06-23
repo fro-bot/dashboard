@@ -220,7 +220,7 @@ describe('operator UI — flag ON + authenticated', () => {
     // waiting_for_approval must NOT appear as raw token in primary labels
     // (it may appear in data attributes or aria, but not as visible text)
 
-    // Unit 5: approval prompts are rendered by the browser client (not SSR).
+    // Approval prompts are rendered by the browser client (not SSR).
     // The SSR ships the approval region empty and hidden; the browser fills it
     // from getOpenApprovals(runEntry). The old fixture approval section is gone.
     // The no-raw-token invariants above are the load-bearing assertions here.
@@ -351,7 +351,7 @@ describe('operator UI — flag ON + authenticated', () => {
     expect(res.status).toBe(200)
     const body = await res.text()
 
-    // Unit 5: approval decision states are rendered by the browser client (not SSR).
+    // Approval decision states are rendered by the browser client (not SSR).
     // The SSR ships the approval region empty and hidden; the browser fills it
     // from getOpenApprovals(runEntry) and maps decision outcomes to interaction states.
     // The no-raw-token invariants in 'renders approval states with safe copy' cover the
@@ -715,10 +715,10 @@ describe('operator UI — launch surface (flag ON + authenticated)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Unit 5: Inline approval prompt UI — SSR hooks and no-dashboard-proxy invariant
+// Inline approval prompt UI — SSR hooks and no-dashboard-proxy invariant
 // ---------------------------------------------------------------------------
 
-describe('operator UI — Unit 5: approval region SSR hooks (flag ON)', () => {
+describe('operator UI — approval region SSR hooks (flag ON)', () => {
   it('run cards contain a data-role="run-approvals" region (flag ON)', async () => {
     const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
@@ -777,7 +777,7 @@ describe('operator UI — Unit 5: approval region SSR hooks (flag ON)', () => {
   })
 })
 
-describe('operator UI — Unit 5: no-dashboard-proxy 404 invariant for approval routes', () => {
+describe('operator UI — no-dashboard-proxy 404 invariant for approval routes', () => {
   // The dashboard app deliberately does NOT serve the operator approval endpoints.
   // The public reverse proxy routes those same-origin paths to the gateway.
   // These assertions pin that invariant for the 1.4.0 per-run approval routes.

@@ -562,10 +562,10 @@ repos:
 })
 
 // ---------------------------------------------------------------------------
-// Integration boundary: Unit 4 fail-closed contract
+// Integration boundary: metadata fail-closed contract
 // ---------------------------------------------------------------------------
 
-describe('Unit 4 fail-closed contract', () => {
+describe('metadata fail-closed contract', () => {
   it('ok result provides both publicRepos and redactedNodeIds for aggregator use', async () => {
     const result = await readRepoMetadata(makeReader(FIXTURE_YAML))
 
@@ -597,7 +597,7 @@ describe('Unit 4 fail-closed contract', () => {
     expect(unavailableResult.error).toBeInstanceOf(MetadataUnavailableError)
     expect(transportResult.error).toBeInstanceOf(MetadataTransportError)
 
-    // Unit 4 can distinguish them by instanceof
+    // Caller can distinguish them by instanceof
     expect(unavailableResult.error instanceof MetadataUnavailableError).toBe(true)
     expect(transportResult.error instanceof MetadataTransportError).toBe(true)
   })

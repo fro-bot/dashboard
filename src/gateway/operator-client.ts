@@ -204,7 +204,7 @@ export interface OperatorClient {
   /**
    * POST /operator/runs/:runId/approvals/:requestId/decision — decide a pending approval.
    * Decision verb is PermissionReply ('once'|'always'|'reject').
-   * Response state is OperatorDecisionState — returned to caller for R10 failure-class mapping.
+   * Response state is OperatorDecisionState — returned to caller for approval decision failure-class mapping.
    * CSRF-protected + idempotency-key; one CSRF-400 retry reusing the same key.
    * Contract 1.4.0.
    */

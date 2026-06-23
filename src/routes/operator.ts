@@ -142,7 +142,7 @@ function runStatusSection(): ReturnType<typeof html> {
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
           <span class="run-status ${cssClass}" data-role="run-status">${label}</span>
           <span class="mono">${run.runId}</span>
-          <!-- R12: in-page open-prompt indicator — browser fills this badge when hasOpenApprovals -->
+          <!-- in-page open-prompt indicator — browser fills this badge when there are open approvals -->
           <span class="approval-badge" data-role="approval-badge" hidden style="font-size:0.75rem;font-weight:600;background:#f59e0b;color:#fff;border-radius:10px;padding:1px 7px;"></span>
         </div>
         <div style="font-size:0.8rem;color:#6b7280;">
@@ -208,7 +208,8 @@ function eventTimelineSection(): ReturnType<typeof html> {
   `
 }
 
-// pendingApprovalSection and terminalApprovalCard have been removed (Unit 5).
+// The fixture-only pending-approval section and terminal approval cards have been removed;
+// the inline approval prompt is now rendered by the browser stream client from live frames.
 // Approval prompts are now rendered inline in each run card by the browser client
 // via the data-role="run-approvals" hook. The SSR no longer renders fixture approval
 // copy — doing so was misleading (it implied approval was unavailable when the flag
