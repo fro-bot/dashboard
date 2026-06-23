@@ -15,6 +15,8 @@ export declare const RETRY_FACTOR: number
 export declare const RETRY_MAX_COUNT: number
 export declare const MAX_SSE_BUFFER_BYTES: number
 export declare const MAX_OUTPUT_TEXT_CHARS: number
+export declare const MAX_APPROVAL_TOMBSTONES: number
+export declare const MAX_OPEN_APPROVALS: number
 export declare const FIRST_FRAME_TIMEOUT_MS: number
 
 // ---------------------------------------------------------------------------

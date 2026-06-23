@@ -1367,6 +1367,106 @@ describe('parseSseChunk — approval frame (error cases, fail-closed, no wire ec
       expect(frame.error.message).toBe('approval frame has invalid settled discriminator')
     }
   })
+
+  // Fix 2: empty-string rejections
+  it('rejects approval frame with empty-string runId (open)', () => {
+    const payload = {runId: '', requestID: 'req-001', permission: 'shell', settled: false}
+    const frame = parseSseChunk(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)[0]
+    expect(frame?.success).toBe(false)
+  })
+
+  it('rejects approval frame with empty-string requestID (open)', () => {
+    const payload = {runId: 'run-001', requestID: '', permission: 'shell', settled: false}
+    const frame = parseSseChunk(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)[0]
+    expect(frame?.success).toBe(false)
+  })
+
+  it('rejects approval frame with empty-string runId (settle)', () => {
+    const payload = {runId: '', requestID: 'req-001', settled: true}
+    const frame = parseSseChunk(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)[0]
+    expect(frame?.success).toBe(false)
+  })
+
+  it('rejects approval frame with empty-string requestID (settle)', () => {
+    const payload = {runId: 'run-001', requestID: '', settled: true}
+    const frame = parseSseChunk(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)[0]
+    expect(frame?.success).toBe(false)
+  })
+
+  it('rejects open approval frame with empty-string permission', () => {
+    const payload = {runId: 'run-001', requestID: 'req-001', permission: '', settled: false}
+    const frame = parseSseChunk(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)[0]
+    expect(frame?.success).toBe(false)
+  })
+
+  // Fix 3: no-echo assertions on non-string requestID and non-string filepath
+  it('non-string requestID rejection does not echo the bad value', () => {
+    const payload = {runId: 'run-001', requestID: true, permission: 'shell', settled: false}
+    const frame = parseSseChunk(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)[0]
+    expect(frame?.success).toBe(false)
+    if (frame !== undefined && !frame.success) {
+      expect(frame.error.message).not.toContain('true')
+    }
+  })
+
+  it('non-string filepath rejection does not echo the bad value', () => {
+    const payload = {runId: 'run-001', requestID: 'req-001', permission: 'shell', filepath: [], settled: false}
+    const frame = parseSseChunk(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)[0]
+    expect(frame?.success).toBe(false)
+    if (frame !== undefined && !frame.success) {
+      expect(frame.error.message).not.toContain('[]')
+    }
+  })
+})
+
+describe('parseSseChunk — approval frame (open variant) — filepath valid', () => {
+  it('parses an open approval frame with empty string filepath (valid string)', () => {
+    const payload = {
+      runId: 'run-001',
+      requestID: 'req-001',
+      permission: 'fs-write',
+      filepath: '',
+      settled: false,
+    }
+    const text = `event: approval\ndata: ${JSON.stringify(payload)}\n\n`
+    const results = parseSseChunk(text)
+    expect(results).toHaveLength(1)
+    const frame = results[0]
+    expect(frame?.success).toBe(true)
+    if (frame?.success && frame.frame.type === 'approval') {
+      if (!frame.frame.data.settled) {
+        expect(frame.frame.data.filepath).toBe('')
+      }
+    } else {
+      expect.fail('expected an approval frame')
+    }
+  })
+})
+
+describe('parseSseChunk — approval frame (settle variant) — extra fields absent', () => {
+  it('settle frame with extra wire fields: parsed data has ONLY {runId, requestID, settled}', () => {
+    const payload = {
+      runId: 'run-001',
+      requestID: 'req-001',
+      settled: true,
+      extraField: 'ignored',
+      anotherExtra: 42,
+    }
+    const text = `event: approval\ndata: ${JSON.stringify(payload)}\n\n`
+    const results = parseSseChunk(text)
+    expect(results).toHaveLength(1)
+    const frame = results[0]
+    expect(frame?.success).toBe(true)
+    if (frame?.success && frame.frame.type === 'approval') {
+      const data = frame.frame.data
+      const keys = Object.keys(data)
+      expect(keys.sort()).toEqual(['requestID', 'runId', 'settled'].sort())
+      expect('extraField' in data).toBe(false)
+      expect('anotherExtra' in data).toBe(false)
+    } else {
+      expect.fail('expected an approval frame')
+    }
+  })
 })
 
 describe('parseSseChunk — approval frame integration (open then settle in one chunk)', () => {

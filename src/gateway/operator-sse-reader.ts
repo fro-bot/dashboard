@@ -245,8 +245,13 @@ function parseSseRecord(record: string): SseParseResult | null {
   }
 
   if (eventName === 'approval') {
-    // Validate runId and requestID — required on both variants
-    if (typeof candidate.runId !== 'string' || typeof candidate.requestID !== 'string') {
+    // Validate runId and requestID — required on both variants; must be non-empty strings
+    if (
+      typeof candidate.runId !== 'string' ||
+      candidate.runId.length === 0 ||
+      typeof candidate.requestID !== 'string' ||
+      candidate.requestID.length === 0
+    ) {
       return {success: false, error: new Error('approval frame missing required fields')}
     }
     // settled must be a boolean — reject anything else (string, number, null, etc.)
@@ -254,8 +259,8 @@ function parseSseRecord(record: string): SseParseResult | null {
       return {success: false, error: new Error('approval frame has invalid settled discriminator')}
     }
     if (candidate.settled === false) {
-      // Open variant: permission is required; command and filepath are optional strings
-      if (typeof candidate.permission !== 'string') {
+      // Open variant: permission is required and must be non-empty; command and filepath are optional strings
+      if (typeof candidate.permission !== 'string' || candidate.permission.length === 0) {
         return {success: false, error: new Error('approval frame missing required fields')}
       }
       if (candidate.command !== undefined && typeof candidate.command !== 'string') {

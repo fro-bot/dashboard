@@ -52,6 +52,20 @@ export const MAX_SSE_BUFFER_BYTES = 1_000_000
 export const MAX_OUTPUT_TEXT_CHARS = 256_000
 
 /**
+ * Hard cap on the per-run approval tombstone map. A hostile stream could send many
+ * distinct settle frames; this bounds the map size. When the cap is reached, the
+ * oldest entry (FIFO) is evicted before adding the new one.
+ */
+export const MAX_APPROVAL_TOMBSTONES = 1000
+
+/**
+ * Hard cap on the per-run open-approvals map. A hostile stream could send many
+ * distinct open frames; this bounds the map size. When the cap is reached, new open
+ * frames for unseen requestIDs are ignored (existing prompts are never evicted).
+ */
+export const MAX_OPEN_APPROVALS = 100
+
+/**
  * Bounded timeout in milliseconds for receiving the first SSE frame after opening
  * a stream. If no frame arrives within this window, the connection transitions to
  * 'submitted-unobservable' — the run was accepted but is not yet streaming (e.g.
@@ -271,8 +285,13 @@ export function parseSseFrame(record) {
   }
 
   if (eventName === 'approval') {
-    // Validate runId and requestID — required on both variants
-    if (typeof parsed.runId !== 'string' || typeof parsed.requestID !== 'string') {
+    // Validate runId and requestID — required on both variants; must be non-empty strings
+    if (
+      typeof parsed.runId !== 'string' ||
+      parsed.runId.length === 0 ||
+      typeof parsed.requestID !== 'string' ||
+      parsed.requestID.length === 0
+    ) {
       return {success: false, error: 'approval frame missing required fields'}
     }
     // settled must be a boolean — reject anything else (string, number, null, etc.)
@@ -280,8 +299,8 @@ export function parseSseFrame(record) {
       return {success: false, error: 'approval frame has invalid settled discriminator'}
     }
     if (parsed.settled === false) {
-      // Open variant: permission is required; command and filepath are optional strings
-      if (typeof parsed.permission !== 'string') {
+      // Open variant: permission is required and must be non-empty; command and filepath are optional strings
+      if (typeof parsed.permission !== 'string' || parsed.permission.length === 0) {
         return {success: false, error: 'approval frame missing required fields'}
       }
       if (parsed.command !== undefined && typeof parsed.command !== 'string') {
@@ -443,7 +462,14 @@ export function nextStreamState(current, event) {
         // A settle for a requestID never seen open → still tombstone it (no spurious UI).
         const nextOpenPrompts = Object.assign(Object.create(null), prevOpenPrompts)
         delete nextOpenPrompts[requestID]
-        const nextTombstones = Object.assign(Object.create(null), prevTombstones, {[requestID]: true})
+        // Cap the tombstone map: if at cap and requestID is new, evict the oldest entry (FIFO).
+        let tombstoneBase = prevTombstones
+        if (!(requestID in prevTombstones) && Object.keys(prevTombstones).length >= MAX_APPROVAL_TOMBSTONES) {
+          const oldestKey = Object.keys(prevTombstones)[0]
+          tombstoneBase = Object.assign(Object.create(null), prevTombstones)
+          delete tombstoneBase[oldestKey]
+        }
+        const nextTombstones = Object.assign(Object.create(null), tombstoneBase, {[requestID]: true})
         const updatedEntry = {
           ...base,
           approvalOpenPrompts: nextOpenPrompts,
@@ -454,6 +480,11 @@ export function nextStreamState(current, event) {
       } else {
         // Open frame: if requestID is already tombstoned → IGNORE (open-after-settle / id-reuse guard).
         if (prevTombstones[requestID] === true) {
+          return current
+        }
+        // Cap the open-prompts map: if at cap and requestID is new, ignore the overflow open.
+        // (Never evict an existing open prompt — losing a real pending prompt is worse than dropping overflow.)
+        if (!(requestID in prevOpenPrompts) && Object.keys(prevOpenPrompts).length >= MAX_OPEN_APPROVALS) {
           return current
         }
         // Add/replace in the open-prompts map (duplicate open for same id is idempotent).

@@ -21,6 +21,8 @@ import {
   FIRST_FRAME_TIMEOUT_MS,
   getOpenApprovals,
   hasOpenApprovals,
+  MAX_APPROVAL_TOMBSTONES,
+  MAX_OPEN_APPROVALS,
   MAX_OUTPUT_TEXT_CHARS,
   MAX_SSE_BUFFER_BYTES,
   nextStreamState,
@@ -453,6 +455,37 @@ describe('parseSseFrame — approval frame (error cases, fail-closed, no wire ec
     if (result && !result.success) {
       expect(result.error).toBe('approval frame has invalid settled discriminator')
     }
+  })
+
+  // Fix 2: empty-string rejections
+  it('rejects approval frame with empty-string runId (open)', () => {
+    const payload = {runId: '', requestID: 'req-001', permission: 'shell', settled: false}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
+  })
+
+  it('rejects approval frame with empty-string requestID (open)', () => {
+    const payload = {runId: 'run-001', requestID: '', permission: 'shell', settled: false}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
+  })
+
+  it('rejects approval frame with empty-string runId (settle)', () => {
+    const payload = {runId: '', requestID: 'req-001', settled: true}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
+  })
+
+  it('rejects approval frame with empty-string requestID (settle)', () => {
+    const payload = {runId: 'run-001', requestID: '', settled: true}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
+  })
+
+  it('rejects open approval frame with empty-string permission', () => {
+    const payload = {runId: 'run-001', requestID: 'req-001', permission: '', settled: false}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
   })
 })
 
@@ -1923,5 +1956,224 @@ describe('nextStreamState — buffer overflow', () => {
     const overflowed = nextStreamState(state, {type: 'buffer-overflow'})
     expect(overflowed.connection).toBe('failed')
     expect(overflowed.shouldReconnect).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix 1: tombstone map cap + open-approvals map cap
+// ---------------------------------------------------------------------------
+
+describe('nextStreamState — approval tombstone cap (MAX_APPROVAL_TOMBSTONES)', () => {
+  const live = (): StreamState =>
+    nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+
+  it('MAX_APPROVAL_TOMBSTONES is a positive number', () => {
+    expect(typeof MAX_APPROVAL_TOMBSTONES).toBe('number')
+    expect(MAX_APPROVAL_TOMBSTONES).toBeGreaterThan(0)
+  })
+
+  it('MAX_OPEN_APPROVALS is a positive number', () => {
+    expect(typeof MAX_OPEN_APPROVALS).toBe('number')
+    expect(MAX_OPEN_APPROVALS).toBeGreaterThan(0)
+  })
+
+  it('tombstone map stays at cap after MAX_APPROVAL_TOMBSTONES+1 settles — oldest evicted, newest present', () => {
+    let state = live()
+    // Add MAX_APPROVAL_TOMBSTONES settles
+    for (let i = 0; i < MAX_APPROVAL_TOMBSTONES; i++) {
+      state = nextStreamState(state, {
+        type: 'approval',
+        data: {runId: 'run-001', requestID: `req-${i}`, settled: true},
+      })
+    }
+    const runBefore = state.runs['run-001']
+    expect(runBefore).toBeDefined()
+    const tombstonesBefore = runBefore?.approvalTombstones ?? {}
+    expect(Object.keys(tombstonesBefore)).toHaveLength(MAX_APPROVAL_TOMBSTONES)
+
+    // Add one more — should evict oldest (req-0) and add newest
+    state = nextStreamState(state, {
+      type: 'approval',
+      data: {runId: 'run-001', requestID: `req-${MAX_APPROVAL_TOMBSTONES}`, settled: true},
+    })
+    const run = state.runs['run-001']
+    const tombstones = run?.approvalTombstones ?? {}
+    // Map size stays at cap
+    expect(Object.keys(tombstones)).toHaveLength(MAX_APPROVAL_TOMBSTONES)
+    // Oldest (req-0) evicted
+    expect(Object.hasOwn(tombstones, 'req-0')).toBe(false)
+    // Newest present
+    expect(Object.hasOwn(tombstones, `req-${MAX_APPROVAL_TOMBSTONES}`)).toBe(true)
+  })
+})
+
+describe('nextStreamState — open-approvals cap (MAX_OPEN_APPROVALS)', () => {
+  const live = (): StreamState =>
+    nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+
+  it('overflow open frame is ignored when open-prompts map is at cap — existing prompts intact', () => {
+    let state = live()
+    // Add MAX_OPEN_APPROVALS distinct open prompts
+    for (let i = 0; i < MAX_OPEN_APPROVALS; i++) {
+      state = nextStreamState(state, {
+        type: 'approval',
+        data: {runId: 'run-001', requestID: `req-${i}`, permission: 'shell', settled: false},
+      })
+    }
+    const runAtCap = state.runs['run-001']
+    expect(Object.keys(runAtCap?.approvalOpenPrompts ?? {})).toHaveLength(MAX_OPEN_APPROVALS)
+
+    // One more distinct open — must be ignored
+    state = nextStreamState(state, {
+      type: 'approval',
+      data: {runId: 'run-001', requestID: `req-${MAX_OPEN_APPROVALS}`, permission: 'shell', settled: false},
+    })
+    const run = state.runs['run-001']
+    const openPrompts = run?.approvalOpenPrompts ?? {}
+    // Size stays at cap
+    expect(Object.keys(openPrompts)).toHaveLength(MAX_OPEN_APPROVALS)
+    // Overflow requestID not present
+    expect(Object.hasOwn(openPrompts, `req-${MAX_OPEN_APPROVALS}`)).toBe(false)
+    // All original prompts still present
+    expect(Object.hasOwn(openPrompts, 'req-0')).toBe(true)
+    expect(Object.hasOwn(openPrompts, `req-${MAX_OPEN_APPROVALS - 1}`)).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix 3: coverage gaps
+// ---------------------------------------------------------------------------
+
+describe('parseSseFrame — approval frame (settle variant) — extra fields absent', () => {
+  it('settle frame with extra wire fields: parsed data has ONLY {runId, requestID, settled}', () => {
+    const payload = {
+      runId: 'run-001',
+      requestID: 'req-001',
+      settled: true,
+      extraField: 'ignored',
+      anotherExtra: 42,
+    }
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(true)
+    if (result?.success && result.frame.type === 'approval') {
+      const data = result.frame.data
+      const keys = Object.keys(data)
+      expect(keys.sort()).toEqual(['requestID', 'runId', 'settled'].sort())
+      expect('extraField' in data).toBe(false)
+      expect('anotherExtra' in data).toBe(false)
+    } else {
+      expect.fail('expected an approval frame')
+    }
+  })
+})
+
+describe('parseSseFrame — approval frame (open variant) — filepath valid', () => {
+  it('parses an open approval frame with empty string filepath (valid string)', () => {
+    const payload = {
+      runId: 'run-001',
+      requestID: 'req-001',
+      permission: 'fs-write',
+      filepath: '',
+      settled: false,
+    }
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(true)
+    if (result?.success && result.frame.type === 'approval') {
+      if (!result.frame.data.settled) {
+        expect(result.frame.data.filepath).toBe('')
+      }
+    } else {
+      expect.fail('expected an approval frame')
+    }
+  })
+})
+
+describe('parseSseFrame — approval frame (error cases) — no-echo assertions', () => {
+  it('non-string requestID rejection does not echo the bad value', () => {
+    const payload = {runId: 'run-001', requestID: true, permission: 'shell', settled: false}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
+    if (result && !result.success) {
+      expect(result.error).not.toContain('true')
+    }
+  })
+
+  it('non-string filepath rejection does not echo the bad value', () => {
+    const payload = {runId: 'run-001', requestID: 'req-001', permission: 'shell', filepath: [], settled: false}
+    const result = parseSseFrame(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(result?.success).toBe(false)
+    if (result && !result.success) {
+      expect(result.error).not.toContain('[]')
+    }
+  })
+})
+
+describe('nextStreamState — approval reducer null-proto sub-maps', () => {
+  const live = (): StreamState =>
+    nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+
+  it('approvalOpenPrompts has null prototype after dispatching an open approval', () => {
+    let state = live()
+    state = nextStreamState(state, {
+      type: 'approval',
+      data: {runId: 'run-001', requestID: 'req-001', permission: 'shell', settled: false},
+    })
+    const runEntry = state.runs['run-001']
+    expect(runEntry).toBeDefined()
+    expect(Object.getPrototypeOf(runEntry?.approvalOpenPrompts)).toBeNull()
+  })
+
+  it('approvalTombstones has null prototype after dispatching a settle approval', () => {
+    let state = live()
+    state = nextStreamState(state, {
+      type: 'approval',
+      data: {runId: 'run-001', requestID: 'req-001', settled: true},
+    })
+    const runEntry = state.runs['run-001']
+    expect(runEntry).toBeDefined()
+    expect(Object.getPrototypeOf(runEntry?.approvalTombstones)).toBeNull()
+  })
+})
+
+describe('hasOpenApprovals / getOpenApprovals — null/undefined guards', () => {
+  it('hasOpenApprovals(undefined) returns false', () => {
+    expect(hasOpenApprovals(undefined)).toBe(false)
+  })
+
+  it('hasOpenApprovals(null) returns false', () => {
+    expect(hasOpenApprovals(null)).toBe(false)
+  })
+
+  it('getOpenApprovals(undefined) returns []', () => {
+    expect(getOpenApprovals(undefined)).toEqual([])
+  })
+
+  it('getOpenApprovals(null) returns []', () => {
+    expect(getOpenApprovals(null)).toEqual([])
+  })
+})
+
+describe('nextStreamState — approval reducer open frame with filepath', () => {
+  const live = (): StreamState =>
+    nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+
+  it('open frame with filepath stores filepath correctly in the prompt', () => {
+    let state = live()
+    state = nextStreamState(state, {
+      type: 'approval',
+      data: {
+        runId: 'run-001',
+        requestID: 'req-001',
+        permission: 'fs-write',
+        filepath: '/workspace/output.txt',
+        settled: false,
+      },
+    })
+    const run = state.runs['run-001']
+    expect(run).toBeDefined()
+    const prompts = getOpenApprovals(run)
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]?.filepath).toBe('/workspace/output.txt')
+    expect(prompts[0]?.permission).toBe('fs-write')
   })
 })
