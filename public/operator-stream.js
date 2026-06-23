@@ -842,10 +842,14 @@ export function buildApprovalClient() {
    * One CSRF-400 retry reusing the same idempotency key (mirrors launch pattern).
    */
   async function decideRunApproval(runId, requestId, decision, idempotencyKey) {
-    // Get initial CSRF token
+    // Get initial CSRF token. Propagate an HTTP failure (e.g. an expired session
+    // returning 401/403) so the caller can show the reload state instead of an
+    // endless retry; only a true transport failure collapses to 'network'.
     const csrfResult = await refreshCsrf()
     if (!csrfResult.success) {
-      return {success: false, error: {kind: 'network'}}
+      return csrfResult.error.kind === 'http'
+        ? {success: false, error: {kind: 'http', status: csrfResult.error.status}}
+        : {success: false, error: {kind: 'network'}}
     }
     const csrfToken = csrfResult.data.csrfToken
 
@@ -873,7 +877,9 @@ export function buildApprovalClient() {
     if (res.status === 400) {
       const retrycsrfResult = await refreshCsrf()
       if (!retrycsrfResult.success) {
-        return {success: false, error: {kind: 'network'}}
+        return retrycsrfResult.error.kind === 'http'
+          ? {success: false, error: {kind: 'http', status: retrycsrfResult.error.status}}
+          : {success: false, error: {kind: 'network'}}
       }
       try {
         res = await browserFetch(path, makeInit(retrycsrfResult.data.csrfToken))

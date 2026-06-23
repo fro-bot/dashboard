@@ -2871,7 +2871,7 @@ describe('renderApprovalPrompt — DOM-level failure states', () => {
     expect(statusEl?.textContent).not.toMatch(/may not have.*access|approval access/i)
   })
 
-  it('HTTP 400 post-retry → session-failure copy shown, controls cleared (Fix 3)', async () => {
+  it('HTTP 400 post-retry → session-failure copy shown, controls cleared', async () => {
     stubRenderEnv()
     vi.stubGlobal('crypto', {randomUUID: () => 'test-uuid-1234'})
     const prompt: ApprovalFrameDataOpen = {
@@ -2889,6 +2889,29 @@ describe('renderApprovalPrompt — DOM-level failure states', () => {
     const statusEl = findStatusElement(el)
     expect(statusEl?.textContent).toMatch(/session.*expired|reload.*page/i)
     // Controls should be cleared (non-retryable)
+    const buttons = findVisibleButtons(el)
+    expect(buttons).toHaveLength(0)
+  })
+
+  it('HTTP 401 from CSRF-refresh-expiry → session-failure copy shown, controls cleared', async () => {
+    stubRenderEnv()
+    vi.stubGlobal('crypto', {randomUUID: () => 'test-uuid-1234'})
+    const prompt: ApprovalFrameDataOpen = {
+      runId: 'run-001', requestID: 'req-001', permission: 'shell', command: 'echo hi', settled: false,
+    }
+    // A 401/403 on the CSRF refresh that precedes the decision surfaces as http,
+    // so the operator is told to reload rather than looping on "try again".
+    const {client} = makeFakeApprovalClient({
+      decideResult: {success: false, error: {kind: 'http', status: 401}},
+    })
+    const el = renderPromptAsFake(prompt, 'run-001', client)
+
+    const onceBtn = findVisibleButtons(el).find(b => b.textContent === 'Once')
+    onceBtn?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    const statusEl = findStatusElement(el)
+    expect(statusEl?.textContent).toMatch(/session.*expired|reload.*page/i)
     const buttons = findVisibleButtons(el)
     expect(buttons).toHaveLength(0)
   })
@@ -3141,6 +3164,47 @@ describe('buildApprovalClient — decideRunApproval', () => {
     expect(result.success).toBe(false)
     if (!result.success) {
       expect(result.error?.kind).toBe('network')
+    }
+  })
+
+  it('initial CSRF refresh returning 401 → http error (session-expired), not network', async () => {
+    vi.stubGlobal('fetch', async (url: string) => {
+      if (typeof url === 'string' && url.includes('/csrf')) {
+        return {ok: false, status: 401, json: async () => ({})}
+      }
+      return {ok: true, status: 200, json: async () => ({state: 'claimed'})}
+    })
+
+    const client = buildApprovalClient()
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc')
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      // Must surface as http (so the prompt shows the reload state), not a retryable network failure.
+      expect(result.error?.kind).toBe('http')
+      if (result.error?.kind === 'http') {
+        expect(result.error.status).toBe(401)
+      }
+    }
+  })
+
+  it('initial CSRF refresh returning 403 → http error, not network', async () => {
+    vi.stubGlobal('fetch', async (url: string) => {
+      if (typeof url === 'string' && url.includes('/csrf')) {
+        return {ok: false, status: 403, json: async () => ({})}
+      }
+      return {ok: true, status: 200, json: async () => ({state: 'claimed'})}
+    })
+
+    const client = buildApprovalClient()
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc')
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error?.kind).toBe('http')
+      if (result.error?.kind === 'http') {
+        expect(result.error.status).toBe(403)
+      }
     }
   })
 })
