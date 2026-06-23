@@ -79,11 +79,11 @@ function makeFakeOperatorClient(
     listRepos: () => {
       throw new Error('listRepos must not be called during page render')
     },
-    listPendingApprovals: () => {
-      throw new Error('listPendingApprovals must not be called during page render')
+    listRunApprovals: () => {
+      throw new Error('listRunApprovals must not be called during page render')
     },
-    decideApproval: () => {
-      throw new Error('decideApproval must not be called during page render')
+    decideRunApproval: () => {
+      throw new Error('decideRunApproval must not be called during page render')
     },
   }
 }

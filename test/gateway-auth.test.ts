@@ -66,11 +66,11 @@ function makeFakeOperatorClient(
     listRepos: () => {
       throw new Error('listRepos must not be called in auth middleware')
     },
-    listPendingApprovals: () => {
-      throw new Error('listPendingApprovals must not be called in auth middleware')
+    listRunApprovals: () => {
+      throw new Error('listRunApprovals must not be called in auth middleware')
     },
-    decideApproval: () => {
-      throw new Error('decideApproval must not be called in auth middleware')
+    decideRunApproval: () => {
+      throw new Error('decideRunApproval must not be called in auth middleware')
     },
   }
 

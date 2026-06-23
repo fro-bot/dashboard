@@ -5,7 +5,7 @@
  * - Fixture data must NOT contain real prompts, tool args, workspace paths,
  *   internal URLs, tokens, session cookies, or CSRF values.
  */
-import type {ApprovalDecisionRequest, ApprovalDecisionResponse, CsrfDto, LaunchRunRequest, LaunchRunResponse, PendingApprovalsResponse, PendingApprovalSummary, RunSnapshotDto, RunStreamEvent, SessionDto} from './operator-client.ts'
+import type {CsrfDto, LaunchRunRequest, LaunchRunResponse, RunApprovalDecisionResponse, RunApprovalsResponse, RunApprovalSummary, RunSnapshotDto, RunStreamEvent, SessionDto} from './operator-client.ts'
 
 // ---------------------------------------------------------------------------
 // Session fixtures
@@ -144,61 +144,47 @@ export const FIXTURE_RUN_TIMELINE: readonly RunStreamEvent[] = [
 ]
 
 // ---------------------------------------------------------------------------
-// Pending approval fixtures — one per ApprovalDecisionState
+// Run approval fixtures — 1.4.0 per-run routes
 // ---------------------------------------------------------------------------
 
-export const FIXTURE_PENDING_APPROVAL: PendingApprovalSummary = {
-  requestId: 'req-fixture-pending-001',
-  runId: 'run-fixture-approval-003',
-  safeSummary: 'Fixture approval request — safe summary',
-  approvalScope: 'fixture-scope',
-  createdAt: '2026-06-17T10:04:00Z',
+export const FIXTURE_RUN_APPROVAL: RunApprovalSummary = {
+  requestID: 'req-fixture-pending-001',
+  permission: 'tool_use',
+  command: 'bash',
 }
 
-export const FIXTURE_PENDING_APPROVALS: PendingApprovalsResponse = {
-  approvals: [FIXTURE_PENDING_APPROVAL],
+export const FIXTURE_RUN_APPROVALS: RunApprovalsResponse = {
+  approvals: [FIXTURE_RUN_APPROVAL],
 }
 
 // ---------------------------------------------------------------------------
-// Approval decision response fixtures — one per ApprovalDecisionState
+// Approval decision response fixtures — one per OperatorDecisionState
 // ---------------------------------------------------------------------------
 
-export const FIXTURE_DECISION_PENDING: ApprovalDecisionResponse = {
+export const FIXTURE_DECISION_PENDING: RunApprovalDecisionResponse = {
   state: 'pending',
-  requestId: 'req-fixture-pending-001',
-  timestamp: '2026-06-17T10:04:00Z',
 }
 
-export const FIXTURE_DECISION_CLAIMED: ApprovalDecisionResponse = {
+export const FIXTURE_DECISION_CLAIMED: RunApprovalDecisionResponse = {
   state: 'claimed',
-  requestId: 'req-fixture-pending-001',
-  timestamp: '2026-06-17T10:04:30Z',
 }
 
-export const FIXTURE_DECISION_ALREADY_CLAIMED: ApprovalDecisionResponse = {
+export const FIXTURE_DECISION_ALREADY_CLAIMED: RunApprovalDecisionResponse = {
   // already_claimed: a second decision arrived while the first POST was still in-flight.
   // The entry has NOT settled yet — this is NOT 'already_settled'.
   state: 'already_claimed',
-  requestId: 'req-fixture-pending-001',
-  timestamp: '2026-06-17T10:05:00Z',
 }
 
-export const FIXTURE_DECISION_SCOPE_MISMATCH: ApprovalDecisionResponse = {
+export const FIXTURE_DECISION_SCOPE_MISMATCH: RunApprovalDecisionResponse = {
   state: 'scope_mismatch',
-  requestId: 'req-fixture-scope-005',
-  timestamp: '2026-06-17T10:05:30Z',
 }
 
-export const FIXTURE_DECISION_FAILED_TO_SETTLE: ApprovalDecisionResponse = {
+export const FIXTURE_DECISION_FAILED_TO_SETTLE: RunApprovalDecisionResponse = {
   state: 'failed_to_settle',
-  requestId: 'req-fixture-failed-003',
-  timestamp: '2026-06-17T10:07:00Z',
 }
 
-export const FIXTURE_DECISION_UNAVAILABLE: ApprovalDecisionResponse = {
+export const FIXTURE_DECISION_UNAVAILABLE: RunApprovalDecisionResponse = {
   state: 'unavailable',
-  requestId: 'req-fixture-unavailable-004',
-  timestamp: '2026-06-17T10:08:00Z',
 }
 
 // ---------------------------------------------------------------------------
@@ -216,12 +202,4 @@ export const FIXTURE_LAUNCH_REQUEST: LaunchRunRequest = {
 
 export const FIXTURE_LAUNCH_RESPONSE: LaunchRunResponse = {
   runId: 'run-fixture-queued-001',
-}
-
-export const FIXTURE_APPROVAL_DECISION_REQUEST: ApprovalDecisionRequest = {
-  requestId: 'req-fixture-pending-001',
-  decision: 'approve',
-  approvalScope: 'fixture-scope',
-  idempotencyKey: 'fixture-idempotency-key-002',
-  csrfToken: 'fixture-csrf-placeholder',
 }

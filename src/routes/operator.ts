@@ -23,7 +23,7 @@ import {Hono} from 'hono'
 import {html} from 'hono/html'
 
 import {approvalStateLabel, runStatusLabel, streamEventLabel} from '../gateway/operator-copy.ts'
-import {ALL_FIXTURE_RUNS, FIXTURE_DECISION_ALREADY_CLAIMED, FIXTURE_DECISION_CLAIMED, FIXTURE_DECISION_FAILED_TO_SETTLE, FIXTURE_DECISION_PENDING, FIXTURE_DECISION_SCOPE_MISMATCH, FIXTURE_DECISION_UNAVAILABLE, FIXTURE_PENDING_APPROVAL, FIXTURE_RUN_TIMELINE} from '../gateway/operator-fixtures.ts'
+import {ALL_FIXTURE_RUNS, FIXTURE_DECISION_ALREADY_CLAIMED, FIXTURE_DECISION_CLAIMED, FIXTURE_DECISION_FAILED_TO_SETTLE, FIXTURE_DECISION_PENDING, FIXTURE_DECISION_SCOPE_MISMATCH, FIXTURE_DECISION_UNAVAILABLE, FIXTURE_RUN_APPROVAL, FIXTURE_RUN_TIMELINE} from '../gateway/operator-fixtures.ts'
 
 // ---------------------------------------------------------------------------
 // Status pill helper
@@ -200,26 +200,22 @@ function eventTimelineSection(): ReturnType<typeof html> {
 }
 
 function pendingApprovalSection(): ReturnType<typeof html> {
-  const approval = FIXTURE_PENDING_APPROVAL
+  const approval = FIXTURE_RUN_APPROVAL
   return html`
     <section class="section" aria-labelledby="approvals-heading">
       <h2 id="approvals-heading">Pending Approvals <span class="badge-mock">Mock skeleton — fixture data</span></h2>
       <div class="notice" style="margin-bottom:16px;">
         Approval controls are unavailable. This panel shows fixture data.
-        Live approval actions will be available once Gateway approvals are ready
-        and CSRF is present.
+        Live approval actions will be available once the operator UI is enabled.
       </div>
 
       <div class="approval-card" tabindex="0" aria-labelledby="approval-pending-heading">
         <h3 id="approval-pending-heading">Approval Request (Pending)</h3>
         <p style="font-size:0.875rem;margin-bottom:8px;">
-          <strong>Request ID:</strong> <span class="mono">${approval.requestId}</span>
-        </p>
-        <p style="font-size:0.875rem;margin-bottom:8px;">
-          <strong>Run:</strong> <span class="mono">${approval.runId}</span>
+          <strong>Request ID:</strong> <span class="mono">${approval.requestID}</span>
         </p>
         <p style="font-size:0.875rem;margin-bottom:12px;">
-          <strong>Summary:</strong> ${approval.safeSummary}
+          <strong>Permission:</strong> ${approval.permission}
         </p>
         <div style="display:flex;gap:10px;align-items:center;">
           <button
@@ -229,7 +225,7 @@ function pendingApprovalSection(): ReturnType<typeof html> {
             aria-disabled="true"
             aria-describedby="approval-disabled-reason"
           >
-            Approve
+            Once
           </button>
           <button
             type="button"
@@ -242,8 +238,7 @@ function pendingApprovalSection(): ReturnType<typeof html> {
           </button>
         </div>
         <p id="approval-disabled-reason" style="font-size:0.8rem;color:#9ca3af;margin-top:8px;">
-          Approval actions are disabled: the Gateway approval route is not yet
-          available and CSRF is not present.
+          Approval actions are disabled: the operator UI is not yet enabled.
         </p>
       </div>
 
@@ -266,19 +261,13 @@ function pendingApprovalSection(): ReturnType<typeof html> {
 
 function terminalApprovalCard(decision: {
   state: ApprovalDecisionState
-  requestId: string
-  timestamp: string
 }): ReturnType<typeof html> {
   // approvalStateLabel maps all states to safe copy — failed_to_settle never shown raw
   const label = approvalStateLabel(decision.state)
   return html`
-    <div class="approval-terminal" tabindex="0" aria-label="Approval ${decision.requestId}: ${label}">
+    <div class="approval-terminal" tabindex="0" aria-label="Approval state: ${label}">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
         <strong style="font-size:0.875rem;">${label}</strong>
-      </div>
-      <div style="font-size:0.8rem;">
-        <span>Request: <span class="mono">${decision.requestId}</span></span>
-        · <span>At: ${decision.timestamp}</span>
       </div>
     </div>
   `
