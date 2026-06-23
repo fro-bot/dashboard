@@ -8,7 +8,7 @@
  * (an upstream-only coordination type with internal fields). The PUBLIC frozen types
  * (OperatorWebStatus, OperatorRunStatus, RunPhase, Surface) are present and correct.
  *
- * Security (R5): OperatorRunStatus carries only operator-safe fields. The internal
+ * Security: OperatorRunStatus carries only operator-safe fields. The internal
  * coordination fields holder_id, thread_id, and details are excluded by construction.
  *
  * Note: toOperatorRunStatus is omitted in this vendored copy — it requires RunState

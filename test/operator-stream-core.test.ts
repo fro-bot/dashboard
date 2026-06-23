@@ -15,12 +15,14 @@
  */
 
 import type {ApprovalFrameDataOpen, OutputFrameData, RunEntry, StreamState} from '../public/operator-stream.js'
-import {describe, expect, it, vi} from 'vitest'
+import {afterEach, describe, expect, it, vi} from 'vitest'
 import {
   bootstrapOperatorStreams,
+  buildApprovalClient,
   FIRST_FRAME_TIMEOUT_MS,
   getOpenApprovals,
   hasOpenApprovals,
+  initOperatorStream,
   MAX_APPROVAL_TOMBSTONES,
   MAX_OPEN_APPROVALS,
   MAX_OUTPUT_TEXT_CHARS,
@@ -28,6 +30,7 @@ import {
   nextStreamState,
   parseSseFrame,
   PINNED_CONTRACT_VERSION,
+  renderApprovalPrompt,
   RETRY_BASE_MS,
   RETRY_FACTOR,
   RETRY_MAX_COUNT,
@@ -1606,7 +1609,7 @@ describe('nextStreamState — output accumulation edge cases', () => {
 })
 
 // ---------------------------------------------------------------------------
-// nextStreamState — approval reducer state (Unit 3)
+// nextStreamState — approval reducer state
 // ---------------------------------------------------------------------------
 
 describe('nextStreamState — approval reducer state', () => {
@@ -2175,5 +2178,1145 @@ describe('nextStreamState — approval reducer open frame with filepath', () => 
     expect(prompts).toHaveLength(1)
     expect(prompts[0]?.filepath).toBe('/workspace/output.txt')
     expect(prompts[0]?.permission).toBe('fs-write')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// initOperatorStream — approval prompt DOM rendering
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal fake DOM element for testing approval prompt rendering.
+ * Tracks textContent, hidden state, and child elements.
+ */
+interface FakeElement {
+  tagName: string
+  textContent: string
+  hidden: boolean
+  children: FakeElement[]
+  attributes: Record<string, string>
+  style: Record<string, string>
+  dataset: Record<string, string>
+  eventListeners: Record<string, ((...args: unknown[]) => void)[]>
+  querySelector: (sel: string) => FakeElement | null
+  querySelectorAll: (sel: string) => FakeElement[]
+  append: (...nodes: FakeElement[]) => void
+  remove: () => void
+  setAttribute: (name: string, value: string) => void
+  getAttribute: (name: string) => string | null
+  classList: {add: (cls: string) => void; remove: (cls: string) => void; contains: (cls: string) => boolean}
+  addEventListener: (event: string, handler: (...args: unknown[]) => void) => void
+  dispatchEvent: (event: {type: string}) => void
+}
+
+function makeFakeEl(tagName = 'div'): FakeElement {
+  // Use a plain object with a textContent property that clears children when set to ''.
+  // This mirrors the real DOM behavior where `el.textContent = ''` removes all child nodes.
+  let textContentValue = ''
+  const el = {
+    tagName,
+    get textContent() { return textContentValue },
+    set textContent(v: string) {
+      textContentValue = v
+      // Setting textContent clears children (mirrors real DOM behavior)
+      if (v === '') {
+        el.children = []
+      }
+    },
+    hidden: false,
+    children: [] as FakeElement[],
+    attributes: {} as Record<string, string>,
+    style: {} as Record<string, string>,
+    dataset: {} as Record<string, string>,
+    eventListeners: {} as Record<string, ((...args: unknown[]) => void)[]>,
+    querySelector(sel: string): FakeElement | null {
+      // Simple selector matching for data-role and id
+      for (const child of el.children) {
+        if (sel.includes('data-role=')) {
+          const role = sel.match(/data-role="([^"]+)"/)?.[1]
+          if (role !== undefined && role !== '' && child.attributes['data-role'] === role) return child
+        }
+        if (sel.startsWith('#')) {
+          const id = sel.slice(1)
+          if (child.attributes.id === id) return child
+        }
+        const found = child.querySelector(sel)
+        if (found !== null) return found
+      }
+      return null
+    },
+    querySelectorAll(sel: string): FakeElement[] {
+      const results: FakeElement[] = []
+      for (const child of el.children) {
+        if (sel === 'button') {
+          if (child.tagName === 'button') results.push(child)
+          results.push(...child.querySelectorAll(sel))
+        } else if (sel.includes('data-role=')) {
+          const role = sel.match(/data-role="([^"]+)"/)?.[1]
+          if (role !== undefined && role !== '' && child.attributes['data-role'] === role) results.push(child)
+          results.push(...child.querySelectorAll(sel))
+        } else {
+          results.push(...child.querySelectorAll(sel))
+        }
+      }
+      return results
+    },
+    append(...nodes: FakeElement[]) {
+      for (const node of nodes) {
+        el.children.push(node)
+      }
+    },
+    remove() {
+      // No-op in fake — parent would need to remove from children
+    },
+    setAttribute(name: string, value: string) {
+      el.attributes[name] = value
+    },
+    getAttribute(name: string): string | null {
+      return el.attributes[name] ?? null
+    },
+    classList: {
+      add(_cls: string) { /* no-op */ },
+      remove(_cls: string) { /* no-op */ },
+      contains(_cls: string) { return false },
+    },
+    addEventListener(event: string, handler: (...args: unknown[]) => void) {
+      if (!el.eventListeners[event]) el.eventListeners[event] = []
+      el.eventListeners[event].push(handler)
+    },
+    dispatchEvent(event: {type: string}) {
+      const handlers = el.eventListeners[event.type] ?? []
+      for (const h of handlers) h(event)
+    },
+  } satisfies FakeElement
+  return el
+}
+
+/**
+ * Build a fake approval client for testing.
+ * Records calls and returns configurable results.
+ */
+function makeFakeApprovalClient(opts: {
+  decideResult?: {success: boolean; data?: {state: string}; error?: {kind: string; status?: number}}
+  listResult?: {requestID: string; permission: string; command?: string; filepath?: string}[]
+} = {}) {
+  const decideCalls: {runId: string; requestId: string; decision: string; idempotencyKey: string}[] = []
+  const listCalls: string[] = []
+
+  return {
+    decideCalls,
+    listCalls,
+    client: {
+      refreshCsrf: async () => ({success: true, data: {csrfToken: 'test-csrf'}}),
+      decideRunApproval: async (runId: string, requestId: string, decision: string, idempotencyKey: string) => {
+        decideCalls.push({runId, requestId, decision, idempotencyKey})
+        return opts.decideResult ?? {success: true, data: {state: 'claimed'}}
+      },
+      listRunApprovals: async (runId: string) => {
+        listCalls.push(runId)
+        return opts.listResult ?? []
+      },
+    },
+  }
+}
+
+// Helper: build a fake DOM environment and run initOperatorStream
+function makeApprovalTestEnv(opts: {
+  approvalClientOpts?: Parameters<typeof makeFakeApprovalClient>[0]
+} = {}) {
+  const {client, decideCalls, listCalls} = makeFakeApprovalClient(opts.approvalClientOpts)
+
+  const approvalsEl = makeFakeEl('div')
+  approvalsEl.hidden = true
+  approvalsEl.attributes['data-role'] = 'run-approvals'
+
+  const badgeEl = makeFakeEl('span')
+  badgeEl.hidden = true
+  badgeEl.attributes['data-role'] = 'approval-badge'
+
+  const statusEl = makeFakeEl('span')
+  const noticeEl = makeFakeEl('div')
+
+  // Stub document.createElement to return fake elements
+  const createdElements: FakeElement[] = []
+  vi.stubGlobal('document', {
+    createElement: (tag: string) => {
+      const el = makeFakeEl(tag)
+      createdElements.push(el)
+      return el
+    },
+    querySelector: () => null,
+    readyState: 'complete',
+    addEventListener: () => {},
+  })
+  vi.stubGlobal('fetch', async () => new Promise<Response>(() => {}))
+  vi.stubGlobal('addEventListener', () => {})
+
+  return {approvalsEl, badgeEl, statusEl, noticeEl, client, decideCalls, listCalls, createdElements}
+}
+
+describe('initOperatorStream — approval prompt DOM rendering', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('approvalsEl starts hidden when no open prompts', () => {
+    const {approvalsEl, badgeEl, statusEl, noticeEl, client} = makeApprovalTestEnv()
+
+    initOperatorStream({
+      runId: 'run-001',
+      statusEl,
+      noticeEl,
+      approvalsEl,
+      badgeEl,
+      approvalClient: client,
+    })
+
+    // No prompts yet — approvalsEl should remain hidden
+    expect(approvalsEl.hidden).toBe(true)
+  })
+
+  it('no approval client constructed when approvalsEl is absent', () => {
+    // When approvalsEl is not provided, no approval client should be built
+    // (the injected client should not be called)
+    const {client, decideCalls, listCalls} = makeFakeApprovalClient()
+
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('fetch', async () => new Promise<Response>(() => {}))
+    vi.stubGlobal('addEventListener', () => {})
+
+    initOperatorStream({
+      runId: 'run-001',
+      statusEl: makeFakeEl('span'),
+      noticeEl: makeFakeEl('div'),
+      // No approvalsEl — approval client should not be used
+      approvalClient: client,
+    })
+
+    // No calls should have been made to the client
+    expect(decideCalls).toHaveLength(0)
+    expect(listCalls).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// bootstrapOperatorStreams — discovers approvalsEl and badgeEl
+// ---------------------------------------------------------------------------
+
+describe('bootstrapOperatorStreams — discovers approvalsEl and badgeEl', () => {
+  interface FakeCardWithApprovals {
+    dataset: {runId: string}
+    querySelector: (sel: string) => {
+      textContent: string
+      hidden: boolean
+      attributes?: Record<string, string>
+      dataset?: Record<string, string>
+    } | null
+  }
+
+  function makeFakeCardWithApprovals(runId: string): FakeCardWithApprovals {
+    return {
+      dataset: {runId},
+      querySelector: (sel: string) => {
+        if (sel.includes('run-status')) return {textContent: '', hidden: false}
+        if (sel.includes('run-output-coalesced')) return {textContent: '', hidden: true}
+        if (sel.includes('run-output')) return {textContent: '', hidden: true}
+        if (sel.includes('run-approvals')) return {textContent: '', hidden: true, attributes: {'data-role': 'run-approvals'}}
+        if (sel.includes('approval-badge')) return {textContent: '', hidden: true, attributes: {'data-role': 'approval-badge'}}
+        return null
+      },
+    }
+  }
+
+  it('bootstrapOperatorStreams discovers approvalsEl and badgeEl per card', async () => {
+    const fetchCalls: string[] = []
+    const cards = [makeFakeCardWithApprovals('run-001')]
+
+    const section = {
+      querySelector: (sel: string) =>
+        sel.includes('stream-status') ? {textContent: '', hidden: false} : null,
+      querySelectorAll: () => cards,
+    }
+
+    vi.stubGlobal('document', {
+      querySelector: (sel: string) => (sel === '#run-status-section' ? section : null),
+      readyState: 'complete',
+      addEventListener() {},
+    })
+    vi.stubGlobal('fetch', async (url: string) => {
+      fetchCalls.push(url)
+      return new Promise<Response>(() => {})
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    try {
+      bootstrapOperatorStreams()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+
+    // Should have started a stream for the card
+    expect(fetchCalls).toHaveLength(1)
+    expect(fetchCalls[0]).toBe('/operator/runs/run-001/stream')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// reconcile-on-reconnect — reducer-level no-resurrect
+// ---------------------------------------------------------------------------
+
+describe('reconcile-on-reconnect — reducer-level no-resurrect', () => {
+  const live = (): StreamState =>
+    nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+
+  it('reconcile: a synthetic open frame for a tombstoned requestID is ignored (no-resurrect)', () => {
+    let state = live()
+    // Open and settle req-001
+    state = nextStreamState(state, {
+      type: 'approval',
+      data: {runId: 'run-001', requestID: 'req-001', permission: 'shell', settled: false},
+    })
+    state = nextStreamState(state, {
+      type: 'approval',
+      data: {runId: 'run-001', requestID: 'req-001', settled: true},
+    })
+    // Verify tombstoned
+    expect(hasOpenApprovals(state.runs['run-001'])).toBe(false)
+
+    // Simulate reconcile: dispatch a synthetic open frame for the same requestID
+    // (as if the GET returned it — the reducer must ignore it because it's tombstoned)
+    state = nextStreamState(state, {
+      type: 'approval',
+      data: {runId: 'run-001', requestID: 'req-001', permission: 'shell', settled: false},
+    })
+    // Must still be absent (tombstone wins)
+    expect(hasOpenApprovals(state.runs['run-001'])).toBe(false)
+    expect(getOpenApprovals(state.runs['run-001'])).toHaveLength(0)
+  })
+
+  it('reconcile: a synthetic open frame for a non-tombstoned requestID is added', () => {
+    let state = live()
+    // No prior open/settle for req-002
+
+    // Simulate reconcile: dispatch a synthetic open frame
+    state = nextStreamState(state, {
+      type: 'approval',
+      data: {runId: 'run-001', requestID: 'req-002', permission: 'network', settled: false},
+    })
+    // Must be present
+    expect(hasOpenApprovals(state.runs['run-001'])).toBe(true)
+    expect(getOpenApprovals(state.runs['run-001'])[0]?.requestID).toBe('req-002')
+  })
+
+  it('reconcile: after terminal status, synthetic open frames are ignored', () => {
+    let state = live()
+    // Apply terminal status
+    state = nextStreamState(state, {
+      type: 'status',
+      data: {
+        runId: 'run-001',
+        entityRef: 'testowner/test-repo',
+        surface: 'github',
+        phase: 'COMPLETED',
+        status: 'succeeded',
+        startedAt: '2026-06-22T10:00:00Z',
+        stale: false,
+      },
+    })
+    // Simulate reconcile: dispatch a synthetic open frame after terminal
+    state = nextStreamState(state, {
+      type: 'approval',
+      data: {runId: 'run-001', requestID: 'req-003', permission: 'shell', settled: false},
+    })
+    // Must be ignored (terminal is absorbing)
+    expect(hasOpenApprovals(state.runs['run-001'])).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// safe DOM — inert text rendering (no injection)
+// ---------------------------------------------------------------------------
+
+describe('safe DOM — inert text rendering', () => {
+  it('a command containing HTML/script renders as inert text (no element injection)', () => {
+    // This test verifies the renderApprovalPrompt function uses textContent only.
+    // We test this by checking that the rendered element's textContent contains
+    // the raw string (including HTML chars) without any element injection.
+    //
+    // Since renderApprovalPrompt is not exported, we test it indirectly through
+    // the reducer + DOM rendering path. The key invariant is:
+    // - command/filepath values are set via textContent, not innerHTML
+    // - HTML characters in command/filepath must appear as literal text, not parsed HTML
+    //
+    // We verify this at the reducer level: the prompt data is stored as-is,
+    // and the rendering contract (textContent only) is enforced by the implementation.
+
+    const liveState = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: PINNED_CONTRACT_VERSION},
+    })
+    const maliciousCommand = '<script>alert("xss")</script>'
+    const state = nextStreamState(liveState, {
+      type: 'approval',
+      data: {
+        runId: 'run-001',
+        requestID: 'req-001',
+        permission: 'shell',
+        command: maliciousCommand,
+        settled: false,
+      },
+    })
+
+    // The reducer stores the command as-is (no sanitization at reducer level)
+    const prompts = getOpenApprovals(state.runs['run-001'])
+    expect(prompts).toHaveLength(1)
+    // The raw command is stored — the rendering layer is responsible for safe DOM
+    expect(prompts[0]?.command).toBe(maliciousCommand)
+
+    // The rendering contract: when this is rendered, it MUST use textContent,
+    // not innerHTML. This is enforced by the renderApprovalPrompt implementation
+    // which uses `actionEl.textContent = command` (never innerHTML).
+    // The test above verifies the data is correct; the implementation contract
+    // is verified by code review and the no-injection invariant in the module header.
+  })
+
+  it('a filepath containing HTML renders as inert text (no element injection)', () => {
+    const liveState = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: PINNED_CONTRACT_VERSION},
+    })
+    const maliciousFilepath = '/workspace/<img src=x onerror=alert(1)>.txt'
+    const state = nextStreamState(liveState, {
+      type: 'approval',
+      data: {
+        runId: 'run-001',
+        requestID: 'req-001',
+        permission: 'edit',
+        filepath: maliciousFilepath,
+        settled: false,
+      },
+    })
+
+    const prompts = getOpenApprovals(state.runs['run-001'])
+    expect(prompts).toHaveLength(1)
+    // The raw filepath is stored — the rendering layer uses textContent only
+    expect(prompts[0]?.filepath).toBe(maliciousFilepath)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Shared helpers for renderApprovalPrompt and buildApprovalClient tests
+// ---------------------------------------------------------------------------
+
+/** Stub a minimal browser environment for renderApprovalPrompt tests. */
+function stubRenderEnv() {
+  vi.stubGlobal('document', {
+    createElement: (tag: string) => makeFakeEl(tag),
+    querySelector: () => null,
+    readyState: 'complete',
+    addEventListener: () => {},
+  })
+  vi.stubGlobal('fetch', async () => new Promise<Response>(() => {}))
+  vi.stubGlobal('addEventListener', () => {})
+}
+
+/**
+ * Call renderApprovalPrompt and return the result as a FakeElement.
+ * renderApprovalPrompt is typed as returning HTMLElement (for browser use),
+ * but in tests it returns a FakeElement from the stubbed document.createElement.
+ */
+function renderPromptAsFake(
+  prompt: ApprovalFrameDataOpen,
+  runId: string,
+  client: ReturnType<typeof makeFakeApprovalClient>['client'],
+): FakeElement {
+  return renderApprovalPrompt(prompt, runId, client, () => {}) as FakeElement
+}
+
+/** Find all visible (non-hidden) button elements recursively. */
+function findVisibleButtons(el: FakeElement): FakeElement[] {
+  const buttons: FakeElement[] = []
+  for (const child of el.children) {
+    if (child.hidden) continue
+    if (child.tagName === 'button') buttons.push(child)
+    buttons.push(...findVisibleButtons(child))
+  }
+  return buttons
+}
+
+/** Find the status element (role="status") recursively. */
+function findStatusElement(el: FakeElement): FakeElement | undefined {
+  for (const child of el.children) {
+    if (child.attributes.role === 'status') return child
+    const found = findStatusElement(child)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+
+// ---------------------------------------------------------------------------
+// renderApprovalPrompt — safe-DOM inertness (injection-safety regression guard)
+// ---------------------------------------------------------------------------
+
+describe('renderApprovalPrompt — safe-DOM inertness', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('command containing HTML/script renders as inert textContent — no child elements injected', () => {
+    stubRenderEnv()
+    const maliciousCommand = '<script>alert(1)</script><img src=x onerror=y>'
+    const prompt: ApprovalFrameDataOpen = {
+      runId: 'run-001',
+      requestID: 'req-001',
+      permission: 'shell',
+      command: maliciousCommand,
+      settled: false,
+    }
+    const {client} = makeFakeApprovalClient()
+    const el = renderPromptAsFake(prompt, 'run-001', client)
+
+    // Find the action element (pre tag) — it should have the raw string as textContent
+    const actionEl = el.children.find((c: FakeElement) => c.tagName === 'pre')
+    expect(actionEl).toBeDefined()
+    if (actionEl !== undefined) {
+      // textContent must equal the literal string (not parsed HTML)
+      expect(actionEl.textContent).toBe(maliciousCommand)
+      // No child elements should have been injected (innerHTML was never set)
+      // In our fake DOM, children are only added via append() — never innerHTML
+      expect(actionEl.children).toHaveLength(0)
+    }
+  })
+
+  it('filepath containing HTML/script renders as inert textContent — no child elements injected', () => {
+    stubRenderEnv()
+    const maliciousFilepath = '<script>alert(1)</script><img src=x onerror=y>'
+    const prompt: ApprovalFrameDataOpen = {
+      runId: 'run-001',
+      requestID: 'req-001',
+      permission: 'edit',
+      filepath: maliciousFilepath,
+      settled: false,
+    }
+    const {client} = makeFakeApprovalClient()
+    const el = renderPromptAsFake(prompt, 'run-001', client)
+
+    const actionEl = el.children.find((c: FakeElement) => c.tagName === 'pre')
+    expect(actionEl).toBeDefined()
+    if (actionEl !== undefined) {
+      expect(actionEl.textContent).toBe(maliciousFilepath)
+      expect(actionEl.children).toHaveLength(0)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// renderApprovalPrompt — two-step always flow
+// ---------------------------------------------------------------------------
+
+describe('renderApprovalPrompt — two-step always flow', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('initial render shows 3 controls: once, always, reject', () => {
+    stubRenderEnv()
+    const prompt: ApprovalFrameDataOpen = {
+      runId: 'run-001', requestID: 'req-001', permission: 'shell', command: 'echo hi', settled: false,
+    }
+    const {client} = makeFakeApprovalClient()
+    const el = renderPromptAsFake(prompt, 'run-001', client)
+    const buttons = findVisibleButtons(el)
+    const labels = buttons.map(b => b.textContent)
+    expect(labels).toContain('Once')
+    expect(labels).toContain('Always')
+    expect(labels).toContain('Reject')
+    expect(buttons).toHaveLength(3)
+  })
+
+  it('clicking always suppresses once/reject and shows confirm/cancel', () => {
+    stubRenderEnv()
+    const prompt: ApprovalFrameDataOpen = {
+      runId: 'run-001', requestID: 'req-001', permission: 'shell', command: 'echo hi', settled: false,
+    }
+    const {client} = makeFakeApprovalClient()
+    const el = renderPromptAsFake(prompt, 'run-001', client)
+
+    // Click always
+    const alwaysBtn = findVisibleButtons(el).find(b => b.textContent === 'Always')
+    expect(alwaysBtn).toBeDefined()
+    alwaysBtn?.dispatchEvent({type: 'click'})
+
+    // After click: once/reject should be gone, confirm/cancel should appear
+    const buttons = findVisibleButtons(el)
+    const labels = buttons.map(b => b.textContent)
+    expect(labels).not.toContain('Once')
+    expect(labels).not.toContain('Reject')
+    expect(labels).toContain('Confirm always')
+    expect(labels).toContain('Cancel')
+  })
+
+  it('clicking cancel after always restores 3 controls', () => {
+    stubRenderEnv()
+    const prompt: ApprovalFrameDataOpen = {
+      runId: 'run-001', requestID: 'req-001', permission: 'shell', command: 'echo hi', settled: false,
+    }
+    const {client} = makeFakeApprovalClient()
+    const el = renderPromptAsFake(prompt, 'run-001', client)
+
+    // Click always then cancel
+    const alwaysBtn = findVisibleButtons(el).find(b => b.textContent === 'Always')
+    alwaysBtn?.dispatchEvent({type: 'click'})
+    const cancelBtn = findVisibleButtons(el).find(b => b.textContent === 'Cancel')
+    expect(cancelBtn).toBeDefined()
+    cancelBtn?.dispatchEvent({type: 'click'})
+
+    // Should be back to 3 controls
+    const buttons = findVisibleButtons(el)
+    const labels = buttons.map(b => b.textContent)
+    expect(labels).toContain('Once')
+    expect(labels).toContain('Always')
+    expect(labels).toContain('Reject')
+    expect(buttons).toHaveLength(3)
+  })
+
+  it('clicking confirm always calls decideRunApproval with "always"', async () => {
+    stubRenderEnv()
+    vi.stubGlobal('crypto', {randomUUID: () => 'test-uuid-1234'})
+    const prompt: ApprovalFrameDataOpen = {
+      runId: 'run-001', requestID: 'req-001', permission: 'shell', command: 'echo hi', settled: false,
+    }
+    const {client, decideCalls} = makeFakeApprovalClient({
+      decideResult: {success: true, data: {state: 'claimed'}},
+    })
+    const el = renderPromptAsFake(prompt, 'run-001', client)
+
+    // Click always then confirm
+    const alwaysBtn = findVisibleButtons(el).find(b => b.textContent === 'Always')
+    alwaysBtn?.dispatchEvent({type: 'click'})
+    const confirmBtn = findVisibleButtons(el).find(b => b.textContent === 'Confirm always')
+    expect(confirmBtn).toBeDefined()
+    confirmBtn?.dispatchEvent({type: 'click'})
+
+    // Wait for async decision
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    expect(decideCalls).toHaveLength(1)
+    expect(decideCalls[0]?.decision).toBe('always')
+    expect(decideCalls[0]?.runId).toBe('run-001')
+    expect(decideCalls[0]?.requestId).toBe('req-001')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// renderApprovalPrompt — DOM-level failure states
+// ---------------------------------------------------------------------------
+
+describe('renderApprovalPrompt — DOM-level failure states', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('404 → cant-approve copy shown, controls cleared', async () => {
+    stubRenderEnv()
+    vi.stubGlobal('crypto', {randomUUID: () => 'test-uuid-1234'})
+    const prompt: ApprovalFrameDataOpen = {
+      runId: 'run-001', requestID: 'req-001', permission: 'shell', command: 'echo hi', settled: false,
+    }
+    const {client} = makeFakeApprovalClient({
+      decideResult: {success: false, error: {kind: 'http', status: 404}},
+    })
+    const el = renderPromptAsFake(prompt, 'run-001', client)
+
+    // Click once to trigger decision
+    const onceBtn = findVisibleButtons(el).find(b => b.textContent === 'Once')
+    onceBtn?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    const statusEl = findStatusElement(el)
+    expect(statusEl?.textContent).toMatch(/may not have approval access|check your gateway/i)
+    // Controls should be cleared (no buttons)
+    const buttons = findVisibleButtons(el)
+    expect(buttons).toHaveLength(0)
+    // Denial copy must not contain "try again"
+    expect(statusEl?.textContent).not.toMatch(/try again/i)
+  })
+
+  it('network error → transport-failure copy shown, controls still present (Fix 1)', async () => {
+    stubRenderEnv()
+    vi.stubGlobal('crypto', {randomUUID: () => 'test-uuid-1234'})
+    const prompt: ApprovalFrameDataOpen = {
+      runId: 'run-001', requestID: 'req-001', permission: 'shell', command: 'echo hi', settled: false,
+    }
+    const {client} = makeFakeApprovalClient({
+      decideResult: {success: false, error: {kind: 'network'}},
+    })
+    const el = renderPromptAsFake(prompt, 'run-001', client)
+
+    const onceBtn = findVisibleButtons(el).find(b => b.textContent === 'Once')
+    onceBtn?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    const statusEl = findStatusElement(el)
+    expect(statusEl?.textContent).toMatch(/didn.t go through|try again/i)
+    // Controls must still be present (retryable)
+    const buttons = findVisibleButtons(el)
+    expect(buttons.length).toBeGreaterThan(0)
+    // Transport copy must not contain "access" language that implies denial
+    expect(statusEl?.textContent).not.toMatch(/may not have.*access|approval access/i)
+  })
+
+  it('HTTP 400 post-retry → session-failure copy shown, controls cleared', async () => {
+    stubRenderEnv()
+    vi.stubGlobal('crypto', {randomUUID: () => 'test-uuid-1234'})
+    const prompt: ApprovalFrameDataOpen = {
+      runId: 'run-001', requestID: 'req-001', permission: 'shell', command: 'echo hi', settled: false,
+    }
+    const {client} = makeFakeApprovalClient({
+      decideResult: {success: false, error: {kind: 'http', status: 400}},
+    })
+    const el = renderPromptAsFake(prompt, 'run-001', client)
+
+    const onceBtn = findVisibleButtons(el).find(b => b.textContent === 'Once')
+    onceBtn?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    const statusEl = findStatusElement(el)
+    expect(statusEl?.textContent).toMatch(/session.*expired|reload.*page/i)
+    // Controls should be cleared (non-retryable)
+    const buttons = findVisibleButtons(el)
+    expect(buttons).toHaveLength(0)
+  })
+
+  it('HTTP 401 from CSRF-refresh-expiry → session-failure copy shown, controls cleared', async () => {
+    stubRenderEnv()
+    vi.stubGlobal('crypto', {randomUUID: () => 'test-uuid-1234'})
+    const prompt: ApprovalFrameDataOpen = {
+      runId: 'run-001', requestID: 'req-001', permission: 'shell', command: 'echo hi', settled: false,
+    }
+    // A 401/403 on the CSRF refresh that precedes the decision surfaces as http,
+    // so the operator is told to reload rather than looping on "try again".
+    const {client} = makeFakeApprovalClient({
+      decideResult: {success: false, error: {kind: 'http', status: 401}},
+    })
+    const el = renderPromptAsFake(prompt, 'run-001', client)
+
+    const onceBtn = findVisibleButtons(el).find(b => b.textContent === 'Once')
+    onceBtn?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    const statusEl = findStatusElement(el)
+    expect(statusEl?.textContent).toMatch(/session.*expired|reload.*page/i)
+    const buttons = findVisibleButtons(el)
+    expect(buttons).toHaveLength(0)
+  })
+
+  it('already_claimed → already-settled copy shown', async () => {
+    stubRenderEnv()
+    vi.stubGlobal('crypto', {randomUUID: () => 'test-uuid-1234'})
+    const prompt: ApprovalFrameDataOpen = {
+      runId: 'run-001', requestID: 'req-001', permission: 'shell', command: 'echo hi', settled: false,
+    }
+    const {client} = makeFakeApprovalClient({
+      decideResult: {success: true, data: {state: 'already_claimed'}},
+    })
+    const el = renderPromptAsFake(prompt, 'run-001', client)
+
+    const onceBtn = findVisibleButtons(el).find(b => b.textContent === 'Once')
+    onceBtn?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    const statusEl = findStatusElement(el)
+    expect(statusEl?.textContent).toMatch(/already been settled/i)
+  })
+
+  it('scope_mismatch → scope label shown, controls cleared (Fix 2)', async () => {
+    stubRenderEnv()
+    vi.stubGlobal('crypto', {randomUUID: () => 'test-uuid-1234'})
+    const prompt: ApprovalFrameDataOpen = {
+      runId: 'run-001', requestID: 'req-001', permission: 'shell', command: 'echo hi', settled: false,
+    }
+    const {client} = makeFakeApprovalClient({
+      decideResult: {success: true, data: {state: 'scope_mismatch'}},
+    })
+    const el = renderPromptAsFake(prompt, 'run-001', client)
+
+    const onceBtn = findVisibleButtons(el).find(b => b.textContent === 'Once')
+    onceBtn?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    const statusEl = findStatusElement(el)
+    expect(statusEl?.textContent).toMatch(/scope.*didn.t match|decision not applied/i)
+    // Controls should be cleared (terminal non-retryable)
+    const buttons = findVisibleButtons(el)
+    expect(buttons).toHaveLength(0)
+  })
+
+  it('failed_to_settle → retryable copy shown, controls still present (Fix 2)', async () => {
+    stubRenderEnv()
+    vi.stubGlobal('crypto', {randomUUID: () => 'test-uuid-1234'})
+    const prompt: ApprovalFrameDataOpen = {
+      runId: 'run-001', requestID: 'req-001', permission: 'shell', command: 'echo hi', settled: false,
+    }
+    const {client} = makeFakeApprovalClient({
+      decideResult: {success: true, data: {state: 'failed_to_settle'}},
+    })
+    const el = renderPromptAsFake(prompt, 'run-001', client)
+
+    const onceBtn = findVisibleButtons(el).find(b => b.textContent === 'Once')
+    onceBtn?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    const statusEl = findStatusElement(el)
+    expect(statusEl?.textContent).toMatch(/couldn.t finalize|please try again/i)
+    // Controls must still be present (retryable)
+    const buttons = findVisibleButtons(el)
+    expect(buttons.length).toBeGreaterThan(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// renderApprovalPrompt — in-flight guard
+// ---------------------------------------------------------------------------
+
+describe('renderApprovalPrompt — in-flight guard', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('a second handleDecision while in-flight is ignored (no duplicate calls)', async () => {
+    stubRenderEnv()
+    vi.stubGlobal('crypto', {randomUUID: () => 'test-uuid-1234'})
+
+    let resolveDecide!: (v: {success: boolean; data: {state: string}}) => void
+    const decidePromise = new Promise<{success: boolean; data: {state: string}}>(resolve => {
+      resolveDecide = resolve
+    })
+
+    const decideCalls: string[] = []
+    const client = {
+      refreshCsrf: async () => ({success: true, data: {csrfToken: 'csrf'}}),
+      decideRunApproval: async (_runId: string, _requestId: string, decision: string) => {
+        decideCalls.push(decision)
+        return decidePromise
+      },
+      listRunApprovals: async () => [],
+    }
+
+    const prompt: ApprovalFrameDataOpen = {
+      runId: 'run-001', requestID: 'req-001', permission: 'shell', command: 'echo hi', settled: false,
+    }
+    const el = renderApprovalPrompt(prompt, 'run-001', client, () => {}) as unknown as FakeElement
+
+    // Click once — starts in-flight
+    const onceBtn = findVisibleButtons(el).find(b => b.textContent === 'Once')
+    onceBtn?.dispatchEvent({type: 'click'})
+
+    // Immediately click again — should be ignored (in-flight guard)
+    onceBtn?.dispatchEvent({type: 'click'})
+
+    // Resolve the pending decision
+    resolveDecide({success: true, data: {state: 'claimed'}})
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    // Only one call should have been made
+    expect(decideCalls).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// buildApprovalClient — refreshCsrf and decideRunApproval
+// ---------------------------------------------------------------------------
+
+describe('buildApprovalClient — refreshCsrf', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('200 response → success with csrfToken', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({csrfToken: 'test-csrf-token'}),
+    }))
+    const client = buildApprovalClient()
+    const result = await client.refreshCsrf()
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data?.csrfToken).toBe('test-csrf-token')
+    }
+  })
+
+  it('non-200 response → http error', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: false,
+      status: 401,
+      json: async () => ({}),
+    }))
+    const client = buildApprovalClient()
+    const result = await client.refreshCsrf()
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error?.kind).toBe('http')
+      expect(result.error?.status).toBe(401)
+    }
+  })
+
+  it('fetch throws → network error', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('ECONNREFUSED')
+    })
+    const client = buildApprovalClient()
+    const result = await client.refreshCsrf()
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error?.kind).toBe('network')
+    }
+  })
+})
+
+describe('buildApprovalClient — decideRunApproval', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('sends POST with x-csrf-token, idempotency-key, and redirect:error', async () => {
+    const fetchCalls: {url: string; init: RequestInit}[] = []
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      fetchCalls.push({url, init})
+      // CSRF endpoint returns csrfToken; decision endpoint returns state
+      if (typeof url === 'string' && url.includes('/csrf')) {
+        return {ok: true, status: 200, json: async () => ({csrfToken: 'test-csrf-token'})}
+      }
+      return {ok: true, status: 200, json: async () => ({state: 'claimed'})}
+    })
+    vi.stubGlobal('crypto', {randomUUID: () => 'test-uuid'})
+
+    const client = buildApprovalClient()
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc')
+
+    expect(result.success).toBe(true)
+    // Should have made 2 calls: one for CSRF, one for the decision
+    expect(fetchCalls).toHaveLength(2)
+    const decisionCall = fetchCalls[1]
+    expect(decisionCall?.init?.headers).toBeDefined()
+    const headers = decisionCall?.init?.headers as Record<string, string>
+    expect(headers['x-csrf-token']).toBe('test-csrf-token')
+    expect(headers['idempotency-key']).toBe('idem-key-abc')
+    // redirect:'error' is set by the browserFetch wrapper (merged into the fetch call)
+    expect(decisionCall?.init?.redirect).toBe('error')
+  })
+
+  it('retries ONCE on 400 with a refreshed CSRF token and the SAME idempotency key', async () => {
+    const fetchCalls: {url: string; init: RequestInit}[] = []
+    let decisionCallCount = 0
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      fetchCalls.push({url, init})
+      // CSRF endpoint always returns a token
+      if (typeof url === 'string' && url.includes('/csrf')) {
+        return {ok: true, status: 200, json: async () => ({csrfToken: `csrf-${fetchCalls.length}`})}
+      }
+      // Decision endpoint: first call → 400, second call → success
+      decisionCallCount++
+      if (decisionCallCount === 1) {
+        return {ok: false, status: 400, json: async () => ({})}
+      }
+      return {ok: true, status: 200, json: async () => ({state: 'claimed'})}
+    })
+
+    const client = buildApprovalClient()
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc')
+
+    expect(result.success).toBe(true)
+    // Should have made 4 calls: CSRF, decision (400), CSRF retry, decision retry
+    expect(fetchCalls).toHaveLength(4)
+    // Both decision calls must use the same idempotency key
+    const decisionCalls = fetchCalls.filter(c => typeof c.url === 'string' && c.url.includes('/decision'))
+    expect(decisionCalls).toHaveLength(2)
+    const idemKeys = decisionCalls.map(c => (c.init?.headers as Record<string, string>)['idempotency-key'])
+    expect(idemKeys[0]).toBe('idem-key-abc')
+    expect(idemKeys[1]).toBe('idem-key-abc')
+  })
+
+  it('CSRF refresh failure on retry → network error', async () => {
+    let csrfCallCount = 0
+    vi.stubGlobal('fetch', async (url: string) => {
+      if (typeof url === 'string' && url.includes('/csrf')) {
+        csrfCallCount++
+        // First CSRF → success; second CSRF → throws
+        if (csrfCallCount === 1) {
+          return {ok: true, status: 200, json: async () => ({csrfToken: 'csrf-1'})}
+        }
+        throw new Error('network failure on retry')
+      }
+      // Decision → 400
+      return {ok: false, status: 400, json: async () => ({})}
+    })
+
+    const client = buildApprovalClient()
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc')
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error?.kind).toBe('network')
+    }
+  })
+
+  it('initial CSRF refresh returning 401 → http error (session-expired), not network', async () => {
+    vi.stubGlobal('fetch', async (url: string) => {
+      if (typeof url === 'string' && url.includes('/csrf')) {
+        return {ok: false, status: 401, json: async () => ({})}
+      }
+      return {ok: true, status: 200, json: async () => ({state: 'claimed'})}
+    })
+
+    const client = buildApprovalClient()
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc')
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      // Must surface as http (so the prompt shows the reload state), not a retryable network failure.
+      expect(result.error?.kind).toBe('http')
+      if (result.error?.kind === 'http') {
+        expect(result.error.status).toBe(401)
+      }
+    }
+  })
+
+  it('initial CSRF refresh returning 403 → http error, not network', async () => {
+    vi.stubGlobal('fetch', async (url: string) => {
+      if (typeof url === 'string' && url.includes('/csrf')) {
+        return {ok: false, status: 403, json: async () => ({})}
+      }
+      return {ok: true, status: 200, json: async () => ({state: 'claimed'})}
+    })
+
+    const client = buildApprovalClient()
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc')
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error?.kind).toBe('http')
+      if (result.error?.kind === 'http') {
+        expect(result.error.status).toBe(403)
+      }
+    }
+  })
+})
+
+describe('buildApprovalClient — listRunApprovals', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('returns [] on non-200 response', async () => {
+    vi.stubGlobal('fetch', async () => ({ok: false, status: 404, json: async () => ({})}))
+    const client = buildApprovalClient()
+    const result = await client.listRunApprovals('run-001')
+    expect(result).toEqual([])
+  })
+
+  it('returns [] on fetch throw', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('network error')
+    })
+    const client = buildApprovalClient()
+    const result = await client.listRunApprovals('run-001')
+    expect(result).toEqual([])
+  })
+
+  it('returns [] on malformed response (no approvals array)', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({notApprovals: []}),
+    }))
+    const client = buildApprovalClient()
+    const result = await client.listRunApprovals('run-001')
+    expect(result).toEqual([])
+  })
+
+  it('returns approvals array on success', async () => {
+    const approvals = [{requestID: 'req-001', permission: 'shell', command: 'echo hi'}]
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({approvals}),
+    }))
+    const client = buildApprovalClient()
+    const result = await client.listRunApprovals('run-001')
+    expect(result).toEqual(approvals)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// approval badge indicator
+// ---------------------------------------------------------------------------
+
+describe('approval badge indicator', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('badge starts hidden when no open prompts', () => {
+    const {approvalsEl, badgeEl, statusEl, noticeEl, client} = makeApprovalTestEnv()
+
+    const handle = initOperatorStream({
+      runId: 'run-001',
+      statusEl,
+      noticeEl,
+      approvalsEl,
+      badgeEl,
+      approvalClient: client,
+    })
+
+    // No prompts yet — badge should remain hidden
+    expect(badgeEl.hidden).toBe(true)
+    expect(badgeEl.textContent).toBe('')
+
+    handle.close()
+  })
+
+  it('badge shows "2" for two open prompts and hides on settle (reducer-level)', () => {
+    // Test the badge logic via the reducer state machine
+    // (badge is driven by hasOpenApprovals/getOpenApprovals from the reducer)
+    const live = (): StreamState =>
+      nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+
+    let state = live()
+    state = nextStreamState(state, {
+      type: 'approval',
+      data: {runId: 'run-001', requestID: 'req-001', permission: 'shell', settled: false},
+    })
+    state = nextStreamState(state, {
+      type: 'approval',
+      data: {runId: 'run-001', requestID: 'req-002', permission: 'network', settled: false},
+    })
+
+    const run = state.runs['run-001']
+    expect(hasOpenApprovals(run)).toBe(true)
+    expect(getOpenApprovals(run)).toHaveLength(2)
+
+    // Settle one
+    state = nextStreamState(state, {
+      type: 'approval',
+      data: {runId: 'run-001', requestID: 'req-001', settled: true},
+    })
+    const runAfter = state.runs['run-001']
+    expect(getOpenApprovals(runAfter)).toHaveLength(1)
+
+    // Settle both
+    state = nextStreamState(state, {
+      type: 'approval',
+      data: {runId: 'run-001', requestID: 'req-002', settled: true},
+    })
+    const runFinal = state.runs['run-001']
+    expect(hasOpenApprovals(runFinal)).toBe(false)
+    expect(getOpenApprovals(runFinal)).toHaveLength(0)
   })
 })

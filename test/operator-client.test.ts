@@ -13,7 +13,6 @@
  */
 
 import type {
-  ApprovalDecisionRequest,
   LaunchRunRequest,
   OperatorClientOptions,
   RunStreamEvent,
@@ -600,33 +599,32 @@ describe('connectRunStream', () => {
 })
 
 // ---------------------------------------------------------------------------
-// listPendingApprovals
+// listRunApprovals — 1.4.0 per-run GET
 // ---------------------------------------------------------------------------
 
-describe('listPendingApprovals', () => {
-  it('returns pending approvals list on success', async () => {
+describe('listRunApprovals', () => {
+  it('returns open approvals list on success', async () => {
     const approvals = [
       {
-        requestId: 'req-1',
-        runId: 'run-001',
-        safeSummary: 'run a script',
-        approvalScope: 'tool_use',
-        createdAt: '2026-06-18T20:00:00Z',
+        requestID: 'req-001',
+        permission: 'tool_use',
+        command: 'bash',
       },
     ]
     const client = createOperatorClient({
       fetch: makeOkFetch({approvals}),
       createEventStream: makeEventStream([]),
     })
-    const result = await client.listPendingApprovals()
+    const result = await client.listRunApprovals('run-001')
     expect(result.success).toBe(true)
     if (result.success) {
       expect(result.data.approvals).toHaveLength(1)
-      expect(result.data.approvals[0]?.requestId).toBe('req-1')
+      expect(result.data.approvals[0]?.requestID).toBe('req-001')
+      expect(result.data.approvals[0]?.permission).toBe('tool_use')
     }
   })
 
-  it('uses relative path /operator/approvals', async () => {
+  it('uses relative path /operator/runs/:runId/approvals', async () => {
     const calls: string[] = []
     const client = createOperatorClient({
       fetch: async (input, _init) => {
@@ -638,69 +636,230 @@ describe('listPendingApprovals', () => {
       },
       createEventStream: makeEventStream([]),
     })
-    await client.listPendingApprovals()
-    expect(calls[0]).toBe('/operator/approvals')
+    await client.listRunApprovals('run-001')
+    expect(calls[0]).toBe('/operator/runs/run-001/approvals')
   })
 
-  it('filters by runId when provided', async () => {
-    const calls: string[] = []
+  it('returns empty approvals array when no open prompts', async () => {
     const client = createOperatorClient({
-      fetch: async (input, _init) => {
-        calls.push(typeof input === 'string' ? input : String(input))
-        return new Response(JSON.stringify({approvals: []}), {
-          status: 200,
-          headers: {'content-type': 'application/json'},
-        })
+      fetch: makeOkFetch({approvals: []}),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.listRunApprovals('run-001')
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.approvals).toHaveLength(0)
+    }
+  })
+
+  it('returns approval with optional filepath field', async () => {
+    const approvals = [{requestID: 'req-001', permission: 'file_write', filepath: '/tmp/out.txt'}]
+    const client = createOperatorClient({
+      fetch: makeOkFetch({approvals}),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.listRunApprovals('run-001')
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.approvals[0]?.filepath).toBe('/tmp/out.txt')
+    }
+  })
+
+  it('returns approval with neither command nor filepath (bare permission)', async () => {
+    const approvals = [{requestID: 'req-001', permission: 'network_access'}]
+    const client = createOperatorClient({
+      fetch: makeOkFetch({approvals}),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.listRunApprovals('run-001')
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.approvals[0]?.command).toBeUndefined()
+      expect(result.data.approvals[0]?.filepath).toBeUndefined()
+    }
+  })
+
+  it('rejects blank runId before fetch', async () => {
+    let fetchCalled = false
+    const client = createOperatorClient({
+      fetch: async () => {
+        fetchCalled = true
+        return new Response(JSON.stringify({approvals: []}), {status: 200, headers: {'content-type': 'application/json'}})
       },
       createEventStream: makeEventStream([]),
     })
-    await client.listPendingApprovals({runId: 'run-001'})
-    expect(calls[0]).toBe('/operator/approvals?runId=run-001')
+    const result = await client.listRunApprovals('')
+    expect(result.success).toBe(false)
+    expect(fetchCalled).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+      if (result.error.kind === 'validation') {
+        expect(result.error.code).toBe('missing_run_id')
+      }
+    }
+  })
+
+  it('returns http error on 404', async () => {
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(404),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.listRunApprovals('run-missing')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('http')
+      if (result.error.kind === 'http') {
+        expect(result.error.status).toBe(404)
+      }
+    }
+  })
+
+  it('returns network error when fetch throws', async () => {
+    const client = createOperatorClient({
+      fetch: async () => { throw new Error('ECONNREFUSED') },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.listRunApprovals('run-001')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('network')
+    }
   })
 })
 
 // ---------------------------------------------------------------------------
-// decideApproval — CSRF + idempotency key guards
+// decideRunApproval — 1.4.0 per-run POST with once/always/reject verbs
 // ---------------------------------------------------------------------------
 
-describe('decideApproval', () => {
-  const validDecision: ApprovalDecisionRequest = {
-    requestId: 'req-1',
-    decision: 'approve',
-    approvalScope: 'tool_use',
-    idempotencyKey: 'idem-decision-abc',
-    csrfToken: 'csrf-token-xyz',
-  }
-
-  it('returns decision result on success', async () => {
-    const decisionResult = {
-      state: 'claimed' as const,
-      requestId: 'req-1',
-      timestamp: '2026-06-18T20:00:00Z',
-    }
+describe('decideRunApproval', () => {
+  it('returns claimed state on success with once verb', async () => {
     const client = createOperatorClient({
-      fetch: makeOkFetch(decisionResult),
+      fetch: makeOkFetch({state: 'claimed'}),
       createEventStream: makeEventStream([]),
     })
-    const result = await client.decideApproval(validDecision)
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-decision-abc', 'csrf-token-xyz')
     expect(result.success).toBe(true)
     if (result.success) {
       expect(result.data.state).toBe('claimed')
     }
   })
 
-  it('rejects before fetch when csrfToken is missing', async () => {
-    let fetchCalled = false
-    const neverFetch: OperatorClientOptions['fetch'] = async () => {
-      fetchCalled = true
-      return new Response('', {status: 200})
-    }
+  it('returns claimed state on success with always verb', async () => {
     const client = createOperatorClient({
-      fetch: neverFetch,
+      fetch: makeOkFetch({state: 'claimed'}),
       createEventStream: makeEventStream([]),
     })
-    const req = {...validDecision, csrfToken: ''}
-    const result = await client.decideApproval(req)
+    const result = await client.decideRunApproval('run-001', 'req-001', 'always', 'idem-decision-abc', 'csrf-token-xyz')
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.state).toBe('claimed')
+    }
+  })
+
+  it('returns claimed state on success with reject verb', async () => {
+    const client = createOperatorClient({
+      fetch: makeOkFetch({state: 'claimed'}),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.decideRunApproval('run-001', 'req-001', 'reject', 'idem-decision-abc', 'csrf-token-xyz')
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.state).toBe('claimed')
+    }
+  })
+
+  it('uses relative path /operator/runs/:runId/approvals/:requestId/decision', async () => {
+    const calls: string[] = []
+    const client = createOperatorClient({
+      fetch: async (input, _init) => {
+        calls.push(typeof input === 'string' ? input : String(input))
+        return new Response(JSON.stringify({state: 'claimed'}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      },
+      createEventStream: makeEventStream([]),
+    })
+    await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc', 'csrf-token-xyz')
+    expect(calls[0]).toBe('/operator/runs/run-001/approvals/req-001/decision')
+  })
+
+  it('sends decision verb in request body', async () => {
+    let capturedBody: unknown
+    const client = createOperatorClient({
+      fetch: async (_input, init) => {
+        capturedBody = JSON.parse(init?.body as string)
+        return new Response(JSON.stringify({state: 'claimed'}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      },
+      createEventStream: makeEventStream([]),
+    })
+    await client.decideRunApproval('run-001', 'req-001', 'always', 'idem-key-abc', 'csrf-token-xyz')
+    expect(capturedBody).toEqual({decision: 'always'})
+  })
+
+  it('sends x-csrf-token header', async () => {
+    const headers: Record<string, string> = {}
+    const client = createOperatorClient({
+      fetch: async (_input, init) => {
+        const h = init?.headers as Record<string, string> | undefined
+        if (h) Object.assign(headers, h)
+        return new Response(JSON.stringify({state: 'claimed'}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      },
+      createEventStream: makeEventStream([]),
+    })
+    await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc', 'csrf-token-xyz')
+    expect(headers['x-csrf-token']).toBe('csrf-token-xyz')
+  })
+
+  it('sends idempotency-key header', async () => {
+    const headers: Record<string, string> = {}
+    const client = createOperatorClient({
+      fetch: async (_input, init) => {
+        const h = init?.headers as Record<string, string> | undefined
+        if (h) Object.assign(headers, h)
+        return new Response(JSON.stringify({state: 'claimed'}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      },
+      createEventStream: makeEventStream([]),
+    })
+    await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc', 'csrf-token-xyz')
+    expect(headers['idempotency-key']).toBe('idem-key-abc')
+  })
+
+  it('passes redirect: error in fetch init', async () => {
+    let capturedInit: RequestInit | undefined
+    const client = createOperatorClient({
+      fetch: async (_input, init) => {
+        capturedInit = init
+        return new Response(JSON.stringify({state: 'claimed'}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      },
+      createEventStream: makeEventStream([]),
+    })
+    await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc', 'csrf-token-xyz')
+    expect(capturedInit?.redirect).toBe('error')
+  })
+
+  it('rejects before fetch when csrfToken is blank', async () => {
+    let fetchCalled = false
+    const client = createOperatorClient({
+      fetch: async () => {
+        fetchCalled = true
+        return new Response('', {status: 200})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc', '')
     expect(result.success).toBe(false)
     expect(fetchCalled).toBe(false)
     if (!result.success) {
@@ -711,18 +870,36 @@ describe('decideApproval', () => {
     }
   })
 
-  it('rejects before fetch when idempotencyKey is missing', async () => {
+  it('rejects before fetch when csrfToken is whitespace-only', async () => {
     let fetchCalled = false
-    const neverFetch: OperatorClientOptions['fetch'] = async () => {
-      fetchCalled = true
-      return new Response('', {status: 200})
-    }
     const client = createOperatorClient({
-      fetch: neverFetch,
+      fetch: async () => {
+        fetchCalled = true
+        return new Response('', {status: 200})
+      },
       createEventStream: makeEventStream([]),
     })
-    const req = {...validDecision, idempotencyKey: ''}
-    const result = await client.decideApproval(req)
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc', '   ')
+    expect(result.success).toBe(false)
+    expect(fetchCalled).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+      if (result.error.kind === 'validation') {
+        expect(result.error.code).toBe('missing_csrf')
+      }
+    }
+  })
+
+  it('rejects before fetch when idempotencyKey is blank', async () => {
+    let fetchCalled = false
+    const client = createOperatorClient({
+      fetch: async () => {
+        fetchCalled = true
+        return new Response('', {status: 200})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', '', 'csrf-token-xyz')
     expect(result.success).toBe(false)
     expect(fetchCalled).toBe(false)
     if (!result.success) {
@@ -733,37 +910,248 @@ describe('decideApproval', () => {
     }
   })
 
-  it('uses relative path /operator/approvals/:requestId/decision', async () => {
-    const calls: string[] = []
+  it('rejects before fetch when idempotencyKey is whitespace-only', async () => {
+    let fetchCalled = false
     const client = createOperatorClient({
-      fetch: async (input, _init) => {
-        calls.push(typeof input === 'string' ? input : String(input))
-        return new Response(JSON.stringify({state: 'claimed', requestId: 'req-1', timestamp: '2026-06-18T20:00:00Z'}), {
+      fetch: async () => {
+        fetchCalled = true
+        return new Response('', {status: 200})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', '   ', 'csrf-token-xyz')
+    expect(result.success).toBe(false)
+    expect(fetchCalled).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+      if (result.error.kind === 'validation') {
+        expect(result.error.code).toBe('missing_idempotency_key')
+      }
+    }
+  })
+
+  it('rejects before fetch when runId is blank', async () => {
+    let fetchCalled = false
+    const client = createOperatorClient({
+      fetch: async () => {
+        fetchCalled = true
+        return new Response('', {status: 200})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.decideRunApproval('', 'req-001', 'once', 'idem-key-abc', 'csrf-token-xyz')
+    expect(result.success).toBe(false)
+    expect(fetchCalled).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+      if (result.error.kind === 'validation') {
+        expect(result.error.code).toBe('missing_run_id')
+      }
+    }
+  })
+
+  it('rejects before fetch when requestId is blank', async () => {
+    let fetchCalled = false
+    const client = createOperatorClient({
+      fetch: async () => {
+        fetchCalled = true
+        return new Response('', {status: 200})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.decideRunApproval('run-001', '', 'once', 'idem-key-abc', 'csrf-token-xyz')
+    expect(result.success).toBe(false)
+    expect(fetchCalled).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+      if (result.error.kind === 'validation') {
+        expect(result.error.code).toBe('missing_request_id')
+      }
+    }
+  })
+
+  // Approval decision failure classes: denial-404 vs transport-error vs already-settled state values
+
+  it('404 response surfaces as denial-class http error (distinct from network throw)', async () => {
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(404),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc', 'csrf-token-xyz')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('http')
+      if (result.error.kind === 'http') {
+        expect(result.error.status).toBe(404)
+      }
+    }
+  })
+
+  it('network throw surfaces as transport-error (distinct from 404 denial)', async () => {
+    const client = createOperatorClient({
+      fetch: async () => { throw new Error('ECONNREFUSED') },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc', 'csrf-token-xyz')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('network')
+    }
+  })
+
+  it('404 and network throw are distinguishable (different error kinds)', async () => {
+    const clientDenial = createOperatorClient({
+      fetch: makeErrorFetch(404),
+      createEventStream: makeEventStream([]),
+    })
+    const clientTransport = createOperatorClient({
+      fetch: async () => { throw new Error('ECONNREFUSED') },
+      createEventStream: makeEventStream([]),
+    })
+    const denialResult = await clientDenial.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc', 'csrf-token-xyz')
+    const transportResult = await clientTransport.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc', 'csrf-token-xyz')
+    expect(denialResult.success).toBe(false)
+    expect(transportResult.success).toBe(false)
+    if (!denialResult.success && !transportResult.success) {
+      expect(denialResult.error.kind).toBe('http')
+      expect(transportResult.error.kind).toBe('network')
+      expect(denialResult.error.kind).not.toBe(transportResult.error.kind)
+    }
+  })
+
+  it('already_claimed state is returned to caller (not thrown)', async () => {
+    const client = createOperatorClient({
+      fetch: makeOkFetch({state: 'already_claimed'}),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc', 'csrf-token-xyz')
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.state).toBe('already_claimed')
+    }
+  })
+
+  it('unavailable state is returned to caller', async () => {
+    const client = createOperatorClient({
+      fetch: makeOkFetch({state: 'unavailable'}),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc', 'csrf-token-xyz')
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.state).toBe('unavailable')
+    }
+  })
+
+  it('scope_mismatch state is returned to caller', async () => {
+    const client = createOperatorClient({
+      fetch: makeOkFetch({state: 'scope_mismatch'}),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc', 'csrf-token-xyz')
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.state).toBe('scope_mismatch')
+    }
+  })
+
+  it('failed_to_settle state is returned to caller', async () => {
+    const client = createOperatorClient({
+      fetch: makeOkFetch({state: 'failed_to_settle'}),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc', 'csrf-token-xyz')
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.state).toBe('failed_to_settle')
+    }
+  })
+
+  // CSRF-400 retry: retried once reusing the SAME idempotency key
+
+  it('retries once on CSRF-400 reusing the same idempotency key', async () => {
+    const capturedKeys: string[] = []
+    let callCount = 0
+    const client = createOperatorClient({
+      fetch: async (_input, init) => {
+        callCount++
+        const h = init?.headers as Record<string, string> | undefined
+        const idemKey = h?.['idempotency-key']
+        if (idemKey !== undefined && idemKey !== '') capturedKeys.push(idemKey)
+        if (callCount === 1) {
+          return new Response(JSON.stringify({error: 'csrf_invalid'}), {
+            status: 400,
+            headers: {'content-type': 'application/json'},
+          })
+        }
+        return new Response(JSON.stringify({state: 'claimed'}), {
           status: 200,
           headers: {'content-type': 'application/json'},
         })
       },
       createEventStream: makeEventStream([]),
     })
-    await client.decideApproval(validDecision)
-    expect(calls[0]).toBe('/operator/approvals/req-1/decision')
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-retry-test', 'csrf-token-xyz')
+    expect(result.success).toBe(true)
+    expect(callCount).toBe(2)
+    // Both calls must use the SAME idempotency key
+    expect(capturedKeys).toHaveLength(2)
+    expect(capturedKeys[0]).toBe('idem-key-retry-test')
+    expect(capturedKeys[1]).toBe('idem-key-retry-test')
   })
 
-  it('handles already_claimed state', async () => {
-    const decisionResult = {
-      state: 'already_claimed' as const,
-      requestId: 'req-1',
-      timestamp: '2026-06-18T20:00:00Z',
-    }
+  it('does not retry a second time on second 400 (no third attempt)', async () => {
+    let callCount = 0
     const client = createOperatorClient({
-      fetch: makeOkFetch(decisionResult),
+      fetch: async () => {
+        callCount++
+        return new Response(JSON.stringify({error: 'csrf_invalid'}), {
+          status: 400,
+          headers: {'content-type': 'application/json'},
+        })
+      },
       createEventStream: makeEventStream([]),
     })
-    const result = await client.decideApproval(validDecision)
-    expect(result.success).toBe(true)
-    if (result.success) {
-      expect(result.data.state).toBe('already_claimed')
-    }
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc', 'csrf-token-xyz')
+    expect(result.success).toBe(false)
+    expect(callCount).toBe(2) // exactly 2: initial + one retry
+  })
+
+  it('does not retry on non-400 errors (404 is not retried)', async () => {
+    let callCount = 0
+    const client = createOperatorClient({
+      fetch: async () => {
+        callCount++
+        return new Response(JSON.stringify({error: 'not_found'}), {
+          status: 404,
+          headers: {'content-type': 'application/json'},
+        })
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc', 'csrf-token-xyz')
+    expect(result.success).toBe(false)
+    expect(callCount).toBe(1) // no retry for 404
+  })
+
+  it('does not log dynamic runId or requestId in error context', async () => {
+    const loggedContexts: Record<string, unknown>[] = []
+    const sensitiveRunId = 'SENSITIVE_RUN_ID_DECIDE_TEST'
+    const sensitiveReqId = 'SENSITIVE_REQ_ID_DECIDE_TEST'
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(409),
+      createEventStream: makeEventStream([]),
+      logger: {
+        debug: (_msg, ctx) => { if (ctx) loggedContexts.push(ctx) },
+        info: (_msg, ctx) => { if (ctx) loggedContexts.push(ctx) },
+        warning: (_msg, ctx) => { if (ctx) loggedContexts.push(ctx) },
+        error: (_msg, ctx) => { if (ctx) loggedContexts.push(ctx) },
+      },
+    })
+    await client.decideRunApproval(sensitiveRunId, sensitiveReqId, 'once', 'idem-key-abc', 'csrf-token-xyz')
+    const allLogged = JSON.stringify(loggedContexts)
+    expect(allLogged).not.toContain(sensitiveRunId)
+    expect(allLogged).not.toContain(sensitiveReqId)
   })
 })
 
@@ -1130,7 +1518,7 @@ describe('path parameter encoding', () => {
     }
   })
 
-  it('rejects requestId with literal slash in decideApproval before fetch', async () => {
+  it('rejects requestId with literal slash in decideRunApproval before fetch', async () => {
     let fetchCalled = false
     const client = createOperatorClient({
       fetch: async () => {
@@ -1139,13 +1527,7 @@ describe('path parameter encoding', () => {
       },
       createEventStream: makeEventStream([]),
     })
-    const result = await client.decideApproval({
-      requestId: 'req/evil',
-      decision: 'approve',
-      approvalScope: 'tool_use',
-      idempotencyKey: 'idem-key-abc',
-      csrfToken: 'csrf-token-xyz',
-    })
+    const result = await client.decideRunApproval('run-001', 'req/evil', 'once', 'idem-key-abc', 'csrf-token-xyz')
     expect(fetchCalled).toBe(false)
     expect(result.success).toBe(false)
     if (!result.success) {
@@ -1156,7 +1538,7 @@ describe('path parameter encoding', () => {
     }
   })
 
-  it('rejects requestId with percent-encoded slash (%2F) in decideApproval before fetch', async () => {
+  it('rejects requestId with percent-encoded slash (%2F) in decideRunApproval before fetch', async () => {
     let fetchCalled = false
     const client = createOperatorClient({
       fetch: async () => {
@@ -1165,13 +1547,7 @@ describe('path parameter encoding', () => {
       },
       createEventStream: makeEventStream([]),
     })
-    const result = await client.decideApproval({
-      requestId: 'req%2Fevil',
-      decision: 'approve',
-      approvalScope: 'tool_use',
-      idempotencyKey: 'idem-key-abc',
-      csrfToken: 'csrf-token-xyz',
-    })
+    const result = await client.decideRunApproval('run-001', 'req%2Fevil', 'once', 'idem-key-abc', 'csrf-token-xyz')
     expect(fetchCalled).toBe(false)
     expect(result.success).toBe(false)
     if (!result.success) {
@@ -1182,7 +1558,7 @@ describe('path parameter encoding', () => {
     }
   })
 
-  it('rejects requestId with percent-encoded backslash (%5C) in decideApproval before fetch', async () => {
+  it('rejects requestId with percent-encoded backslash (%5C) in decideRunApproval before fetch', async () => {
     let fetchCalled = false
     const client = createOperatorClient({
       fetch: async () => {
@@ -1191,13 +1567,7 @@ describe('path parameter encoding', () => {
       },
       createEventStream: makeEventStream([]),
     })
-    const result = await client.decideApproval({
-      requestId: 'req%5Cevil',
-      decision: 'reject',
-      approvalScope: 'tool_use',
-      idempotencyKey: 'idem-key-abc',
-      csrfToken: 'csrf-token-xyz',
-    })
+    const result = await client.decideRunApproval('run-001', 'req%5Cevil', 'reject', 'idem-key-abc', 'csrf-token-xyz')
     expect(fetchCalled).toBe(false)
     expect(result.success).toBe(false)
     if (!result.success) {
@@ -1205,53 +1575,38 @@ describe('path parameter encoding', () => {
     }
   })
 
-  it('encodes requestId with query chars in decideApproval', async () => {
+  it('encodes requestId with query chars in decideRunApproval', async () => {
     const calls: string[] = []
     const client = createOperatorClient({
       fetch: async (input, _init) => {
         calls.push(typeof input === 'string' ? input : String(input))
         return new Response(
-          JSON.stringify({state: 'claimed', requestId: 'req?x=1', timestamp: '2026-06-18T20:00:00Z'}),
+          JSON.stringify({state: 'claimed'}),
           {status: 200, headers: {'content-type': 'application/json'}},
         )
       },
       createEventStream: makeEventStream([]),
     })
-    await client.decideApproval({
-      requestId: 'req?x=1',
-      decision: 'reject',
-      approvalScope: 'tool_use',
-      idempotencyKey: 'idem-key-abc',
-      csrfToken: 'csrf-token-xyz',
-    })
-    expect(calls[0]).toBe('/operator/approvals/req%3Fx%3D1/decision')
+    await client.decideRunApproval('run-001', 'req?x=1', 'reject', 'idem-key-abc', 'csrf-token-xyz')
+    expect(calls[0]).toBe('/operator/runs/run-001/approvals/req%3Fx%3D1/decision')
   })
 })
 
 // ---------------------------------------------------------------------------
-// decideApproval — all approval decision states
+// decideRunApproval — all OperatorDecisionState values
 // ---------------------------------------------------------------------------
 
-describe('decideApproval — all decision states', () => {
-  const validDecision: ApprovalDecisionRequest = {
-    requestId: 'req-state-test',
-    decision: 'approve',
-    approvalScope: 'tool_use',
-    idempotencyKey: 'idem-state-abc',
-    csrfToken: 'csrf-state-xyz',
-  }
-
-  // Canonical OperatorDecisionState values per contract v1.0.0
+describe('decideRunApproval — all decision states', () => {
+  // Canonical OperatorDecisionState values per contract v1.4.0
   const allStates = ['pending', 'claimed', 'already_claimed', 'scope_mismatch', 'failed_to_settle', 'unavailable'] as const
 
   for (const state of allStates) {
     it(`handles ${state} state`, async () => {
-      const decisionResult = {state, requestId: 'req-state-test', timestamp: '2026-06-18T20:00:00Z'}
       const client = createOperatorClient({
-        fetch: makeOkFetch(decisionResult),
+        fetch: makeOkFetch({state}),
         createEventStream: makeEventStream([]),
       })
-      const result = await client.decideApproval(validDecision)
+      const result = await client.decideRunApproval('run-001', 'req-state-test', 'once', 'idem-state-abc', 'csrf-state-xyz')
       expect(result.success).toBe(true)
       if (result.success) {
         expect(result.data.state).toBe(state)
@@ -1402,8 +1757,8 @@ describe('path validation — allowlist /operator/* only', () => {
     expect(result).toBeNull()
   })
 
-  it('accepts /operator/approvals?runId=run-001', () => {
-    const result = validateOperatorPath('/operator/approvals?runId=run-001')
+  it('accepts /operator/runs/run-001/approvals (per-run approval route)', () => {
+    const result = validateOperatorPath('/operator/runs/run-001/approvals')
     expect(result).toBeNull()
   })
 
@@ -1521,74 +1876,7 @@ describe('connectRunStream — blank runId validation', () => {
   })
 })
 
-describe('decideApproval — blank requestId validation', () => {
-  const validBase = {
-    decision: 'approve' as const,
-    approvalScope: 'tool_use',
-    idempotencyKey: 'idem-key-abc',
-    csrfToken: 'csrf-token-xyz',
-  }
-
-  it('rejects blank requestId before fetch', async () => {
-    let fetchCalled = false
-    const client = createOperatorClient({
-      fetch: async () => {
-        fetchCalled = true
-        return new Response('{}', {status: 200, headers: {'content-type': 'application/json'}})
-      },
-      createEventStream: makeEventStream([]),
-    })
-    const result = await client.decideApproval({...validBase, requestId: ''})
-    expect(result.success).toBe(false)
-    expect(fetchCalled).toBe(false)
-    if (!result.success) {
-      expect(result.error.kind).toBe('validation')
-      if (result.error.kind === 'validation') {
-        expect(result.error.code).toBe('missing_request_id')
-      }
-    }
-  })
-
-  it('rejects whitespace-only requestId before fetch', async () => {
-    let fetchCalled = false
-    const client = createOperatorClient({
-      fetch: async () => {
-        fetchCalled = true
-        return new Response('{}', {status: 200, headers: {'content-type': 'application/json'}})
-      },
-      createEventStream: makeEventStream([]),
-    })
-    const result = await client.decideApproval({...validBase, requestId: '   '})
-    expect(result.success).toBe(false)
-    expect(fetchCalled).toBe(false)
-    if (!result.success) {
-      expect(result.error.kind).toBe('validation')
-      if (result.error.kind === 'validation') {
-        expect(result.error.code).toBe('missing_request_id')
-      }
-    }
-  })
-
-  it('rejects blank requestId even with valid CSRF and idempotency key', async () => {
-    let fetchCalled = false
-    const client = createOperatorClient({
-      fetch: async () => {
-        fetchCalled = true
-        return new Response('{}', {status: 200, headers: {'content-type': 'application/json'}})
-      },
-      createEventStream: makeEventStream([]),
-    })
-    const result = await client.decideApproval({
-      requestId: '',
-      decision: 'reject',
-      approvalScope: 'tool_use',
-      idempotencyKey: 'valid-idem-key',
-      csrfToken: 'valid-csrf-token',
-    })
-    expect(result.success).toBe(false)
-    expect(fetchCalled).toBe(false)
-  })
-})
+// (decideRunApproval blank requestId/runId validation is tested inline in the decideRunApproval describe block above)
 
 // ---------------------------------------------------------------------------
 // Finding 3: SSE resume contract — event metadata with eventId
@@ -1939,8 +2227,9 @@ describe('sensitive value redaction', () => {
     expect(allLogged).not.toContain(sensitiveRunId)
   })
 
-  it('does not log dynamic requestId in decideApproval error context — uses coarse route name', async () => {
+  it('does not log dynamic runId or requestId in decideRunApproval error context — uses coarse route name', async () => {
     const loggedMessages: {message: string; context?: Record<string, unknown>}[] = []
+    const sensitiveRunId = 'SENSITIVE_RUN_ID_DO_NOT_LOG_DECIDE'
     const sensitiveRequestId = 'SENSITIVE_REQUEST_ID_DO_NOT_LOG_ABCDE'
     const client = createOperatorClient({
       fetch: makeErrorFetch(409),
@@ -1952,14 +2241,9 @@ describe('sensitive value redaction', () => {
         error: (message, context) => loggedMessages.push({message, context}),
       },
     })
-    await client.decideApproval({
-      requestId: sensitiveRequestId,
-      decision: 'approve',
-      approvalScope: 'tool_use',
-      idempotencyKey: 'idem-key-abc',
-      csrfToken: 'csrf-token-xyz',
-    })
+    await client.decideRunApproval(sensitiveRunId, sensitiveRequestId, 'once', 'idem-key-abc', 'csrf-token-xyz')
     const allLogged = JSON.stringify(loggedMessages)
+    expect(allLogged).not.toContain(sensitiveRunId)
     expect(allLogged).not.toContain(sensitiveRequestId)
   })
 })
@@ -2205,75 +2489,17 @@ describe('validateOperatorPath — path traversal and unsafe chars', () => {
     expect(result).toBeNull()
   })
 
-  it('still accepts /operator/approvals?runId=run-001 (query string)', () => {
-    const result = validateOperatorPath('/operator/approvals?runId=run-001')
+  it('still accepts /operator/runs/run-001/approvals/req-001/decision (per-run decision route)', () => {
+    const result = validateOperatorPath('/operator/runs/run-001/approvals/req-001/decision')
     expect(result).toBeNull()
   })
 })
 
 // ---------------------------------------------------------------------------
-// Fix 7: listPendingApprovals — blank/whitespace runId rejection
+// listRunApprovals — blank/whitespace runId rejection (migrated from Fix 7)
 // ---------------------------------------------------------------------------
 
-describe('listPendingApprovals — blank runId validation', () => {
-  it('rejects blank runId before fetch', async () => {
-    let fetchCalled = false
-    const client = createOperatorClient({
-      fetch: async () => {
-        fetchCalled = true
-        return new Response(JSON.stringify({approvals: []}), {status: 200, headers: {'content-type': 'application/json'}})
-      },
-      createEventStream: makeEventStream([]),
-    })
-    const result = await client.listPendingApprovals({runId: ''})
-    expect(result.success).toBe(false)
-    expect(fetchCalled).toBe(false)
-    if (!result.success) {
-      expect(result.error.kind).toBe('validation')
-      if (result.error.kind === 'validation') {
-        expect(result.error.code).toBe('missing_run_id')
-      }
-    }
-  })
-
-  it('rejects whitespace-only runId before fetch', async () => {
-    let fetchCalled = false
-    const client = createOperatorClient({
-      fetch: async () => {
-        fetchCalled = true
-        return new Response(JSON.stringify({approvals: []}), {status: 200, headers: {'content-type': 'application/json'}})
-      },
-      createEventStream: makeEventStream([]),
-    })
-    const result = await client.listPendingApprovals({runId: '   '})
-    expect(result.success).toBe(false)
-    expect(fetchCalled).toBe(false)
-    if (!result.success) {
-      expect(result.error.kind).toBe('validation')
-      if (result.error.kind === 'validation') {
-        expect(result.error.code).toBe('missing_run_id')
-      }
-    }
-  })
-
-  it('still accepts undefined runId (no filter)', async () => {
-    const client = createOperatorClient({
-      fetch: makeOkFetch({approvals: []}),
-      createEventStream: makeEventStream([]),
-    })
-    const result = await client.listPendingApprovals()
-    expect(result.success).toBe(true)
-  })
-
-  it('still accepts valid runId', async () => {
-    const client = createOperatorClient({
-      fetch: makeOkFetch({approvals: []}),
-      createEventStream: makeEventStream([]),
-    })
-    const result = await client.listPendingApprovals({runId: 'run-001'})
-    expect(result.success).toBe(true)
-  })
-})
+// (listRunApprovals blank runId validation is tested inline in the listRunApprovals describe block above)
 
 // ---------------------------------------------------------------------------
 // Fix 8: connectRunStream returns Result<EventStreamHandle, GatewayClientError>
@@ -2412,7 +2638,7 @@ describe('connectRunStream — setup error handling', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Fix 10: redirect: 'error' in launchRun and decideApproval
+// Fix 10: redirect: 'error' in launchRun and decideRunApproval
 // ---------------------------------------------------------------------------
 
 describe('launchRun — redirect: error', () => {
@@ -2438,29 +2664,7 @@ describe('launchRun — redirect: error', () => {
   })
 })
 
-describe('decideApproval — redirect: error', () => {
-  it('passes redirect: error in fetch init', async () => {
-    let capturedInit: RequestInit | undefined
-    const client = createOperatorClient({
-      fetch: async (_input, init) => {
-        capturedInit = init
-        return new Response(JSON.stringify({state: 'claimed', requestId: 'req-1', timestamp: '2026-06-18T20:00:00Z'}), {
-          status: 200,
-          headers: {'content-type': 'application/json'},
-        })
-      },
-      createEventStream: makeEventStream([]),
-    })
-    await client.decideApproval({
-      requestId: 'req-1',
-      decision: 'approve',
-      approvalScope: 'tool_use',
-      idempotencyKey: 'idem-key-abc',
-      csrfToken: 'csrf-token-xyz',
-    })
-    expect(capturedInit?.redirect).toBe('error')
-  })
-})
+// (decideRunApproval redirect:error is tested inline in the decideRunApproval describe block above)
 
 // ---------------------------------------------------------------------------
 // Fix 13: No-logger smoke coverage
@@ -2572,59 +2776,7 @@ describe('launchRun — whitespace-only idempotencyKey', () => {
   })
 })
 
-describe('decideApproval — whitespace-only CSRF and idempotencyKey', () => {
-  it('rejects whitespace-only csrfToken before fetch', async () => {
-    let fetchCalled = false
-    const client = createOperatorClient({
-      fetch: async () => {
-        fetchCalled = true
-        return new Response('', {status: 200})
-      },
-      createEventStream: makeEventStream([]),
-    })
-    const result = await client.decideApproval({
-      requestId: 'req-1',
-      decision: 'approve',
-      approvalScope: 'tool_use',
-      idempotencyKey: 'idem-key-abc',
-      csrfToken: '   ',
-    })
-    expect(result.success).toBe(false)
-    expect(fetchCalled).toBe(false)
-    if (!result.success) {
-      expect(result.error.kind).toBe('validation')
-      if (result.error.kind === 'validation') {
-        expect(result.error.code).toBe('missing_csrf')
-      }
-    }
-  })
-
-  it('rejects whitespace-only idempotencyKey before fetch', async () => {
-    let fetchCalled = false
-    const client = createOperatorClient({
-      fetch: async () => {
-        fetchCalled = true
-        return new Response('', {status: 200})
-      },
-      createEventStream: makeEventStream([]),
-    })
-    const result = await client.decideApproval({
-      requestId: 'req-1',
-      decision: 'approve',
-      approvalScope: 'tool_use',
-      idempotencyKey: '   ',
-      csrfToken: 'csrf-token-xyz',
-    })
-    expect(result.success).toBe(false)
-    expect(fetchCalled).toBe(false)
-    if (!result.success) {
-      expect(result.error.kind).toBe('validation')
-      if (result.error.kind === 'validation') {
-        expect(result.error.code).toBe('missing_idempotency_key')
-      }
-    }
-  })
-})
+// (decideRunApproval whitespace-only CSRF and idempotencyKey validation is tested inline in the decideRunApproval describe block above)
 
 // ---------------------------------------------------------------------------
 // Fix 16: HTTP error logging uses route templates, not dynamic IDs
@@ -2651,8 +2803,9 @@ describe('HTTP error logging uses route templates', () => {
     expect(allLogged).toContain('/operator/runs/:runId')
   })
 
-  it('does not log dynamic requestId in decideApproval HTTP error', async () => {
+  it('does not log dynamic runId or requestId in decideRunApproval HTTP error', async () => {
     const loggedContexts: Record<string, unknown>[] = []
+    const sensitiveRunId = 'SENSITIVE_RUN_ID_ROUTE_TEMPLATE_TEST'
     const sensitiveRequestId = 'SENSITIVE_REQ_ID_ROUTE_TEMPLATE_TEST'
     const client = createOperatorClient({
       fetch: makeErrorFetch(409),
@@ -2664,15 +2817,10 @@ describe('HTTP error logging uses route templates', () => {
         error: (_msg, ctx) => { if (ctx) loggedContexts.push(ctx) },
       },
     })
-    await client.decideApproval({
-      requestId: sensitiveRequestId,
-      decision: 'approve',
-      approvalScope: 'tool_use',
-      idempotencyKey: 'idem-key-abc',
-      csrfToken: 'csrf-token-xyz',
-    })
+    await client.decideRunApproval(sensitiveRunId, sensitiveRequestId, 'once', 'idem-key-abc', 'csrf-token-xyz')
     const allLogged = JSON.stringify(loggedContexts)
+    expect(allLogged).not.toContain(sensitiveRunId)
     expect(allLogged).not.toContain(sensitiveRequestId)
-    expect(allLogged).toContain('/operator/approvals/:requestId/decision')
+    expect(allLogged).toContain('/operator/runs/:runId/approvals/:requestId/decision')
   })
 })

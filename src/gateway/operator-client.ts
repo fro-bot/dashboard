@@ -7,7 +7,7 @@
  *
  * Security invariants:
  * - All paths must be relative (/operator/*); absolute URLs are rejected.
- * - Mutating calls (launchRun, decideApproval) reject before fetch when CSRF
+ * - Mutating calls (launchRun, decideRunApproval) reject before fetch when CSRF
  *   token or idempotency key is missing or blank.
  * - Logger receives only coarse metadata: path, status, event type, error code.
  *   Never logs: prompts, tool args, workspace paths, internal URLs, tokens,
@@ -17,6 +17,7 @@
 
 import type {Logger} from '../logger.ts'
 import type {Result} from '../result.ts'
+import type {PermissionReply} from './operator-contract/approval.ts'
 import type {OperatorCsrfToken, OperatorDecisionState, OperatorSessionInfo, OperatorWebStatus, RepoSummary, RunStreamFrame} from './operator-contract/index.ts'
 import {err, ok} from '../result.ts'
 import {parseOperatorCsrfToken, parseOperatorSessionInfo, parseRepoSummaryList} from './operator-contract/index.ts'
@@ -48,9 +49,8 @@ export type CsrfDto = OperatorCsrfToken
 // ---------------------------------------------------------------------------
 // MOCK-ONLY / DEFERRED — NOT part of frozen contract v1.0.0
 //
-// The following DTOs (LaunchRunRequest, LaunchRunResponse, RunSnapshotDto,
-// PendingApprovalSummary, PendingApprovalsResponse, ApprovalDecisionRequest,
-// ApprovalDecisionResponse) and the RunStreamEvent SSE union are MOCK-ONLY.
+// The following DTOs (LaunchRunRequest, LaunchRunResponse, RunSnapshotDto)
+// and the RunStreamEvent SSE union are MOCK-ONLY.
 //
 // Only the following are frozen in operator contract v1.0.0:
 //   - GET /operator/session → OperatorSessionInfo (SessionDto)
@@ -83,31 +83,33 @@ export interface RunSnapshotDto {
   readonly updatedAt?: string
 }
 
-export interface PendingApprovalSummary {
-  readonly requestId: string
-  readonly runId: string
-  readonly safeSummary: string
-  readonly approvalScope: string
-  readonly createdAt: string
+// ---------------------------------------------------------------------------
+// Approval DTOs — 1.4.0 per-run routes
+//
+// GET /operator/runs/:runId/approvals → RunApprovalsResponse (open prompts only)
+// POST /operator/runs/:runId/approvals/:requestId/decision → RunApprovalDecisionResponse
+// ---------------------------------------------------------------------------
+
+/** A single open approval prompt from GET /operator/runs/:runId/approvals. */
+export interface RunApprovalSummary {
+  readonly requestID: string
+  readonly permission: string
+  readonly command?: string
+  readonly filepath?: string
 }
 
-export interface PendingApprovalsResponse {
-  readonly approvals: readonly PendingApprovalSummary[]
+/** Response shape for GET /operator/runs/:runId/approvals. */
+export interface RunApprovalsResponse {
+  readonly approvals: readonly RunApprovalSummary[]
 }
 
-export interface ApprovalDecisionRequest {
-  readonly requestId: string
-  readonly decision: 'approve' | 'reject'
-  readonly approvalScope: string
-  readonly idempotencyKey: string
-  readonly csrfToken: string
+/** Response shape for POST /operator/runs/:runId/approvals/:requestId/decision. */
+export interface RunApprovalDecisionResponse {
+  readonly state: OperatorDecisionState
 }
 
-export interface ApprovalDecisionResponse {
-  readonly state: ApprovalDecisionState
-  readonly requestId: string
-  readonly timestamp: string
-}
+/** Decision verb type — re-exported from the vendored approval contract. */
+export type {PermissionReply}
 
 // ---------------------------------------------------------------------------
 // SSE run-stream event type — canonical named frames for /operator/runs/:runId/stream
@@ -194,12 +196,25 @@ export interface OperatorClient {
       readonly lastEventId?: string
     },
   ) => Result<EventStreamHandle, GatewayClientError>
-  readonly listPendingApprovals: (opts?: {
-    readonly runId?: string
-  }) => Promise<Result<PendingApprovalsResponse, GatewayClientError>>
-  readonly decideApproval: (
-    req: ApprovalDecisionRequest,
-  ) => Promise<Result<ApprovalDecisionResponse, GatewayClientError>>
+  /**
+   * GET /operator/runs/:runId/approvals — returns open (unsettled) prompts only.
+   * Contract 1.4.0.
+   */
+  readonly listRunApprovals: (runId: string) => Promise<Result<RunApprovalsResponse, GatewayClientError>>
+  /**
+   * POST /operator/runs/:runId/approvals/:requestId/decision — decide a pending approval.
+   * Decision verb is PermissionReply ('once'|'always'|'reject').
+   * Response state is OperatorDecisionState — returned to caller for approval decision failure-class mapping.
+   * CSRF-protected + idempotency-key; one CSRF-400 retry reusing the same key.
+   * Contract 1.4.0.
+   */
+  readonly decideRunApproval: (
+    runId: string,
+    requestId: string,
+    decision: PermissionReply,
+    idempotencyKey: string,
+    csrfToken: string,
+  ) => Promise<Result<RunApprovalDecisionResponse, GatewayClientError>>
 }
 
 // ---------------------------------------------------------------------------
@@ -533,51 +548,61 @@ export function createOperatorClient(options: OperatorClientOptions): OperatorCl
     return ok(handle)
   }
 
-  async function listPendingApprovals(
-    listOpts?: {readonly runId?: string},
-  ): Promise<Result<PendingApprovalsResponse, GatewayClientError>> {
-    if (listOpts?.runId !== undefined) {
-      const runIdErr = requireRunId(listOpts.runId)
-      if (runIdErr !== null) return err(runIdErr)
-    }
-    const path =
-      listOpts?.runId === undefined
-        ? '/operator/approvals'
-        : `/operator/approvals?runId=${encodeURIComponent(listOpts.runId)}`
-    return fetchJson<PendingApprovalsResponse>(path, '/operator/approvals')
+  async function listRunApprovals(runId: string): Promise<Result<RunApprovalsResponse, GatewayClientError>> {
+    const runIdErr = requireRunId(runId)
+    if (runIdErr !== null) return err(runIdErr)
+
+    return fetchJson<RunApprovalsResponse>(
+      `/operator/runs/${encodeURIComponent(runId)}/approvals`,
+      '/operator/runs/:runId/approvals',
+    )
   }
 
-  async function decideApproval(
-    req: ApprovalDecisionRequest,
-  ): Promise<Result<ApprovalDecisionResponse, GatewayClientError>> {
-    const requestIdErr = requireRequestId(req.requestId)
+  async function decideRunApproval(
+    runId: string,
+    requestId: string,
+    decision: PermissionReply,
+    idempotencyKey: string,
+    csrfToken: string,
+  ): Promise<Result<RunApprovalDecisionResponse, GatewayClientError>> {
+    const runIdErr = requireRunId(runId)
+    if (runIdErr !== null) return err(runIdErr)
+
+    const requestIdErr = requireRequestId(requestId)
     if (requestIdErr !== null) return err(requestIdErr)
 
-    const csrfGuard = requireCsrf(req.csrfToken)
+    const csrfGuard = requireCsrf(csrfToken)
     if (csrfGuard !== null) return err(csrfGuard)
 
-    const idemGuard = requireIdempotencyKey(req.idempotencyKey)
+    const idemGuard = requireIdempotencyKey(idempotencyKey)
     if (idemGuard !== null) return err(idemGuard)
 
-    const body = JSON.stringify({
-      decision: req.decision,
-      approvalScope: req.approvalScope,
-    })
-
-    return fetchJson<ApprovalDecisionResponse>(
-      `/operator/approvals/${encodeURIComponent(req.requestId)}/decision`,
-      '/operator/approvals/:requestId/decision',
-      {
-        method: 'POST',
-        redirect: 'error',
-        headers: {
-          'content-type': 'application/json',
-          'x-csrf-token': req.csrfToken,
-          'idempotency-key': req.idempotencyKey,
-        },
-        body,
+    const path = `/operator/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(requestId)}/decision`
+    const route = '/operator/runs/:runId/approvals/:requestId/decision'
+    const body = JSON.stringify({decision})
+    const init: RequestInit = {
+      method: 'POST',
+      redirect: 'error',
+      headers: {
+        'content-type': 'application/json',
+        'x-csrf-token': csrfToken,
+        'idempotency-key': idempotencyKey,
       },
-    )
+      body,
+    }
+
+    const first = await fetchJson<RunApprovalDecisionResponse>(path, route, init)
+
+    // One CSRF-400 retry reusing the SAME idempotency key (mirrors the launch-surface pattern).
+    // A 400 may indicate a stale CSRF token; the caller must supply a fresh token on retry.
+    // Since the client does not own CSRF refresh, we re-attempt with the same token — the
+    // gateway will accept if the token is still valid. The idempotency key is reused to
+    // deduplicate any lost-response scenario.
+    if (!first.success && first.error.kind === 'http' && first.error.status === 400) {
+      return fetchJson<RunApprovalDecisionResponse>(path, route, init)
+    }
+
+    return first
   }
 
   return {
@@ -587,7 +612,7 @@ export function createOperatorClient(options: OperatorClientOptions): OperatorCl
     launchRun,
     getRunSnapshot,
     connectRunStream,
-    listPendingApprovals,
-    decideApproval,
+    listRunApprovals,
+    decideRunApproval,
   }
 }

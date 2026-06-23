@@ -191,7 +191,7 @@ export declare function toSafeRunView(runStatus: {
  * Returns true iff the run entry has at least one open (non-tombstoned) approval prompt.
  *
  * This is the canonical visibility signal for the `waiting_for_approval` overlay and
- * the in-page open-prompt indicator (R11). Both must derive from this one state so
+ * the in-page open-prompt indicator. Both must derive from this one state so
  * they cannot desync.
  */
 export declare function hasOpenApprovals(runEntry: RunEntry | undefined | null): boolean
@@ -212,14 +212,57 @@ export interface StreamHandle {
   close: () => void
 }
 
+/** Browser-direct approval client interface (for testing injection). */
+export interface ApprovalClient {
+  readonly refreshCsrf: () => Promise<{success: boolean; data?: {csrfToken: string}; error?: {kind: string; status?: number}}>
+  readonly decideRunApproval: (
+    runId: string,
+    requestId: string,
+    decision: string,
+    idempotencyKey: string,
+  ) => Promise<{success: boolean; data?: {state: string}; error?: {kind: string; status?: number}}>
+  readonly listRunApprovals: (runId: string) => Promise<readonly {requestID: string; permission: string; command?: string; filepath?: string}[]>
+}
+
 export interface InitOptions {
   readonly runId: string
   readonly statusEl: Element | null
   readonly noticeEl: Element | null
   readonly outputEl?: (HTMLElement & {hidden: boolean}) | null
   readonly coalescedEl?: (HTMLElement & {hidden: boolean}) | null
+  /** Approval prompts container element (data-role="run-approvals"). */
+  readonly approvalsEl?: (HTMLElement & {hidden: boolean}) | null
+  /** Approval count badge element (data-role="approval-badge"). */
+  readonly badgeEl?: (HTMLElement & {hidden: boolean}) | null
+  /** Injectable approval client for testing. If absent, buildApprovalClient() is used. */
+  readonly approvalClient?: ApprovalClient | null
 }
 
 export declare function initOperatorStream(opts: InitOptions): StreamHandle
 
 export declare function bootstrapOperatorStreams(): void
+
+// ---------------------------------------------------------------------------
+// Exported for direct testing (approval client + prompt renderer)
+// ---------------------------------------------------------------------------
+
+/** Browser-direct approval client factory. Returns refreshCsrf/decideRunApproval/listRunApprovals. */
+export declare function buildApprovalClient(): ApprovalClient
+
+/**
+ * Render a single open approval prompt into a container element.
+ * Uses safe DOM (textContent only — never innerHTML or HTML interpolation).
+ * Exported for direct unit testing of the safe-DOM inertness guarantee.
+ *
+ * @param prompt - An open ApprovalFrameDataOpen object from getOpenApprovals.
+ * @param runId - The run ID (for the decision POST).
+ * @param approvalClient - The browser-direct approval client.
+ * @param onSettle - Called when the prompt is settled (to trigger DOM cleanup).
+ * @returns The rendered prompt element.
+ */
+export declare function renderApprovalPrompt(
+  prompt: ApprovalFrameDataOpen,
+  runId: string,
+  approvalClient: ApprovalClient,
+  onSettle: () => void,
+): HTMLElement

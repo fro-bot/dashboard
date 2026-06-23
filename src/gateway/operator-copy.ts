@@ -12,6 +12,94 @@
  */
 import type {ApprovalDecisionState, RunStatus, RunStreamEvent} from './operator-client.ts'
 
+// ---------------------------------------------------------------------------
+// Approval prompt copy — inline approval prompt UI
+// ---------------------------------------------------------------------------
+
+/**
+ * Human-readable label for a permission category.
+ * Used to label the gated action in the inline approval prompt.
+ * Returns a safe fixed label — never echoes the raw permission string.
+ */
+export function permissionLabel(permission: string): string {
+  switch (permission) {
+    case 'shell':
+      return 'Shell command'
+    case 'edit':
+      return 'File edit'
+    case 'external_directory':
+      return 'External directory access'
+    case 'network':
+      return 'Network access'
+    case 'read':
+      return 'File read'
+    case 'write':
+      return 'File write'
+    default:
+      // Unknown permission — return a safe generic label, never the raw token
+      return 'Tool action'
+  }
+}
+
+/**
+ * Returns true if the permission category is an edit-class permission
+ * (filepath-based, contents not previewed in v1).
+ */
+export function isEditClassPermission(permission: string): boolean {
+  return permission === 'edit' || permission === 'external_directory'
+}
+
+/**
+ * Copy for the denial-class failure (uniform 404 from the gateway).
+ * Must NOT imply a specific reason — the gateway returns uniform not-found.
+ */
+export const APPROVAL_CANT_APPROVE_COPY =
+  'You may not have approval access for this run. If you believe this is an error, check your gateway operator session.'
+
+/**
+ * Copy for the transport-failure class (network/protocol error).
+ * Must be clearly distinct from the denial copy — a transport failure is retryable.
+ */
+export const APPROVAL_TRANSPORT_FAILURE_COPY =
+  'Decision didn\u2019t go through \u2014 try again.'
+
+/**
+ * Copy for the already-settled class (already_claimed / unavailable state).
+ * Shown inline when the decision response indicates the prompt is already settled.
+ */
+export const APPROVAL_ALREADY_SETTLED_COPY =
+  'This approval request has already been settled.'
+
+/**
+ * Conservative consequence copy for the `always` two-step confirm.
+ * Must NOT assert a specific match key — use conservative wording until the
+ * exact grant scope is confirmed against the gateway.
+ */
+export const APPROVAL_ALWAYS_CONSEQUENCE_COPY =
+  'This installs a standing approval that auto-approves matching requests for the rest of this run, as defined by the gateway\u2019s grant rule.'
+
+/**
+ * Pre-click copy for the approval prompt.
+ * Sets the expectation that approval requires write access.
+ */
+export const APPROVAL_ACCESS_CAVEAT_COPY =
+  'Approval requires write access to this run. Unavailable decisions fail safely.'
+
+/**
+ * Caveat shown for edit-class prompts.
+ * The operator sees the filepath only — diff preview is gateway-deferred.
+ */
+export const APPROVAL_EDIT_CLASS_CAVEAT_COPY =
+  'File-level only \u2014 contents not previewed.'
+
+/**
+ * Copy for a persistent session/auth failure after a CSRF retry (e.g. repeated 400/401/403).
+ * Non-retryable — instructs the operator to reload rather than loop.
+ * Must NOT use taxonomy labels or backend token names.
+ */
+export const APPROVAL_SESSION_FAILURE_COPY =
+  'Your session may have expired \u2014 reload the page to approve.'
+
 /**
  * Human-readable label for a run status.
  * Never returns the raw backend token as the primary label.
