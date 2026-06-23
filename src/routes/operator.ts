@@ -18,12 +18,12 @@
  * This route is protected by the auth middleware in server.ts.
  * It is NOT a public path — do NOT add it to isPublicPath.
  */
-import type {ApprovalDecisionState, RunStatus} from '../gateway/operator-client.ts'
+import type {RunStatus} from '../gateway/operator-client.ts'
 import {Hono} from 'hono'
 import {html} from 'hono/html'
 
-import {approvalStateLabel, runStatusLabel, streamEventLabel} from '../gateway/operator-copy.ts'
-import {ALL_FIXTURE_RUNS, FIXTURE_DECISION_ALREADY_CLAIMED, FIXTURE_DECISION_CLAIMED, FIXTURE_DECISION_FAILED_TO_SETTLE, FIXTURE_DECISION_PENDING, FIXTURE_DECISION_SCOPE_MISMATCH, FIXTURE_DECISION_UNAVAILABLE, FIXTURE_RUN_APPROVAL, FIXTURE_RUN_TIMELINE} from '../gateway/operator-fixtures.ts'
+import {runStatusLabel, streamEventLabel} from '../gateway/operator-copy.ts'
+import {ALL_FIXTURE_RUNS, FIXTURE_RUN_TIMELINE} from '../gateway/operator-fixtures.ts'
 
 // ---------------------------------------------------------------------------
 // Status pill helper
@@ -142,6 +142,8 @@ function runStatusSection(): ReturnType<typeof html> {
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
           <span class="run-status ${cssClass}" data-role="run-status">${label}</span>
           <span class="mono">${run.runId}</span>
+          <!-- R12: in-page open-prompt indicator — browser fills this badge when hasOpenApprovals -->
+          <span class="approval-badge" data-role="approval-badge" hidden style="font-size:0.75rem;font-weight:600;background:#f59e0b;color:#fff;border-radius:10px;padding:1px 7px;"></span>
         </div>
         <div style="font-size:0.8rem;color:#6b7280;">
           <!-- When live run data is wired, repo identity must pass the redaction/denylist
@@ -156,6 +158,13 @@ function runStatusSection(): ReturnType<typeof html> {
           Some output was coalesced under load.
         </p>
         <pre class="run-output" data-role="run-output" hidden aria-live="polite" style="white-space:pre-wrap;word-break:break-word;margin:6px 0 0;font-size:0.8rem;"></pre>
+        <!--
+          Approval region: the browser client renders open approval prompts here via safe DOM
+          (textContent only — never HTML interpolation). The SSR ships this hidden and empty;
+          the browser fills it when getOpenApprovals(runEntry) returns prompts.
+          data-role="run-approvals" is the discovery hook for bootstrapOperatorStreams.
+        -->
+        <div class="run-approvals" data-role="run-approvals" hidden aria-live="polite" aria-label="Approval prompts for this run" style="margin-top:8px;"></div>
       </div>
     `
   })
@@ -199,79 +208,11 @@ function eventTimelineSection(): ReturnType<typeof html> {
   `
 }
 
-function pendingApprovalSection(): ReturnType<typeof html> {
-  const approval = FIXTURE_RUN_APPROVAL
-  return html`
-    <section class="section" aria-labelledby="approvals-heading">
-      <h2 id="approvals-heading">Pending Approvals <span class="badge-mock">Mock skeleton — fixture data</span></h2>
-      <div class="notice" style="margin-bottom:16px;">
-        Approval controls are unavailable. This panel shows fixture data.
-        Live approval actions will be available once the operator UI is enabled.
-      </div>
-
-      <div class="approval-card" tabindex="0" aria-labelledby="approval-pending-heading">
-        <h3 id="approval-pending-heading">Approval Request (Pending)</h3>
-        <p style="font-size:0.875rem;margin-bottom:8px;">
-          <strong>Request ID:</strong> <span class="mono">${approval.requestID}</span>
-        </p>
-        <p style="font-size:0.875rem;margin-bottom:12px;">
-          <strong>Permission:</strong> ${approval.permission}
-        </p>
-        <div style="display:flex;gap:10px;align-items:center;">
-          <button
-            type="button"
-            class="btn btn-disabled"
-            disabled
-            aria-disabled="true"
-            aria-describedby="approval-disabled-reason"
-          >
-            Once
-          </button>
-          <button
-            type="button"
-            class="btn btn-disabled"
-            disabled
-            aria-disabled="true"
-            aria-describedby="approval-disabled-reason"
-          >
-            Reject
-          </button>
-        </div>
-        <p id="approval-disabled-reason" style="font-size:0.8rem;color:#9ca3af;margin-top:8px;">
-          Approval actions are disabled: the operator UI is not yet enabled.
-        </p>
-      </div>
-
-      <h3 style="margin-top:16px;margin-bottom:8px;">Approval Decision States</h3>
-      <p style="font-size:0.8rem;color:#6b7280;margin-bottom:10px;">
-        The following cards show all canonical approval decision states (non-actionable in this skeleton).
-        Note: the &ldquo;Decision already in progress&rdquo; state is in-flight (not terminal) —
-        a second decision arrived while the first POST was still in-flight.
-      </p>
-
-      ${terminalApprovalCard(FIXTURE_DECISION_PENDING)}
-      ${terminalApprovalCard(FIXTURE_DECISION_CLAIMED)}
-      ${terminalApprovalCard(FIXTURE_DECISION_ALREADY_CLAIMED)}
-      ${terminalApprovalCard(FIXTURE_DECISION_SCOPE_MISMATCH)}
-      ${terminalApprovalCard(FIXTURE_DECISION_FAILED_TO_SETTLE)}
-      ${terminalApprovalCard(FIXTURE_DECISION_UNAVAILABLE)}
-    </section>
-  `
-}
-
-function terminalApprovalCard(decision: {
-  state: ApprovalDecisionState
-}): ReturnType<typeof html> {
-  // approvalStateLabel maps all states to safe copy — failed_to_settle never shown raw
-  const label = approvalStateLabel(decision.state)
-  return html`
-    <div class="approval-terminal" tabindex="0" aria-label="Approval state: ${label}">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-        <strong style="font-size:0.875rem;">${label}</strong>
-      </div>
-    </div>
-  `
-}
+// pendingApprovalSection and terminalApprovalCard have been removed (Unit 5).
+// Approval prompts are now rendered inline in each run card by the browser client
+// via the data-role="run-approvals" hook. The SSR no longer renders fixture approval
+// copy — doing so was misleading (it implied approval was unavailable when the flag
+// is on). The browser client fills the approval region from getOpenApprovals(runEntry).
 
 function bindingUnavailableSection(): ReturnType<typeof html> {
   return html`
@@ -312,7 +253,6 @@ function operatorPage(gatewaySessionEnabled: boolean): ReturnType<typeof html> {
   ${launchSection()}
   ${runStatusSection()}
   ${eventTimelineSection()}
-  ${pendingApprovalSection()}
   ${bindingUnavailableSection()}
 
   <p style="margin-top:24px;font-size:0.8rem;color:#6b7280;">

@@ -787,6 +787,375 @@ function backoffDelay(attempt) {
 // DOM shell — only runs in a browser (document must exist)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Browser-direct approval client (same-origin relative /operator/* paths)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a browser-direct approval client for the inline approval prompt UI.
+ *
+ * Uses same-origin relative /operator/* paths (owned by the public reverse proxy,
+ * not the dashboard app). credentials:'include' and redirect:'error' are set on
+ * all fetch calls so the cookie, Origin, and Sec-Fetch metadata ride automatically.
+ *
+ * Security:
+ * - Never logs runId, requestId, decision, csrf, or idempotency key.
+ * - All 404s collapse to one denial-class signal (no cause inference).
+ * - Transport errors are distinct from denial (R10).
+ * - CSRF-400 retried once with the same idempotency key (mirrors launch pattern).
+ *
+ * @returns {object} An object with refreshCsrf() and decideRunApproval() methods.
+ */
+function buildApprovalClient() {
+  const browserFetch = (input, init) =>
+    globalThis.fetch(input, {
+      ...init,
+      credentials: 'include',
+      redirect: 'error',
+    })
+
+  async function refreshCsrf() {
+    try {
+      const res = await browserFetch('/operator/session/csrf', {
+        headers: {'content-type': 'application/json'},
+      })
+      if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
+      const data = await res.json()
+      if (data === null || typeof data !== 'object' || typeof data.csrfToken !== 'string') {
+        return {success: false, error: {kind: 'protocol'}}
+      }
+      return {success: true, data: {csrfToken: data.csrfToken}}
+    } catch {
+      return {success: false, error: {kind: 'network'}}
+    }
+  }
+
+  /**
+   * POST a decision for a pending approval.
+   *
+   * Returns:
+   *   {success: true, data: {state}}  — decision accepted; state is the gateway's response
+   *   {success: false, error: {kind: 'http', status: 404}}  — denial-class (uniform not-found)
+   *   {success: false, error: {kind: 'network'}}  — transport failure (retryable)
+   *   {success: false, error: {kind: 'http', status: N}}  — other HTTP error
+   *
+   * One CSRF-400 retry reusing the same idempotency key (mirrors launch pattern).
+   */
+  async function decideRunApproval(runId, requestId, decision, idempotencyKey) {
+    // Get initial CSRF token
+    const csrfResult = await refreshCsrf()
+    if (!csrfResult.success) {
+      return {success: false, error: {kind: 'network'}}
+    }
+    const csrfToken = csrfResult.data.csrfToken
+
+    const path = `/operator/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(requestId)}/decision`
+    const body = JSON.stringify({decision})
+    const makeInit = csrf => ({
+      method: 'POST',
+      redirect: 'error',
+      headers: {
+        'content-type': 'application/json',
+        'x-csrf-token': csrf,
+        'idempotency-key': idempotencyKey,
+      },
+      body,
+    })
+
+    let res
+    try {
+      res = await browserFetch(path, makeInit(csrfToken))
+    } catch {
+      return {success: false, error: {kind: 'network'}}
+    }
+
+    // CSRF-400 retry: refresh CSRF once and retry with the same idempotency key
+    if (res.status === 400) {
+      const retrycsrfResult = await refreshCsrf()
+      if (!retrycsrfResult.success) {
+        return {success: false, error: {kind: 'network'}}
+      }
+      try {
+        res = await browserFetch(path, makeInit(retrycsrfResult.data.csrfToken))
+      } catch {
+        return {success: false, error: {kind: 'network'}}
+      }
+    }
+
+    if (res.ok) {
+      let data
+      try {
+        data = await res.json()
+      } catch {
+        return {success: false, error: {kind: 'network'}}
+      }
+      return {success: true, data: {state: data.state}}
+    }
+
+    return {success: false, error: {kind: 'http', status: res.status}}
+  }
+
+  /**
+   * GET open approvals for a run (reconcile on reconnect).
+   * Returns the list of open approval summaries, or an empty array on failure.
+   */
+  async function listRunApprovals(runId) {
+    try {
+      const res = await browserFetch(
+        `/operator/runs/${encodeURIComponent(runId)}/approvals`,
+        {headers: {'content-type': 'application/json'}},
+      )
+      if (!res.ok) return []
+      const data = await res.json()
+      if (!data || !Array.isArray(data.approvals)) return []
+      return data.approvals
+    } catch {
+      return []
+    }
+  }
+
+  return {refreshCsrf, decideRunApproval, listRunApprovals}
+}
+
+// ---------------------------------------------------------------------------
+// Approval prompt interaction state machine (per-prompt, browser-side)
+// ---------------------------------------------------------------------------
+
+/**
+ * Prompt interaction states (per-prompt, browser-side):
+ *   'open'              — controls active: once, always, reject
+ *   'always-confirm'    — always first-click: show confirm + cancel; once/reject suppressed
+ *   'in-flight'         — POST pending: all controls disabled
+ *   'cant-approve'      — denial-class 404: generic no-access copy, controls gone
+ *   'transport-failure' — transport error: "try again" state, controls re-enabled
+ *   'already-settled'   — already_claimed/unavailable: inline settled copy
+ */
+
+/**
+ * Render a single open approval prompt into a container element.
+ * Uses safe DOM (textContent only — never innerHTML or HTML interpolation).
+ * Wires once/reject/always/confirm/cancel handlers.
+ *
+ * @param {object} prompt - An open ApprovalFrameDataOpen object from getOpenApprovals.
+ * @param {string} runId - The run ID (for the decision POST).
+ * @param {object} approvalClient - The browser-direct approval client.
+ * @param {function} _onSettle - Called when the prompt is settled (to trigger DOM cleanup).
+ * @returns {HTMLElement} The rendered prompt element.
+ */
+function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
+  const {requestID, permission, command, filepath} = prompt
+
+  // Determine if this is an edit-class prompt (filepath-based, contents not previewed)
+  const isEditClass = permission === 'edit' || permission === 'external_directory'
+
+  // Safe permission label — never the raw token
+  const permLabel = (() => {
+    switch (permission) {
+      case 'shell': return 'Shell command'
+      case 'edit': return 'File edit'
+      case 'external_directory': return 'External directory access'
+      case 'network': return 'Network access'
+      case 'read': return 'File read'
+      case 'write': return 'File write'
+      default: return 'Tool action'
+    }
+  })()
+
+  // Build the prompt container
+  const el = document.createElement('div')
+  el.className = 'approval-prompt'
+  el.setAttribute('role', 'region')
+  el.setAttribute('aria-label', 'Approval prompt')
+  el.style.cssText = 'border:1px solid #f59e0b;border-radius:4px;padding:10px;margin-bottom:8px;background:#fffbeb;'
+
+  // Permission label
+  const permEl = document.createElement('div')
+  permEl.style.cssText = 'font-size:0.8rem;font-weight:600;color:#92400e;margin-bottom:4px;'
+  permEl.textContent = permLabel
+  el.append(permEl)
+
+  // Gated action — strictly inert textContent, never innerHTML
+  if (command !== undefined || filepath !== undefined) {
+    const actionEl = document.createElement('pre')
+    actionEl.style.cssText = 'font-size:0.8rem;background:#fef3c7;border:1px solid #fcd34d;border-radius:3px;padding:6px 8px;margin:4px 0;white-space:pre-wrap;word-break:break-all;overflow:hidden;'
+    actionEl.setAttribute('aria-label', 'Requested action (read-only)')
+    // textContent only — never innerHTML. This is the injection-safety guarantee.
+    actionEl.textContent = command === undefined ? (filepath ?? '') : command
+    el.append(actionEl)
+  }
+
+  // Edit-class caveat (PD3)
+  if (isEditClass) {
+    const caveEl = document.createElement('p')
+    caveEl.style.cssText = 'font-size:0.75rem;color:#92400e;margin:2px 0 6px;'
+    caveEl.textContent = 'File-level only \u2014 contents not previewed.'
+    el.append(caveEl)
+  }
+
+  // Access caveat (PD1)
+  const accessCaveEl = document.createElement('p')
+  accessCaveEl.style.cssText = 'font-size:0.75rem;color:#6b7280;margin:2px 0 6px;'
+  accessCaveEl.textContent = 'Approval requires write access to this run. Unavailable decisions fail safely.'
+  el.append(accessCaveEl)
+
+  // Status/feedback area (for in-flight, failure, settled states)
+  const statusEl = document.createElement('div')
+  statusEl.setAttribute('role', 'status')
+  statusEl.setAttribute('aria-live', 'polite')
+  statusEl.style.cssText = 'font-size:0.8rem;margin:4px 0;'
+  el.append(statusEl)
+
+  // Controls area
+  const controlsEl = document.createElement('div')
+  controlsEl.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px;'
+  el.append(controlsEl)
+
+  // Always-confirm area (hidden until always first-click)
+  const alwaysConfirmEl = document.createElement('div')
+  alwaysConfirmEl.hidden = true
+  alwaysConfirmEl.style.cssText = 'margin-top:6px;padding:8px;background:#fef3c7;border:1px solid #f59e0b;border-radius:4px;'
+  el.append(alwaysConfirmEl)
+
+  const alwaysConsequenceEl = document.createElement('p')
+  alwaysConsequenceEl.style.cssText = 'font-size:0.8rem;color:#92400e;margin:0 0 8px;'
+  alwaysConsequenceEl.textContent = 'This installs a standing approval that auto-approves matching requests for the rest of this run, as defined by the gateway\u2019s grant rule.'
+  alwaysConfirmEl.append(alwaysConsequenceEl)
+
+  const alwaysConfirmBtnsEl = document.createElement('div')
+  alwaysConfirmBtnsEl.style.cssText = 'display:flex;gap:8px;'
+  alwaysConfirmEl.append(alwaysConfirmBtnsEl)
+
+  // Interaction state machine
+  let promptState = 'open' // 'open' | 'always-confirm' | 'in-flight' | 'cant-approve' | 'transport-failure' | 'already-settled'
+
+  function setInFlight() {
+    promptState = 'in-flight'
+    statusEl.textContent = 'Sending decision\u2026'
+    // Disable all buttons
+    for (const btn of el.querySelectorAll('button')) {
+      btn.disabled = true
+    }
+  }
+
+  function setTransportFailure() {
+    promptState = 'transport-failure'
+    statusEl.textContent = 'Decision didn\u2019t go through \u2014 try again.'
+    // Re-enable controls
+    renderControls()
+  }
+
+  function setCantApprove() {
+    promptState = 'cant-approve'
+    statusEl.textContent = 'You may not have approval access for this run. If you believe this is an error, check your gateway operator session.'
+    // Remove controls
+    controlsEl.textContent = ''
+    alwaysConfirmEl.hidden = true
+  }
+
+  function setAlreadySettled() {
+    promptState = 'already-settled'
+    statusEl.textContent = 'This approval request has already been settled.'
+    controlsEl.textContent = ''
+    alwaysConfirmEl.hidden = true
+  }
+
+  async function handleDecision(decision) {
+    if (promptState === 'in-flight') return
+    setInFlight()
+
+    const idempotencyKey = (
+      globalThis.crypto !== undefined && typeof globalThis.crypto.randomUUID === 'function'
+        ? globalThis.crypto.randomUUID()
+        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+    )
+
+    const result = await approvalClient.decideRunApproval(runId, requestID, decision, idempotencyKey)
+
+    if (result.success) {
+      const {state} = result.data
+      if (state === 'already_claimed' || state === 'unavailable') {
+        setAlreadySettled()
+      } else {
+        // claimed / scope_mismatch / failed_to_settle / other → treat as settled/success
+        // The settle frame will arrive over the stream and remove the prompt via the reducer.
+        // For now, show a brief "decision sent" state; the reducer will clean up.
+        statusEl.textContent = ''
+        // onSettle will be called when the settle frame arrives; no action needed here.
+      }
+    } else {
+      const {error} = result
+      if (error.kind === 'http' && error.status === 404) {
+        setCantApprove()
+      } else {
+        setTransportFailure()
+      }
+    }
+  }
+
+  function renderControls() {
+    controlsEl.textContent = ''
+    alwaysConfirmEl.hidden = true
+    statusEl.textContent = ''
+
+    const onceBtn = document.createElement('button')
+    onceBtn.type = 'button'
+    onceBtn.textContent = 'Once'
+    onceBtn.style.cssText = 'padding:4px 12px;background:#2563eb;color:#fff;border:none;border-radius:4px;font-size:0.8rem;font-weight:600;cursor:pointer;'
+    onceBtn.addEventListener('click', () => {
+      handleDecision('once')
+    })
+    controlsEl.append(onceBtn)
+
+    const alwaysBtn = document.createElement('button')
+    alwaysBtn.type = 'button'
+    alwaysBtn.textContent = 'Always'
+    alwaysBtn.style.cssText = 'padding:4px 12px;background:#d97706;color:#fff;border:none;border-radius:4px;font-size:0.8rem;font-weight:600;cursor:pointer;'
+    alwaysBtn.addEventListener('click', () => {
+      if (promptState !== 'open' && promptState !== 'transport-failure') return
+      promptState = 'always-confirm'
+      // Suppress once/reject during confirm-pending (PD2)
+      controlsEl.textContent = ''
+      alwaysConfirmEl.hidden = false
+
+      // Confirm button
+      const confirmBtn = document.createElement('button')
+      confirmBtn.type = 'button'
+      confirmBtn.textContent = 'Confirm always'
+      confirmBtn.style.cssText = 'padding:4px 12px;background:#d97706;color:#fff;border:none;border-radius:4px;font-size:0.8rem;font-weight:600;cursor:pointer;'
+      confirmBtn.addEventListener('click', () => {
+        handleDecision('always')
+      })
+
+      // Cancel button
+      const cancelBtn = document.createElement('button')
+      cancelBtn.type = 'button'
+      cancelBtn.textContent = 'Cancel'
+      cancelBtn.style.cssText = 'padding:4px 12px;background:#6b7280;color:#fff;border:none;border-radius:4px;font-size:0.8rem;cursor:pointer;'
+      cancelBtn.addEventListener('click', () => {
+        promptState = 'open'
+        renderControls()
+      })
+
+      alwaysConfirmBtnsEl.textContent = ''
+      alwaysConfirmBtnsEl.append(confirmBtn, cancelBtn)
+    })
+    controlsEl.append(alwaysBtn)
+
+    const rejectBtn = document.createElement('button')
+    rejectBtn.type = 'button'
+    rejectBtn.textContent = 'Reject'
+    rejectBtn.style.cssText = 'padding:4px 12px;background:#dc2626;color:#fff;border:none;border-radius:4px;font-size:0.8rem;font-weight:600;cursor:pointer;'
+    rejectBtn.addEventListener('click', () => {
+      handleDecision('reject')
+    })
+    controlsEl.append(rejectBtn)
+  }
+
+  renderControls()
+
+  return el
+}
+
 /**
  * Initialize the operator run stream for a given run ID.
  *
@@ -794,19 +1163,33 @@ function backoffDelay(attempt) {
  * It is never called at module top-level, so Vitest can import this file safely.
  *
  * Options:
- *   runId    — the run ID to subscribe to (used only in the fetch URL)
- *   statusEl — element with [data-role="run-status"] to update
- *   noticeEl — element to show stream connection state notices
+ *   runId       — the run ID to subscribe to (used only in the fetch URL)
+ *   statusEl    — element with [data-role="run-status"] to update
+ *   noticeEl    — element to show stream connection state notices
+ *   approvalsEl — element with [data-role="run-approvals"] to render approval prompts
+ *   badgeEl     — element with [data-role="approval-badge"] for the R12 indicator
+ *   approvalClient — optional pre-built approval client (for testing); if absent,
+ *                    buildApprovalClient() is called when the flag is on
  *
  * Security:
  * - Never logs frame data, run IDs, repo names, or stream URLs.
  * - Renders only phase/status/timestamps via toSafeRunView.
  * - Status labels rendered from STATUS_LABELS map, never raw wire strings.
+ * - Approval prompt content rendered via textContent only — never innerHTML.
  * - All 404s → one not-found state, one retry policy.
- * - Read-only: GET only, no POST/PUT/DELETE.
+ * - Read-only: GET only for stream; approval decisions are operator-forwarded writes.
  */
 export function initOperatorStream(opts) {
-  const {runId, statusEl, noticeEl, outputEl, coalescedEl} = opts
+  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, approvalClient: injectedApprovalClient} = opts
+
+  // Build the approval client lazily (only if approvalsEl is present)
+  const approvalClient = approvalsEl !== undefined && approvalsEl !== null
+    ? (injectedApprovalClient ?? buildApprovalClient())
+    : null
+
+  // Track rendered prompt elements by requestID so we can remove them on settle
+  // without re-rendering the entire list. Map: requestID → DOM element.
+  const renderedPrompts = new Map()
 
   let state = {
     connection: 'connecting',
@@ -885,6 +1268,50 @@ export function initOperatorStream(opts) {
         coalescedEl.hidden = !flagged
       }
     }
+
+    // Approval prompts: render open prompts from getOpenApprovals(runEntry).
+    // Uses safe DOM (textContent only — never innerHTML). Prompts are added/removed
+    // as the reducer state changes; settled prompts are removed silently (PD4).
+    if (approvalsEl !== undefined && approvalsEl !== null && approvalClient !== null) {
+      const runEntry = state.runs[runId]
+      const openPrompts = getOpenApprovals(runEntry)
+      const openIds = new Set(openPrompts.map(p => p.requestID))
+
+      // Remove prompts that are no longer open (settled/dismissed — PD4)
+      for (const [reqId, promptEl] of renderedPrompts) {
+        if (!openIds.has(reqId)) {
+          promptEl.remove()
+          renderedPrompts.delete(reqId)
+        }
+      }
+
+      // Add new prompts that aren't yet rendered
+      for (const prompt of openPrompts) {
+        if (!renderedPrompts.has(prompt.requestID)) {
+          const promptEl = renderApprovalPrompt(prompt, runId, approvalClient, () => {
+            // onSettle: called when the prompt decides to remove itself
+            // (the reducer will handle the actual removal on the next settle frame)
+          })
+          renderedPrompts.set(prompt.requestID, promptEl)
+          approvalsEl.append(promptEl)
+        }
+      }
+
+      // Show/hide the approvals container
+      approvalsEl.hidden = openPrompts.length === 0
+
+      // R12: update the badge indicator (hasOpenApprovals)
+      if (badgeEl !== undefined && badgeEl !== null) {
+        const hasOpen = hasOpenApprovals(runEntry)
+        if (hasOpen) {
+          badgeEl.textContent = String(openPrompts.length)
+          badgeEl.hidden = false
+        } else {
+          badgeEl.textContent = ''
+          badgeEl.hidden = true
+        }
+      }
+    }
   }
 
   function clearFirstFrameTimer() {
@@ -894,14 +1321,67 @@ export function initOperatorStream(opts) {
     }
   }
 
+  // Track whether we've done the reconcile GET for the current connection attempt.
+  // Reset on each connect() call so reconnects trigger a fresh reconcile.
+  let reconcileDone = false
+
   function dispatch(event) {
+    const prevConnection = state.connection
     state = nextStreamState(state, event)
     updateDOM()
+    // Trigger reconcile when the stream first goes live (or re-goes live after reconnect).
+    // This is the one-shot GET on (re)connect (KTD4, R5).
+    if (prevConnection !== 'live' && state.connection === 'live') {
+      reconcileApprovals()
+    }
+  }
+
+  /**
+   * Reconcile open approvals on (re)connect: one-shot GET on stream open.
+   * Feeds returned open prompts into the reducer as synthetic open frames.
+   * The reducer's tombstone logic drops any already-settled prompts (PD5).
+   * Never called on a timer — only once per connect() invocation (KTD4).
+   */
+  async function reconcileApprovals() {
+    if (approvalClient === null) return
+    if (reconcileDone) return
+    reconcileDone = true
+
+    const openApprovals = await approvalClient.listRunApprovals(runId)
+    for (const approval of openApprovals) {
+      // Validate the approval summary before dispatching
+      if (
+        typeof approval.requestID !== 'string' ||
+        approval.requestID.length === 0 ||
+        typeof approval.permission !== 'string' ||
+        approval.permission.length === 0
+      ) {
+        continue
+      }
+      // Dispatch as a synthetic open approval frame — the reducer's tombstone
+      // logic will drop it if already settled (PD5 reconcile-additive-only).
+      const syntheticFrame = {
+        type: 'approval',
+        data: {
+          runId,
+          requestID: approval.requestID,
+          permission: approval.permission,
+          settled: false,
+          ...(typeof approval.command === 'string' ? {command: approval.command} : {}),
+          ...(typeof approval.filepath === 'string' ? {filepath: approval.filepath} : {}),
+        },
+      }
+      dispatch(syntheticFrame)
+    }
   }
 
   function connect() {
     // Don't fetch if close() was called
     if (aborted) return
+
+    // Reset reconcile flag for this connection attempt — each connect/reconnect
+    // triggers a fresh one-shot reconcile GET when the stream goes live.
+    reconcileDone = false
 
     // Clear any previously-pending first-frame timer before arming a new one.
     // Without this, a reconnect would leak the old timer, which could fire later
@@ -1100,7 +1580,10 @@ export function bootstrapOperatorStreams() {
     const statusEl = card.querySelector('[data-role="run-status"]')
     const outputEl = card.querySelector('[data-role="run-output"]')
     const coalescedEl = card.querySelector('[data-role="run-output-coalesced"]')
-    handles.push(initOperatorStream({runId, statusEl, noticeEl, outputEl, coalescedEl}))
+    // Unit 5: discover the approval region and badge elements
+    const approvalsEl = card.querySelector('[data-role="run-approvals"]')
+    const badgeEl = card.querySelector('[data-role="approval-badge"]')
+    handles.push(initOperatorStream({runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl}))
   }
 
   globalThis.addEventListener('pagehide', () => {

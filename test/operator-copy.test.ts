@@ -8,7 +8,19 @@ import type {ApprovalDecisionState, RunStatus} from '../src/gateway/operator-cli
  * All RunStatus and ApprovalDecisionState values must have safe copy.
  */
 import {describe, expect, it} from 'vitest'
-import {approvalStateLabel, runStatusLabel, streamEventLabel} from '../src/gateway/operator-copy.ts'
+import {
+  APPROVAL_ACCESS_CAVEAT_COPY,
+  APPROVAL_ALREADY_SETTLED_COPY,
+  APPROVAL_ALWAYS_CONSEQUENCE_COPY,
+  APPROVAL_CANT_APPROVE_COPY,
+  APPROVAL_EDIT_CLASS_CAVEAT_COPY,
+  APPROVAL_TRANSPORT_FAILURE_COPY,
+  approvalStateLabel,
+  isEditClassPermission,
+  permissionLabel,
+  runStatusLabel,
+  streamEventLabel,
+} from '../src/gateway/operator-copy.ts'
 
 describe('runStatusLabel', () => {
   const allStatuses: RunStatus[] = [
@@ -181,5 +193,144 @@ describe('streamEventLabel', () => {
 
   it("'reset' returns its safe fixed label", () => {
     expect(streamEventLabel('reset')).toBe('Stream reconnected')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// permissionLabel — Unit 5 approval prompt copy
+// ---------------------------------------------------------------------------
+
+describe('permissionLabel', () => {
+  it('returns a non-empty string for known permission values', () => {
+    const known = ['shell', 'edit', 'external_directory', 'network', 'read', 'write']
+    for (const p of known) {
+      const label = permissionLabel(p)
+      expect(label, `permissionLabel('${p}') should be non-empty`).toBeTruthy()
+      expect(typeof label).toBe('string')
+    }
+  })
+
+  it('never returns the raw permission token as the label', () => {
+    const known = ['shell', 'edit', 'external_directory', 'network', 'read', 'write']
+    for (const p of known) {
+      const label = permissionLabel(p)
+      expect(label).not.toBe(p)
+    }
+  })
+
+  it('returns a safe generic label for unknown permission values', () => {
+    const label = permissionLabel('unknown_permission_xyz')
+    expect(label).toBeTruthy()
+    expect(label).not.toContain('unknown_permission_xyz')
+  })
+
+  it('shell → human-readable label', () => {
+    expect(permissionLabel('shell')).toMatch(/shell|command/i)
+  })
+
+  it('edit → human-readable label', () => {
+    expect(permissionLabel('edit')).toMatch(/file|edit/i)
+  })
+
+  it('external_directory → human-readable label (not raw token)', () => {
+    const label = permissionLabel('external_directory')
+    expect(label).not.toBe('external_directory')
+    expect(label).not.toContain('external_directory')
+    expect(label).toMatch(/directory|access|external/i)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isEditClassPermission — Unit 5
+// ---------------------------------------------------------------------------
+
+describe('isEditClassPermission', () => {
+  it('returns true for edit', () => {
+    expect(isEditClassPermission('edit')).toBe(true)
+  })
+
+  it('returns true for external_directory', () => {
+    expect(isEditClassPermission('external_directory')).toBe(true)
+  })
+
+  it('returns false for shell', () => {
+    expect(isEditClassPermission('shell')).toBe(false)
+  })
+
+  it('returns false for network', () => {
+    expect(isEditClassPermission('network')).toBe(false)
+  })
+
+  it('returns false for unknown values', () => {
+    expect(isEditClassPermission('unknown')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// R10 failure-class copy constants — Unit 5
+// ---------------------------------------------------------------------------
+
+describe('R10 failure-class copy constants', () => {
+  it('APPROVAL_CANT_APPROVE_COPY is a non-empty string', () => {
+    expect(typeof APPROVAL_CANT_APPROVE_COPY).toBe('string')
+    expect(APPROVAL_CANT_APPROVE_COPY.length).toBeGreaterThan(0)
+  })
+
+  it('APPROVAL_TRANSPORT_FAILURE_COPY is a non-empty string', () => {
+    expect(typeof APPROVAL_TRANSPORT_FAILURE_COPY).toBe('string')
+    expect(APPROVAL_TRANSPORT_FAILURE_COPY.length).toBeGreaterThan(0)
+  })
+
+  it('APPROVAL_ALREADY_SETTLED_COPY is a non-empty string', () => {
+    expect(typeof APPROVAL_ALREADY_SETTLED_COPY).toBe('string')
+    expect(APPROVAL_ALREADY_SETTLED_COPY.length).toBeGreaterThan(0)
+  })
+
+  it('APPROVAL_ALWAYS_CONSEQUENCE_COPY is a non-empty string', () => {
+    expect(typeof APPROVAL_ALWAYS_CONSEQUENCE_COPY).toBe('string')
+    expect(APPROVAL_ALWAYS_CONSEQUENCE_COPY.length).toBeGreaterThan(0)
+  })
+
+  it('APPROVAL_ACCESS_CAVEAT_COPY is a non-empty string', () => {
+    expect(typeof APPROVAL_ACCESS_CAVEAT_COPY).toBe('string')
+    expect(APPROVAL_ACCESS_CAVEAT_COPY.length).toBeGreaterThan(0)
+  })
+
+  it('APPROVAL_EDIT_CLASS_CAVEAT_COPY is a non-empty string', () => {
+    expect(typeof APPROVAL_EDIT_CLASS_CAVEAT_COPY).toBe('string')
+    expect(APPROVAL_EDIT_CLASS_CAVEAT_COPY.length).toBeGreaterThan(0)
+  })
+
+  it('CRITICAL: denial copy and transport-failure copy are distinct (R10 — must not conflate)', () => {
+    expect(APPROVAL_CANT_APPROVE_COPY).not.toBe(APPROVAL_TRANSPORT_FAILURE_COPY)
+    // The transport copy must not contain "access" language that implies denial
+    expect(APPROVAL_TRANSPORT_FAILURE_COPY).not.toMatch(/may not have.*access|approval access/i)
+    // The denial copy must not contain "try again" language that implies retryability
+    expect(APPROVAL_CANT_APPROVE_COPY).not.toMatch(/try again/i)
+  })
+
+  it('CRITICAL: no raw backend token leakage in any copy constant', () => {
+    const allCopy = [
+      APPROVAL_CANT_APPROVE_COPY,
+      APPROVAL_TRANSPORT_FAILURE_COPY,
+      APPROVAL_ALREADY_SETTLED_COPY,
+      APPROVAL_ALWAYS_CONSEQUENCE_COPY,
+      APPROVAL_ACCESS_CAVEAT_COPY,
+      APPROVAL_EDIT_CLASS_CAVEAT_COPY,
+    ]
+    for (const copy of allCopy) {
+      expect(copy).not.toContain('failed_to_settle')
+      expect(copy).not.toContain('already_claimed')
+      expect(copy).not.toContain('scope_mismatch')
+      expect(copy).not.toContain('waiting_for_approval')
+    }
+  })
+
+  it('APPROVAL_ALWAYS_CONSEQUENCE_COPY uses conservative wording (does not assert specific match key)', () => {
+    // Must not claim a specific match dimension (e.g. "same command", "same tool")
+    // until the exact grant scope is confirmed against the gateway
+    expect(APPROVAL_ALWAYS_CONSEQUENCE_COPY).toMatch(/standing approval|auto-approves|grant rule/i)
+    // Must not assert a specific match key
+    expect(APPROVAL_ALWAYS_CONSEQUENCE_COPY).not.toMatch(/same command|same tool|same file/i)
   })
 })

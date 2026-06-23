@@ -212,12 +212,30 @@ export interface StreamHandle {
   close: () => void
 }
 
+/** Browser-direct approval client interface (for testing injection). */
+export interface ApprovalClient {
+  readonly refreshCsrf: () => Promise<{success: boolean; data?: {csrfToken: string}; error?: {kind: string; status?: number}}>
+  readonly decideRunApproval: (
+    runId: string,
+    requestId: string,
+    decision: string,
+    idempotencyKey: string,
+  ) => Promise<{success: boolean; data?: {state: string}; error?: {kind: string; status?: number}}>
+  readonly listRunApprovals: (runId: string) => Promise<readonly {requestID: string; permission: string; command?: string; filepath?: string}[]>
+}
+
 export interface InitOptions {
   readonly runId: string
   readonly statusEl: Element | null
   readonly noticeEl: Element | null
   readonly outputEl?: (HTMLElement & {hidden: boolean}) | null
   readonly coalescedEl?: (HTMLElement & {hidden: boolean}) | null
+  /** Approval prompts container element (data-role="run-approvals"). */
+  readonly approvalsEl?: (HTMLElement & {hidden: boolean}) | null
+  /** R12 badge element (data-role="approval-badge"). */
+  readonly badgeEl?: (HTMLElement & {hidden: boolean}) | null
+  /** Injectable approval client for testing. If absent, buildApprovalClient() is used. */
+  readonly approvalClient?: ApprovalClient | null
 }
 
 export declare function initOperatorStream(opts: InitOptions): StreamHandle

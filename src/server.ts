@@ -80,6 +80,16 @@ let rateLimitCallCount = 0
 const EVICT_INTERVAL = 500 // sweep every 500 calls
 const EVICT_STALE_AGE = 2 * RATE_LIMIT_WINDOW_MS
 
+/**
+ * Reset the rate limiter state. For use in tests only — clears all tracked
+ * IP windows so tests that share the module-level map don't bleed into each other.
+ * @internal
+ */
+export function resetRateLimitForTesting(): void {
+  rateLimitMap.clear()
+  rateLimitCallCount = 0
+}
+
 // In gateway operator-session mode, an unauthenticated/invalid request must recover
 // through the GATEWAY operator login (which mints the __Host-session the gateway
 // authority requires), never the dashboard's own Arctic flow (which mints a

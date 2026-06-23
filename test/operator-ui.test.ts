@@ -19,11 +19,19 @@ import type {Result} from '../src/result.ts'
  */
 import {Buffer} from 'node:buffer'
 
-import {describe, expect, it} from 'vitest'
+import {beforeEach, describe, expect, it} from 'vitest'
 import {ok} from '../src/result.ts'
-import {buildDashboardApp} from '../src/server.ts'
+import {buildDashboardApp, resetRateLimitForTesting} from '../src/server.ts'
 import {SessionManager} from '../src/session.ts'
 import {createMockOperatorClient} from './operator-mock-client.ts'
+
+// Reset the module-level rate limiter before each test so tests don't bleed
+// into each other. The rate limiter is shared module state (60 req/min per IP);
+// without this reset, a large test suite exhausts the window and later tests
+// get 429 responses that have nothing to do with the code under test.
+beforeEach(() => {
+  resetRateLimitForTesting()
+})
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -212,13 +220,10 @@ describe('operator UI — flag ON + authenticated', () => {
     // waiting_for_approval must NOT appear as raw token in primary labels
     // (it may appear in data attributes or aria, but not as visible text)
 
-    // POSITIVE: pending fixture is rendered — assert safe label appears
-    // approvalStateLabel('pending') === 'Awaiting your decision'
-    expect(body).toContain('Awaiting your decision')
-    // POSITIVE: scope_mismatch fixture is rendered — assert safe label appears
-    // approvalStateLabel('scope_mismatch') === "Approval scope didn't match — decision not applied"
-    // The apostrophe is HTML-entity-encoded in SSR output (&#39;) — use regex to match both forms
-    expect(body).toMatch(/Approval scope didn(?:'|&#39;)t match — decision not applied/)
+    // Unit 5: approval prompts are rendered by the browser client (not SSR).
+    // The SSR ships the approval region empty and hidden; the browser fills it
+    // from getOpenApprovals(runEntry). The old fixture approval section is gone.
+    // The no-raw-token invariants above are the load-bearing assertions here.
   })
 
   it('CRITICAL: failed_to_settle raw token never appears in rendered HTML', async () => {
@@ -346,11 +351,12 @@ describe('operator UI — flag ON + authenticated', () => {
     expect(res.status).toBe(200)
     const body = await res.text()
 
-    // Decision states should be shown with safe copy
-    // claimed state
-    expect(body).toMatch(/claim|process|review|in progress/i)
-    // unavailable state
-    expect(body).toMatch(/unavailable/i)
+    // Unit 5: approval decision states are rendered by the browser client (not SSR).
+    // The SSR ships the approval region empty and hidden; the browser fills it
+    // from getOpenApprovals(runEntry) and maps decision outcomes to interaction states.
+    // The no-raw-token invariants in 'renders approval states with safe copy' cover the
+    // critical safety property. The approval region hook is present (tested separately).
+    expect(body).toContain('data-role="run-approvals"')
   })
 
   it('renders Gateway unauthenticated panel', async () => {
@@ -705,6 +711,118 @@ describe('operator UI — launch surface (flag ON + authenticated)', () => {
     expect(body).not.toContain('operator-launch.js')
     expect(body).not.toContain('launch-form')
     expect(body).not.toContain('repo-picker-container')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Unit 5: Inline approval prompt UI — SSR hooks and no-dashboard-proxy invariant
+// ---------------------------------------------------------------------------
+
+describe('operator UI — Unit 5: approval region SSR hooks (flag ON)', () => {
+  it('run cards contain a data-role="run-approvals" region (flag ON)', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // Each run card must have an approval region hook for the browser client to fill
+    expect(body).toContain('data-role="run-approvals"')
+  })
+
+  it('approval region starts hidden (browser fills it on stream data)', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // The approval region must ship hidden — the browser reveals it when prompts arrive
+    expect(body).toMatch(/data-role="run-approvals"[^>]*hidden/)
+  })
+
+  it('approval region does NOT contain fixture command/filepath text (inert SSR)', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // The SSR must not render any fixture command or filepath text in the approval region
+    // (the browser fills this via safe DOM, not SSR interpolation)
+    expect(body).not.toContain('echo hello')
+    expect(body).not.toContain('/workspace/')
+  })
+
+  it('no "approval unavailable" fixture copy in the rendered page (misleading copy removed)', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // The old fixture-only "approval unavailable" copy must be gone
+    expect(body).not.toContain('Approval actions are disabled: the operator UI is not yet enabled')
+    expect(body).not.toContain('Live approval actions will be available once the operator UI is enabled')
+  })
+
+  it('no raw fixture approval requestID in rendered HTML', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // The fixture requestID must not appear in the rendered HTML
+    // (approval prompts are rendered by the browser client, not SSR)
+    expect(body).not.toContain('req-fixture-001')
+  })
+
+  it('flag OFF → no approval region in rendered HTML', async () => {
+    const app = await buildTestApp(false)
+    const res = await authedGet(app, '/operator')
+    expect([302, 303, 401, 404]).toContain(res.status)
+    const body = await res.text()
+    expect(body).not.toContain('run-approvals')
+  })
+})
+
+describe('operator UI — Unit 5: no-dashboard-proxy 404 invariant for approval routes', () => {
+  // The dashboard app deliberately does NOT serve the operator approval endpoints.
+  // The public reverse proxy routes those same-origin paths to the gateway.
+  // These assertions pin that invariant for the 1.4.0 per-run approval routes.
+  it('GET /operator/runs/:id/approvals returns 404 from buildDashboardApp (not proxied)', async () => {
+    const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
+    const app = await buildTestApp({
+      operatorUiEnabled: true,
+      gatewayOperatorSessionEnabled: true,
+      operatorClient,
+    })
+    const res = await app.request('/operator/runs/run-001/approvals', {
+      headers: {cookie: 'gateway_session=test-gateway-cookie'},
+    })
+    expect(res.status).toBe(404)
+  })
+
+  it('POST /operator/runs/:id/approvals/:reqId/decision returns 404 from buildDashboardApp (not proxied)', async () => {
+    const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
+    const app = await buildTestApp({
+      operatorUiEnabled: true,
+      gatewayOperatorSessionEnabled: true,
+      operatorClient,
+    })
+    const res = await app.request('/operator/runs/run-001/approvals/req-001/decision', {
+      method: 'POST',
+      headers: {
+        cookie: 'gateway_session=test-gateway-cookie',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({decision: 'once'}),
+    })
+    expect(res.status).toBe(404)
+  })
+
+  it('SSR render does not call listRunApprovals or decideRunApproval', async () => {
+    // The throwing fake surfaces any accidental SSR call to these methods.
+    const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
+    const app = await buildTestApp({
+      operatorUiEnabled: true,
+      gatewayOperatorSessionEnabled: true,
+      operatorClient,
+    })
+    // If listRunApprovals/decideRunApproval were called, they would throw and the request would fail.
+    const res = await gatewayAuthedGet(app, '/operator')
+    expect(res.status).toBe(200)
   })
 })
 
