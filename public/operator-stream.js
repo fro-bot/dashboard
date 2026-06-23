@@ -29,7 +29,7 @@
 // ---------------------------------------------------------------------------
 
 /** Contract version this client expects on the ready frame. */
-export const PINNED_CONTRACT_VERSION = '1.3.0'
+export const PINNED_CONTRACT_VERSION = '1.4.0'
 
 /** Base delay in milliseconds for exponential backoff. */
 export const RETRY_BASE_MS = 1000
@@ -50,6 +50,20 @@ export const MAX_SSE_BUFFER_BYTES = 1_000_000
  * truncated and a fixed truncation hint is shown — never an echoed count.
  */
 export const MAX_OUTPUT_TEXT_CHARS = 256_000
+
+/**
+ * Hard cap on the per-run approval tombstone map. A hostile stream could send many
+ * distinct settle frames; this bounds the map size. When the cap is reached, the
+ * oldest entry (FIFO) is evicted before adding the new one.
+ */
+export const MAX_APPROVAL_TOMBSTONES = 1000
+
+/**
+ * Hard cap on the per-run open-approvals map. A hostile stream could send many
+ * distinct open frames; this bounds the map size. When the cap is reached, new open
+ * frames for unseen requestIDs are ignored (existing prompts are never evicted).
+ */
+export const MAX_OPEN_APPROVALS = 100
 
 /**
  * Bounded timeout in milliseconds for receiving the first SSE frame after opening
@@ -270,6 +284,51 @@ export function parseSseFrame(record) {
     return {success: true, frame: {type: 'output', data}}
   }
 
+  if (eventName === 'approval') {
+    // Validate runId and requestID — required on both variants; must be non-empty strings
+    if (
+      typeof parsed.runId !== 'string' ||
+      parsed.runId.length === 0 ||
+      typeof parsed.requestID !== 'string' ||
+      parsed.requestID.length === 0
+    ) {
+      return {success: false, error: 'approval frame missing required fields'}
+    }
+    // settled must be a boolean — reject anything else (string, number, null, etc.)
+    if (typeof parsed.settled !== 'boolean') {
+      return {success: false, error: 'approval frame has invalid settled discriminator'}
+    }
+    if (parsed.settled === false) {
+      // Open variant: permission is required and must be non-empty; command and filepath are optional strings
+      if (typeof parsed.permission !== 'string' || parsed.permission.length === 0) {
+        return {success: false, error: 'approval frame missing required fields'}
+      }
+      if (parsed.command !== undefined && typeof parsed.command !== 'string') {
+        return {success: false, error: 'approval frame missing required fields'}
+      }
+      if (parsed.filepath !== undefined && typeof parsed.filepath !== 'string') {
+        return {success: false, error: 'approval frame missing required fields'}
+      }
+      const data = {
+        runId: parsed.runId,
+        requestID: parsed.requestID,
+        permission: parsed.permission,
+        settled: false,
+        ...(parsed.command === undefined ? {} : {command: parsed.command}),
+        ...(parsed.filepath === undefined ? {} : {filepath: parsed.filepath}),
+      }
+      return {success: true, frame: {type: 'approval', data}}
+    } else {
+      // Settle variant: only runId/requestID/settled required
+      const data = {
+        runId: parsed.runId,
+        requestID: parsed.requestID,
+        settled: true,
+      }
+      return {success: true, frame: {type: 'approval', data}}
+    }
+  }
+
   // Unknown event name — fixed error string, never echoes the name
   return {success: false, error: 'sse record has unrecognized event name'}
 }
@@ -335,8 +394,29 @@ export function nextStreamState(current, event) {
       // outputFinal/outputCoalesced) survive a status update — a terminal status frame
       // arrives AFTER the final output frame, so a bare replacement would drop it.
       const prevStatusEntry = current.runs[runId]
+      // On terminal status, clear all open approval prompts for this run.
+      // Terminal is absorbing for approvals: once terminal, no open prompt can reappear.
+      // Tombstones are preserved so that any late open frames are still ignored.
+      const approvalFields = isTerminal
+        ? {
+            approvalOpenPrompts: Object.create(null),
+            approvalTombstones: prevStatusEntry?.approvalTombstones ?? Object.create(null),
+          }
+        : {
+            approvalOpenPrompts: prevStatusEntry?.approvalOpenPrompts,
+            approvalTombstones: prevStatusEntry?.approvalTombstones,
+          }
       const updatedRuns = Object.assign(Object.create(null), current.runs, {
-        [runId]: {...prevStatusEntry, runId, status, phase, startedAt, stale, terminal: isTerminal},
+        [runId]: {
+          ...prevStatusEntry,
+          ...approvalFields,
+          runId,
+          status,
+          phase,
+          startedAt,
+          stale,
+          terminal: isTerminal,
+        },
       })
       // If all observed runs are terminal, close the stream
       const allTerminal =
@@ -347,6 +427,83 @@ export function nextStreamState(current, event) {
         runs: updatedRuns,
         connection: allTerminal ? 'closed' : current.connection,
         shouldReconnect: allTerminal ? false : current.shouldReconnect,
+      }
+    }
+
+    case 'approval': {
+      // Approval frames before ready (connection !== 'live') are ignored — mirrors output/status gating.
+      if (current.connection !== 'live') {
+        return current
+      }
+      const {runId, requestID, settled} = event.data
+      const prevEntry = current.runs[runId]
+
+      // If the run is already terminal, all approval frames are ignored (terminal is absorbing).
+      if (prevEntry !== undefined && prevEntry.terminal) {
+        return current
+      }
+
+      // Build the base entry (may be a new run entry if we've never seen a status for this run).
+      const base = prevEntry ?? {
+        runId,
+        status: '',
+        phase: '',
+        startedAt: '',
+        stale: false,
+        terminal: false,
+      }
+
+      // Null-proto maps for open prompts and tombstones — guard against __proto__ key pollution.
+      const prevOpenPrompts = base.approvalOpenPrompts ?? Object.create(null)
+      const prevTombstones = base.approvalTombstones ?? Object.create(null)
+
+      if (settled) {
+        // Settle frame: remove from open-prompts map AND add to tombstone set.
+        // A settle for a requestID never seen open → still tombstone it (no spurious UI).
+        const nextOpenPrompts = Object.assign(Object.create(null), prevOpenPrompts)
+        delete nextOpenPrompts[requestID]
+        // Cap the tombstone map: if at cap and requestID is new, evict the oldest entry (FIFO).
+        let tombstoneBase = prevTombstones
+        if (!(requestID in prevTombstones) && Object.keys(prevTombstones).length >= MAX_APPROVAL_TOMBSTONES) {
+          const oldestKey = Object.keys(prevTombstones)[0]
+          tombstoneBase = Object.assign(Object.create(null), prevTombstones)
+          delete tombstoneBase[oldestKey]
+        }
+        const nextTombstones = Object.assign(Object.create(null), tombstoneBase, {[requestID]: true})
+        const updatedEntry = {
+          ...base,
+          approvalOpenPrompts: nextOpenPrompts,
+          approvalTombstones: nextTombstones,
+        }
+        const updatedRuns = Object.assign(Object.create(null), current.runs, {[runId]: updatedEntry})
+        return {...current, runs: updatedRuns}
+      } else {
+        // Open frame: if requestID is already tombstoned → IGNORE (open-after-settle / id-reuse guard).
+        if (prevTombstones[requestID] === true) {
+          return current
+        }
+        // Cap the open-prompts map: if at cap and requestID is new, ignore the overflow open.
+        // (Never evict an existing open prompt — losing a real pending prompt is worse than dropping overflow.)
+        if (!(requestID in prevOpenPrompts) && Object.keys(prevOpenPrompts).length >= MAX_OPEN_APPROVALS) {
+          return current
+        }
+        // Add/replace in the open-prompts map (duplicate open for same id is idempotent).
+        const promptData = {
+          runId: event.data.runId,
+          requestID: event.data.requestID,
+          permission: event.data.permission,
+          settled: false,
+          ...(event.data.command === undefined ? {} : {command: event.data.command}),
+          ...(event.data.filepath === undefined ? {} : {filepath: event.data.filepath}),
+        }
+        const nextOpenPrompts = Object.assign(Object.create(null), prevOpenPrompts, {[requestID]: promptData})
+        const updatedEntry = {
+          ...base,
+          approvalOpenPrompts: nextOpenPrompts,
+          approvalTombstones: prevTombstones,
+        }
+        const updatedRuns = Object.assign(Object.create(null), current.runs, {[runId]: updatedEntry})
+        return {...current, runs: updatedRuns}
       }
     }
 
@@ -573,6 +730,44 @@ export function toSafeRunView(runStatus) {
     startedAt: runStatus.startedAt,
     stale: runStatus.stale,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Approval derivation helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true iff the run entry has at least one open (non-tombstoned) approval prompt.
+ *
+ * This is the canonical visibility signal for the `waiting_for_approval` overlay and
+ * the in-page open-prompt indicator (R11). Both must derive from this one state so
+ * they cannot desync.
+ *
+ * @param {object} runEntry - A RunEntry from the stream state's runs map.
+ * @returns {boolean} True iff the run has at least one open approval prompt.
+ */
+export function hasOpenApprovals(runEntry) {
+  if (runEntry === undefined || runEntry === null) return false
+  const openPrompts = runEntry.approvalOpenPrompts
+  if (openPrompts === undefined || openPrompts === null) return false
+  return Object.keys(openPrompts).length > 0
+}
+
+/**
+ * Returns the list of open (non-tombstoned) approval prompts for a run entry,
+ * in insertion order. Each element is an open ApprovalFrameData object with
+ * `{runId, requestID, permission, settled:false, command?, filepath?}`.
+ *
+ * Returns an empty array when there are no open prompts.
+ *
+ * @param {object} runEntry - A RunEntry from the stream state's runs map.
+ * @returns {Array} The list of open approval prompt objects, or an empty array.
+ */
+export function getOpenApprovals(runEntry) {
+  if (runEntry === undefined || runEntry === null) return []
+  const openPrompts = runEntry.approvalOpenPrompts
+  if (openPrompts === undefined || openPrompts === null) return []
+  return Object.values(openPrompts)
 }
 
 // ---------------------------------------------------------------------------

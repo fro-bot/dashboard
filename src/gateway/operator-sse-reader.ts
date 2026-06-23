@@ -22,6 +22,7 @@
  */
 
 import type {Logger} from '../logger.ts'
+import type {OperatorApprovalFrame} from './operator-contract/approval-frame.ts'
 import type {ResetReason, RunStreamFrame} from './operator-contract/sse-frames.ts'
 import {OPERATOR_CONTRACT_VERSION} from './operator-contract/version.ts'
 
@@ -241,6 +242,51 @@ function parseSseRecord(record: string): SseParseResult | null {
             droppedCount: candidate.droppedCount,
           }
     return {success: true, frame: {type: 'output', data}}
+  }
+
+  if (eventName === 'approval') {
+    // Validate runId and requestID — required on both variants; must be non-empty strings
+    if (
+      typeof candidate.runId !== 'string' ||
+      candidate.runId.length === 0 ||
+      typeof candidate.requestID !== 'string' ||
+      candidate.requestID.length === 0
+    ) {
+      return {success: false, error: new Error('approval frame missing required fields')}
+    }
+    // settled must be a boolean — reject anything else (string, number, null, etc.)
+    if (typeof candidate.settled !== 'boolean') {
+      return {success: false, error: new Error('approval frame has invalid settled discriminator')}
+    }
+    if (candidate.settled === false) {
+      // Open variant: permission is required and must be non-empty; command and filepath are optional strings
+      if (typeof candidate.permission !== 'string' || candidate.permission.length === 0) {
+        return {success: false, error: new Error('approval frame missing required fields')}
+      }
+      if (candidate.command !== undefined && typeof candidate.command !== 'string') {
+        return {success: false, error: new Error('approval frame missing required fields')}
+      }
+      if (candidate.filepath !== undefined && typeof candidate.filepath !== 'string') {
+        return {success: false, error: new Error('approval frame missing required fields')}
+      }
+      const data: OperatorApprovalFrame = {
+        runId: candidate.runId,
+        requestID: candidate.requestID,
+        permission: candidate.permission,
+        settled: false,
+        ...(candidate.command === undefined ? {} : {command: candidate.command}),
+        ...(candidate.filepath === undefined ? {} : {filepath: candidate.filepath}),
+      }
+      return {success: true, frame: {type: 'approval', data}}
+    } else {
+      // Settle variant: only runId/requestID/settled required
+      const data: OperatorApprovalFrame = {
+        runId: candidate.runId,
+        requestID: candidate.requestID,
+        settled: true,
+      }
+      return {success: true, frame: {type: 'approval', data}}
+    }
   }
 
   // Unknown event name — fixed error string, never echoes the name

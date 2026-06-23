@@ -76,7 +76,7 @@ export function streamEventLabel(type: RunStreamEvent['type']): string {
       return 'Stream reconnected'
     case 'output':
       return 'Run output received'
-    default:
-      return 'Event received'
+    case 'approval':
+      return 'Approval requested'
   }
 }
