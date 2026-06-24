@@ -10,6 +10,7 @@ on:
       - pnpm-lock.yaml
       - 'tsconfig*.json'
       - 'src/**'
+      - 'web/**'
       - .github/workflows/release.yaml
       - scripts/should-release.ts
       - scripts/compute-release-tag.ts
@@ -190,7 +191,26 @@ jobs:
             docker logs dashboard-smoke || true
             exit 1
           fi
-          echo "smoke OK"
+          # Verify the SPA web/dist/ was built into the image and is served.
+          # /manifest.webmanifest is a public (pre-auth) path — no cookie needed.
+          spa=0
+          if curl -fsS http://127.0.0.1:8080/manifest.webmanifest >/dev/null 2>&1; then spa=1; fi
+          if [ "$spa" != 1 ]; then
+            echo "SMOKE FAILED: SPA manifest not served (web/dist/ missing from image?)"
+            docker logs dashboard-smoke || true
+            exit 1
+          fi
+          # Verify CSP header is present and contains the pinned script-src 'self' directive.
+          csp_ok=0
+          CSP_HEADER=$(curl -fsS -I http://127.0.0.1:8080/api/healthz 2>/dev/null | tr -d '\r' | grep -i '^content-security-policy:' || true)
+          if echo "$CSP_HEADER" | grep -q "script-src 'self'"; then csp_ok=1; fi
+          if [ "$csp_ok" != 1 ]; then
+            echo "SMOKE FAILED: CSP header missing or script-src 'self' not present"
+            echo "CSP header: $CSP_HEADER"
+            docker logs dashboard-smoke || true
+            exit 1
+          fi
+          echo "smoke OK (healthz=$ok sibling=$sib spa_manifest=$spa csp=$csp_ok)"
 
       - name: 🧹 Cleanup smoke containers
         if: always()

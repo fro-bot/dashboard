@@ -311,7 +311,21 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // ── Security headers + CSP (applied to all responses) ──────────────────────
   // Placed first so every response — including error responses — carries the
   // security headers. The tight CSP (script-src 'self', no unsafe-inline)
-  // requires all styles to be external files (see public/operator.css).
+  // requires all scripts to be external files, satisfying the SPA build output
+  // (Vite emits <script type="module" src="..."> with hashed filenames — no inline).
+  //
+  // Pinned directives for the SPA PWA shell:
+  //   script-src 'self'     — no inline scripts, no eval; Vite hashed chunks satisfy this
+  //   worker-src 'self'     — service worker registration from same origin
+  //   manifest-src 'self'   — web app manifest fetch from same origin
+  //   connect-src 'self'    — fetch/XHR/SSE to same origin only
+  //   img-src 'self' data:  — data: URIs for inline SVG/icon use cases
+  //   font-src 'self'       — self-hosted fonts only
+  //   base-uri 'self'       — prevent base tag injection
+  //   object-src 'none'     — no plugins
+  //   style-src 'self' 'unsafe-inline' — SSR pages use inline style attributes
+  //     throughout; inline styles are low risk vs inline scripts (the XSS vector).
+  //     Do NOT add 'unsafe-eval' — no eval in production.
   app.use(
     '*',
     secureHeaders({
@@ -322,8 +336,11 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
         // permits inline styles. Scripts stay strict ('self', no inline) since
         // inline script is the meaningful XSS vector here.
         styleSrc: ["'self'", "'unsafe-inline'"],
+        workerSrc: ["'self'"],
+        manifestSrc: ["'self'"],
         connectSrc: ["'self'"],
-        imgSrc: ["'self'"],
+        imgSrc: ["'self'", 'data:'],
+        fontSrc: ["'self'"],
         objectSrc: ["'none'"],
         baseUri: ["'self'"],
         formAction: ["'self'"],
@@ -381,6 +398,14 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     path === '/auth/login' ||
     path === '/auth/callback' ||
     path === '/auth/logout' ||
+    // SPA static assets — reachable pre-auth so the PWA shell loads before the
+    // auth redirect. The JS/CSS/manifest/icons carry no sensitive data.
+    // /assets/* — hashed JS/CSS chunks from web/dist/assets/
+    // /manifest.webmanifest — PWA manifest
+    // /icon-*.svg — PWA icons
+    path.startsWith('/assets/') ||
+    path === '/manifest.webmanifest' ||
+    path.startsWith('/icon-') ||
     (operatorUiEnabled && path.startsWith('/static/'))
 
   app.use('*', async (c: Context, next) => {
@@ -584,6 +609,27 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     // root is relative to WORKDIR (/app) in the container, matching Dockerfile.
     app.use('/static/*', serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}))
   }
+
+  // ── SPA static asset serving ─────────────────────────────────────────────
+  // Serves the prebuilt SPA (web/dist/) under specific public paths.
+  // These paths are added to isPublicPath above so the PWA shell loads before
+  // the auth redirect — the JS/CSS/manifest/icons carry no sensitive data.
+  //
+  // /assets/* — hashed JS/CSS chunks (Vite content-addressed, safe to cache)
+  // /manifest.webmanifest — PWA manifest
+  // /icon-*.svg — PWA icons
+  //
+  // root is relative to WORKDIR (/app) in the container, matching Dockerfile.
+  // The builder stage copies web/dist/ to /app/web/dist/ in the runtime image.
+  //
+  // NOTE: The SPA index.html is NOT served at / here — the existing SSR route
+  // at / remains active until Unit 5 performs the cutover. Unit 5 will replace
+  // buildDashboardRouter with a handler that serves web/dist/index.html at /
+  // and delegates all SPA client routes to it (with Caddy fallback for deep links).
+  app.use('/assets/*', serveStatic({root: './web/dist'}))
+  app.use('/manifest.webmanifest', serveStatic({root: './web/dist'}))
+  // PWA icons: icon-192.svg, icon-512.svg (and any future icon-*.svg)
+  app.use('/icon-*', serveStatic({root: './web/dist'}))
 
   return app
 }

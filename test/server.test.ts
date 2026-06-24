@@ -1,3 +1,6 @@
+import {existsSync, readdirSync} from 'node:fs'
+import {join} from 'node:path'
+import process from 'node:process'
 import {beforeAll, describe, expect, it, vi} from 'vitest'
 import {buildDashboardApp, buildSnapshotProvider, readServerBindConfig} from '../src/server.ts'
 
@@ -317,6 +320,178 @@ describe('buildSnapshotProvider — auth topology regression tests', () => {
 
     expect(fakeMetadataReader).toHaveBeenCalled()
     expect(provider.getSnapshot().refreshedAt).not.toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Unit 4: SPA static asset serving, CSP pinned directives, auth gating
+// ---------------------------------------------------------------------------
+
+describe('SPA static assets — served pre-auth (Unit 4)', () => {
+  let app: Awaited<ReturnType<typeof buildDashboardApp>>
+
+  beforeAll(async () => {
+    app = await buildDashboardApp()
+  })
+
+  it('web/dist/ exists and contains index.html (build artifact present)', () => {
+    // Verify the build artifact is present in the repo for local dev/test.
+    // In CI the builder stage produces it; locally run `pnpm build:web` first.
+    const distPath = join(process.cwd(), 'web', 'dist')
+    expect(existsSync(distPath), 'web/dist/ must exist — run pnpm build:web').toBe(true)
+    expect(existsSync(join(distPath, 'index.html')), 'web/dist/index.html must exist').toBe(true)
+  })
+
+  it('GET /assets/*.js returns 200 without auth (pre-auth public path)', async () => {
+    // Find the actual hashed JS asset filename from web/dist/assets/
+    const assetsDir = join(process.cwd(), 'web', 'dist', 'assets')
+    if (!existsSync(assetsDir)) {
+      // Skip gracefully if dist not built — CI always builds first
+      return
+    }
+    const jsFiles = readdirSync(assetsDir).filter(f => f.endsWith('.js'))
+    expect(jsFiles.length, 'web/dist/assets/ must contain at least one .js file').toBeGreaterThan(0)
+    const jsFile = jsFiles.at(0) ?? ''
+    const res = await app.request(`/assets/${jsFile}`)
+    expect(res.status).toBe(200)
+  })
+
+  it('GET /assets/*.css returns 200 without auth (pre-auth public path)', async () => {
+    const assetsDir = join(process.cwd(), 'web', 'dist', 'assets')
+    if (!existsSync(assetsDir)) return
+    const cssFiles = readdirSync(assetsDir).filter(f => f.endsWith('.css'))
+    expect(cssFiles.length, 'web/dist/assets/ must contain at least one .css file').toBeGreaterThan(0)
+    const cssFile = cssFiles.at(0) ?? ''
+    const res = await app.request(`/assets/${cssFile}`)
+    expect(res.status).toBe(200)
+  })
+
+  it('GET /manifest.webmanifest returns 200 without auth (pre-auth public path)', async () => {
+    const manifestPath = join(process.cwd(), 'web', 'dist', 'manifest.webmanifest')
+    if (!existsSync(manifestPath)) return
+    const res = await app.request('/manifest.webmanifest')
+    expect(res.status).toBe(200)
+  })
+
+  it('GET /icon-192.svg returns 200 without auth (pre-auth public path)', async () => {
+    const iconPath = join(process.cwd(), 'web', 'dist', 'icon-192.svg')
+    if (!existsSync(iconPath)) return
+    const res = await app.request('/icon-192.svg')
+    expect(res.status).toBe(200)
+  })
+})
+
+describe('CSP pinned directives (Unit 4)', () => {
+  let app: Awaited<ReturnType<typeof buildDashboardApp>>
+
+  beforeAll(async () => {
+    app = await buildDashboardApp()
+  })
+
+  it('CSP header is present on all responses', async () => {
+    const res = await app.request('/api/healthz')
+    expect(res.headers.get('content-security-policy')).not.toBeNull()
+  })
+
+  it("CSP contains script-src 'self' (no inline scripts)", async () => {
+    const res = await app.request('/api/healthz')
+    const csp = res.headers.get('content-security-policy') ?? ''
+    expect(csp).toContain("script-src 'self'")
+  })
+
+  it("CSP does NOT contain 'unsafe-eval' (no eval in production)", async () => {
+    const res = await app.request('/api/healthz')
+    const csp = res.headers.get('content-security-policy') ?? ''
+    expect(csp).not.toContain("'unsafe-eval'")
+  })
+
+  it("CSP contains object-src 'none'", async () => {
+    const res = await app.request('/api/healthz')
+    const csp = res.headers.get('content-security-policy') ?? ''
+    expect(csp).toContain("object-src 'none'")
+  })
+
+  it("CSP contains worker-src 'self'", async () => {
+    const res = await app.request('/api/healthz')
+    const csp = res.headers.get('content-security-policy') ?? ''
+    expect(csp).toContain("worker-src 'self'")
+  })
+
+  it("CSP contains manifest-src 'self'", async () => {
+    const res = await app.request('/api/healthz')
+    const csp = res.headers.get('content-security-policy') ?? ''
+    expect(csp).toContain("manifest-src 'self'")
+  })
+
+  it("CSP contains connect-src 'self'", async () => {
+    const res = await app.request('/api/healthz')
+    const csp = res.headers.get('content-security-policy') ?? ''
+    expect(csp).toContain("connect-src 'self'")
+  })
+
+  it("CSP contains img-src 'self' data:", async () => {
+    const res = await app.request('/api/healthz')
+    const csp = res.headers.get('content-security-policy') ?? ''
+    expect(csp).toContain("img-src 'self' data:")
+  })
+
+  it("CSP contains font-src 'self'", async () => {
+    const res = await app.request('/api/healthz')
+    const csp = res.headers.get('content-security-policy') ?? ''
+    expect(csp).toContain("font-src 'self'")
+  })
+
+  it("CSP contains base-uri 'self'", async () => {
+    const res = await app.request('/api/healthz')
+    const csp = res.headers.get('content-security-policy') ?? ''
+    expect(csp).toContain("base-uri 'self'")
+  })
+
+  it('CSP is present on SPA asset responses too', async () => {
+    const assetsDir = join(process.cwd(), 'web', 'dist', 'assets')
+    if (!existsSync(assetsDir)) return
+    const jsFiles = readdirSync(assetsDir).filter(f => f.endsWith('.js'))
+    if (jsFiles.length === 0) return
+    const res = await app.request(`/assets/${jsFiles.at(0) ?? ''}`)
+    const csp = res.headers.get('content-security-policy') ?? ''
+    expect(csp).toContain("script-src 'self'")
+    expect(csp).not.toContain("'unsafe-eval'")
+  })
+})
+
+describe('Auth gating unchanged — Unit 4 regression', () => {
+  let app: Awaited<ReturnType<typeof buildDashboardApp>>
+
+  beforeAll(async () => {
+    app = await buildDashboardApp()
+  })
+
+  it('unauthenticated GET / is denied (401 — no operator configured)', async () => {
+    // With no operatorLogin configured, the app fails closed: 401 on all protected routes.
+    const res = await app.request('/')
+    expect(res.status).toBe(401)
+  })
+
+  it('unauthenticated GET /api/status is denied (401)', async () => {
+    const res = await app.request('/api/status')
+    expect(res.status).toBe(401)
+  })
+
+  it('GET /api/healthz is still public (200)', async () => {
+    const res = await app.request('/api/healthz')
+    expect(res.status).toBe(200)
+  })
+
+  it('SPA assets are reachable without auth (pre-auth public paths)', async () => {
+    // /assets/* is in isPublicPath — must not be 401 even without a session.
+    // 404 is acceptable if web/dist not built; 401 is a regression.
+    const res = await app.request('/assets/nonexistent-file.js')
+    expect(res.status).not.toBe(401)
+  })
+
+  it('/manifest.webmanifest is reachable without auth', async () => {
+    const res = await app.request('/manifest.webmanifest')
+    expect(res.status).not.toBe(401)
   })
 })
 
