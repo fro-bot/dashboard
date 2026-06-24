@@ -21,6 +21,7 @@ import type {OperatorClient, SessionDto} from './gateway/operator-client.ts'
 import type {AggregatorSnapshot} from './github/aggregator.ts'
 import type {MetadataReader} from './github/metadata.ts'
 import {Buffer} from 'node:buffer'
+import {existsSync} from 'node:fs'
 import process from 'node:process'
 import {serve} from '@hono/node-server'
 import {getConnInfo} from '@hono/node-server/conninfo'
@@ -163,7 +164,7 @@ export interface DashboardAppConfig {
    */
   fetchUserLogin?: ((accessToken: string) => Promise<string>) | undefined
   /**
-   * Aggregator snapshot provider. Both the dashboard SSR route and /api/status
+   * Aggregator snapshot provider. Both the SPA monitoring view and /api/status
    * read from this same provider so they always serve the same data.
    *
    * If undefined, defaults to a provider returning an empty snapshot
@@ -264,7 +265,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
 
   const fetchUserLogin = opts?.fetchUserLogin ?? fetchGitHubUserLogin
 
-  // Resolve snapshot provider — both dashboard SSR and /api/status share the same source.
+  // Resolve snapshot provider — both the SPA monitoring view and /api/status share the same source.
   // Default: empty snapshot (no aggregator wired yet; production wires the real one).
   const EMPTY_SNAPSHOT = {repos: [], staleBanner: false, driftCount: 0, refreshedAt: null} as const
   const getSnapshot = opts?.getSnapshot ?? (() => EMPTY_SNAPSHOT)
@@ -618,6 +619,16 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   app.use('/manifest.webmanifest', serveStatic({root: './web/dist'}))
   // PWA icons: icon-192.svg, icon-512.svg (and any future icon-*.svg)
   app.use('/icon-*', serveStatic({root: './web/dist'}))
+
+  // ── web/dist presence check ───────────────────────────────────────────────
+  // Warn early if the SPA build artifact is missing. GET / will 404 silently
+  // without this. Does NOT throw — the server still starts (useful for backend-
+  // only dev), but the operator needs to know to run `pnpm build:web` first.
+  if (!existsSync('./web/dist/index.html')) {
+    logger.warning(
+      'web/dist/index.html not found — GET / will return 404. Run `pnpm build:web` to build the SPA.',
+    )
+  }
 
   return app
 }

@@ -2,12 +2,13 @@ import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
 /**
  * Dashboard SPA root + /api/monitoring + /api/status integration tests.
  *
- * Unit 5 cutover: GET / now serves web/dist/index.html (SPA shell), not SSR HTML.
+ * GET / now serves web/dist/index.html (SPA shell), not SSR HTML.
  * The monitoring data is fetched client-side via /api/monitoring (BFF JSON endpoint).
  *
  * Security invariants tested:
  * - Unauthed GET / and GET /api/monitoring are denied (redirect or 401).
- * - /api/monitoring NEVER emits a denylisted repo's identifiers (owner/name/node_id/full_name).
+ * - /api/monitoring NEVER emits internal fields (node_id, owner, name, fetchedAt,
+ *   installation_id, redactedNodeIds, redactedDatabaseIds) as JSON keys.
  * - /api/monitoring carries Cache-Control: no-store.
  * - /api/monitoring is behind auth (not public).
  * - Drift count is a number only — no repo names from drift.
@@ -91,7 +92,7 @@ async function authedGet(app: Awaited<ReturnType<typeof buildTestApp>>, path: st
 }
 
 // ---------------------------------------------------------------------------
-// GET / — SPA shell (Unit 5 cutover)
+// SPA shell — GET /
 // ---------------------------------------------------------------------------
 
 describe('dashboard SPA root — GET /', () => {
@@ -146,7 +147,7 @@ describe('dashboard SPA root — GET /', () => {
 })
 
 // ---------------------------------------------------------------------------
-// /api/monitoring — BFF aggregation endpoint (Unit 5)
+// BFF aggregation endpoint — /api/monitoring
 // ---------------------------------------------------------------------------
 
 describe('/api/monitoring — BFF aggregation endpoint', () => {
@@ -223,17 +224,64 @@ describe('/api/monitoring — BFF aggregation endpoint', () => {
     })
   })
 
-  describe('security — redaction: denylisted repo identifiers NEVER emitted', () => {
+  describe('security — DTO whitelist: internal fields NEVER emitted', () => {
     /**
-     * The BFF endpoint must NEVER emit a denylisted repo's identifiers.
-     * The aggregator's denylist-before-query invariant guarantees this:
-     * denylisted repos are excluded BEFORE any per-repo query, so they
-     * never appear in the snapshot. This test verifies the endpoint output
-     * contains no denylisted identifiers.
+     * The /api/monitoring DTO mapper is the final whitelist. Internal fields
+     * (node_id, owner, name, fetchedAt, installation_id, redactedNodeIds,
+     * redactedDatabaseIds) must NEVER appear as JSON keys in the response,
+     * regardless of what the aggregator snapshot contains.
      *
-     * The snapshot injected here simulates the aggregator's already-redacted
-     * output — denylisted repos are absent from the repos array.
+     * These are exact key-presence assertions — not string-absence checks.
      */
+    it('response JSON does NOT contain node_id as a key', async () => {
+      const repo = makeRepo({node_id: 'NODE_PUBLIC_AGENT'})
+      const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
+      const app = await buildTestApp(snapshot)
+      const res = await authedGet(app, '/api/monitoring')
+
+      expect(res.status).toBe(200)
+      const body = await res.json() as Record<string, unknown>
+      // Top-level keys
+      expect(Object.keys(body)).not.toContain('node_id')
+      // Repo-level keys
+      const repos = body.repos as unknown[]
+      expect(repos).toHaveLength(1)
+      const r = repos[0] as Record<string, unknown>
+      expect(Object.keys(r)).not.toContain('node_id')
+      expect(Object.keys(r)).not.toContain('owner')
+      expect(Object.keys(r)).not.toContain('name')
+      // full_name IS present (it is part of the DTO)
+      expect(Object.keys(r)).toContain('full_name')
+    })
+
+    it('response JSON does NOT contain fetchedAt as a key', async () => {
+      const repo = makeRepo()
+      const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
+      const app = await buildTestApp(snapshot)
+      const res = await authedGet(app, '/api/monitoring')
+
+      expect(res.status).toBe(200)
+      const body = await res.json() as Record<string, unknown>
+      const repos = body.repos as unknown[]
+      const r = repos[0] as Record<string, unknown>
+      const status = r.status as Record<string, unknown>
+      expect(Object.keys(status)).not.toContain('fetchedAt')
+    })
+
+    it('response JSON does NOT contain installation_id, redactedNodeIds, or redactedDatabaseIds', async () => {
+      const repo = makeRepo()
+      const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
+      const app = await buildTestApp(snapshot)
+      const res = await authedGet(app, '/api/monitoring')
+
+      expect(res.status).toBe(200)
+      const bodyText = await res.text()
+      // These keys must never appear anywhere in the serialized response
+      expect(bodyText).not.toContain('"installation_id"')
+      expect(bodyText).not.toContain('"redactedNodeIds"')
+      expect(bodyText).not.toContain('"redactedDatabaseIds"')
+    })
+
     it('snapshot output contains no denylisted repo identifiers (owner/name/node_id/full_name)', async () => {
       // Simulate a snapshot where a private repo has been excluded by the denylist.
       // The snapshot only contains the public repo — the private one is absent.
@@ -251,9 +299,9 @@ describe('/api/monitoring — BFF aggregation endpoint', () => {
       const res = await authedGet(app, '/api/monitoring')
 
       expect(res.status).toBe(200)
-      const body = await res.json() as AggregatorSnapshot
+      const body = await res.json() as {repos: {full_name: string}[]}
 
-      // Public repo is present
+      // Public repo is present via full_name
       expect(body.repos).toHaveLength(1)
       expect(body.repos[0]?.full_name).toBe('fro-bot/agent')
 
@@ -272,7 +320,7 @@ describe('/api/monitoring — BFF aggregation endpoint', () => {
       const res = await authedGet(app, '/api/monitoring')
 
       expect(res.status).toBe(200)
-      const body = await res.json() as AggregatorSnapshot
+      const body = await res.json() as {driftCount: number; repos: unknown[]}
 
       // driftCount is a number
       expect(body.driftCount).toBe(3)
@@ -283,20 +331,6 @@ describe('/api/monitoring — BFF aggregation endpoint', () => {
       const bodyText = JSON.stringify(body)
       expect(bodyText).not.toContain('private-repo-name')
       expect(bodyText).not.toContain('secret-project')
-    })
-
-    it('node_id is present in repo entries (it is a public identifier in the snapshot)', async () => {
-      // node_id IS present in the snapshot for public repos — it is used as a React key.
-      // This test documents that node_id is intentionally included for public repos.
-      // The security invariant is that DENYLISTED repos' node_ids are absent.
-      const repo = makeRepo({node_id: 'NODE_PUBLIC_AGENT'})
-      const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
-      const app = await buildTestApp(snapshot)
-      const res = await authedGet(app, '/api/monitoring')
-
-      expect(res.status).toBe(200)
-      const body = await res.json() as AggregatorSnapshot
-      expect(body.repos[0]?.node_id).toBe('NODE_PUBLIC_AGENT')
     })
   })
 
@@ -311,7 +345,9 @@ describe('/api/monitoring — BFF aggregation endpoint', () => {
         authedGet(app, '/api/status'),
       ])
 
-      const monitoringBody = await monitoringRes.json() as AggregatorSnapshot
+      // /api/monitoring returns the minimized DTO; /api/status returns the full snapshot.
+      // Both are sourced from the same provider — full_name and refreshedAt must match.
+      const monitoringBody = await monitoringRes.json() as {repos: {full_name: string}[]; refreshedAt: number | null}
       const statusBody = await statusRes.json() as AggregatorSnapshot
 
       // Both see the same repo
@@ -381,8 +417,8 @@ describe('/api/status', () => {
     })
   })
 
-  describe('same snapshot source as dashboard', () => {
-    it('/ and /api/status serve data from the same provider (via /api/monitoring)', async () => {
+  describe('same snapshot source as /api/monitoring', () => {
+    it('/api/status and /api/monitoring serve data from the same provider', async () => {
       const repo = makeRepo({full_name: 'fro-bot/shared-source'})
       const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
       const app = await buildTestApp(snapshot)
@@ -392,7 +428,7 @@ describe('/api/status', () => {
         authedGet(app, '/api/status'),
       ])
 
-      const monitoringBody = await monitoringRes.json() as AggregatorSnapshot
+      const monitoringBody = await monitoringRes.json() as {repos: {full_name: string}[]}
       const statusBody = await statusRes.json() as AggregatorSnapshot
 
       // Both see the same repo

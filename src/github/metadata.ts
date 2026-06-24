@@ -2,7 +2,7 @@
  * Repo metadata reader for the dashboard.
  *
  * Reads `metadata/repos.yaml` from the `fro-bot/.github` `data` branch and
- * exports a denylist of redacted node_ids for the aggregator (Unit 4).
+ * exports a denylist of redacted node_ids for the aggregator.
  *
  * Security invariants:
  * - Redacted entries (private:true / owner:'[REDACTED]') are NEVER included in
@@ -15,7 +15,7 @@
  * - Transport error (reader rejects) → err(MetadataTransportError), logged at error.
  * - Wrong schema version → err(MetadataSchemaError), logged at error. FAIL CLOSED.
  *
- * Unit 4 (aggregator) contract:
+ * Aggregator contract:
  *   - ok(MetadataResult) → use publicRepos + redactedNodeIds normally.
  *   - err(MetadataUnavailableError) → data branch missing; fail closed (serve stale/empty).
  *   - err(MetadataParseError | MetadataSchemaError | MetadataTransportError) → hard error;
@@ -90,12 +90,12 @@ export interface MetadataResult {
 }
 
 // ---------------------------------------------------------------------------
-// Error types (discriminated by name for Unit 4 instanceof checks)
+// Error types (discriminated by name for aggregator instanceof checks)
 // ---------------------------------------------------------------------------
 
 /**
  * The data branch or metadata file does not exist (404).
- * Logged at WARNING. Unit 4 should fail closed (serve stale/empty).
+ * Logged at WARNING. The aggregator should fail closed (serve stale/empty).
  */
 export class MetadataUnavailableError extends Error {
   constructor(message: string) {
@@ -106,7 +106,7 @@ export class MetadataUnavailableError extends Error {
 
 /**
  * The YAML content could not be parsed.
- * Logged at ERROR. Unit 4 must fail closed.
+ * Logged at ERROR. The aggregator must fail closed.
  */
 export class MetadataParseError extends Error {
   constructor(message: string) {
@@ -117,7 +117,7 @@ export class MetadataParseError extends Error {
 
 /**
  * The YAML schema version is not supported (version !== 1 or missing).
- * Logged at ERROR. Unit 4 must fail closed.
+ * Logged at ERROR. The aggregator must fail closed.
  */
 export class MetadataSchemaError extends Error {
   constructor(message: string) {
@@ -128,7 +128,7 @@ export class MetadataSchemaError extends Error {
 
 /**
  * The reader threw an unexpected transport error (network, auth, etc.).
- * Logged at ERROR. Unit 4 must fail closed.
+ * Logged at ERROR. The aggregator must fail closed.
  */
 export class MetadataTransportError extends Error {
   constructor(message: string) {

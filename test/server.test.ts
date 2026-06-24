@@ -324,10 +324,10 @@ describe('buildSnapshotProvider — auth topology regression tests', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Unit 4: SPA static asset serving, CSP pinned directives, auth gating
+// SPA static asset serving, CSP pinned directives, auth gating
 // ---------------------------------------------------------------------------
 
-describe('SPA static assets — served pre-auth (Unit 4)', () => {
+describe('SPA static assets — served pre-auth', () => {
   let app: Awaited<ReturnType<typeof buildDashboardApp>>
 
   beforeAll(async () => {
@@ -381,7 +381,7 @@ describe('SPA static assets — served pre-auth (Unit 4)', () => {
   })
 })
 
-describe('CSP pinned directives (Unit 4)', () => {
+describe('CSP pinned directives', () => {
   let app: Awaited<ReturnType<typeof buildDashboardApp>>
 
   beforeAll(async () => {
@@ -459,7 +459,7 @@ describe('CSP pinned directives (Unit 4)', () => {
   })
 })
 
-describe('Auth gating unchanged — Unit 4 regression', () => {
+describe('Auth gating regression', () => {
   let app: Awaited<ReturnType<typeof buildDashboardApp>>
 
   beforeAll(async () => {

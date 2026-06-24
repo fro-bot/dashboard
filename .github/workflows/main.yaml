@@ -100,6 +100,9 @@ jobs:
       - name: 📦 Setup
         uses: ./.github/actions/setup
 
+      - name: 🏗 Build web
+        run: pnpm build:web
+
       - name: 🧪 Run Tests
         run: pnpm test
 

@@ -8,7 +8,7 @@
  * Security invariants:
  * - NO dangerouslySetInnerHTML anywhere. All dynamic strings are React text (auto-escaped).
  * - The BFF guarantees redaction. This view is display-only.
- * - node_id is used as React key only — never rendered as visible text.
+ * - full_name is used as React key — node_id is not present in the client DTO.
  * - Aggregation failure → fail-closed (no unfiltered union, no leak).
  * - Empty/stale snapshot → labeled state, not a dead screen.
  */
@@ -360,7 +360,10 @@ export function Monitoring() {
 
   const {snapshot} = state
   const {repos, staleBanner, driftCount, refreshedAt} = snapshot
-  const isEmpty = repos.length === 0 && refreshedAt === null
+  // isEmpty covers both pre-fetch (refreshedAt===null) and post-fetch-zero-repos cases.
+  // Using repos.length===0 alone is correct: the pre-fetch empty snapshot already has
+  // refreshedAt===null, so EmptyState renders for both cases.
+  const isEmpty = repos.length === 0
 
   const refreshedLabel =
     refreshedAt === null ? 'never' : new Date(refreshedAt).toISOString()
@@ -411,7 +414,7 @@ export function Monitoring() {
           }}
         >
           {repos.map(repo => (
-            <RepoCard key={repo.node_id} repo={repo} />
+            <RepoCard key={repo.full_name} repo={repo} />
           ))}
         </div>
       )}

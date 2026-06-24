@@ -2,9 +2,9 @@
  * Typed fetch for the BFF aggregation JSON endpoint.
  *
  * Fetches /api/monitoring (same-origin, credentials:'include') and returns
- * the already-redacted AggregatorSnapshot. The BFF guarantees redaction
- * server-side — this client is display-only and must never apply its own
- * redaction logic.
+ * the minimized client DTO. The BFF guarantees redaction server-side and
+ * emits ONLY the fields the monitoring UI needs — this client is display-only
+ * and must never apply its own redaction logic.
  *
  * Error handling:
  * - Network failure → throws (caller handles)
@@ -12,10 +12,20 @@
  * - JSON parse failure → throws
  *
  * The SPA is untrusted display-only. Redaction is enforced at the BFF seam.
+ * Internal fields (node_id, owner, name, fetchedAt, installation_id) are
+ * NEVER present in the DTO — the BFF mapper strips them before emission.
  */
 
 // ---------------------------------------------------------------------------
-// Snapshot shape (mirrors src/github/aggregator.ts — kept in sync manually)
+// Client DTO shape (mirrors MonitoringDto in src/routes/api.ts — kept in sync manually)
+//
+// IMPORTANT: This DTO intentionally omits internal fields present in the
+// server-side AggregatorSnapshot/DashboardRepo:
+//   - node_id      (internal identifier — not needed for display)
+//   - owner        (derivable from full_name if needed)
+//   - name         (derivable from full_name if needed)
+//   - fetchedAt    (internal cache timestamp — not rendered)
+//   - installation_id (internal auth context — never client-visible)
 // ---------------------------------------------------------------------------
 
 export type CiRollupState = 'green' | 'red' | 'pending' | 'unknown'
@@ -27,13 +37,9 @@ export interface RepoCiStatus {
   readonly openIssueCount: number
   readonly openAlertCount: number | null
   readonly stale: boolean
-  readonly fetchedAt: number
 }
 
 export interface DashboardRepo {
-  readonly node_id: string
-  readonly owner: string
-  readonly name: string
   readonly full_name: string
   readonly discovery_channel: string
   readonly status: RepoCiStatus

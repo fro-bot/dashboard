@@ -221,8 +221,48 @@
 /*
  * Styleguide §6: "warm — cream and deep violet, grounded, still technical."
  * Overrides via explicit attribute OR system preference.
+ *
+ * IMPORTANT: These are TWO separate rules with identical declarations.
+ * Combining them as `[data-theme="light"], @media (...) { :root { ... } }` is
+ * INVALID CSS — an @media rule cannot be a member of a comma-separated selector
+ * list. The entire block would be silently discarded, breaking light theme.
  */
-[data-theme="light"],
+[data-theme="light"] {
+  --color-bg: #ffffff; /* Page background */
+  --color-surface: #f5ebeb; /* Card/panel background */
+  --color-surface-raised: #edd8d8; /* Elevated card */
+  --color-surface-overlay: #e8cccc; /* Dialog overlay */
+
+  --color-border: #d4b8b8; /* Default border */
+  --color-border-muted: #edd8d8; /* Subtle separator */
+  --color-border-accent: #006064; /* Focused/active border */
+
+  --color-text: #1a0b2e; /* Primary text — AAA on white */
+  --color-text-muted: #5c4569; /* Secondary text */
+  --color-text-subtle: rgba(26, 11, 46, 0.45); /* Placeholder */
+  --color-text-disabled: rgba(26, 11, 46, 0.3); /* Disabled state */
+
+  --color-accent: #006064; /* Primary interactive (links) — AAA */
+  --color-accent-hover: #00838f; /* Hover state */
+  --color-accent-pressed: #004d50; /* Active/pressed */
+
+  --color-cta: #880e4f; /* Call-to-action — AAA on white */
+  --color-cta-hover: #ad1457; /* CTA hover */
+
+  --color-highlight: #e65100; /* Badges — AA Large on white */
+
+  --color-success: #2e7d32; /* Success */
+  --color-warning: #e65100; /* Warning */
+  --color-error: #c62828; /* Error */
+  --color-info: #006064; /* Info */
+
+  --shadow-sm: 0 1px 3px rgba(26, 11, 46, 0.12);
+  --shadow-md: 0 4px 12px rgba(26, 11, 46, 0.15);
+  --shadow-lg: 0 8px 32px rgba(26, 11, 46, 0.18);
+  --shadow-glow: 0 0 20px rgba(0, 96, 100, 0.15);
+  --shadow-glow-magenta: 0 0 20px rgba(136, 14, 79, 0.15);
+}
+
 @media (prefers-color-scheme: light) {
   :root {
     --color-bg: #ffffff; /* Page background */
