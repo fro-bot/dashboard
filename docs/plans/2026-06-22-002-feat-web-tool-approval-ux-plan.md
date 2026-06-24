@@ -243,7 +243,7 @@ apply only once `connection==='live'` (parity with output/status). Expose a deri
 
 ### Phase 2 — Operator UI (PR-B: client migration + inline prompt)
 
-- [ ] **Unit 4: Migrate the operator client to the 1.4.0 per-run approval routes**
+- [x] **Unit 4: Migrate the operator client to the 1.4.0 per-run approval routes**
 
 **Goal:** Replace stale approval routes/verbs with per-run 1.4.0 routes; decision POST reuses
 the mutating pattern and maps the response to the R10 failure classes.
@@ -278,7 +278,7 @@ the stale-route tests rather than leaving them.
 **Verification:** Client uses 1.4.0 routes/verbs; failure classes distinguishable; no stale-route
 references remain; tests green.
 
-- [ ] **Unit 5: Inline approval prompt UI — render, decide, confirm, dismiss**
+- [x] **Unit 5: Inline approval prompt UI — render, decide, confirm, dismiss**
 
 **Goal:** Render the open prompt inline in the run card; once/reject single-click,
 two-step `always` confirm; safe-DOM gated-action render; the R10 failure states; silent
@@ -324,7 +324,7 @@ handler (in-flight disable, no-oracle failure); the label-map/no-leak rendering 
 **Verification:** Operator can decide a prompt end-to-end (flag on); all interaction/failure states
 render correctly; no leak; reconcile doesn't resurrect a settled prompt; tests green.
 
-- [ ] **Unit 6: Learning doc (optional, post-merge)**
+- [x] **Unit 6: Learning doc (optional, post-merge)**
 
 **Goal:** Capture the durable learning (approval-frame consumption + tombstone/precedence race model
 + optimistic-affordance failure-class split) if warranted.
