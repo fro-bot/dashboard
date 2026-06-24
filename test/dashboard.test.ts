@@ -17,7 +17,8 @@ import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
  */
 import type {AggregatorSnapshot, DashboardRepo} from '../src/github/aggregator.ts'
 import {Buffer} from 'node:buffer'
-import {describe, expect, it} from 'vitest'
+import process from 'node:process'
+import {afterEach, describe, expect, it} from 'vitest'
 import {buildDashboardApp} from '../src/server.ts'
 import {SessionManager} from '../src/session.ts'
 
@@ -445,5 +446,291 @@ describe('/api/healthz remains public', () => {
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(body).toEqual({ok: true, lastFetch: null, rateLimit: null})
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FIX B — devAutoLogin: DEV-ONLY auth bypass
+// ---------------------------------------------------------------------------
+
+describe('devAutoLogin — DEV-ONLY auth bypass', () => {
+  const ORIGINAL_NODE_ENV = process.env.NODE_ENV
+  const ORIGINAL_DASHBOARD_HOST = process.env.DASHBOARD_HOST
+
+  // Restore NODE_ENV and DASHBOARD_HOST after each test that mutates them
+  afterEach(() => {
+    process.env.NODE_ENV = ORIGINAL_NODE_ENV
+    if (ORIGINAL_DASHBOARD_HOST === undefined) {
+      delete process.env.DASHBOARD_HOST
+    } else {
+      process.env.DASHBOARD_HOST = ORIGINAL_DASHBOARD_HOST
+    }
+  })
+
+  // ── Injected opts.devAutoLogin path (test seam) ─────────────────────────────
+  // opts.devAutoLogin bypasses the DASHBOARD_HOST loopback check (test seam)
+  // but still throws if NODE_ENV==='production'.
+
+  describe('injected opts.devAutoLogin=true + non-production → effective', () => {
+    it('unauthenticated GET / returns 200 (SPA served, not redirect to /auth/login)', async () => {
+      process.env.NODE_ENV = 'development'
+      const app = await buildDashboardApp({
+        operatorLogin: TEST_OPERATOR,
+        cookieKey: TEST_KEY,
+        oauthClient: makeFakeOAuthClient(),
+        fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+        getSnapshot: () => makeSnapshot(),
+        devAutoLogin: true,
+      })
+      const res = await app.request('/')
+      expect(res.status).toBe(200)
+    })
+
+    it('unauthenticated GET / sets a valid session cookie (not a redirect)', async () => {
+      process.env.NODE_ENV = 'development'
+      const app = await buildDashboardApp({
+        operatorLogin: TEST_OPERATOR,
+        cookieKey: TEST_KEY,
+        oauthClient: makeFakeOAuthClient(),
+        fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+        getSnapshot: () => makeSnapshot(),
+        devAutoLogin: true,
+      })
+      const res = await app.request('/')
+      expect(res.status).toBe(200)
+      const setCookieHeader = res.headers.get('set-cookie')
+      expect(setCookieHeader).not.toBeNull()
+      expect(setCookieHeader).toContain('session=')
+      expect(setCookieHeader).toContain('HttpOnly')
+      expect(setCookieHeader).toContain('SameSite=Lax')
+    })
+
+    it('minted session cookie round-trips through SessionManager (genuine signed session)', async () => {
+      process.env.NODE_ENV = 'development'
+      const app = await buildDashboardApp({
+        operatorLogin: TEST_OPERATOR,
+        cookieKey: TEST_KEY,
+        oauthClient: makeFakeOAuthClient(),
+        fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+        getSnapshot: () => makeSnapshot(),
+        devAutoLogin: true,
+      })
+      const res = await app.request('/')
+      expect(res.status).toBe(200)
+
+      // Extract the session cookie value
+      const setCookieHeader = res.headers.get('set-cookie') ?? ''
+      const match = /session=([^;]+)/.exec(setCookieHeader)
+      expect(match).not.toBeNull()
+      const sessionValue = (match as RegExpExecArray)[1] as string
+
+      // Verify it round-trips through SessionManager
+      const sm = new SessionManager(TEST_KEY)
+      const payload = sm.verify(sessionValue)
+      expect(payload).not.toBeNull()
+      expect(payload?.login).toBe(TEST_OPERATOR)
+    })
+
+    it('replaying the minted session cookie on a subsequent request returns 200', async () => {
+      process.env.NODE_ENV = 'development'
+      const app = await buildDashboardApp({
+        operatorLogin: TEST_OPERATOR,
+        cookieKey: TEST_KEY,
+        oauthClient: makeFakeOAuthClient(),
+        fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+        getSnapshot: () => makeSnapshot(),
+        devAutoLogin: true,
+      })
+
+      // First request: get the minted cookie
+      const firstRes = await app.request('/')
+      const setCookieHeader = firstRes.headers.get('set-cookie') ?? ''
+      const match = /session=([^;]+)/.exec(setCookieHeader)
+      expect(match).not.toBeNull()
+      const sessionValue = (match as RegExpExecArray)[1] as string
+
+      // Second request: replay the cookie — should still be 200
+      const secondRes = await app.request('/', {headers: {cookie: `session=${sessionValue}`}})
+      expect(secondRes.status).toBe(200)
+    })
+  })
+
+  // ── PROD GUARD: injected opts.devAutoLogin=true + NODE_ENV=production → THROWS ──
+  // The previous behavior was silent disable + redirect. Now it throws at startup.
+
+  describe('PROD GUARD: injected opts.devAutoLogin=true + NODE_ENV=production → THROWS at startup', () => {
+    it('buildDashboardApp throws when devAutoLogin requested in production (injected path)', async () => {
+      process.env.NODE_ENV = 'production'
+      await expect(
+        buildDashboardApp({
+          operatorLogin: TEST_OPERATOR,
+          cookieKey: TEST_KEY,
+          oauthClient: makeFakeOAuthClient(),
+          fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+          getSnapshot: () => makeSnapshot(),
+          devAutoLogin: true,
+        }),
+      ).rejects.toThrow('DASHBOARD_DEV_AUTOLOGIN refused')
+    })
+
+    it('throw message mentions production and loopback requirement', async () => {
+      process.env.NODE_ENV = 'production'
+      await expect(
+        buildDashboardApp({
+          operatorLogin: TEST_OPERATOR,
+          cookieKey: TEST_KEY,
+          oauthClient: makeFakeOAuthClient(),
+          fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+          getSnapshot: () => makeSnapshot(),
+          devAutoLogin: true,
+        }),
+      ).rejects.toThrow('dev-only auth bypass must never run in production')
+    })
+  })
+
+  // ── ENV path: DASHBOARD_DEV_AUTOLOGIN + loopback host → effective ───────────
+
+  describe('ENV path: DASHBOARD_DEV_AUTOLOGIN=true + DASHBOARD_HOST=127.0.0.1 + non-prod → effective', () => {
+    it('unauthenticated GET / returns 200 (bypass active)', async () => {
+      process.env.NODE_ENV = 'development'
+      process.env.DASHBOARD_HOST = '127.0.0.1'
+      process.env.DASHBOARD_DEV_AUTOLOGIN = 'true'
+      try {
+        const app = await buildDashboardApp({
+          operatorLogin: TEST_OPERATOR,
+          cookieKey: TEST_KEY,
+          oauthClient: makeFakeOAuthClient(),
+          fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+          getSnapshot: () => makeSnapshot(),
+          // No devAutoLogin injected — reads from env
+        })
+        const res = await app.request('/')
+        expect(res.status).toBe(200)
+        const setCookieHeader = res.headers.get('set-cookie')
+        expect(setCookieHeader).toContain('session=')
+      } finally {
+        delete process.env.DASHBOARD_DEV_AUTOLOGIN
+      }
+    })
+  })
+
+  // ── ENV path: DASHBOARD_DEV_AUTOLOGIN + non-loopback host → THROWS ──────────
+
+  describe('ENV path: DASHBOARD_DEV_AUTOLOGIN=true + DASHBOARD_HOST unset/0.0.0.0 → THROWS at startup', () => {
+    it('throws when DASHBOARD_HOST is unset (default 0.0.0.0 is not loopback)', async () => {
+      process.env.NODE_ENV = 'development'
+      delete process.env.DASHBOARD_HOST
+      process.env.DASHBOARD_DEV_AUTOLOGIN = 'true'
+      try {
+        await expect(
+          buildDashboardApp({
+            operatorLogin: TEST_OPERATOR,
+            cookieKey: TEST_KEY,
+            oauthClient: makeFakeOAuthClient(),
+            fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+            getSnapshot: () => makeSnapshot(),
+          }),
+        ).rejects.toThrow('DASHBOARD_DEV_AUTOLOGIN refused')
+      } finally {
+        delete process.env.DASHBOARD_DEV_AUTOLOGIN
+      }
+    })
+
+    it('throws when DASHBOARD_HOST=0.0.0.0 (non-loopback)', async () => {
+      process.env.NODE_ENV = 'development'
+      process.env.DASHBOARD_HOST = '0.0.0.0'
+      process.env.DASHBOARD_DEV_AUTOLOGIN = 'true'
+      try {
+        await expect(
+          buildDashboardApp({
+            operatorLogin: TEST_OPERATOR,
+            cookieKey: TEST_KEY,
+            oauthClient: makeFakeOAuthClient(),
+            fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+            getSnapshot: () => makeSnapshot(),
+          }),
+        ).rejects.toThrow('DASHBOARD_DEV_AUTOLOGIN refused')
+      } finally {
+        delete process.env.DASHBOARD_DEV_AUTOLOGIN
+      }
+    })
+  })
+
+  // ── ENV path: DASHBOARD_DEV_AUTOLOGIN + NODE_ENV=production → THROWS ────────
+
+  describe('ENV path: DASHBOARD_DEV_AUTOLOGIN=true + NODE_ENV=production → THROWS at startup', () => {
+    it('throws even when DASHBOARD_HOST is loopback (production guard fires first)', async () => {
+      process.env.NODE_ENV = 'production'
+      process.env.DASHBOARD_HOST = '127.0.0.1'
+      process.env.DASHBOARD_DEV_AUTOLOGIN = 'true'
+      try {
+        await expect(
+          buildDashboardApp({
+            operatorLogin: TEST_OPERATOR,
+            cookieKey: TEST_KEY,
+            oauthClient: makeFakeOAuthClient(),
+            fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+            getSnapshot: () => makeSnapshot(),
+          }),
+        ).rejects.toThrow('DASHBOARD_DEV_AUTOLOGIN refused')
+      } finally {
+        delete process.env.DASHBOARD_DEV_AUTOLOGIN
+      }
+    })
+  })
+
+  // ── devAutoLogin=false (default) → unchanged behavior ───────────────────────
+
+  describe('devAutoLogin=false (default) → unchanged behavior', () => {
+    it('unauthenticated GET / redirects to /auth/login', async () => {
+      process.env.NODE_ENV = 'development'
+      const app = await buildDashboardApp({
+        operatorLogin: TEST_OPERATOR,
+        cookieKey: TEST_KEY,
+        oauthClient: makeFakeOAuthClient(),
+        fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+        getSnapshot: () => makeSnapshot(),
+        devAutoLogin: false,
+      })
+      const res = await app.request('/')
+      expect([302, 303]).toContain(res.status)
+      expect(res.headers.get('location')).toContain('/auth/login')
+    })
+  })
+
+  // ── devAutoLogin=true but operatorLogin=undefined (deny-all) → no bypass ────
+
+  describe('devAutoLogin=true but operatorLogin=undefined (deny-all) → no bypass', () => {
+    it('unauthenticated GET / returns 401 (deny-all mode, no session minted)', async () => {
+      process.env.NODE_ENV = 'development'
+      // operatorLogin is undefined → deny-all mode; devAutoLogin must not mint a session
+      // Note: cookieKey is not required when operatorLogin is undefined
+      const app = await buildDashboardApp({
+        operatorLogin: undefined,
+        oauthClient: makeFakeOAuthClient(),
+        fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+        getSnapshot: () => makeSnapshot(),
+        devAutoLogin: true,
+      })
+      const res = await app.request('/')
+      expect(res.status).toBe(401)
+    })
+
+    it('no session cookie is set in deny-all mode', async () => {
+      process.env.NODE_ENV = 'development'
+      const app = await buildDashboardApp({
+        operatorLogin: undefined,
+        oauthClient: makeFakeOAuthClient(),
+        fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+        getSnapshot: () => makeSnapshot(),
+        devAutoLogin: true,
+      })
+      const res = await app.request('/')
+      expect(res.status).toBe(401)
+      const setCookieHeader = res.headers.get('set-cookie')
+      if (setCookieHeader !== null) {
+        expect(setCookieHeader).not.toContain('session=')
+      }
+    })
   })
 })

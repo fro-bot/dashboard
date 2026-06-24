@@ -43,6 +43,11 @@ RUN addgroup --system --gid 1001 dashboard && \
     adduser --system --uid 1001 --ingroup dashboard dashboard
 USER dashboard
 
+# Mark this as a production runtime so NODE_ENV-gated guards (e.g. devAutoLogin)
+# fire correctly. The builder stage intentionally does NOT set this so pnpm install
+# and pnpm build:web run with full dev-dep access.
+ENV NODE_ENV=production
+
 EXPOSE 3000
 
 CMD ["node", "src/server.ts"]
