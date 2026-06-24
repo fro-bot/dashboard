@@ -903,14 +903,16 @@ export function buildApprovalClient() {
 
   /**
    * GET open approvals for a run (reconcile on reconnect).
-   * Returns the list of open approval summaries, or an empty array on failure.
    *
-   * Reconcile is best-effort: failures (network, non-200, malformed body) are
-   * intentionally swallowed and return []. The SSE stream is the authoritative
-   * channel for approval state; the reconcile GET is a late-join catch-up only.
-   * Silently returning [] on failure is correct — a missed reconcile means the
-   * operator may not see a prompt until the next SSE open frame, which is
-   * acceptable given the stream is the primary delivery path.
+   * Returns a discriminated result:
+   *   {success: true, data: {approvals: [...]}}  — 2xx with a valid approvals array
+   *   {success: false, error: {kind: 'http', status}}  — non-2xx response
+   *   {success: false, error: {kind: 'network'}}  — fetch threw (transport failure)
+   *   {success: false, error: {kind: 'protocol'}}  — 200 but missing/non-array approvals
+   *
+   * A malformed body is NOT treated as success-empty: under corrective pruning,
+   * a failed reconcile must never wipe open prompts. The caller dispatches the
+   * corrective action only on success:true.
    */
   async function listRunApprovals(runId) {
     try {
@@ -918,12 +920,12 @@ export function buildApprovalClient() {
         `/operator/runs/${encodeURIComponent(runId)}/approvals`,
         {headers: {'content-type': 'application/json'}},
       )
-      if (!res.ok) return []
+      if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
       const data = await res.json()
-      if (!data || !Array.isArray(data.approvals)) return []
-      return data.approvals
+      if (!data || !Array.isArray(data.approvals)) return {success: false, error: {kind: 'protocol'}}
+      return {success: true, data: {approvals: data.approvals}}
     } catch {
-      return []
+      return {success: false, error: {kind: 'network'}}
     }
   }
 
@@ -1382,7 +1384,10 @@ export function initOperatorStream(opts) {
     if (reconcileDone) return
     reconcileDone = true
 
-    const openApprovals = await approvalClient.listRunApprovals(runId)
+    // Unit 1 bridge: read the discriminated result; on failure abort (no prune, no add).
+    // Unit 3 will replace this with the full corrective-prune wiring.
+    const listResult = await approvalClient.listRunApprovals(runId)
+    const openApprovals = listResult.success ? listResult.data.approvals : []
     for (const approval of openApprovals) {
       // Validate the approval summary before dispatching
       if (

@@ -221,7 +221,12 @@ export interface ApprovalClient {
     decision: string,
     idempotencyKey: string,
   ) => Promise<{success: boolean; data?: {state: string}; error?: {kind: string; status?: number}}>
-  readonly listRunApprovals: (runId: string) => Promise<readonly {requestID: string; permission: string; command?: string; filepath?: string}[]>
+  readonly listRunApprovals: (runId: string) => Promise<
+    | {success: true; data: {approvals: readonly {requestID: string; permission: string; command?: string; filepath?: string}[]}}
+    | {success: false; error: {kind: 'http'; status: number}}
+    | {success: false; error: {kind: 'network'}}
+    | {success: false; error: {kind: 'protocol'}}
+  >
 }
 
 export interface InitOptions {

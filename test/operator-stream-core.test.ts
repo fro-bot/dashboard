@@ -2292,6 +2292,12 @@ function makeFakeEl(tagName = 'div'): FakeElement {
   return el
 }
 
+type ListRunApprovalsResult =
+  | {success: true; data: {approvals: {requestID: string; permission: string; command?: string; filepath?: string}[]}}
+  | {success: false; error: {kind: 'http'; status: number}}
+  | {success: false; error: {kind: 'network'}}
+  | {success: false; error: {kind: 'protocol'}}
+
 /**
  * Build a fake approval client for testing.
  * Records calls and returns configurable results.
@@ -2299,6 +2305,7 @@ function makeFakeEl(tagName = 'div'): FakeElement {
 function makeFakeApprovalClient(opts: {
   decideResult?: {success: boolean; data?: {state: string}; error?: {kind: string; status?: number}}
   listResult?: {requestID: string; permission: string; command?: string; filepath?: string}[]
+  listFailure?: {kind: 'http'; status: number} | {kind: 'network'} | {kind: 'protocol'}
 } = {}) {
   const decideCalls: {runId: string; requestId: string; decision: string; idempotencyKey: string}[] = []
   const listCalls: string[] = []
@@ -2312,9 +2319,15 @@ function makeFakeApprovalClient(opts: {
         decideCalls.push({runId, requestId, decision, idempotencyKey})
         return opts.decideResult ?? {success: true, data: {state: 'claimed'}}
       },
-      listRunApprovals: async (runId: string) => {
+      listRunApprovals: async (runId: string): Promise<ListRunApprovalsResult> => {
         listCalls.push(runId)
-        return opts.listResult ?? []
+        if (opts.listFailure) {
+          const failure = opts.listFailure
+          if (failure.kind === 'http') return {success: false, error: {kind: 'http', status: failure.status}}
+          if (failure.kind === 'network') return {success: false, error: {kind: 'network'}}
+          return {success: false, error: {kind: 'protocol'}}
+        }
+        return {success: true, data: {approvals: opts.listResult ?? []}}
       },
     },
   }
@@ -3005,7 +3018,7 @@ describe('renderApprovalPrompt — in-flight guard', () => {
         decideCalls.push(decision)
         return decidePromise
       },
-      listRunApprovals: async () => [],
+      listRunApprovals: async () => ({success: true as const, data: {approvals: []}}),
     }
 
     const prompt: ApprovalFrameDataOpen = {
@@ -3214,34 +3227,14 @@ describe('buildApprovalClient — listRunApprovals', () => {
     vi.unstubAllGlobals()
   })
 
-  it('returns [] on non-200 response', async () => {
-    vi.stubGlobal('fetch', async () => ({ok: false, status: 404, json: async () => ({})}))
+  it('returns {success:true, data:{approvals:[]}} on 200 with empty approvals array', async () => {
+    vi.stubGlobal('fetch', async () => ({ok: true, status: 200, json: async () => ({approvals: []})}))
     const client = buildApprovalClient()
     const result = await client.listRunApprovals('run-001')
-    expect(result).toEqual([])
+    expect(result).toEqual({success: true, data: {approvals: []}})
   })
 
-  it('returns [] on fetch throw', async () => {
-    vi.stubGlobal('fetch', async () => {
-      throw new Error('network error')
-    })
-    const client = buildApprovalClient()
-    const result = await client.listRunApprovals('run-001')
-    expect(result).toEqual([])
-  })
-
-  it('returns [] on malformed response (no approvals array)', async () => {
-    vi.stubGlobal('fetch', async () => ({
-      ok: true,
-      status: 200,
-      json: async () => ({notApprovals: []}),
-    }))
-    const client = buildApprovalClient()
-    const result = await client.listRunApprovals('run-001')
-    expect(result).toEqual([])
-  })
-
-  it('returns approvals array on success', async () => {
+  it('returns {success:true, data:{approvals:[...]}} on 200 with populated approvals array', async () => {
     const approvals = [{requestID: 'req-001', permission: 'shell', command: 'echo hi'}]
     vi.stubGlobal('fetch', async () => ({
       ok: true,
@@ -3250,7 +3243,63 @@ describe('buildApprovalClient — listRunApprovals', () => {
     }))
     const client = buildApprovalClient()
     const result = await client.listRunApprovals('run-001')
-    expect(result).toEqual(approvals)
+    expect(result).toEqual({success: true, data: {approvals}})
+  })
+
+  it('returns {success:false, error:{kind:"http", status}} on non-2xx response', async () => {
+    vi.stubGlobal('fetch', async () => ({ok: false, status: 404, json: async () => ({})}))
+    const client = buildApprovalClient()
+    const result = await client.listRunApprovals('run-001')
+    expect(result).toEqual({success: false, error: {kind: 'http', status: 404}})
+  })
+
+  it('returns {success:false, error:{kind:"http", status}} on 500 response', async () => {
+    vi.stubGlobal('fetch', async () => ({ok: false, status: 500, json: async () => ({})}))
+    const client = buildApprovalClient()
+    const result = await client.listRunApprovals('run-001')
+    expect(result).toEqual({success: false, error: {kind: 'http', status: 500}})
+  })
+
+  it('returns {success:false, error:{kind:"network"}} on fetch throw', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('network error')
+    })
+    const client = buildApprovalClient()
+    const result = await client.listRunApprovals('run-001')
+    expect(result).toEqual({success: false, error: {kind: 'network'}})
+  })
+
+  it('returns {success:false, error:{kind:"protocol"}} on 200 with missing approvals field', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({notApprovals: []}),
+    }))
+    const client = buildApprovalClient()
+    const result = await client.listRunApprovals('run-001')
+    expect(result).toEqual({success: false, error: {kind: 'protocol'}})
+  })
+
+  it('returns {success:false, error:{kind:"protocol"}} on 200 with null body', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => null,
+    }))
+    const client = buildApprovalClient()
+    const result = await client.listRunApprovals('run-001')
+    expect(result).toEqual({success: false, error: {kind: 'protocol'}})
+  })
+
+  it('returns {success:false, error:{kind:"protocol"}} on 200 with approvals as non-array', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({approvals: 'not-an-array'}),
+    }))
+    const client = buildApprovalClient()
+    const result = await client.listRunApprovals('run-001')
+    expect(result).toEqual({success: false, error: {kind: 'protocol'}})
   })
 })
 
