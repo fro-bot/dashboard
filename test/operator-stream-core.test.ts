@@ -20,6 +20,7 @@ import {
   bootstrapOperatorStreams,
   buildApprovalClient,
   FIRST_FRAME_TIMEOUT_MS,
+  GATEWAY_PENDING_APPROVALS_CAP,
   getOpenApprovals,
   hasOpenApprovals,
   initOperatorStream,
@@ -3367,5 +3368,311 @@ describe('approval badge indicator', () => {
     const runFinal = state.runs['run-001']
     expect(hasOpenApprovals(runFinal)).toBe(false)
     expect(getOpenApprovals(runFinal)).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Unit 2: approval-reconcile reducer action
+// ---------------------------------------------------------------------------
+
+describe('nextStreamState — approval-reconcile action', () => {
+  const live = (): StreamState =>
+    nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+
+  const runOf = (state: StreamState, runId: string): RunEntry => {
+    const entry = state.runs[runId]
+    if (entry === undefined) throw new Error(`expected run ${runId} in state`)
+    return entry
+  }
+
+  const openApproval = (
+    state: StreamState,
+    runId: string,
+    requestID: string,
+    permission: string,
+    command?: string,
+  ): StreamState =>
+    nextStreamState(state, {
+      type: 'approval',
+      data: {
+        runId,
+        requestID,
+        permission,
+        settled: false,
+        ...(command === undefined ? {} : {command}),
+      },
+    })
+
+  const settleApproval = (state: StreamState, runId: string, requestID: string): StreamState =>
+    nextStreamState(state, {
+      type: 'approval',
+      data: {runId, requestID, settled: true},
+    })
+
+  const reconcile = (
+    state: StreamState,
+    runId: string,
+    pruneIds: string[],
+    addPrompts: {requestID: string; permission: string; command?: string; filepath?: string}[],
+  ): StreamState =>
+    nextStreamState(state, {
+      type: 'approval-reconcile',
+      runId,
+      pruneIds,
+      addPrompts,
+    })
+
+  // ---------------------------------------------------------------------------
+  // Happy path
+  // ---------------------------------------------------------------------------
+
+  it('happy: open(A), open(B) → reconcile pruneIds:[A], addPrompts:[] → A absent, tombstoned; B still open', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-A', 'shell', 'echo A')
+    state = openApproval(state, 'run-001', 'req-B', 'shell', 'echo B')
+    state = reconcile(state, 'run-001', ['req-A'], [])
+
+    const run = runOf(state, 'run-001')
+    const openIds = getOpenApprovals(run).map(p => p.requestID)
+    expect(openIds).not.toContain('req-A')
+    expect(openIds).toContain('req-B')
+    expect(hasOpenApprovals(run)).toBe(true)
+    // req-A must be tombstoned
+    expect(Object.hasOwn(run.approvalTombstones ?? {}, 'req-A')).toBe(true)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Edge: prune multiple ids
+  // ---------------------------------------------------------------------------
+
+  it('edge: reconcile pruneIds:[A,B] → both pruned and tombstoned', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-A', 'shell', 'echo A')
+    state = openApproval(state, 'run-001', 'req-B', 'network')
+    state = reconcile(state, 'run-001', ['req-A', 'req-B'], [])
+
+    const run = runOf(state, 'run-001')
+    expect(hasOpenApprovals(run)).toBe(false)
+    expect(getOpenApprovals(run)).toHaveLength(0)
+    expect(Object.hasOwn(run.approvalTombstones ?? {}, 'req-A')).toBe(true)
+    expect(Object.hasOwn(run.approvalTombstones ?? {}, 'req-B')).toBe(true)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Edge: no-resurrect — pruned id stays suppressed after a later open frame
+  // ---------------------------------------------------------------------------
+
+  it('edge (no-resurrect): A pruned → later open frame for A → A stays suppressed (tombstone precedence)', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-A', 'shell', 'echo A')
+    state = reconcile(state, 'run-001', ['req-A'], [])
+    // Verify pruned
+    expect(hasOpenApprovals(runOf(state, 'run-001'))).toBe(false)
+    // Now a late open frame arrives for req-A
+    state = openApproval(state, 'run-001', 'req-A', 'shell', 'echo late')
+    expect(hasOpenApprovals(runOf(state, 'run-001'))).toBe(false)
+    expect(getOpenApprovals(runOf(state, 'run-001'))).toHaveLength(0)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Edge: idempotent — already settled then pruneIds includes same id
+  // ---------------------------------------------------------------------------
+
+  it('edge (idempotent settle/prune overlap): A already settled then pruneIds:[A] → no-op, no error, A stays tombstoned', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-A', 'shell', 'echo A')
+    state = settleApproval(state, 'run-001', 'req-A')
+    // Verify tombstoned
+    expect(Object.hasOwn(runOf(state, 'run-001').approvalTombstones ?? {}, 'req-A')).toBe(true)
+    // Now reconcile with pruneIds:[req-A] — should be a no-op
+    state = reconcile(state, 'run-001', ['req-A'], [])
+    const run = runOf(state, 'run-001')
+    expect(hasOpenApprovals(run)).toBe(false)
+    expect(Object.hasOwn(run.approvalTombstones ?? {}, 'req-A')).toBe(true)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Edge: add path — addPrompts adds a new open prompt
+  // ---------------------------------------------------------------------------
+
+  it('edge (add path): addPrompts:[{requestID:C}] where C not open and not tombstoned → C added as open', () => {
+    let state = live()
+    state = reconcile(state, 'run-001', [], [{requestID: 'req-C', permission: 'network'}])
+
+    const run = runOf(state, 'run-001')
+    expect(hasOpenApprovals(run)).toBe(true)
+    const prompts = getOpenApprovals(run)
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]?.requestID).toBe('req-C')
+    expect(prompts[0]?.permission).toBe('network')
+  })
+
+  // ---------------------------------------------------------------------------
+  // Edge: add ignores tombstoned ids
+  // ---------------------------------------------------------------------------
+
+  it('edge (add ignores tombstoned): addPrompts:[{requestID:A}] where A is tombstoned → A NOT added', () => {
+    let state = live()
+    // Settle req-A to tombstone it
+    state = settleApproval(state, 'run-001', 'req-A')
+    expect(Object.hasOwn(runOf(state, 'run-001').approvalTombstones ?? {}, 'req-A')).toBe(true)
+    // Now reconcile with addPrompts containing req-A
+    state = reconcile(state, 'run-001', [], [{requestID: 'req-A', permission: 'shell'}])
+    const run = runOf(state, 'run-001')
+    expect(hasOpenApprovals(run)).toBe(false)
+    expect(getOpenApprovals(run)).toHaveLength(0)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Edge: empty pruneIds and empty addPrompts → no-op
+  // ---------------------------------------------------------------------------
+
+  it('edge: empty pruneIds and empty addPrompts → no-op, no spurious tombstones', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-A', 'shell', 'echo A')
+    const before = runOf(state, 'run-001')
+    state = reconcile(state, 'run-001', [], [])
+    const after = runOf(state, 'run-001')
+    // Open prompts unchanged
+    expect(getOpenApprovals(after)).toHaveLength(1)
+    expect(getOpenApprovals(after)[0]?.requestID).toBe('req-A')
+    // Tombstones unchanged (no new tombstones)
+    expect(Object.keys(after.approvalTombstones ?? {})).toHaveLength(
+      Object.keys(before.approvalTombstones ?? {}).length,
+    )
+  })
+
+  // ---------------------------------------------------------------------------
+  // Edge: FIFO cap — pruning when tombstone map is at MAX_APPROVAL_TOMBSTONES evicts oldest
+  // ---------------------------------------------------------------------------
+
+  it('edge (FIFO cap): pruning when tombstone map is at MAX_APPROVAL_TOMBSTONES evicts oldest', () => {
+    let state = live()
+    // Fill tombstones to cap via settle frames
+    for (let i = 0; i < MAX_APPROVAL_TOMBSTONES; i++) {
+      state = nextStreamState(state, {
+        type: 'approval',
+        data: {runId: 'run-001', requestID: `req-${i}`, settled: true},
+      })
+    }
+    const runAtCap = runOf(state, 'run-001')
+    expect(Object.keys(runAtCap.approvalTombstones ?? {})).toHaveLength(MAX_APPROVAL_TOMBSTONES)
+
+    // Now open a new prompt and prune it via reconcile — should evict oldest tombstone
+    state = openApproval(state, 'run-001', 'req-new', 'shell', 'echo new')
+    state = reconcile(state, 'run-001', ['req-new'], [])
+
+    const run = runOf(state, 'run-001')
+    const tombstones = run.approvalTombstones ?? {}
+    // Map size stays at cap
+    expect(Object.keys(tombstones)).toHaveLength(MAX_APPROVAL_TOMBSTONES)
+    // Oldest (req-0) evicted
+    expect(Object.hasOwn(tombstones, 'req-0')).toBe(false)
+    // Newest (req-new) present
+    expect(Object.hasOwn(tombstones, 'req-new')).toBe(true)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Edge: add path — addPrompts with already-open id is idempotent
+  // ---------------------------------------------------------------------------
+
+  it('edge (add idempotent): addPrompts containing an id already locally open → idempotent, no duplicate', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-A', 'shell', 'echo A')
+    state = reconcile(state, 'run-001', [], [{requestID: 'req-A', permission: 'shell'}])
+    const run = runOf(state, 'run-001')
+    expect(getOpenApprovals(run)).toHaveLength(1)
+    expect(getOpenApprovals(run)[0]?.requestID).toBe('req-A')
+  })
+
+  // ---------------------------------------------------------------------------
+  // Edge: pruneIds containing an id not in open-prompts → no-op (absent is a no-op)
+  // ---------------------------------------------------------------------------
+
+  it('edge: pruneIds containing an id not in open-prompts → tombstoned but no error', () => {
+    let state = live()
+    // req-X was never opened
+    state = reconcile(state, 'run-001', ['req-X'], [])
+    const run = runOf(state, 'run-001')
+    // Should be tombstoned (settle-unseen behavior mirrors settle branch)
+    expect(Object.hasOwn(run.approvalTombstones ?? {}, 'req-X')).toBe(true)
+    expect(hasOpenApprovals(run)).toBe(false)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Immutability: prior state not mutated
+  // ---------------------------------------------------------------------------
+
+  it('immutability: prior state is not mutated by approval-reconcile', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-A', 'shell', 'echo A')
+    const priorRuns = state.runs
+    const priorEntry = state.runs['run-001']
+    const after = reconcile(state, 'run-001', ['req-A'], [])
+    // Prior state unchanged
+    expect(state.runs).toBe(priorRuns)
+    expect(state.runs['run-001']).toBe(priorEntry)
+    // New state has different runs map
+    expect(after.runs).not.toBe(priorRuns)
+    // Prior entry still shows req-A as open
+    expect(hasOpenApprovals(priorEntry)).toBe(true)
+    // New entry shows req-A pruned
+    expect(hasOpenApprovals(after.runs['run-001'])).toBe(false)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Terminal absorbing: reconcile on a terminal run is ignored
+  // ---------------------------------------------------------------------------
+
+  it('terminal absorbing: approval-reconcile on a terminal run is ignored', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-A', 'shell', 'echo A')
+    // Apply terminal status
+    state = nextStreamState(state, {
+      type: 'status',
+      data: {
+        runId: 'run-001',
+        entityRef: 'testowner/test-repo',
+        surface: 'github',
+        phase: 'COMPLETED',
+        status: 'succeeded',
+        startedAt: '2026-06-22T10:00:00Z',
+        stale: false,
+      },
+    })
+    expect(runOf(state, 'run-001').terminal).toBe(true)
+    // Reconcile on terminal run — should be ignored
+    state = reconcile(state, 'run-001', ['req-A'], [{requestID: 'req-B', permission: 'network'}])
+    const run = runOf(state, 'run-001')
+    // Terminal run: open prompts cleared by terminal status, reconcile is a no-op
+    expect(hasOpenApprovals(run)).toBe(false)
+    // req-B must NOT have been added (terminal is absorbing)
+    expect(getOpenApprovals(run).map(p => p.requestID)).not.toContain('req-B')
+  })
+
+  // ---------------------------------------------------------------------------
+  // Pre-live: approval-reconcile before ready is ignored
+  // ---------------------------------------------------------------------------
+
+  it('pre-live: approval-reconcile before ready (connection !== live) → ignored', () => {
+    const state = reconcile(INITIAL_STATE, 'run-001', ['req-A'], [{requestID: 'req-B', permission: 'shell'}])
+    expect(state.runs['run-001']).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// GATEWAY_PENDING_APPROVALS_CAP constant
+// ---------------------------------------------------------------------------
+
+describe('GATEWAY_PENDING_APPROVALS_CAP constant', () => {
+  it('GATEWAY_PENDING_APPROVALS_CAP is exported and equals 50', () => {
+    // Import is at the top of the file — verify the value
+    expect(GATEWAY_PENDING_APPROVALS_CAP).toBe(50)
+  })
+
+  it('GATEWAY_PENDING_APPROVALS_CAP is a positive number less than MAX_OPEN_APPROVALS', () => {
+    expect(typeof GATEWAY_PENDING_APPROVALS_CAP).toBe('number')
+    expect(GATEWAY_PENDING_APPROVALS_CAP).toBeGreaterThan(0)
+    expect(GATEWAY_PENDING_APPROVALS_CAP).toBeLessThan(MAX_OPEN_APPROVALS)
   })
 })

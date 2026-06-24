@@ -66,6 +66,21 @@ export const MAX_APPROVAL_TOMBSTONES = 1000
 export const MAX_OPEN_APPROVALS = 100
 
 /**
+ * Mirrors the gateway's PENDING_APPROVALS_MAX_RESULTS cap (50) from
+ * fro-bot/agent v0.76.2 packages/gateway/src/web/operator/pending-approvals-route.ts.
+ *
+ * The reconcile caller (Unit 3) uses this to guard against truncated recovery
+ * responses: if the recovered set size is >= this cap, the response may be
+ * truncated and corrective pruning is skipped (additive-only fallback).
+ *
+ * NOTE: This is an external contract value with no in-repo source of truth.
+ * If the gateway cap is bumped, update this mirror and the guard in reconcileApprovals.
+ * A stale mirror silently tightens the guard (ghosts persist) but never causes
+ * catastrophic wipe — the safe failure direction.
+ */
+export const GATEWAY_PENDING_APPROVALS_CAP = 50
+
+/**
  * Bounded timeout in milliseconds for receiving the first SSE frame after opening
  * a stream. If no frame arrives within this window, the connection transitions to
  * 'submitted-unobservable' — the run was accepted but is not yet streaming (e.g.
@@ -674,6 +689,96 @@ export function nextStreamState(current, event) {
         retryCount: current.retryCount + 1,
         shouldReconnect: true,
       }
+    }
+
+    case 'approval-reconcile': {
+      // Corrective reconcile action dispatched by reconcileApprovals on reconnect.
+      // The caller (Unit 3) computes the explicit pruneIds and addPrompts lists from
+      // a pre-GET snapshot diff — the reducer does NOT re-derive the diff, which is
+      // what makes the reconcile-window race impossible.
+      //
+      // Before ready (connection !== 'live') → ignore (mirrors approval/output gating).
+      if (current.connection !== 'live') {
+        return current
+      }
+      const {runId, pruneIds, addPrompts} = event
+      const prevEntry = current.runs[runId]
+
+      // If the run is already terminal, all approval frames are ignored (terminal is absorbing).
+      if (prevEntry !== undefined && prevEntry.terminal) {
+        return current
+      }
+
+      // Build the base entry (may be a new run entry if we've never seen a status for this run).
+      const base = prevEntry ?? {
+        runId,
+        status: '',
+        phase: '',
+        startedAt: '',
+        stale: false,
+        terminal: false,
+      }
+
+      // Null-proto maps for open prompts and tombstones — guard against __proto__ key pollution.
+      let nextOpenPrompts = Object.assign(Object.create(null), base.approvalOpenPrompts ?? Object.create(null))
+      let nextTombstones = base.approvalTombstones ?? Object.create(null)
+
+      // --- Prune path ---
+      // For each id in pruneIds: remove from open-prompts and add to tombstones.
+      // Removing an id that's already absent is a no-op.
+      // Re-tombstoning an already-tombstoned id is idempotent.
+      // Reuses the FIFO-cap logic from the settle branch (~L460-472).
+      for (const requestID of pruneIds) {
+        // Guard against __proto__ key injection
+        if (requestID === '__proto__') continue
+        // Remove from open-prompts (no-op if absent)
+        if (requestID in nextOpenPrompts) {
+          const updated = Object.assign(Object.create(null), nextOpenPrompts)
+          delete updated[requestID]
+          nextOpenPrompts = updated
+        }
+        // Add to tombstones with FIFO cap (mirrors settle branch)
+        if (!(requestID in nextTombstones) && Object.keys(nextTombstones).length >= MAX_APPROVAL_TOMBSTONES) {
+          const oldestKey = Object.keys(nextTombstones)[0]
+          const trimmed = Object.assign(Object.create(null), nextTombstones)
+          delete trimmed[oldestKey]
+          nextTombstones = trimmed
+        }
+        nextTombstones = Object.assign(Object.create(null), nextTombstones, {[requestID]: true})
+      }
+
+      // --- Add path ---
+      // For each prompt in addPrompts whose requestID is NOT already in open-prompts
+      // AND NOT tombstoned: add it. Respects the existing MAX_OPEN_APPROVALS overflow guard.
+      // Mirrors the open branch (~L480-505).
+      for (const prompt of addPrompts) {
+        const {requestID} = prompt
+        // Guard against __proto__ key injection
+        if (requestID === '__proto__') continue
+        // Ignore if tombstoned (tombstone precedence)
+        if (nextTombstones[requestID] === true) continue
+        // Ignore if already open (idempotent)
+        if (requestID in nextOpenPrompts) continue
+        // Overflow guard: if at cap, ignore the new prompt
+        if (Object.keys(nextOpenPrompts).length >= MAX_OPEN_APPROVALS) continue
+        const promptData = {
+          runId,
+          requestID,
+          permission: prompt.permission,
+          settled: false,
+          ...(prompt.command === undefined ? {} : {command: prompt.command}),
+          ...(prompt.filepath === undefined ? {} : {filepath: prompt.filepath}),
+        }
+        nextOpenPrompts = Object.assign(Object.create(null), nextOpenPrompts, {[requestID]: promptData})
+      }
+
+      const updatedEntry = {
+        ...base,
+        approvalOpenPrompts: nextOpenPrompts,
+        approvalTombstones: nextTombstones,
+      }
+      const updatedRuns = Object.assign(Object.create(null), current.runs, {[runId]: updatedEntry})
+      return {...current, runs: updatedRuns}
     }
 
     case 'buffer-overflow': {

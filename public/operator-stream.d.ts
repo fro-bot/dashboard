@@ -18,6 +18,12 @@ export declare const MAX_OUTPUT_TEXT_CHARS: number
 export declare const MAX_APPROVAL_TOMBSTONES: number
 export declare const MAX_OPEN_APPROVALS: number
 export declare const FIRST_FRAME_TIMEOUT_MS: number
+/**
+ * Mirrors the gateway's PENDING_APPROVALS_MAX_RESULTS cap (50) from
+ * fro-bot/agent v0.76.2 packages/gateway/src/web/operator/pending-approvals-route.ts.
+ * Used by reconcileApprovals (Unit 3) to guard against truncated recovery responses.
+ */
+export declare const GATEWAY_PENDING_APPROVALS_CAP: number
 
 // ---------------------------------------------------------------------------
 // Frame types (mirrors src/gateway/operator-contract/sse-frames.ts shapes)
@@ -136,6 +142,34 @@ export interface StreamState {
 }
 
 // ---------------------------------------------------------------------------
+// Reconcile action (Unit 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Corrective reconcile action dispatched by reconcileApprovals on reconnect.
+ *
+ * The caller (Unit 3) computes the explicit diff from a pre-GET snapshot so the
+ * reducer does NOT re-derive it — this is what makes the reconcile-window race
+ * impossible.
+ *
+ * - pruneIds: requestIDs to remove from open-prompts and tombstone (FIFO-capped).
+ *   Pruning an absent id is a no-op; re-tombstoning is idempotent.
+ * - addPrompts: recovered open prompts to add if not already open and not tombstoned.
+ *   Respects MAX_OPEN_APPROVALS overflow guard.
+ */
+export interface ApprovalReconcileEvent {
+  readonly type: 'approval-reconcile'
+  readonly runId: string
+  readonly pruneIds: readonly string[]
+  readonly addPrompts: readonly {
+    readonly requestID: string
+    readonly permission: string
+    readonly command?: string
+    readonly filepath?: string
+  }[]
+}
+
+// ---------------------------------------------------------------------------
 // Lifecycle events
 // ---------------------------------------------------------------------------
 
@@ -147,6 +181,7 @@ export type StreamEvent =
   | {readonly type: 'unexpected-close'}
   | {readonly type: 'buffer-overflow'}
   | {readonly type: 'first-frame-timeout'}
+  | ApprovalReconcileEvent
 
 // ---------------------------------------------------------------------------
 // Safe render model
