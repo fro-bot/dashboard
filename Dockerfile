@@ -1,4 +1,4 @@
-FROM node:24-slim@sha256:964191e9c047c5ababb0ba8a6e613cc70714a1de1fbca57e717c516f689c8053
+FROM node:24-slim@sha256:862263c612aa437e3037674b85419622a9d93bff80aa1eee5398dfe686375532
 
 # Enable corepack for pnpm
 RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
