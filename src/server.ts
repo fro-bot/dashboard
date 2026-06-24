@@ -21,6 +21,7 @@ import type {OperatorClient, SessionDto} from './gateway/operator-client.ts'
 import type {AggregatorSnapshot} from './github/aggregator.ts'
 import type {MetadataReader} from './github/metadata.ts'
 import {Buffer} from 'node:buffer'
+import {existsSync} from 'node:fs'
 import process from 'node:process'
 import {serve} from '@hono/node-server'
 import {getConnInfo} from '@hono/node-server/conninfo'
@@ -28,7 +29,7 @@ import {serveStatic} from '@hono/node-server/serve-static'
 import {Octokit} from '@octokit/core'
 import {graphql} from '@octokit/graphql'
 import {Hono, type Context} from 'hono'
-import {getCookie} from 'hono/cookie'
+import {getCookie, setCookie} from 'hono/cookie'
 import {secureHeaders} from 'hono/secure-headers'
 import {fetchGitHubUserLogin, makeGitHubOAuthClient} from './auth/oauth.ts'
 import {createOperatorClient} from './gateway/operator-client.ts'
@@ -42,7 +43,6 @@ import {logger, sanitizeErrorMessage} from './logger.ts'
 import {isOk} from './result.ts'
 import {buildApiRouter} from './routes/api.ts'
 import {buildAuthRouter} from './routes/auth.ts'
-import {buildDashboardRouter} from './routes/dashboard.ts'
 import {readOptionalMultilineSecret, readOptionalSecret} from './secrets.ts'
 import {loadCookieKey, SessionManager} from './session.ts'
 
@@ -164,7 +164,7 @@ export interface DashboardAppConfig {
    */
   fetchUserLogin?: ((accessToken: string) => Promise<string>) | undefined
   /**
-   * Aggregator snapshot provider. Both the dashboard SSR route and /api/status
+   * Aggregator snapshot provider. Both the SPA monitoring view and /api/status
    * read from this same provider so they always serve the same data.
    *
    * If undefined, defaults to a provider returning an empty snapshot
@@ -220,6 +220,28 @@ export interface DashboardAppConfig {
    * Ignored when operatorClient is injected directly.
    */
   gatewayFetchImpl?: ((url: string, init?: RequestInit) => Promise<Response>) | undefined
+  /**
+   * DEV-ONLY auto-login bypass. When true AND guards pass, skips OAuth and mints
+   * a real signed session for the configured operatorLogin on every unauthenticated
+   * request to a protected route (Arctic branch only).
+   *
+   * SECURITY INVARIANTS (load-bearing):
+   * - THROWS at startup if NODE_ENV === 'production' (fail loud, never silent).
+   * - ENV-driven path (DASHBOARD_DEV_AUTOLOGIN) ALSO throws if DASHBOARD_HOST is
+   *   not a loopback address (127.0.0.1/localhost/::1). Default host 0.0.0.0 fails.
+   * - Injected opts.devAutoLogin (test seam) bypasses the host check but still
+   *   throws on NODE_ENV=production. Document this in tests.
+   * - NEVER mints a session when operatorLogin is undefined (deny-all stays deny-all).
+   * - Only active in the Arctic branch (not gateway-session mode).
+   * - Minted session is a genuine signed session via SessionManager — not a fake identity.
+   *
+   * If undefined, reads from DASHBOARD_DEV_AUTOLOGIN env.
+   * Only the exact string 'true' (case-insensitive, trimmed) enables the bypass.
+   * Default: OFF.
+   *
+   * Tests inject this directly to avoid env dependencies.
+   */
+  devAutoLogin?: boolean | undefined
 }
 
 /**
@@ -265,7 +287,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
 
   const fetchUserLogin = opts?.fetchUserLogin ?? fetchGitHubUserLogin
 
-  // Resolve snapshot provider — both dashboard SSR and /api/status share the same source.
+  // Resolve snapshot provider — both the SPA monitoring view and /api/status share the same source.
   // Default: empty snapshot (no aggregator wired yet; production wires the real one).
   const EMPTY_SNAPSHOT = {repos: [], staleBanner: false, driftCount: 0, refreshedAt: null} as const
   const getSnapshot = opts?.getSnapshot ?? (() => EMPTY_SNAPSHOT)
@@ -282,6 +304,59 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     opts?.gatewayOperatorSessionEnabled === undefined
       ? readGatewayOperatorSessionConfig().enabled
       : opts.gatewayOperatorSessionEnabled
+
+  // Resolve devAutoLogin — DEV-ONLY auth bypass. Default OFF (fail-closed).
+  //
+  // SECURITY: Two independent guards must BOTH pass for the bypass to be effective.
+  // If the bypass is REQUESTED but either guard fails, we THROW at startup (fail loud,
+  // not silent) so misconfiguration is caught immediately rather than silently disabled.
+  //
+  // Guard A — NODE_ENV: must NOT be 'production'.
+  //   The runtime Dockerfile sets ENV NODE_ENV=production, so the production container
+  //   always satisfies this guard. The previous silent-disable was insufficient because
+  //   NODE_ENV was undefined in prod (not set in Dockerfile/compose/deploy .env).
+  //
+  // Guard B — bind host (ENV path only): DASHBOARD_HOST must be a loopback address.
+  //   The default bind host is 0.0.0.0 (non-loopback), so the bypass requires an
+  //   explicit DASHBOARD_HOST=127.0.0.1/localhost/::1. This prevents the bypass from
+  //   engaging on any network-accessible bind address.
+  //   NOTE: Guard B applies only to the ENV-driven path (DASHBOARD_DEV_AUTOLOGIN).
+  //   The injected opts.devAutoLogin path is a test seam — it bypasses the host check
+  //   but still honors Guard A (NODE_ENV production throw). This is intentional: tests
+  //   inject devAutoLogin directly and do not set DASHBOARD_HOST.
+  //
+  // Both paths: if requested but unsafe → THROW (never silently disable).
+  const devAutoLoginRequested: boolean =
+    opts?.devAutoLogin === undefined
+      ? process.env.DASHBOARD_DEV_AUTOLOGIN?.trim().toLowerCase() === 'true'
+      : opts.devAutoLogin
+
+  const isEnvDrivenPath = opts?.devAutoLogin === undefined
+
+  if (devAutoLoginRequested) {
+    // Guard A: NODE_ENV production check (applies to BOTH paths)
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'DASHBOARD_DEV_AUTOLOGIN refused: requires NODE_ENV!=production and DASHBOARD_HOST=127.0.0.1/localhost/::1 (dev-only auth bypass must never run in production)',
+      )
+    }
+
+    // Guard B: loopback bind host check (ENV-driven path only)
+    if (isEnvDrivenPath) {
+      const configuredHost = process.env.DASHBOARD_HOST?.trim()
+      if (!isLoopbackBindHost(configuredHost)) {
+        throw new Error(
+          'DASHBOARD_DEV_AUTOLOGIN refused: requires NODE_ENV!=production and DASHBOARD_HOST=127.0.0.1/localhost/::1 (dev-only auth bypass must never run in production)',
+        )
+      }
+    }
+  }
+
+  const devAutoLogin = devAutoLoginRequested
+
+  if (devAutoLogin) {
+    logger.warning('DEV AUTO-LOGIN ENABLED — auth is bypassed; never use in production')
+  }
 
   // Resolve the trusted gateway operator origin — SECURITY CRITICAL.
   // Must be a configured, trusted value; never derived from the inbound request Host.
@@ -311,7 +386,21 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // ── Security headers + CSP (applied to all responses) ──────────────────────
   // Placed first so every response — including error responses — carries the
   // security headers. The tight CSP (script-src 'self', no unsafe-inline)
-  // requires all styles to be external files (see public/operator.css).
+  // requires all scripts to be external files, satisfying the SPA build output
+  // (Vite emits <script type="module" src="..."> with hashed filenames — no inline).
+  //
+  // Pinned directives for the SPA PWA shell:
+  //   script-src 'self'     — no inline scripts, no eval; Vite hashed chunks satisfy this
+  //   worker-src 'self'     — service worker registration from same origin
+  //   manifest-src 'self'   — web app manifest fetch from same origin
+  //   connect-src 'self'    — fetch/XHR/SSE to same origin only
+  //   img-src 'self' data:  — data: URIs for inline SVG/icon use cases
+  //   font-src 'self'       — self-hosted fonts only
+  //   base-uri 'self'       — prevent base tag injection
+  //   object-src 'none'     — no plugins
+  //   style-src 'self' 'unsafe-inline' — SSR pages use inline style attributes
+  //     throughout; inline styles are low risk vs inline scripts (the XSS vector).
+  //     Do NOT add 'unsafe-eval' — no eval in production.
   app.use(
     '*',
     secureHeaders({
@@ -322,8 +411,11 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
         // permits inline styles. Scripts stay strict ('self', no inline) since
         // inline script is the meaningful XSS vector here.
         styleSrc: ["'self'", "'unsafe-inline'"],
+        workerSrc: ["'self'"],
+        manifestSrc: ["'self'"],
         connectSrc: ["'self'"],
-        imgSrc: ["'self'"],
+        imgSrc: ["'self'", 'data:'],
+        fontSrc: ["'self'"],
         objectSrc: ["'none'"],
         baseUri: ["'self'"],
         formAction: ["'self'"],
@@ -381,6 +473,14 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     path === '/auth/login' ||
     path === '/auth/callback' ||
     path === '/auth/logout' ||
+    // SPA static assets — reachable pre-auth so the PWA shell loads before the
+    // auth redirect. The JS/CSS/manifest/icons carry no sensitive data.
+    // /assets/* — hashed JS/CSS chunks from web/dist/assets/
+    // /manifest.webmanifest — PWA manifest
+    // /icon-*.svg — PWA icons
+    path.startsWith('/assets/') ||
+    path === '/manifest.webmanifest' ||
+    path.startsWith('/icon-') ||
     (operatorUiEnabled && path.startsWith('/static/'))
 
   app.use('*', async (c: Context, next) => {
@@ -480,8 +580,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
       c.set('gatewaySession', result.data)
       return next()
     } else {
-      // ── ARCTIC BRANCH (byte-for-byte today's logic) ───────────────────────
-      // Flag-OFF preserves the existing Arctic middleware behavior exactly.
+      // ── ARCTIC BRANCH ────────────────────────────────────────────────────
       // Own public-path check — duplicated intentionally (see strategy-branch note).
 
       if (isPublicPath(path)) {
@@ -489,6 +588,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
       }
 
       // Fail closed: with no configured operator, no protected route is served.
+      // devAutoLogin NEVER mints a session when operatorLogin is undefined.
       if (operatorLogin === undefined) {
         return c.text('Unauthorized', 401)
       }
@@ -497,26 +597,44 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
       // The middleware context type is slightly wider than getCookie's declared param type;
       // this cast is safe — getCookie only reads headers from the context.
       const cookieValue = getCookie(c, 'session')
-      if (typeof cookieValue !== 'string' || cookieValue.length === 0) {
-        return c.redirect('/auth/login', 302)
-      }
+      const sm = sessionManager as SessionManager
 
-      // sessionManager is guaranteed non-undefined here: operatorLogin is set (checked above)
-      // and we only construct SessionManager when operatorLogin is set.
-      const session = (sessionManager as SessionManager).verify(cookieValue)
-      if (session === null) {
-        return c.redirect('/auth/login', 302)
-      }
+      // Attempt to verify the existing session cookie (if present).
+      const session =
+        typeof cookieValue === 'string' && cookieValue.length > 0 ? sm.verify(cookieValue) : null
 
       // FIX #4: Reject sessions minted for a different operator login.
       // A stale session from a previously-configured login must not grant access
       // after the operator changes.
-      if (session.login !== operatorLogin) {
+      const validSession = session !== null && session.login === operatorLogin ? session : null
+
+      if (validSession === null) {
+        // No valid session. devAutoLogin (DEV-ONLY, never in production) mints a real
+        // signed session for the configured operator, skipping OAuth entirely.
+        // Preconditions: devAutoLogin=true, operatorLogin set (checked above), sessionManager set.
+        if (devAutoLogin) {
+          const sessionValue = sm.sign(operatorLogin)
+          // Matches /auth/callback's cookie attributes EXCEPT secure: this dev-only
+          // path runs over http://localhost, where a Secure cookie is dropped by the
+          // browser (causing a re-mint loop). secure:false is correct and safe here
+          // precisely because devAutoLogin is dev-only and prod-impossible (NODE_ENV
+          // guard above). The production session cookie is still set Secure by /auth/callback.
+          setCookie(c, 'session', sessionValue, {
+            httpOnly: true,
+            secure: false,
+            sameSite: 'Lax',
+            maxAge: 24 * 60 * 60,
+            path: '/',
+          })
+          c.set('sessionLogin', operatorLogin)
+          return next()
+        }
+
         return c.redirect('/auth/login', 302)
       }
 
       // Attach session login to context for downstream handlers (typed, no `as never`)
-      c.set('sessionLogin', session.login)
+      c.set('sessionLogin', validSession.login)
       return next()
     }
   })
@@ -554,18 +672,12 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // requests to any path not in isPublicPath, so no extra guard is needed here.
   app.route('/api', buildApiRouter(getSnapshot))
 
-  // ── Dashboard SSR route ──────────────────────────────────────────────────────
-  // Mounted at `/` — protected by the auth middleware above.
-  // Pass cookieKey + operatorLogin so the dashboard can render the CSRF token for logout.
-  app.route(
-    '/',
-    buildDashboardRouter({
-      getSnapshot,
-      cookieKey: opts?.cookieKey,
-      operatorLogin,
-      gatewayOperatorSessionEnabled,
-    }),
-  )
+  // Serve the React SPA at /. The shell assets (JS/CSS/manifest/icons) are public via
+  // isPublicPath, but index.html itself requires a session, so the SPA bootstraps only
+  // for authenticated operators. Deep-link fallback (/some/client-route → index.html)
+  // needs a Caddy try_files rule; only `/` is served here since the SPA has no
+  // client-side routing yet.
+  app.get('/', serveStatic({root: './web/dist', path: 'index.html'}))
 
   // ── Operator UI skeleton route ────────────────────────────────────────────────
   // Only mounted when operatorUiEnabled is true (default: false).
@@ -583,6 +695,32 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     // browsers can load CSS/JS assets without being 302'd to /auth/login.
     // root is relative to WORKDIR (/app) in the container, matching Dockerfile.
     app.use('/static/*', serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}))
+  }
+
+  // ── SPA static asset serving ─────────────────────────────────────────────
+  // Serves the prebuilt SPA (web/dist/) under specific public paths.
+  // These paths are added to isPublicPath above so the PWA shell loads before
+  // the auth redirect — the JS/CSS/manifest/icons carry no sensitive data.
+  //
+  // /assets/* — hashed JS/CSS chunks (Vite content-addressed, safe to cache)
+  // /manifest.webmanifest — PWA manifest
+  // /icon-*.svg — PWA icons
+  //
+  // root is relative to WORKDIR (/app) in the container, matching Dockerfile.
+  // The builder stage copies web/dist/ to /app/web/dist/ in the runtime image.
+  app.use('/assets/*', serveStatic({root: './web/dist'}))
+  app.use('/manifest.webmanifest', serveStatic({root: './web/dist'}))
+  // PWA icons: icon-192.svg, icon-512.svg (and any future icon-*.svg)
+  app.use('/icon-*', serveStatic({root: './web/dist'}))
+
+  // ── web/dist presence check ───────────────────────────────────────────────
+  // Warn early if the SPA build artifact is missing. GET / will 404 silently
+  // without this. Does NOT throw — the server still starts (useful for backend-
+  // only dev), but the operator needs to know to run `pnpm build:web` first.
+  if (!existsSync('./web/dist/index.html')) {
+    logger.warning(
+      'web/dist/index.html not found — GET / will return 404. Run `pnpm build:web` to build the SPA.',
+    )
   }
 
   return app
@@ -711,6 +849,18 @@ export function buildSnapshotProvider(deps: SnapshotProviderDeps): {
   }
 }
 
+/**
+ * Returns true if the given bind host is a loopback address.
+ * Accepts '127.0.0.1', 'localhost', and '::1'.
+ * undefined or any other value (including '0.0.0.0') returns false.
+ *
+ * Used by the devAutoLogin guard: the ENV-driven bypass requires an explicit
+ * loopback bind host so it cannot engage on a network-accessible address.
+ */
+export function isLoopbackBindHost(host: string | undefined): boolean {
+  return host === '127.0.0.1' || host === 'localhost' || host === '::1'
+}
+
 /** Resolved server bind address. */
 export interface ServerBindConfig {
   readonly host: string
@@ -754,6 +904,12 @@ export function readServerBindConfig(env: NodeJS.ProcessEnv = process.env): Serv
 /**
  * Binds the app to `DASHBOARD_HOST:DASHBOARD_PORT` (default `0.0.0.0:3000`) via
  * @hono/node-server. Loads the cookie key asynchronously before starting.
+ *
+ * Non-blocking startup: the server begins listening immediately after the cookie
+ * key is loaded. The first aggregation refresh runs in the background — the
+ * snapshot provider returns an empty snapshot until the first refresh completes,
+ * and the UI handles the empty/loading state. This means the server is ready to
+ * serve requests (including /api/healthz) within ~1-2s, not 15-20s.
  */
 async function createDashboardServer(): Promise<ServerType> {
   const cookieKey = await loadCookieKey()
@@ -767,17 +923,15 @@ async function createDashboardServer(): Promise<ServerType> {
   const appId = readOptionalSecret('DASHBOARD_GITHUB_APP_ID')
   const privateKey = readOptionalMultilineSecret('DASHBOARD_GITHUB_APP_KEY')
 
+  let provider: ReturnType<typeof buildSnapshotProvider> | undefined
+
   if (appId !== null && privateKey !== null) {
-    try {
-      const provider = buildSnapshotProvider({appId, privateKey})
-      await provider.start()
-      getSnapshot = provider.getSnapshot
-      stopAggregator = provider.stop
-    } catch (error) {
-      logger.warning('Failed to start GitHub aggregator; serving empty snapshot', {
-        error: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)),
-      })
-    }
+    // Construct the provider synchronously — no network calls yet.
+    // start() (which triggers the first refresh) runs in the background after
+    // the server is already listening.
+    provider = buildSnapshotProvider({appId, privateKey})
+    getSnapshot = provider.getSnapshot
+    stopAggregator = provider.stop
   } else {
     logger.warning(
       'DASHBOARD_GITHUB_APP_ID or DASHBOARD_GITHUB_APP_KEY not set — GitHub data layer disabled; serving empty snapshot',
@@ -787,6 +941,10 @@ async function createDashboardServer(): Promise<ServerType> {
   const app = await buildDashboardApp({cookieKey, getSnapshot})
 
   const {host, port} = readServerBindConfig()
+
+  // Bind and listen FIRST — the server is immediately ready to serve requests.
+  // The snapshot provider returns an empty snapshot until the first refresh
+  // completes; the UI handles the loading state gracefully.
   const server = serve(
     {
       fetch: app.fetch,
@@ -803,6 +961,18 @@ async function createDashboardServer(): Promise<ServerType> {
     const stop = stopAggregator
     server.addListener('close', () => {
       stop()
+    })
+  }
+
+  // Kick the first aggregation refresh in the background — does NOT block the
+  // server from accepting requests. Failures are logged but do NOT crash the
+  // server; the interval set by start() will retry on the next cycle.
+  if (provider !== undefined) {
+    const p = provider
+    p.start().catch((error: unknown) => {
+      logger.warning('Failed to start GitHub aggregator; serving empty snapshot until next retry', {
+        error: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)),
+      })
     })
   }
 

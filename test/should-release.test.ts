@@ -20,6 +20,8 @@
  * Covered scenarios:
  * - src/** changes => release
  * - bare `src` path changed => release
+ * - web/** changes => release (SPA source built into image)
+ * - bare `web` path changed => release
  * - Dockerfile change => release
  * - release workflow change => release
  * - tsconfig change => release
@@ -169,6 +171,24 @@ describe('should-release — src/** changes trigger release', () => {
     const base = writePkg(tmpDir, 'base.json', BASE_PKG)
     const head = writePkg(tmpDir, 'head.json', BASE_PKG)
     const {exitCode, stdout} = runGuard('src', base, head)
+    expect(exitCode).toBe(0)
+    expect(stdout).toMatch(/^release:/)
+  })
+})
+
+describe('should-release — web/** changes trigger release', () => {
+  it('releases when a web/ source file changes (SPA built into image)', () => {
+    const base = writePkg(tmpDir, 'base.json', BASE_PKG)
+    const head = writePkg(tmpDir, 'head.json', BASE_PKG)
+    const {exitCode, stdout} = runGuard('web/src/App.tsx', base, head)
+    expect(exitCode).toBe(0)
+    expect(stdout).toMatch(/^release:/)
+  })
+
+  it('releases when bare web path is listed as changed', () => {
+    const base = writePkg(tmpDir, 'base.json', BASE_PKG)
+    const head = writePkg(tmpDir, 'head.json', BASE_PKG)
+    const {exitCode, stdout} = runGuard('web', base, head)
     expect(exitCode).toBe(0)
     expect(stdout).toMatch(/^release:/)
   })

@@ -1,0 +1,202 @@
+/**
+ * AppShell — responsive nav frame + content slot.
+ *
+ * Layout:
+ *   - Mobile (<md): stacked header + scrollable main
+ *   - Tablet (md+): same, header gains more horizontal padding
+ *   - Desktop (lg+): wider max-width container
+ *
+ * Theme: dark by default ([data-theme] on <html>). Toggle button flips
+ * between "dark" and "light" without any Radix primitive — a plain <button>
+ * is sufficient for this single-operator monitoring surface.
+ *
+ * All colors come from CSS vars (tokens.css). No inline hex.
+ */
+
+import {type ReactNode, useCallback, useEffect, useState} from 'react'
+
+type Theme = 'dark' | 'light'
+
+function getInitialTheme(): Theme {
+  if (typeof window === 'undefined') return 'dark'
+  const stored = window.localStorage.getItem('fro-bot-theme')
+  if (stored === 'dark' || stored === 'light') return stored
+  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+}
+
+function applyTheme(theme: Theme): void {
+  document.documentElement.setAttribute('data-theme', theme)
+}
+
+interface AppShellProps {
+  children: ReactNode
+}
+
+export function AppShell({children}: AppShellProps) {
+  const [theme, setTheme] = useState<Theme>(getInitialTheme)
+
+  // Sync data-theme attribute on mount and on change
+  useEffect(() => {
+    applyTheme(theme)
+    window.localStorage.setItem('fro-bot-theme', theme)
+  }, [theme])
+
+  const toggleTheme = useCallback(() => {
+    setTheme((t) => (t === 'dark' ? 'light' : 'dark'))
+  }, [])
+
+  return (
+    <div
+      data-testid="app-shell"
+      style={{
+        minHeight: '100dvh',
+        display: 'flex',
+        flexDirection: 'column',
+        backgroundColor: 'var(--color-bg)',
+        color: 'var(--color-text)',
+        fontFamily: 'var(--font-body)',
+      }}
+    >
+      {/* ── Nav / Header ─────────────────────────────────────────────────── */}
+      <header
+        data-testid="app-nav"
+        style={{
+          position: 'sticky',
+          top: 0,
+          zIndex: 40,
+          backgroundColor: 'var(--color-surface)',
+          borderBottom: '1px solid var(--color-border)',
+          boxShadow: 'var(--shadow-sm)',
+        }}
+      >
+        <div
+          style={{
+            maxWidth: 'var(--bp-xl)',
+            margin: '0 auto',
+            padding: 'var(--space-3) var(--space-4)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 'var(--space-4)',
+          }}
+          /* Responsive padding: sm → md → lg via inline style is limited;
+             Tailwind classes handle the breakpoint steps below. */
+          className="sm:px-6 md:px-8 lg:px-10"
+        >
+          {/* Brand mark */}
+          <a
+            href="/"
+            aria-label="Fro Bot Dashboard home"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 'var(--space-2)',
+              textDecoration: 'none',
+              color: 'var(--color-text)',
+            }}
+          >
+            <img
+              src="/icon-192.svg"
+              alt=""
+              aria-hidden="true"
+              width="28"
+              height="28"
+              style={{display: 'block', borderRadius: 'var(--radius-full)'}}
+            />
+            <span
+              style={{
+                fontSize: 'var(--text-body)',
+                fontWeight: 700,
+                letterSpacing: 'var(--tracking-heading)',
+                color: 'var(--color-text)',
+              }}
+              className="hidden sm:inline"
+            >
+              Fro Bot
+            </span>
+            <span
+              style={{
+                fontSize: 'var(--text-label)',
+                fontFamily: 'var(--font-mono)',
+                letterSpacing: 'var(--tracking-label)',
+                color: 'var(--color-text-muted)',
+                textTransform: 'uppercase',
+              }}
+              className="hidden md:inline"
+            >
+              Dashboard
+            </span>
+          </a>
+
+          {/* Nav actions */}
+          <nav
+            aria-label="Primary navigation"
+            style={{display: 'flex', alignItems: 'center', gap: 'var(--space-2)'}}
+          >
+            {/* Theme toggle — plain button, no Radix needed */}
+            <button
+              type="button"
+              aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+              data-testid="theme-toggle"
+              onClick={toggleTheme}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: '2rem',
+                height: '2rem',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--color-border)',
+                backgroundColor: 'transparent',
+                color: 'var(--color-text-muted)',
+                cursor: 'pointer',
+                transition: 'border-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard)',
+              }}
+            >
+              {theme === 'dark' ? (
+                /* Sun icon */
+                <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <circle cx="8" cy="8" r="3" stroke="currentColor" strokeWidth="1.5" />
+                  <line x1="8" y1="1" x2="8" y2="3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  <line x1="8" y1="13" x2="8" y2="15" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  <line x1="1" y1="8" x2="3" y2="8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  <line x1="13" y1="8" x2="15" y2="8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  <line x1="2.93" y1="2.93" x2="4.34" y2="4.34" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  <line x1="11.66" y1="11.66" x2="13.07" y2="13.07" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  <line x1="2.93" y1="13.07" x2="4.34" y2="11.66" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  <line x1="11.66" y1="4.34" x2="13.07" y2="2.93" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              ) : (
+                /* Moon icon */
+                <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path
+                    d="M13.5 9.5A6 6 0 0 1 6.5 2.5a6 6 0 1 0 7 7z"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              )}
+            </button>
+          </nav>
+        </div>
+      </header>
+
+      {/* ── Main content slot ─────────────────────────────────────────────── */}
+      <main
+        data-testid="app-content"
+        style={{
+          flex: 1,
+          width: '100%',
+          maxWidth: 'var(--bp-xl)',
+          margin: '0 auto',
+          padding: 'var(--space-6) var(--space-4)',
+        }}
+        className="sm:px-6 md:px-8 lg:px-10"
+      >
+        {children}
+      </main>
+    </div>
+  )
+}

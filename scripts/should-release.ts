@@ -131,6 +131,7 @@ function loadPkg(path: string, label: string): LoadResult {
 /**
  * Returns true if the file path matches a "hard release" pattern:
  *   - src/**
+ *   - web/**  (SPA source — built into the image by the builder stage)
  *   - Dockerfile
  *   - .github/workflows/release.yaml
  *   - scripts/should-release.ts
@@ -139,6 +140,9 @@ function loadPkg(path: string, label: string): LoadResult {
  */
 function isHardReleasePath(filePath: string): boolean {
   if (filePath.startsWith('src/') || filePath === 'src') return true
+  // web/** — SPA source is built into the image by the Dockerfile builder stage;
+  // any change to web/ must trigger a new image build and release.
+  if (filePath.startsWith('web/') || filePath === 'web') return true
   if (filePath === 'Dockerfile') return true
   if (filePath === '.github/workflows/release.yaml') return true
   if (filePath === 'scripts/should-release.ts') return true
