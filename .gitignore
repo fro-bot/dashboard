@@ -2,6 +2,7 @@ node_modules
 .env
 coverage
 dist
+web/dist
 .DS_Store
 
 # Never commit private keys (App PEM, cookie key). Defense-in-depth: do not
