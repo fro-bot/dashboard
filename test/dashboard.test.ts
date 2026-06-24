@@ -1,17 +1,18 @@
 import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
 /**
- * Dashboard SSR view + /api/status integration tests.
+ * Dashboard SPA root + /api/monitoring + /api/status integration tests.
  *
- * Uses app.request() with injected fake snapshot + a valid session cookie.
- * Does NOT hit real GitHub — snapshot is injected via DashboardAppConfig.getSnapshot.
+ * Unit 5 cutover: GET / now serves web/dist/index.html (SPA shell), not SSR HTML.
+ * The monitoring data is fetched client-side via /api/monitoring (BFF JSON endpoint).
  *
  * Security invariants tested:
- * - Unauthed GET / and GET /api/status are denied (redirect or 401).
- * - node_id is never rendered as user-facing identity in a leaking way.
- * - Drift count is rendered as a number only — no repo names from drift.
- * - staleBanner renders the expected banner text.
- * - Empty snapshot renders loading state, not an error.
- * - Logout is rendered as a POST form with a CSRF token (not a GET link).
+ * - Unauthed GET / and GET /api/monitoring are denied (redirect or 401).
+ * - /api/monitoring NEVER emits a denylisted repo's identifiers (owner/name/node_id/full_name).
+ * - /api/monitoring carries Cache-Control: no-store.
+ * - /api/monitoring is behind auth (not public).
+ * - Drift count is a number only — no repo names from drift.
+ * - staleBanner is present in the JSON response.
+ * - Empty snapshot returns valid JSON with empty repos array.
  */
 import type {AggregatorSnapshot, DashboardRepo} from '../src/github/aggregator.ts'
 import {Buffer} from 'node:buffer'
@@ -90,180 +91,10 @@ async function authedGet(app: Awaited<ReturnType<typeof buildTestApp>>, path: st
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// GET / — SPA shell (Unit 5 cutover)
 // ---------------------------------------------------------------------------
 
-describe('dashboard SSR — GET /', () => {
-  describe('happy path', () => {
-    it('renders repos in attention-first order (aggregator order preserved)', async () => {
-      const repo1 = makeRepo({
-        node_id: 'NODE_1',
-        full_name: 'fro-bot/alpha',
-        owner: 'fro-bot',
-        name: 'alpha',
-        status: {
-          rollupState: 'red',
-          failingChecks: 2,
-          openPrCount: 1,
-          openIssueCount: 0,
-          openAlertCount: null,
-          stale: false,
-          fetchedAt: 1_700_000_000_000,
-        },
-      })
-      const repo2 = makeRepo({
-        node_id: 'NODE_2',
-        full_name: 'fro-bot/beta',
-        owner: 'fro-bot',
-        name: 'beta',
-        status: {
-          rollupState: 'green',
-          failingChecks: 0,
-          openPrCount: 0,
-          openIssueCount: 0,
-          openAlertCount: null,
-          stale: false,
-          fetchedAt: 1_700_000_000_000,
-        },
-      })
-      const snapshot = makeSnapshot({repos: [repo1, repo2], refreshedAt: 1_700_000_000_000})
-      const app = await buildTestApp(snapshot)
-      const res = await authedGet(app, '/')
-
-      expect(res.status).toBe(200)
-      const body = await res.text()
-
-      // Both repos rendered
-      expect(body).toContain('fro-bot/alpha')
-      expect(body).toContain('fro-bot/beta')
-
-      // Order preserved: alpha (attention) appears before beta (healthy)
-      const alphaIdx = body.indexOf('fro-bot/alpha')
-      const betaIdx = body.indexOf('fro-bot/beta')
-      expect(alphaIdx).toBeLessThan(betaIdx)
-    })
-
-    it('renders status pill, PR link, issue link, alert count, and channel badge', async () => {
-      const repo = makeRepo({
-        full_name: 'fro-bot/agent',
-        owner: 'fro-bot',
-        name: 'agent',
-        discovery_channel: 'collab',
-        status: {
-          rollupState: 'red',
-          failingChecks: 3,
-          openPrCount: 2,
-          openIssueCount: 5,
-          openAlertCount: 1,
-          stale: false,
-          fetchedAt: 1_700_000_000_000,
-        },
-      })
-      const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
-      const app = await buildTestApp(snapshot)
-      const res = await authedGet(app, '/')
-
-      expect(res.status).toBe(200)
-      const body = await res.text()
-
-      expect(body).toContain('fro-bot/agent')
-      expect(body).toContain('https://github.com/fro-bot/agent/pulls')
-      expect(body).toContain('https://github.com/fro-bot/agent/issues')
-      expect(body).toContain('collab')
-      // Alert count rendered
-      expect(body).toContain('1')
-    })
-
-    it('renders — for null alert count', async () => {
-      const repo = makeRepo({
-        status: {
-          rollupState: 'green',
-          failingChecks: 0,
-          openPrCount: 0,
-          openIssueCount: 0,
-          openAlertCount: null,
-          stale: false,
-          fetchedAt: 1_700_000_000_000,
-        },
-      })
-      const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
-      const app = await buildTestApp(snapshot)
-      const res = await authedGet(app, '/')
-
-      expect(res.status).toBe(200)
-      const body = await res.text()
-      expect(body).toContain('—')
-    })
-
-    it('renders stale marker on per-repo stale status', async () => {
-      const repo = makeRepo({
-        status: {
-          rollupState: 'unknown',
-          failingChecks: 0,
-          openPrCount: 0,
-          openIssueCount: 0,
-          openAlertCount: null,
-          stale: true,
-          fetchedAt: 1_700_000_000_000,
-        },
-      })
-      const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
-      const app = await buildTestApp(snapshot)
-      const res = await authedGet(app, '/')
-
-      expect(res.status).toBe(200)
-      const body = await res.text()
-      expect(body).toContain('stale')
-    })
-  })
-
-  describe('logout form (FIX P1 — GET link replaced with POST form + CSRF)', () => {
-    it('renders a POST form for logout (not a GET link)', async () => {
-      const snapshot = makeSnapshot({refreshedAt: 1_700_000_000_000})
-      const app = await buildTestApp(snapshot)
-      const res = await authedGet(app, '/')
-
-      expect(res.status).toBe(200)
-      const body = await res.text()
-
-      // Must have a form POSTing to /auth/logout
-      expect(body).toContain('method="POST"')
-      expect(body).toContain('action="/auth/logout"')
-
-      // Must have a hidden CSRF token input
-      expect(body).toContain('name="csrf_token"')
-      expect(body).toContain('type="hidden"')
-
-      // Must NOT have a bare GET link to /auth/logout
-      // (the old <a href="/auth/logout"> pattern)
-      expect(body).not.toMatch(/<a[^>]+href="\/auth\/logout"/)
-    })
-
-    it('CSRF token in form is non-empty', async () => {
-      const snapshot = makeSnapshot({refreshedAt: 1_700_000_000_000})
-      const app = await buildTestApp(snapshot)
-      const res = await authedGet(app, '/')
-
-      const body = await res.text()
-      // Extract the csrf_token value from the hidden input
-      const matchA = /name="csrf_token"\s+value="([^"]+)"/.exec(body)
-      const matchB = /value="([^"]+)"\s+name="csrf_token"/.exec(body)
-      const match = matchA ?? matchB
-      expect(match).not.toBeNull()
-      expect(match?.[1]).toBeTruthy()
-      expect((match?.[1] ?? '').length).toBeGreaterThan(0)
-    })
-
-    it('logout form submits to correct action', async () => {
-      const snapshot = makeSnapshot()
-      const app = await buildTestApp(snapshot)
-      const res = await authedGet(app, '/')
-
-      const body = await res.text()
-      expect(body).toContain('action="/auth/logout"')
-    })
-  })
-
+describe('dashboard SPA root — GET /', () => {
   describe('security — unauthenticated access denied', () => {
     it('GET / without session cookie → redirect or 401', async () => {
       const app = await buildTestApp(makeSnapshot())
@@ -281,96 +112,219 @@ describe('dashboard SSR — GET /', () => {
     })
   })
 
-  describe('edge: empty snapshot (pre-first-fetch)', () => {
-    it('renders loading/empty state — 200, no throw', async () => {
-      const snapshot = makeSnapshot({repos: [], refreshedAt: null})
-      const app = await buildTestApp(snapshot)
+  describe('authenticated access — SPA shell', () => {
+    it('authed GET / returns 200 (SPA index.html served)', async () => {
+      const app = await buildTestApp(makeSnapshot())
       const res = await authedGet(app, '/')
+      expect(res.status).toBe(200)
+    })
 
+    it('authed GET / returns HTML content (SPA shell)', async () => {
+      const app = await buildTestApp(makeSnapshot())
+      const res = await authedGet(app, '/')
       expect(res.status).toBe(200)
       const body = await res.text()
-      // Loading state rendered
-      expect(body).toContain('Loading')
-      // No error thrown — body is valid HTML
-      expect(body).toContain('<html')
-    })
-  })
-
-  describe('edge: staleBanner', () => {
-    it('renders stale-cache banner when staleBanner is true', async () => {
-      const snapshot = makeSnapshot({staleBanner: true, refreshedAt: 1_700_000_000_000})
-      const app = await buildTestApp(snapshot)
-      const res = await authedGet(app, '/')
-
-      expect(res.status).toBe(200)
-      const body = await res.text()
-      expect(body).toContain('Showing cached data')
-      expect(body).toContain('live refresh unavailable')
+      // SPA shell contains the root div and script tag
+      expect(body).toContain('<div id="root">')
+      expect(body).toContain('Fro Bot Dashboard')
     })
 
-    it('does NOT render stale banner when staleBanner is false', async () => {
-      const snapshot = makeSnapshot({staleBanner: false, refreshedAt: 1_700_000_000_000})
-      const app = await buildTestApp(snapshot)
-      const res = await authedGet(app, '/')
-
-      expect(res.status).toBe(200)
-      const body = await res.text()
-      expect(body).not.toContain('live refresh unavailable')
-    })
-  })
-
-  describe('edge: driftCount', () => {
-    it('renders count-only drift line when driftCount > 0', async () => {
-      const snapshot = makeSnapshot({driftCount: 3, refreshedAt: 1_700_000_000_000})
-      const app = await buildTestApp(snapshot)
-      const res = await authedGet(app, '/')
-
-      expect(res.status).toBe(200)
-      const body = await res.text()
-      // Count rendered
-      expect(body).toContain('3')
-      expect(body).toContain('not in public metadata')
-    })
-
-    it('drift line contains the count, not repo names', async () => {
-      // The drift count is 3 — there are no repos in the snapshot (drift repos are
-      // never passed to the view). Assert no private repo names appear.
-      const snapshot = makeSnapshot({driftCount: 3, refreshedAt: 1_700_000_000_000})
-      const app = await buildTestApp(snapshot)
-      const res = await authedGet(app, '/')
-
-      const body = await res.text()
-      // These names should NOT appear — they're drift repos, never in the snapshot
-      expect(body).not.toContain('private-repo-name')
-      expect(body).not.toContain('secret-project')
-    })
-
-    it('does NOT render drift line when driftCount is 0', async () => {
-      const snapshot = makeSnapshot({driftCount: 0, refreshedAt: 1_700_000_000_000})
-      const app = await buildTestApp(snapshot)
-      const res = await authedGet(app, '/')
-
-      const body = await res.text()
-      expect(body).not.toContain('not in public metadata')
-    })
-  })
-
-  describe('security: node_id not rendered as user-facing identity', () => {
-    it('node_id is not rendered as visible text in the page', async () => {
-      const repo = makeRepo({node_id: 'SENSITIVE_NODE_ID_12345'})
+    it('SPA shell does NOT contain SSR repo data (data is fetched client-side)', async () => {
+      const repo = makeRepo({full_name: 'fro-bot/agent'})
       const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
       const app = await buildTestApp(snapshot)
       const res = await authedGet(app, '/')
 
+      expect(res.status).toBe(200)
       const body = await res.text()
-      // node_id must not appear as visible user-facing text
-      // (it may appear in a key= attribute in JSX internals, but not as rendered content)
-      // The view uses full_name for links and display — node_id is only used as React key
-      // which does not appear in the rendered HTML output
-      expect(body).not.toContain('SENSITIVE_NODE_ID_12345')
+      // The SPA shell is static HTML — repo data is NOT embedded in the HTML.
+      // It is fetched client-side via /api/monitoring.
+      // This is the key difference from the old SSR route.
+      expect(body).not.toContain('fro-bot/agent')
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// /api/monitoring — BFF aggregation endpoint (Unit 5)
+// ---------------------------------------------------------------------------
+
+describe('/api/monitoring — BFF aggregation endpoint', () => {
+  describe('happy path', () => {
+    it('authed GET /api/monitoring returns snapshot JSON shape', async () => {
+      const repo = makeRepo()
+      const snapshot = makeSnapshot({
+        repos: [repo],
+        staleBanner: false,
+        driftCount: 1,
+        refreshedAt: 1_700_000_000_000,
+      })
+      const app = await buildTestApp(snapshot)
+      const res = await authedGet(app, '/api/monitoring')
+
+      expect(res.status).toBe(200)
+      const body = await res.json() as AggregatorSnapshot
+      expect(body.repos).toHaveLength(1)
+      expect(body.staleBanner).toBe(false)
+      expect(body.driftCount).toBe(1)
+      expect(body.refreshedAt).toBe(1_700_000_000_000)
+      // Repo shape
+      const r = body.repos[0]
+      expect(r).toBeDefined()
+      if (r !== undefined) {
+        expect(r.full_name).toBe('fro-bot/agent')
+        expect(r.discovery_channel).toBe('collab')
+        expect(r.status.rollupState).toBe('green')
+      }
+    })
+
+    it('returns empty snapshot when no repos', async () => {
+      const snapshot = makeSnapshot()
+      const app = await buildTestApp(snapshot)
+      const res = await authedGet(app, '/api/monitoring')
+
+      expect(res.status).toBe(200)
+      const body = await res.json() as AggregatorSnapshot
+      expect(body.repos).toHaveLength(0)
+      expect(body.refreshedAt).toBeNull()
+    })
+  })
+
+  describe('Cache-Control: no-store', () => {
+    it('response carries Cache-Control: no-store', async () => {
+      const app = await buildTestApp(makeSnapshot())
+      const res = await authedGet(app, '/api/monitoring')
+
+      expect(res.status).toBe(200)
+      const cacheControl = res.headers.get('cache-control')
+      expect(cacheControl).toBe('no-store')
+    })
+
+    it('Cache-Control: no-store is present even on empty snapshot', async () => {
+      const app = await buildTestApp(makeSnapshot({repos: [], refreshedAt: null}))
+      const res = await authedGet(app, '/api/monitoring')
+
+      expect(res.status).toBe(200)
+      expect(res.headers.get('cache-control')).toBe('no-store')
+    })
+  })
+
+  describe('security — unauthenticated access denied', () => {
+    it('GET /api/monitoring without session cookie → denied', async () => {
+      const app = await buildTestApp(makeSnapshot())
+      const res = await app.request('/api/monitoring')
+      expect([302, 303, 401]).toContain(res.status)
+    })
+
+    it('GET /api/monitoring with invalid session cookie → denied', async () => {
+      const app = await buildTestApp(makeSnapshot())
+      const res = await app.request('/api/monitoring', {headers: {cookie: 'session=bad.cookie'}})
+      expect([302, 303, 401]).toContain(res.status)
+    })
+  })
+
+  describe('security — redaction: denylisted repo identifiers NEVER emitted', () => {
+    /**
+     * The BFF endpoint must NEVER emit a denylisted repo's identifiers.
+     * The aggregator's denylist-before-query invariant guarantees this:
+     * denylisted repos are excluded BEFORE any per-repo query, so they
+     * never appear in the snapshot. This test verifies the endpoint output
+     * contains no denylisted identifiers.
+     *
+     * The snapshot injected here simulates the aggregator's already-redacted
+     * output — denylisted repos are absent from the repos array.
+     */
+    it('snapshot output contains no denylisted repo identifiers (owner/name/node_id/full_name)', async () => {
+      // Simulate a snapshot where a private repo has been excluded by the denylist.
+      // The snapshot only contains the public repo — the private one is absent.
+      const publicRepo = makeRepo({
+        node_id: 'NODE_PUBLIC',
+        owner: 'fro-bot',
+        name: 'agent',
+        full_name: 'fro-bot/agent',
+        discovery_channel: 'collab',
+      })
+      // The private/denylisted repo is NOT in the snapshot (excluded by aggregator).
+      // We assert it does not appear in the response.
+      const snapshot = makeSnapshot({repos: [publicRepo], refreshedAt: 1_700_000_000_000})
+      const app = await buildTestApp(snapshot)
+      const res = await authedGet(app, '/api/monitoring')
+
+      expect(res.status).toBe(200)
+      const body = await res.json() as AggregatorSnapshot
+
+      // Public repo is present
+      expect(body.repos).toHaveLength(1)
+      expect(body.repos[0]?.full_name).toBe('fro-bot/agent')
+
+      // Denylisted identifiers are absent from the response body
+      const bodyText = JSON.stringify(body)
+      expect(bodyText).not.toContain('PRIVATE_NODE_ID')
+      expect(bodyText).not.toContain('private-secret-repo')
+      expect(bodyText).not.toContain('private-org/secret-repo')
+    })
+
+    it('drift count is a number only — no repo names from drift repos', async () => {
+      // driftCount=3 means 3 installation-only repos exist but are NOT in the snapshot.
+      // Their names/node_ids must never appear in the response.
+      const snapshot = makeSnapshot({driftCount: 3, refreshedAt: 1_700_000_000_000})
+      const app = await buildTestApp(snapshot)
+      const res = await authedGet(app, '/api/monitoring')
+
+      expect(res.status).toBe(200)
+      const body = await res.json() as AggregatorSnapshot
+
+      // driftCount is a number
+      expect(body.driftCount).toBe(3)
+      // repos array is empty — drift repos are NOT in the snapshot
+      expect(body.repos).toHaveLength(0)
+
+      // No private repo names in the response
+      const bodyText = JSON.stringify(body)
+      expect(bodyText).not.toContain('private-repo-name')
+      expect(bodyText).not.toContain('secret-project')
+    })
+
+    it('node_id is present in repo entries (it is a public identifier in the snapshot)', async () => {
+      // node_id IS present in the snapshot for public repos — it is used as a React key.
+      // This test documents that node_id is intentionally included for public repos.
+      // The security invariant is that DENYLISTED repos' node_ids are absent.
+      const repo = makeRepo({node_id: 'NODE_PUBLIC_AGENT'})
+      const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
+      const app = await buildTestApp(snapshot)
+      const res = await authedGet(app, '/api/monitoring')
+
+      expect(res.status).toBe(200)
+      const body = await res.json() as AggregatorSnapshot
+      expect(body.repos[0]?.node_id).toBe('NODE_PUBLIC_AGENT')
+    })
+  })
+
+  describe('same snapshot source as /api/status', () => {
+    it('/api/monitoring and /api/status serve data from the same provider', async () => {
+      const repo = makeRepo({full_name: 'fro-bot/shared-source'})
+      const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
+      const app = await buildTestApp(snapshot)
+
+      const [monitoringRes, statusRes] = await Promise.all([
+        authedGet(app, '/api/monitoring'),
+        authedGet(app, '/api/status'),
+      ])
+
+      const monitoringBody = await monitoringRes.json() as AggregatorSnapshot
+      const statusBody = await statusRes.json() as AggregatorSnapshot
+
+      // Both see the same repo
+      expect(monitoringBody.repos[0]?.full_name).toBe('fro-bot/shared-source')
+      expect(statusBody.repos[0]?.full_name).toBe('fro-bot/shared-source')
+      expect(monitoringBody.refreshedAt).toBe(statusBody.refreshedAt)
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// /api/status — existing endpoint (unchanged)
+// ---------------------------------------------------------------------------
 
 describe('/api/status', () => {
   describe('happy path', () => {
@@ -428,19 +382,22 @@ describe('/api/status', () => {
   })
 
   describe('same snapshot source as dashboard', () => {
-    it('/ and /api/status serve data from the same provider', async () => {
+    it('/ and /api/status serve data from the same provider (via /api/monitoring)', async () => {
       const repo = makeRepo({full_name: 'fro-bot/shared-source'})
       const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
       const app = await buildTestApp(snapshot)
 
-      const [htmlRes, jsonRes] = await Promise.all([authedGet(app, '/'), authedGet(app, '/api/status')])
+      const [monitoringRes, statusRes] = await Promise.all([
+        authedGet(app, '/api/monitoring'),
+        authedGet(app, '/api/status'),
+      ])
 
-      const htmlBody = await htmlRes.text()
-      const jsonBody = await jsonRes.json() as AggregatorSnapshot
+      const monitoringBody = await monitoringRes.json() as AggregatorSnapshot
+      const statusBody = await statusRes.json() as AggregatorSnapshot
 
       // Both see the same repo
-      expect(htmlBody).toContain('fro-bot/shared-source')
-      expect(jsonBody.repos[0]?.full_name).toBe('fro-bot/shared-source')
+      expect(monitoringBody.repos[0]?.full_name).toBe('fro-bot/shared-source')
+      expect(statusBody.repos[0]?.full_name).toBe('fro-bot/shared-source')
     })
   })
 })

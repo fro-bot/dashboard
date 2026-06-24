@@ -42,7 +42,6 @@ import {logger, sanitizeErrorMessage} from './logger.ts'
 import {isOk} from './result.ts'
 import {buildApiRouter} from './routes/api.ts'
 import {buildAuthRouter} from './routes/auth.ts'
-import {buildDashboardRouter} from './routes/dashboard.ts'
 import {readOptionalMultilineSecret, readOptionalSecret} from './secrets.ts'
 import {loadCookieKey, SessionManager} from './session.ts'
 
@@ -579,18 +578,12 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // requests to any path not in isPublicPath, so no extra guard is needed here.
   app.route('/api', buildApiRouter(getSnapshot))
 
-  // ── Dashboard SSR route ──────────────────────────────────────────────────────
-  // Mounted at `/` — protected by the auth middleware above.
-  // Pass cookieKey + operatorLogin so the dashboard can render the CSRF token for logout.
-  app.route(
-    '/',
-    buildDashboardRouter({
-      getSnapshot,
-      cookieKey: opts?.cookieKey,
-      operatorLogin,
-      gatewayOperatorSessionEnabled,
-    }),
-  )
+  // Serve the React SPA at /. The shell assets (JS/CSS/manifest/icons) are public via
+  // isPublicPath, but index.html itself requires a session, so the SPA bootstraps only
+  // for authenticated operators. Deep-link fallback (/some/client-route → index.html)
+  // needs a Caddy try_files rule; only `/` is served here since the SPA has no
+  // client-side routing yet.
+  app.get('/', serveStatic({root: './web/dist', path: 'index.html'}))
 
   // ── Operator UI skeleton route ────────────────────────────────────────────────
   // Only mounted when operatorUiEnabled is true (default: false).
@@ -621,11 +614,6 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   //
   // root is relative to WORKDIR (/app) in the container, matching Dockerfile.
   // The builder stage copies web/dist/ to /app/web/dist/ in the runtime image.
-  //
-  // NOTE: The SPA index.html is NOT served at / here — the existing SSR route
-  // at / remains active until Unit 5 performs the cutover. Unit 5 will replace
-  // buildDashboardRouter with a handler that serves web/dist/index.html at /
-  // and delegates all SPA client routes to it (with Caddy fallback for deep links).
   app.use('/assets/*', serveStatic({root: './web/dist'}))
   app.use('/manifest.webmanifest', serveStatic({root: './web/dist'}))
   // PWA icons: icon-192.svg, icon-512.svg (and any future icon-*.svg)

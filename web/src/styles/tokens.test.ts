@@ -1,5 +1,5 @@
 /**
- * Token spec tests — Unit 2
+ * Design token spec tests.
  *
  * Strategy: jsdom does not parse @import'd CSS files, so we cannot test
  * computed CSS custom properties at runtime. Instead we:
