@@ -12,6 +12,7 @@
     "check-types": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
     "lint": "eslint",
     "fix": "eslint --fix",
+    "pretest": "pnpm build:web",
     "test": "vitest run"
   },
   "dependencies": {
