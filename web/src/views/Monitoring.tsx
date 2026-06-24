@@ -1,20 +1,25 @@
-/**
- * Monitoring view — responsive repo/status card grid.
- *
- * Fetches the already-redacted aggregation snapshot from the BFF (/api/monitoring)
- * and renders repo cards with status badges. All colors come from CSS tokens —
- * no inline hex, no ad-hoc colors.
- *
- * Security invariants:
- * - NO dangerouslySetInnerHTML anywhere. All dynamic strings are React text (auto-escaped).
- * - The BFF guarantees redaction. This view is display-only.
- * - full_name is used as React key — node_id is not present in the client DTO.
- * - Aggregation failure → fail-closed (no unfiltered union, no leak).
- * - Empty/stale snapshot → labeled state, not a dead screen.
- */
-
 import {useEffect, useState} from 'react'
-import {type AggregatorSnapshot, type CiRollupState, type DashboardRepo, fetchAggregationSnapshot} from '../api/aggregation.ts'
+import {
+  type AggregatorSnapshot,
+  type CiRollupState,
+  type DashboardRepo,
+  fetchAggregationSnapshot,
+} from '../api/aggregation.ts'
+
+// ---------------------------------------------------------------------------
+// Helpers & Types
+// ---------------------------------------------------------------------------
+
+type RepoCategory = 'failing' | 'pending' | 'stale' | 'healthy'
+
+function getRepoCategory(repo: DashboardRepo): RepoCategory {
+  if (repo.status.rollupState === 'red' || repo.status.failingChecks > 0) return 'failing'
+  if (repo.status.rollupState === 'pending') return 'pending'
+  if (repo.status.stale) return 'stale'
+  return 'healthy'
+}
+
+type FilterState = 'all' | 'needs-attention' | 'failing' | 'pending' | 'stale' | 'healthy'
 
 // ---------------------------------------------------------------------------
 // Status badge
@@ -92,24 +97,40 @@ function ChannelBadge({channel}: ChannelBadgeProps) {
 
 interface RepoCardProps {
   readonly repo: DashboardRepo
+  readonly compact?: boolean
 }
 
-function RepoCard({repo}: RepoCardProps) {
+function RepoCard({repo, compact}: RepoCardProps) {
   const {full_name, discovery_channel, status} = repo
   const ghBase = `https://github.com/${full_name}`
   const alertDisplay = status.openAlertCount === null ? '—' : String(status.openAlertCount)
+  const category = getRepoCategory(repo)
+
+  let borderColor = 'var(--color-border)'
+  let accentBorder = 'none'
+  if (category === 'failing') {
+    borderColor = 'var(--color-error)'
+    accentBorder = `4px solid var(--color-error)`
+  } else if (category === 'pending') {
+    borderColor = 'var(--color-warning)'
+    accentBorder = `4px solid var(--color-warning)`
+  }
+
+  const opacity = category === 'stale' ? 0.7 : 1
 
   return (
     <div
       style={{
         backgroundColor: 'var(--color-surface)',
-        border: '1px solid var(--color-border)',
+        border: `1px solid ${borderColor}`,
+        borderLeft: accentBorder !== 'none' ? accentBorder : `1px solid ${borderColor}`,
         borderRadius: 'var(--radius-lg)',
-        padding: 'var(--space-4)',
+        padding: compact ? 'var(--space-3)' : 'var(--space-4)',
         boxShadow: 'var(--shadow-sm)',
         display: 'flex',
         flexDirection: 'column',
-        gap: 'var(--space-3)',
+        gap: compact ? 'var(--space-2)' : 'var(--space-3)',
+        opacity,
       }}
     >
       {/* Header row: repo name + status badge */}
@@ -128,10 +149,11 @@ function RepoCard({repo}: RepoCardProps) {
             rel="noopener noreferrer"
             style={{
               fontWeight: 700,
-              fontSize: 'var(--text-body)',
+              fontSize: compact ? 'var(--text-body-sm)' : 'var(--text-body)',
               color: 'var(--color-accent)',
               textDecoration: 'none',
               letterSpacing: 'var(--tracking-body)',
+              wordBreak: 'break-word',
             }}
           >
             {full_name}
@@ -189,9 +211,11 @@ function RepoCard({repo}: RepoCardProps) {
       </div>
 
       {/* Footer row: channel badge */}
-      <div style={{display: 'flex', alignItems: 'center', gap: 'var(--space-2)'}}>
-        <ChannelBadge channel={discovery_channel} />
-      </div>
+      {!compact && (
+        <div style={{display: 'flex', alignItems: 'center', gap: 'var(--space-2)'}}>
+          <ChannelBadge channel={discovery_channel} />
+        </div>
+      )}
     </div>
   )
 }
@@ -307,22 +331,134 @@ function ErrorState({message}: ErrorStateProps) {
 }
 
 // ---------------------------------------------------------------------------
+// Controls & Filters
+// ---------------------------------------------------------------------------
+
+interface ControlsProps {
+  readonly counts: Record<RepoCategory, number>
+  readonly filterText: string
+  readonly setFilterText: (t: string) => void
+  readonly filterState: FilterState
+  readonly setFilterState: (s: FilterState) => void
+}
+
+const filterOptions: readonly { value: FilterState; label: string }[] = [
+  { value: 'all', label: 'All' },
+  { value: 'needs-attention', label: 'Needs Attention' },
+  { value: 'failing', label: 'Failing' },
+  { value: 'pending', label: 'Pending' },
+  { value: 'stale', label: 'Stale' },
+  { value: 'healthy', label: 'Healthy' },
+]
+
+function MonitoringControls({
+  counts,
+  filterText,
+  setFilterText,
+  filterState,
+  setFilterState,
+}: ControlsProps) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', marginBottom: 'var(--space-6)' }}>
+      <div style={{ display: 'flex', gap: 'var(--space-3)', fontSize: 'var(--text-label)', color: 'var(--color-text-muted)', flexWrap: 'wrap', fontWeight: 600 }}>
+        <span style={{ color: counts.failing > 0 ? 'var(--color-error)' : undefined }}>
+          {counts.failing} failing
+        </span>
+        <span>&middot;</span>
+        <span style={{ color: counts.pending > 0 ? 'var(--color-warning)' : undefined }}>
+          {counts.pending} pending
+        </span>
+        <span>&middot;</span>
+        <span>{counts.stale} stale</span>
+        <span>&middot;</span>
+        <span>{counts.healthy} healthy</span>
+      </div>
+
+      <div style={{ display: 'flex', gap: 'var(--space-4)', flexWrap: 'wrap', alignItems: 'center' }}>
+        <input
+          type="text"
+          placeholder="Filter repos..."
+          value={filterText}
+          onChange={e => setFilterText(e.target.value)}
+          aria-label="Filter repositories by name"
+          style={{
+            padding: 'var(--space-2) var(--space-3)',
+            borderRadius: 'var(--radius-md)',
+            border: '1px solid var(--color-border)',
+            backgroundColor: 'var(--color-surface)',
+            color: 'var(--color-text)',
+            flex: '1 1 200px',
+            minWidth: 0,
+            fontSize: 'var(--text-body-sm)'
+          }}
+        />
+        
+        <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }} role="group" aria-label="Filter by state">
+          {filterOptions.map(({ value, label }) => {
+            const isActive = filterState === value
+            return (
+              <button
+                key={value}
+                onClick={() => setFilterState(value)}
+                aria-pressed={isActive}
+                style={{
+                  padding: 'var(--space-1) var(--space-3)',
+                  borderRadius: 'var(--radius-full)',
+                  border: '1px solid',
+                  borderColor: isActive ? 'var(--color-accent)' : 'var(--color-border-muted)',
+                  backgroundColor: isActive ? 'var(--color-surface-raised)' : 'transparent',
+                  color: isActive ? 'var(--color-text)' : 'var(--color-text-muted)',
+                  fontSize: 'var(--text-label)',
+                  cursor: 'pointer',
+                  fontWeight: isActive ? 600 : 400,
+                  transition: 'all 0.15s ease'
+                }}
+              >
+                {label}
+              </button>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Repo Grid
+// ---------------------------------------------------------------------------
+
+function RepoGrid({repos, compact}: {repos: readonly DashboardRepo[], compact?: boolean}) {
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: compact ? 'repeat(auto-fill, minmax(280px, 1fr))' : 'repeat(auto-fill, minmax(320px, 1fr))',
+        gap: compact ? 'var(--space-3)' : 'var(--space-4)',
+      }}
+    >
+      {repos.map(repo => (
+        <RepoCard key={repo.full_name} repo={repo} compact={compact} />
+      ))}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Monitoring view
 // ---------------------------------------------------------------------------
 
-type FetchState =
+type FetchStateStatus =
   | {readonly kind: 'loading'}
   | {readonly kind: 'error'; readonly message: string}
   | {readonly kind: 'ok'; readonly snapshot: AggregatorSnapshot}
 
-/**
- * Monitoring view — fetches the BFF aggregation snapshot and renders repo cards.
- *
- * Fail-closed: on any fetch error, renders an error state (no unfiltered union,
- * no leak). Empty snapshot renders a labeled loading state, not a dead screen.
- */
 export function Monitoring() {
-  const [state, setState] = useState<FetchState>({kind: 'loading'})
+  const [state, setState] = useState<FetchStateStatus>({kind: 'loading'})
+  
+  const [filterText, setFilterText] = useState('')
+  const [filterState, setFilterState] = useState<FilterState>('all')
+  const [healthyExpanded, setHealthyExpanded] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -360,13 +496,42 @@ export function Monitoring() {
 
   const {snapshot} = state
   const {repos, staleBanner, driftCount, refreshedAt} = snapshot
-  // isEmpty covers both pre-fetch (refreshedAt===null) and post-fetch-zero-repos cases.
-  // Using repos.length===0 alone is correct: the pre-fetch empty snapshot already has
-  // refreshedAt===null, so EmptyState renders for both cases.
   const isEmpty = repos.length === 0
 
   const refreshedLabel =
     refreshedAt === null ? 'never' : new Date(refreshedAt).toISOString()
+
+  // Calculate global counts (ignoring text filter)
+  const counts: Record<RepoCategory, number> = {
+    failing: 0,
+    pending: 0,
+    stale: 0,
+    healthy: 0,
+  }
+  
+  for (const repo of repos) {
+    counts[getRepoCategory(repo)]++
+  }
+
+  // Filter repos based on text
+  const textFilteredRepos = filterText.trim() === '' 
+    ? repos 
+    : repos.filter(r => r.full_name.toLowerCase().includes(filterText.toLowerCase()))
+
+  // Group text-filtered repos by category
+  const failingRepos = textFilteredRepos.filter(r => getRepoCategory(r) === 'failing')
+  const pendingRepos = textFilteredRepos.filter(r => getRepoCategory(r) === 'pending')
+  const staleRepos = textFilteredRepos.filter(r => getRepoCategory(r) === 'stale')
+  const healthyRepos = textFilteredRepos.filter(r => getRepoCategory(r) === 'healthy')
+
+  // Apply state filter to determine which sections to render
+  const showFailing = ['all', 'needs-attention', 'failing'].includes(filterState)
+  const showPending = ['all', 'needs-attention', 'pending'].includes(filterState)
+  const showStale = ['all', 'needs-attention', 'stale'].includes(filterState)
+  const showHealthy = ['all', 'healthy'].includes(filterState)
+
+  // UX: Expand healthy section if actively searching or filtering to it specifically
+  const isHealthyExpanded = healthyExpanded || filterText.trim() !== '' || filterState === 'healthy'
 
   return (
     <div data-testid="monitoring-view">
@@ -406,17 +571,82 @@ export function Monitoring() {
       {isEmpty ? (
         <EmptyState />
       ) : (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
-            gap: 'var(--space-4)',
-          }}
-        >
-          {repos.map(repo => (
-            <RepoCard key={repo.full_name} repo={repo} />
-          ))}
-        </div>
+        <>
+          <MonitoringControls 
+            counts={counts}
+            filterText={filterText}
+            setFilterText={setFilterText}
+            filterState={filterState}
+            setFilterState={setFilterState}
+          />
+          
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+            {showFailing && failingRepos.length > 0 && (
+              <section aria-label="Failing repositories">
+                <RepoGrid repos={failingRepos} />
+              </section>
+            )}
+
+            {showPending && pendingRepos.length > 0 && (
+              <section aria-label="Pending repositories">
+                <RepoGrid repos={pendingRepos} />
+              </section>
+            )}
+
+            {showStale && staleRepos.length > 0 && (
+              <section aria-label="Stale repositories">
+                <RepoGrid repos={staleRepos} />
+              </section>
+            )}
+
+            {showHealthy && healthyRepos.length > 0 && (
+              <section aria-label="Healthy repositories">
+                <button
+                  onClick={() => setHealthyExpanded(!healthyExpanded)}
+                  aria-expanded={isHealthyExpanded}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 'var(--space-2)',
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--color-text)',
+                    fontSize: 'var(--text-body)',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    padding: 'var(--space-2) 0',
+                    marginBottom: isHealthyExpanded ? 'var(--space-4)' : 0,
+                  }}
+                >
+                  <span style={{ 
+                    display: 'inline-block', 
+                    transform: isHealthyExpanded ? 'rotate(90deg)' : 'none', 
+                    transition: 'transform 0.2s',
+                    fontSize: '0.8em'
+                  }}>
+                    ▸
+                  </span>
+                  <span>{healthyRepos.length} healthy repo{healthyRepos.length !== 1 ? 's' : ''}</span>
+                </button>
+                
+                {isHealthyExpanded && <RepoGrid repos={healthyRepos} compact />}
+              </section>
+            )}
+
+            {textFilteredRepos.length === 0 && (
+              <div style={{
+                padding: 'var(--space-8)',
+                textAlign: 'center',
+                color: 'var(--color-text-muted)',
+                backgroundColor: 'var(--color-surface)',
+                borderRadius: 'var(--radius-lg)',
+                border: '1px solid var(--color-border)'
+              }}>
+                No repositories match the current filters.
+              </div>
+            )}
+          </div>
+        </>
       )}
     </div>
   )

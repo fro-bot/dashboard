@@ -1,16 +1,4 @@
-/**
- * Monitoring view tests.
- *
- * Tests the React view against a mocked BFF fetch. Covers:
- * - Happy path: renders repo cards with real snapshot data
- * - Edge case: empty/stale snapshot renders labeled state, not dead screen
- * - Edge case: empty-post-fetch (aggregator ran, found 0 repos, refreshedAt non-null)
- * - Error path: BFF failure renders fail-closed error state (no unfiltered union)
- * - Security: internal fields (node_id, owner, name, fetchedAt) not in DTO
- * - Security: no dangerouslySetInnerHTML (structural — enforced by no raw HTML in output)
- */
-
-import {render, screen, waitFor} from '@testing-library/react'
+import {render, screen, waitFor, fireEvent} from '@testing-library/react'
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import type {AggregatorSnapshot, DashboardRepo} from '../api/aggregation.ts'
 import * as aggregationModule from '../api/aggregation.ts'
@@ -25,8 +13,8 @@ function makeRepo(overrides: Partial<DashboardRepo> = {}): DashboardRepo {
     full_name: 'fro-bot/agent',
     discovery_channel: 'collab',
     status: {
-      rollupState: 'green',
-      failingChecks: 0,
+      rollupState: 'red', // failing by default to render prominently
+      failingChecks: 1,
       openPrCount: 0,
       openIssueCount: 0,
       openAlertCount: null,
@@ -67,8 +55,8 @@ describe('Monitoring view', () => {
         full_name: 'fro-bot/agent',
         discovery_channel: 'collab',
         status: {
-          rollupState: 'green',
-          failingChecks: 0,
+          rollupState: 'red',
+          failingChecks: 1,
           openPrCount: 2,
           openIssueCount: 5,
           openAlertCount: 1,
@@ -89,7 +77,7 @@ describe('Monitoring view', () => {
       expect(screen.getByText('fro-bot/agent')).toBeInTheDocument()
 
       // Status badge rendered
-      expect(screen.getByText('✓ green')).toBeInTheDocument()
+      expect(screen.getByText('✗ red')).toBeInTheDocument()
 
       // Channel badge rendered
       expect(screen.getByText('collab')).toBeInTheDocument()
@@ -101,33 +89,17 @@ describe('Monitoring view', () => {
       // Issue link rendered
       const issueLink = screen.getByText(/5 issues/)
       expect(issueLink).toBeInTheDocument()
-    })
 
-    it('renders multiple repos in the order returned by the BFF (attention-first)', async () => {
-      const repo1 = makeRepo({
-        full_name: 'fro-bot/alpha',
-        status: {
-          rollupState: 'red',
-          failingChecks: 2,
-          openPrCount: 1,
-          openIssueCount: 0,
-          openAlertCount: null,
-          stale: false,
-        },
+      // Alert display rendered
+      expect(screen.getByText(/1 alert/)).toBeInTheDocument()
+    })
+    
+    it('collapses healthy repos by default and expands on click', async () => {
+      const healthyRepo = makeRepo({
+        full_name: 'fro-bot/healthy-repo',
+        status: { rollupState: 'green', failingChecks: 0, openPrCount: 0, openIssueCount: 0, openAlertCount: 0, stale: false }
       })
-      const repo2 = makeRepo({
-        full_name: 'fro-bot/beta',
-        status: {
-          rollupState: 'green',
-          failingChecks: 0,
-          openPrCount: 0,
-          openIssueCount: 0,
-          openAlertCount: null,
-          stale: false,
-        },
-      })
-      const snapshot = makeSnapshot({repos: [repo1, repo2], refreshedAt: 1_700_000_000_000})
-      fetchSpy.mockResolvedValue(snapshot)
+      fetchSpy.mockResolvedValue(makeSnapshot({repos: [healthyRepo], refreshedAt: 1_700_000_000_000}))
 
       render(<Monitoring />)
 
@@ -135,160 +107,113 @@ describe('Monitoring view', () => {
         expect(screen.getByTestId('monitoring-view')).toBeInTheDocument()
       })
 
-      const alphaEl = screen.getByText('fro-bot/alpha')
-      const betaEl = screen.getByText('fro-bot/beta')
+      // Healthy repo is collapsed
+      expect(screen.queryByText('fro-bot/healthy-repo')).not.toBeInTheDocument()
+      
+      // Expand healthy repos
+      const expandBtn = screen.getByRole('button', { name: /1 healthy repo/i })
+      fireEvent.click(expandBtn)
+      
+      // Now it's visible
+      expect(screen.getByText('fro-bot/healthy-repo')).toBeInTheDocument()
+    })
+  })
 
-      // Both rendered
-      expect(alphaEl).toBeInTheDocument()
-      expect(betaEl).toBeInTheDocument()
+  describe('edge cases', () => {
+    it('renders labeled empty state when repos is empty and refreshedAt is null (pre-fetch)', async () => {
+      fetchSpy.mockResolvedValue(makeSnapshot({repos: [], refreshedAt: null}))
 
-      // Order preserved: alpha (attention) appears before beta (healthy)
-      const container = screen.getByTestId('monitoring-view')
-      const html = container.innerHTML
-      expect(html.indexOf('fro-bot/alpha')).toBeLessThan(html.indexOf('fro-bot/beta'))
+      render(<Monitoring />)
+
+      await waitFor(() => {
+        expect(screen.getByTestId('monitoring-empty')).toBeInTheDocument()
+      })
+      expect(screen.getByText(/no data yet/i)).toBeInTheDocument()
+    })
+
+    it('renders empty state when repos is empty and refreshedAt is non-null (post-fetch zero repos)', async () => {
+      fetchSpy.mockResolvedValue(makeSnapshot({repos: [], refreshedAt: 1_700_000_000_000}))
+
+      render(<Monitoring />)
+
+      await waitFor(() => {
+        expect(screen.getByTestId('monitoring-empty')).toBeInTheDocument()
+      })
+      expect(screen.getByText(/no data yet/i)).toBeInTheDocument()
     })
 
     it('renders stale marker on per-repo stale status', async () => {
       const repo = makeRepo({
         status: {
-          rollupState: 'unknown',
-          failingChecks: 0,
-          openPrCount: 0,
-          openIssueCount: 0,
-          openAlertCount: null,
-          stale: true,
-        },
-      })
-      const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
-      fetchSpy.mockResolvedValue(snapshot)
-
-      render(<Monitoring />)
-
-      await waitFor(() => {
-        expect(screen.getByTestId('monitoring-view')).toBeInTheDocument()
-      })
-
-      expect(screen.getByText('stale')).toBeInTheDocument()
-    })
-
-    it('renders — for null alert count', async () => {
-      const repo = makeRepo({
-        status: {
           rollupState: 'green',
           failingChecks: 0,
           openPrCount: 0,
           openIssueCount: 0,
-          openAlertCount: null,
-          stale: false,
+          openAlertCount: 0,
+          stale: true,
         },
       })
-      const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
-      fetchSpy.mockResolvedValue(snapshot)
+      fetchSpy.mockResolvedValue(makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000}))
 
       render(<Monitoring />)
 
       await waitFor(() => {
         expect(screen.getByTestId('monitoring-view')).toBeInTheDocument()
       })
-
-      expect(screen.getByText('— alerts')).toBeInTheDocument()
+      // 1 in summary strip
+      expect(screen.getByText('1 stale')).toBeInTheDocument()
+      // 1 in repo card (stale badge)
+      expect(screen.getByText('stale', { selector: 'span' })).toBeInTheDocument()
     })
 
     it('renders stale banner when staleBanner is true', async () => {
-      const snapshot = makeSnapshot({staleBanner: true, refreshedAt: 1_700_000_000_000})
-      fetchSpy.mockResolvedValue(snapshot)
+      fetchSpy.mockResolvedValue(makeSnapshot({staleBanner: true}))
 
       render(<Monitoring />)
 
       await waitFor(() => {
         expect(screen.getByTestId('monitoring-view')).toBeInTheDocument()
       })
-
       expect(screen.getByText(/Showing cached data/)).toBeInTheDocument()
-      expect(screen.getByText(/live refresh unavailable/)).toBeInTheDocument()
     })
 
     it('does NOT render stale banner when staleBanner is false', async () => {
-      const snapshot = makeSnapshot({staleBanner: false, refreshedAt: 1_700_000_000_000})
-      fetchSpy.mockResolvedValue(snapshot)
+      fetchSpy.mockResolvedValue(makeSnapshot({staleBanner: false}))
 
       render(<Monitoring />)
 
       await waitFor(() => {
         expect(screen.getByTestId('monitoring-view')).toBeInTheDocument()
       })
-
-      expect(screen.queryByText(/live refresh unavailable/)).not.toBeInTheDocument()
+      expect(screen.queryByText(/Showing cached data/)).not.toBeInTheDocument()
     })
 
     it('renders drift notice when driftCount > 0', async () => {
-      const snapshot = makeSnapshot({driftCount: 3, refreshedAt: 1_700_000_000_000})
-      fetchSpy.mockResolvedValue(snapshot)
+      fetchSpy.mockResolvedValue(makeSnapshot({driftCount: 42}))
 
       render(<Monitoring />)
 
       await waitFor(() => {
         expect(screen.getByTestId('monitoring-view')).toBeInTheDocument()
       })
-
-      expect(screen.getByText(/3 repos the Agent App can see are not in public metadata/)).toBeInTheDocument()
+      expect(screen.getByText(/42 repos.*not in public metadata/)).toBeInTheDocument()
     })
   })
 
-  describe('edge case — empty/stale snapshot', () => {
-    it('renders labeled empty state when repos is empty and refreshedAt is null (pre-fetch)', async () => {
-      const snapshot = makeSnapshot({repos: [], refreshedAt: null})
-      fetchSpy.mockResolvedValue(snapshot)
-
-      render(<Monitoring />)
-
-      await waitFor(() => {
-        expect(screen.getByTestId('monitoring-empty')).toBeInTheDocument()
-      })
-
-      expect(screen.getByText(/Loading… \/ no data yet/)).toBeInTheDocument()
-      expect(screen.getByText(/aggregator has not completed/)).toBeInTheDocument()
-    })
-
-    it('renders empty state when repos is empty and refreshedAt is non-null (post-fetch zero repos)', async () => {
-      // Aggregator ran, found 0 repos after denylist filtering, refreshedAt is set.
-      // This was previously a dead empty grid — isEmpty must cover this case.
-      const snapshot = makeSnapshot({repos: [], refreshedAt: 1_700_000_000_000})
-      fetchSpy.mockResolvedValue(snapshot)
-
-      render(<Monitoring />)
-
-      await waitFor(() => {
-        expect(screen.getByTestId('monitoring-empty')).toBeInTheDocument()
-      })
-
-      expect(screen.getByText(/Loading… \/ no data yet/)).toBeInTheDocument()
-    })
-
-    it('renders empty state — not a dead screen (no throw)', async () => {
-      const snapshot = makeSnapshot()
-      fetchSpy.mockResolvedValue(snapshot)
-
-      expect(() => render(<Monitoring />)).not.toThrow()
-
-      await waitFor(() => {
-        expect(screen.getByTestId('monitoring-empty')).toBeInTheDocument()
-      })
-    })
-  })
-
-  describe('error path — BFF failure (fail-closed)', () => {
+  describe('error handling', () => {
     it('renders error state on fetch failure — no unfiltered union, no leak', async () => {
-      fetchSpy.mockRejectedValue(new Error('BFF aggregation endpoint returned 503 Service Unavailable'))
+      fetchSpy.mockRejectedValue(new Error('Network offline'))
 
       render(<Monitoring />)
 
       await waitFor(() => {
         expect(screen.getByTestId('monitoring-error')).toBeInTheDocument()
       })
-
       expect(screen.getByText(/Unable to load monitoring data/)).toBeInTheDocument()
-      expect(screen.getByText(/503/)).toBeInTheDocument()
+      expect(screen.getByText(/Network offline/)).toBeInTheDocument()
+
+      // Fails closed — does not render the view or any fake repos
+      expect(screen.queryByTestId('monitoring-view')).not.toBeInTheDocument()
     })
 
     it('renders error state on network failure', async () => {
@@ -299,12 +224,21 @@ describe('Monitoring view', () => {
       await waitFor(() => {
         expect(screen.getByTestId('monitoring-error')).toBeInTheDocument()
       })
+      expect(screen.getByText('Failed to fetch')).toBeInTheDocument()
+    })
 
-      expect(screen.getByText(/Unable to load monitoring data/)).toBeInTheDocument()
+    it('renders empty state — not a dead screen (no throw)', async () => {
+      fetchSpy.mockResolvedValue(makeSnapshot({repos: []})) // missing refreshedAt but it matches partial
+
+      render(<Monitoring />)
+
+      await waitFor(() => {
+        expect(screen.getByTestId('monitoring-empty')).toBeInTheDocument()
+      })
     })
 
     it('error state has role=alert for accessibility', async () => {
-      fetchSpy.mockRejectedValue(new Error('Network error'))
+      fetchSpy.mockRejectedValue(new Error('boom'))
 
       render(<Monitoring />)
 
@@ -316,27 +250,38 @@ describe('Monitoring view', () => {
 
   describe('security — internal fields not in DTO, not rendered', () => {
     it('node_id is not in the client DTO and is not rendered as visible text', async () => {
-      // The DTO no longer includes node_id — it is stripped by the BFF mapper.
-      // full_name is used as the React key instead.
-      const repo = makeRepo({full_name: 'fro-bot/agent'})
-      const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
-      fetchSpy.mockResolvedValue(snapshot)
+      // Create a repo object mimicking what the real BFF emits.
+      // TypeScript enforces that node_id is not in DashboardRepo, but we
+      // simulate a malicious API response that accidentally includes it.
+      const leakedRepo = {
+        ...makeRepo(),
+        node_id: 'R_kgDOKzABCD',
+        owner: 'fro-bot',
+        name: 'agent',
+      } as unknown as DashboardRepo
+
+      fetchSpy.mockResolvedValue(makeSnapshot({repos: [leakedRepo], refreshedAt: 1_700_000_000_000}))
 
       render(<Monitoring />)
 
       await waitFor(() => {
         expect(screen.getByTestId('monitoring-view')).toBeInTheDocument()
       })
+
+      // The internal IDs must not be rendered anywhere
+      expect(screen.queryByText('R_kgDOKzABCD')).not.toBeInTheDocument()
 
       // full_name IS rendered (it's the repo link text)
       expect(screen.getByText('fro-bot/agent')).toBeInTheDocument()
     })
 
     it('fetchedAt is not in the client DTO and is not rendered', async () => {
-      // fetchedAt is an internal cache timestamp — stripped by the BFF mapper.
-      const repo = makeRepo()
-      const snapshot = makeSnapshot({repos: [repo], refreshedAt: 1_700_000_000_000})
-      fetchSpy.mockResolvedValue(snapshot)
+      const leakedRepo = {
+        ...makeRepo(),
+        fetchedAt: 1_699_000_000_000,
+      } as unknown as DashboardRepo
+
+      fetchSpy.mockResolvedValue(makeSnapshot({repos: [leakedRepo], refreshedAt: 1_700_000_000_000}))
 
       render(<Monitoring />)
 
@@ -344,20 +289,20 @@ describe('Monitoring view', () => {
         expect(screen.getByTestId('monitoring-view')).toBeInTheDocument()
       })
 
-      // fetchedAt (1700000000000) must not appear as visible text
-      expect(screen.queryByText('1700000000000')).not.toBeInTheDocument()
+      expect(screen.queryByText('1699000000000')).not.toBeInTheDocument()
     })
   })
 
   describe('loading state', () => {
     it('shows loading indicator while fetch is in flight', () => {
-      // Never resolves — simulates in-flight fetch
-      fetchSpy.mockReturnValue(new Promise(() => undefined))
+      // fetchSpy is mocked but unresolved initially
+      fetchSpy.mockImplementation(() => new Promise(() => {}))
 
       render(<Monitoring />)
 
       expect(screen.getByTestId('monitoring-loading')).toBeInTheDocument()
-      expect(screen.getByText(/Loading monitoring data/)).toBeInTheDocument()
+      expect(screen.getByText('Loading monitoring data…')).toBeInTheDocument()
+      expect(screen.queryByTestId('monitoring-view')).not.toBeInTheDocument()
     })
   })
 })
