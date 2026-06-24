@@ -95,22 +95,14 @@ export function AppShell({children}: AppShellProps) {
               color: 'var(--color-text)',
             }}
           >
-            {/* Minimal SVG robot icon inline — no external asset dependency */}
-            <svg
+            <img
+              src="/icon-192.svg"
+              alt=""
               aria-hidden="true"
               width="28"
               height="28"
-              viewBox="0 0 28 28"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <rect width="28" height="28" rx="6" fill="var(--color-surface-raised)" />
-              <ellipse cx="14" cy="9" rx="7" ry="6" fill="var(--color-border)" />
-              <rect x="8" y="11" width="12" height="10" rx="2.5" fill="var(--color-surface-overlay)" />
-              <rect x="10" y="14" width="3" height="2" rx="1" fill="var(--color-accent)" />
-              <rect x="15" y="14" width="3" height="2" rx="1" fill="var(--color-accent)" />
-              <rect x="11" y="18" width="6" height="1.5" rx="0.75" fill="var(--color-accent)" />
-            </svg>
+              style={{display: 'block', borderRadius: 'var(--radius-full)'}}
+            />
             <span
               style={{
                 fontSize: 'var(--text-body)',
