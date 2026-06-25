@@ -25,6 +25,21 @@ export default defineConfig({
         // Exclude the SW itself and the manifest from the precache list.
         // The default globPatterns cover hashed JS/CSS/assets in web/dist.
         globIgnores: ['**/sw.js', '**/manifest.webmanifest', '**/registerSW.js'],
+
+        // Rewrite the precache manifest entry for index.html → '/' so that
+        // Workbox's install-time fetch hits GET / (which the Hono server serves
+        // at 200) instead of GET /index.html (which has no route and 404s,
+        // causing the SW to go redundant and never register).
+        //
+        // createHandlerBoundToURL in sw.ts MUST reference the same URL ('/').
+        manifestTransforms: [
+          (entries) => {
+            const manifest = entries.map((entry) =>
+              entry.url === 'index.html' ? {...entry, url: '/'} : entry,
+            )
+            return {manifest, warnings: []}
+          },
+        ],
       },
     }),
   ],

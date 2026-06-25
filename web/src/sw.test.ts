@@ -155,8 +155,12 @@ describe('sw.js build output', () => {
     // After injectManifest substitution, self.__WB_MANIFEST is replaced with
     // an array literal. The raw token must NOT appear in the output.
     expect(content).not.toContain('self.__WB_MANIFEST')
-    // The precache array must contain at least one entry (index.html at minimum)
-    expect(content).toContain('"url":"index.html"')
+    // The precache manifest rewrites index.html → '/' via manifestTransforms so
+    // Workbox's install-time fetch hits GET / (200) not GET /index.html (404).
+    // The raw 'index.html' URL must NOT appear as a precache entry.
+    expect(content).not.toMatch(/"url":"index\.html"/)
+    // '/' must be the precached shell URL.
+    expect(content).toContain('"url":"/"')
   })
 
   // ── SECURITY GUARD: deny-by-default auth/api routing ──────────────────────
@@ -212,8 +216,8 @@ describe('sw.js build output', () => {
 
   it('GUARD: source registers the precache BEFORE the NavigationRoute (createHandlerBoundToURL resolves against the precache at call time)', () => {
     // This is the bug that crashed SW registration end-to-end: when
-    // createHandlerBoundToURL('index.html') runs before precacheAndRoute(),
-    // Workbox throws `non-precached-url: index.html` and the SW never registers
+    // createHandlerBoundToURL runs before precacheAndRoute(),
+    // Workbox throws `non-precached-url` and the SW never registers
     // (the app silently degrades to a plain SPA, which no string-presence test
     // catches). Assert the source order so the precache is populated first.
     // Read the SOURCE (not the minified bundle) so the ordering is stable.
@@ -222,7 +226,8 @@ describe('sw.js build output', () => {
       'utf8',
     )
     const precacheIdx = src.indexOf('precacheAndRoute(self.__WB_MANIFEST)')
-    const navHandlerIdx = src.indexOf("createHandlerBoundToURL('index.html')")
+    // The handler URL is '/' (rewritten from index.html via manifestTransforms).
+    const navHandlerIdx = src.indexOf("createHandlerBoundToURL('/')")
     expect(precacheIdx).toBeGreaterThan(-1)
     expect(navHandlerIdx).toBeGreaterThan(-1)
     expect(precacheIdx).toBeLessThan(navHandlerIdx)

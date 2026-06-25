@@ -104,11 +104,16 @@ precacheAndRoute(self.__WB_MANIFEST)
 cleanupOutdatedCaches()
 
 // ── 5. Navigation requests → precached app shell ────────────────────────────
-// index.html is precached (above); the auth gate runs in-app after hydration
+// '/' is precached (above); the auth gate runs in-app after hydration
 // (SPA pattern). /auth/* and /api/* navigations are denylisted so those hit the
 // network directly (server-side auth redirects must run for those paths).
+//
+// URL NOTE: the precache manifest rewrites index.html → '/' (via manifestTransforms
+// in vite.config.ts) so that Workbox's install-time fetch hits GET / (200) instead
+// of GET /index.html (404 — no route). createHandlerBoundToURL MUST reference the
+// same URL as the precache entry or Workbox throws non-precached-url and aborts.
 registerRoute(
-  new NavigationRoute(createHandlerBoundToURL('index.html'), {
+  new NavigationRoute(createHandlerBoundToURL('/'), {
     denylist: [/^\/auth(\/|$)/, /^\/api(\/|$)/],
   }),
 )
