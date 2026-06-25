@@ -11,6 +11,7 @@ on:
       - 'tsconfig*.json'
       - 'src/**'
       - 'web/**'
+      - 'public/**'
       - .github/workflows/release.yaml
       - scripts/should-release.ts
       - scripts/compute-release-tag.ts
