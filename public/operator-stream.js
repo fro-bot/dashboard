@@ -66,6 +66,21 @@ export const MAX_APPROVAL_TOMBSTONES = 1000
 export const MAX_OPEN_APPROVALS = 100
 
 /**
+ * Mirrors the gateway's PENDING_APPROVALS_MAX_RESULTS cap (50) from
+ * fro-bot/agent v0.76.2 packages/gateway/src/web/operator/pending-approvals-route.ts.
+ *
+ * The reconnect-reconcile caller uses this to guard against truncated recovery
+ * responses: if the recovered set size is >= this cap, the response may be
+ * truncated and corrective pruning is skipped (additive-only fallback).
+ *
+ * NOTE: This is an external contract value with no in-repo source of truth.
+ * If the gateway cap is bumped, update this mirror and the guard in reconcileApprovals.
+ * A stale mirror silently tightens the guard (ghosts persist) but never causes
+ * catastrophic wipe — the safe failure direction.
+ */
+export const GATEWAY_PENDING_APPROVALS_CAP = 50
+
+/**
  * Bounded timeout in milliseconds for receiving the first SSE frame after opening
  * a stream. If no frame arrives within this window, the connection transitions to
  * 'submitted-unobservable' — the run was accepted but is not yet streaming (e.g.
@@ -676,6 +691,96 @@ export function nextStreamState(current, event) {
       }
     }
 
+    case 'approval-reconcile': {
+      // Corrective reconcile action dispatched by reconcileApprovals on reconnect.
+      // The reconnect-reconcile caller computes the explicit pruneIds and addPrompts lists from
+      // a pre-GET snapshot diff — the reducer does NOT re-derive the diff, which is
+      // what makes the reconcile-window race impossible.
+      //
+      // Before ready (connection !== 'live') → ignore (mirrors approval/output gating).
+      if (current.connection !== 'live') {
+        return current
+      }
+      const {runId, pruneIds, addPrompts} = event
+      const prevEntry = current.runs[runId]
+
+      // If the run is already terminal, all approval frames are ignored (terminal is absorbing).
+      if (prevEntry !== undefined && prevEntry.terminal) {
+        return current
+      }
+
+      // Build the base entry (may be a new run entry if we've never seen a status for this run).
+      const base = prevEntry ?? {
+        runId,
+        status: '',
+        phase: '',
+        startedAt: '',
+        stale: false,
+        terminal: false,
+      }
+
+      // Null-proto maps for open prompts and tombstones — guard against __proto__ key pollution.
+      let nextOpenPrompts = Object.assign(Object.create(null), base.approvalOpenPrompts ?? Object.create(null))
+      let nextTombstones = base.approvalTombstones ?? Object.create(null)
+
+      // --- Prune path ---
+      // For each id in pruneIds: remove from open-prompts and add to tombstones.
+      // Removing an id that's already absent is a no-op.
+      // Re-tombstoning an already-tombstoned id is idempotent.
+      // Reuses the FIFO-cap logic from the settle branch (~L460-472).
+      for (const requestID of pruneIds) {
+        // Guard against __proto__ key injection
+        if (requestID === '__proto__') continue
+        // Remove from open-prompts (no-op if absent)
+        if (requestID in nextOpenPrompts) {
+          const updated = Object.assign(Object.create(null), nextOpenPrompts)
+          delete updated[requestID]
+          nextOpenPrompts = updated
+        }
+        // Add to tombstones with FIFO cap (mirrors settle branch)
+        if (!(requestID in nextTombstones) && Object.keys(nextTombstones).length >= MAX_APPROVAL_TOMBSTONES) {
+          const oldestKey = Object.keys(nextTombstones)[0]
+          const trimmed = Object.assign(Object.create(null), nextTombstones)
+          delete trimmed[oldestKey]
+          nextTombstones = trimmed
+        }
+        nextTombstones = Object.assign(Object.create(null), nextTombstones, {[requestID]: true})
+      }
+
+      // --- Add path ---
+      // For each prompt in addPrompts whose requestID is NOT already in open-prompts
+      // AND NOT tombstoned: add it. Respects the existing MAX_OPEN_APPROVALS overflow guard.
+      // Mirrors the open branch (~L480-505).
+      for (const prompt of addPrompts) {
+        const {requestID} = prompt
+        // Guard against __proto__ key injection
+        if (requestID === '__proto__') continue
+        // Ignore if tombstoned (tombstone precedence)
+        if (nextTombstones[requestID] === true) continue
+        // Ignore if already open (idempotent)
+        if (requestID in nextOpenPrompts) continue
+        // Overflow guard: if at cap, ignore the new prompt
+        if (Object.keys(nextOpenPrompts).length >= MAX_OPEN_APPROVALS) continue
+        const promptData = {
+          runId,
+          requestID,
+          permission: prompt.permission,
+          settled: false,
+          ...(prompt.command === undefined ? {} : {command: prompt.command}),
+          ...(prompt.filepath === undefined ? {} : {filepath: prompt.filepath}),
+        }
+        nextOpenPrompts = Object.assign(Object.create(null), nextOpenPrompts, {[requestID]: promptData})
+      }
+
+      const updatedEntry = {
+        ...base,
+        approvalOpenPrompts: nextOpenPrompts,
+        approvalTombstones: nextTombstones,
+      }
+      const updatedRuns = Object.assign(Object.create(null), current.runs, {[runId]: updatedEntry})
+      return {...current, runs: updatedRuns}
+    }
+
     case 'buffer-overflow': {
       // A stream that exceeds the buffer cap is hostile or broken — fail closed
       // terminally with no reconnect, regardless of retry budget.
@@ -903,14 +1008,16 @@ export function buildApprovalClient() {
 
   /**
    * GET open approvals for a run (reconcile on reconnect).
-   * Returns the list of open approval summaries, or an empty array on failure.
    *
-   * Reconcile is best-effort: failures (network, non-200, malformed body) are
-   * intentionally swallowed and return []. The SSE stream is the authoritative
-   * channel for approval state; the reconcile GET is a late-join catch-up only.
-   * Silently returning [] on failure is correct — a missed reconcile means the
-   * operator may not see a prompt until the next SSE open frame, which is
-   * acceptable given the stream is the primary delivery path.
+   * Returns a discriminated result:
+   *   {success: true, data: {approvals: [...]}}  — 2xx with a valid approvals array
+   *   {success: false, error: {kind: 'http', status}}  — non-2xx response
+   *   {success: false, error: {kind: 'network'}}  — fetch threw (transport failure)
+   *   {success: false, error: {kind: 'protocol'}}  — 200 but missing/non-array approvals
+   *
+   * A malformed body is NOT treated as success-empty: under corrective pruning,
+   * a failed reconcile must never wipe open prompts. The caller dispatches the
+   * corrective action only on success:true.
    */
   async function listRunApprovals(runId) {
     try {
@@ -918,12 +1025,12 @@ export function buildApprovalClient() {
         `/operator/runs/${encodeURIComponent(runId)}/approvals`,
         {headers: {'content-type': 'application/json'}},
       )
-      if (!res.ok) return []
+      if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
       const data = await res.json()
-      if (!data || !Array.isArray(data.approvals)) return []
-      return data.approvals
+      if (!data || !Array.isArray(data.approvals)) return {success: false, error: {kind: 'protocol'}}
+      return {success: true, data: {approvals: data.approvals}}
     } catch {
-      return []
+      return {success: false, error: {kind: 'network'}}
     }
   }
 
@@ -1360,6 +1467,11 @@ export function initOperatorStream(opts) {
   // Reset on each connect() call so reconnects trigger a fresh reconcile.
   let reconcileDone = false
 
+  // Monotonic counter incremented on every connect() call. Each reconcileApprovals
+  // invocation captures the epoch before its await; if the epoch changed by the time
+  // the GET resolves, the result is stale and must be discarded.
+  let connectEpoch = 0
+
   function dispatch(event) {
     const prevConnection = state.connection
     state = nextStreamState(state, event)
@@ -1372,9 +1484,17 @@ export function initOperatorStream(opts) {
   }
 
   /**
-   * Reconcile open approvals on (re)connect: one-shot GET on stream open.
-   * Feeds returned open prompts into the reducer as synthetic open frames.
-   * The reducer's tombstone logic drops any already-settled prompts.
+   * Reconcile open approvals on (re)connect: one-shot corrective GET on stream open.
+   *
+   * Snapshots the locally-open approval ids BEFORE the GET so that any prompt
+   * opening via SSE during the await window is never eligible for pruning (race-proof).
+   * On a successful response, dispatches a single approval-reconcile action that
+   * both prunes ghost prompts and adds any recovered-but-not-local prompts.
+   * On any failure, dispatches nothing — open prompts are preserved (fail-closed).
+   *
+   * Truncation guard: if the recovered set is at or above the gateway cap it may be
+   * incomplete, so pruneIds is left empty (additive-only) to avoid false pruning.
+   *
    * Never called on a timer — only once per connect() invocation.
    */
   async function reconcileApprovals() {
@@ -1382,32 +1502,73 @@ export function initOperatorStream(opts) {
     if (reconcileDone) return
     reconcileDone = true
 
-    const openApprovals = await approvalClient.listRunApprovals(runId)
-    for (const approval of openApprovals) {
-      // Validate the approval summary before dispatching
+    // Capture the epoch before the await. If connect() increments connectEpoch
+    // while the GET is in flight, myEpoch will differ from connectEpoch when we
+    // resume — that means this reconcile is stale and must be discarded.
+    const myEpoch = connectEpoch
+
+    // Snapshot the locally-open ids BEFORE the await. Only prompts open at this
+    // moment are eligible for pruning — prompts that arrive via SSE during the
+    // GET window are never in this set and therefore never pruned.
+    const runEntry = state.runs[runId]
+    const preGetLocalOpenIds = getOpenApprovals(runEntry).map(p => p.requestID)
+
+    const listResult = await approvalClient.listRunApprovals(runId)
+
+    // Epoch staleness check: if connect() started a new connection cycle during
+    // the await, connectEpoch will have advanced — discard this stale result.
+    if (myEpoch !== connectEpoch) return
+
+    // On any failure, abort — never prune on an unsafe signal.
+    if (!listResult.success) return
+
+    const recovered = listResult.data.approvals
+
+    // Validate each recovered summary and build the recovered open-id set and
+    // the list of prompts to add (those not already locally open).
+    const recoveredOpenIds = new Set()
+    const addPrompts = []
+    let sawMalformed = false
+    for (const approval of recovered) {
       if (
         typeof approval.requestID !== 'string' ||
         approval.requestID.length === 0 ||
         typeof approval.permission !== 'string' ||
         approval.permission.length === 0
       ) {
+        sawMalformed = true
         continue
       }
-      // Dispatch as a synthetic open approval frame — the reducer's tombstone
-      // logic will drop it if already settled (reconcile-additive-only).
-      const syntheticFrame = {
-        type: 'approval',
-        data: {
-          runId,
-          requestID: approval.requestID,
-          permission: approval.permission,
-          settled: false,
-          ...(typeof approval.command === 'string' ? {command: approval.command} : {}),
-          ...(typeof approval.filepath === 'string' ? {filepath: approval.filepath} : {}),
-        },
-      }
-      dispatch(syntheticFrame)
+      recoveredOpenIds.add(approval.requestID)
+      addPrompts.push({
+        requestID: approval.requestID,
+        permission: approval.permission,
+        ...(typeof approval.command === 'string' ? {command: approval.command} : {}),
+        ...(typeof approval.filepath === 'string' ? {filepath: approval.filepath} : {}),
+      })
     }
+
+    // Partial-malformed guard: if ANY entry failed validation the recovered set is
+    // not a trustworthy complete picture — fall back to additive-only (no prune).
+    // A genuinely empty response (recovered.length === 0, sawMalformed === false)
+    // is authoritative and still prunes normally.
+    // An all-invalid response (recoveredOpenIds.size === 0, sawMalformed === true)
+    // is also additive-only — the valid subset is empty so addPrompts is empty too,
+    // meaning the dispatch is a no-op, but we never prune on a corrupt response.
+    if (sawMalformed) {
+      dispatch({type: 'approval-reconcile', runId, pruneIds: [], addPrompts})
+      return
+    }
+
+    // Truncation guard: if the recovered VALID set is at or above the gateway cap
+    // it may be incomplete — fall back to additive-only to avoid pruning real open
+    // prompts. Uses recoveredOpenIds.size (valid entries only) to match the metric
+    // used by the prune diff below.
+    const pruneIds = recoveredOpenIds.size >= GATEWAY_PENDING_APPROVALS_CAP
+      ? []
+      : preGetLocalOpenIds.filter(id => !recoveredOpenIds.has(id))
+
+    dispatch({type: 'approval-reconcile', runId, pruneIds, addPrompts})
   }
 
   function connect() {
@@ -1417,6 +1578,10 @@ export function initOperatorStream(opts) {
     // Reset reconcile flag for this connection attempt — each connect/reconnect
     // triggers a fresh one-shot reconcile GET when the stream goes live.
     reconcileDone = false
+
+    // Advance the epoch so any in-flight reconcile from the previous connection
+    // cycle sees a stale epoch and discards its result.
+    connectEpoch++
 
     // Clear any previously-pending first-frame timer before arming a new one.
     // Without this, a reconnect would leak the old timer, which could fire later
