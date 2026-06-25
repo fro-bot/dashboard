@@ -84,4 +84,33 @@ describe('ReloadPrompt', () => {
     render(<ReloadPrompt />)
     expect(screen.getByRole('status')).toBeInTheDocument()
   })
+
+  it('hourly interval calls registration.update() — NOT updateServiceWorker (no silent skip-waiting/reload)', () => {
+    vi.useFakeTimers()
+    const mockRegistrationUpdate = vi.fn().mockResolvedValue(undefined)
+    // Make the hook invoke onRegisteredSW with a fake registration whose update()
+    // we can observe, mirroring vite-plugin-pwa's real callback.
+    vi.mocked(pwaRegister.useRegisterSW).mockImplementation(
+      (options?: {onRegisteredSW?: (url: string, reg: ServiceWorkerRegistration) => void}) => {
+        options?.onRegisteredSW?.('/sw.js', {
+          update: mockRegistrationUpdate,
+        } as unknown as ServiceWorkerRegistration)
+        return {
+          needRefresh: [false, mockSetNeedRefresh],
+          offlineReady: [false, vi.fn()],
+          updateServiceWorker: mockUpdateServiceWorker,
+        }
+      },
+    )
+
+    render(<ReloadPrompt />)
+    // Advance one hour to fire the interval.
+    vi.advanceTimersByTime(60 * 60 * 1000)
+
+    expect(mockRegistrationUpdate).toHaveBeenCalledTimes(1)
+    // The interval must NOT activate the waiting SW (that bypasses the prompt).
+    expect(mockUpdateServiceWorker).not.toHaveBeenCalled()
+
+    vi.useRealTimers()
+  })
 })

@@ -12,14 +12,19 @@
  * double-mounts and conditional renders.
  */
 
-import {useEffect} from 'react'
+import {useEffect, useRef} from 'react'
 import {useRegisterSW} from 'virtual:pwa-register/react'
 
 export function ReloadPrompt() {
+  const registrationRef = useRef<ServiceWorkerRegistration | undefined>(undefined)
+
   const {
     needRefresh: [needRefresh, setNeedRefresh],
     updateServiceWorker,
   } = useRegisterSW({
+    onRegisteredSW(_swUrl, registration) {
+      registrationRef.current = registration
+    },
     onRegisterError(error) {
       // SW registration failure must not crash the app — it still works as a
       // plain SPA. Log for diagnostics only.
@@ -28,16 +33,19 @@ export function ReloadPrompt() {
   })
 
   // Check for updates every hour so long-lived tabs pick up new builds.
-  // useEffect with cleanup prevents interval leaks on unmount / strict-mode
-  // double-mounts. updateServiceWorker is stable across renders.
+  // This calls registration.update() — which only CHECKS for a new SW and, if
+  // found, flips needRefresh to show the prompt. It deliberately does NOT call
+  // updateServiceWorker(), which would skipWaiting + activate + reload, bypassing
+  // the prompt-to-refresh contract (that activation only happens on a Refresh click).
+  // useEffect cleanup prevents interval leaks on unmount / strict-mode double-mounts.
   useEffect(() => {
     const id = setInterval(() => {
-      updateServiceWorker().catch(() => {
+      registrationRef.current?.update().catch(() => {
         // Ignore update check failures (offline, etc.)
       })
     }, 60 * 60 * 1000)
     return () => clearInterval(id)
-  }, [updateServiceWorker])
+  }, [])
 
   if (!needRefresh) return null
 
