@@ -6,6 +6,10 @@
  * - GET /static/operator.css → 200 with CSS body + correct content-type, no auth required
  * - Operator page references <link rel="stylesheet"> and has no inline <style> block
  * - When operatorUiEnabled=false: /static/operator.css is not served (404/redirect)
+ * - PWA SW assets: /sw.js + /registerSW.js served with correct MIME + no-cache, public pre-auth
+ * - PWA manifest: /manifest.webmanifest served as application/manifest+json, public pre-auth
+ * - CSP on /sw.js: no page CSP applied (workers don't inherit page CSP; over-restrictive CSP
+ *   can block Workbox importScripts)
  */
 import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
 import {Buffer} from 'node:buffer'
@@ -216,5 +220,167 @@ describe('static route absent when operator UI disabled', () => {
     const app = await buildTestApp(false)
     const res = await app.request('/api/healthz')
     expect(res.status).toBe(200)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// PWA SW asset serving — /sw.js
+// ---------------------------------------------------------------------------
+// The MIME contract is load-bearing: a wrong Content-Type (e.g. text/html)
+// causes the browser to reject SW registration entirely. Cache-Control must
+// be no-store so SW updates are detected on every page load.
+
+describe('PWA SW asset serving — /sw.js', () => {
+  it('GET /sw.js returns 200', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/sw.js')
+    expect(res.status).toBe(200)
+  })
+
+  it('GET /sw.js returns a JavaScript Content-Type (load-bearing MIME — wrong type blocks SW registration)', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/sw.js')
+    expect(res.status).toBe(200)
+    const ct = res.headers.get('content-type') ?? ''
+    // Must be a JavaScript MIME type — a wrong MIME (e.g. text/html) blocks SW registration.
+    // Both text/javascript (RFC 9239 standard) and application/javascript (legacy) are valid.
+    expect(ct).toMatch(/(?:text|application)\/javascript/)
+  })
+
+  it('GET /sw.js returns Cache-Control no-store so SW updates are detected', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/sw.js')
+    expect(res.status).toBe(200)
+    const cc = res.headers.get('cache-control') ?? ''
+    expect(cc).toContain('no-store')
+  })
+
+  it('GET /sw.js is reachable WITHOUT an auth session (public path)', async () => {
+    const app = await buildTestApp(false)
+    // No session cookie — must NOT be 302'd to /auth/login
+    const res = await app.request('/sw.js')
+    expect(res.status).toBe(200)
+    expect(res.status).not.toBe(302)
+    expect(res.status).not.toBe(401)
+  })
+
+  it('GET /sw.js does NOT carry the page CSP (workers do not inherit page CSP; over-restrictive CSP can block Workbox)', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/sw.js')
+    expect(res.status).toBe(200)
+    // The page CSP must not be applied to the SW response — it is irrelevant
+    // for workers and a too-restrictive CSP can block Workbox importScripts.
+    const csp = res.headers.get('content-security-policy')
+    expect(csp).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// PWA SW asset serving — /registerSW.js
+// ---------------------------------------------------------------------------
+
+describe('PWA SW asset serving — /registerSW.js', () => {
+  it('GET /registerSW.js returns 200', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/registerSW.js')
+    expect(res.status).toBe(200)
+  })
+
+  it('GET /registerSW.js returns a JavaScript Content-Type', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/registerSW.js')
+    expect(res.status).toBe(200)
+    const ct = res.headers.get('content-type') ?? ''
+    // Both text/javascript (RFC 9239 standard) and application/javascript (legacy) are valid.
+    expect(ct).toMatch(/(?:text|application)\/javascript/)
+  })
+
+  it('GET /registerSW.js returns Cache-Control no-store', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/registerSW.js')
+    expect(res.status).toBe(200)
+    const cc = res.headers.get('cache-control') ?? ''
+    expect(cc).toContain('no-store')
+  })
+
+  it('GET /registerSW.js is reachable WITHOUT an auth session (public path)', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/registerSW.js')
+    expect(res.status).toBe(200)
+    expect(res.status).not.toBe(302)
+    expect(res.status).not.toBe(401)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// PWA manifest serving — /manifest.webmanifest
+// ---------------------------------------------------------------------------
+
+describe('PWA manifest serving — /manifest.webmanifest', () => {
+  it('GET /manifest.webmanifest returns 200', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/manifest.webmanifest')
+    expect(res.status).toBe(200)
+  })
+
+  it('GET /manifest.webmanifest returns Content-Type application/manifest+json (PWA installability)', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/manifest.webmanifest')
+    expect(res.status).toBe(200)
+    const ct = res.headers.get('content-type') ?? ''
+    expect(ct).toMatch(/application\/manifest\+json/)
+  })
+
+  it('GET /manifest.webmanifest is reachable WITHOUT an auth session (public path)', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/manifest.webmanifest')
+    expect(res.status).toBe(200)
+    expect(res.status).not.toBe(302)
+    expect(res.status).not.toBe(401)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Auth boundary: SW assets are public but protected routes are still gated
+// ---------------------------------------------------------------------------
+
+describe('auth boundary — SW assets public, protected routes still gated', () => {
+  it('/sw.js is public but / (the SPA shell) still requires auth', async () => {
+    const app = await buildTestApp(false)
+    // SW is public
+    const swRes = await app.request('/sw.js')
+    expect(swRes.status).toBe(200)
+    // / requires auth — no session → redirect or deny
+    const rootRes = await app.request('/')
+    expect(rootRes.status).not.toBe(200)
+  })
+
+  it('/registerSW.js is public but /api/monitoring still requires auth', async () => {
+    const app = await buildTestApp(false)
+    const swRes = await app.request('/registerSW.js')
+    expect(swRes.status).toBe(200)
+    // /api/monitoring is protected — no session → deny
+    const apiRes = await app.request('/api/monitoring')
+    expect(apiRes.status).not.toBe(200)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// CSP invariant: existing worker-src/manifest-src 'self' already covers SW+manifest
+// ---------------------------------------------------------------------------
+
+describe('CSP invariant — worker-src and manifest-src already cover SW+manifest', () => {
+  it("CSP on a normal response contains worker-src 'self' (covers SW registration)", async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/api/healthz')
+    const csp = res.headers.get('content-security-policy') ?? ''
+    expect(csp).toContain("worker-src 'self'")
+  })
+
+  it("CSP on a normal response contains manifest-src 'self' (covers manifest fetch)", async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/api/healthz')
+    const csp = res.headers.get('content-security-policy') ?? ''
+    expect(csp).toContain("manifest-src 'self'")
   })
 })
