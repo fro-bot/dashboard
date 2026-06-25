@@ -1505,6 +1505,10 @@ export function initOperatorStream(opts) {
 
     const listResult = await approvalClient.listRunApprovals(runId)
 
+    // Staleness check: if connect() reset reconcileDone during the await, a newer
+    // reconnect cycle is already in progress — discard this stale result entirely.
+    if (!reconcileDone) return
+
     // On any failure, abort — never prune on an unsafe signal.
     if (!listResult.success) return
 
@@ -1532,9 +1536,17 @@ export function initOperatorStream(opts) {
       })
     }
 
-    // Truncation guard: if the recovered set is at or above the gateway cap it may
-    // be incomplete — fall back to additive-only to avoid pruning real open prompts.
-    const pruneIds = recovered.length >= GATEWAY_PENDING_APPROVALS_CAP
+    // Malformed-entries guard: if the gateway returned entries but none passed
+    // validation, the response is not authoritative — abort rather than wiping
+    // all locally-open prompts. A genuinely empty response (recovered.length === 0)
+    // is authoritative and still prunes normally.
+    if (recoveredOpenIds.size === 0 && preGetLocalOpenIds.length > 0 && recovered.length > 0) return
+
+    // Truncation guard: if the recovered VALID set is at or above the gateway cap
+    // it may be incomplete — fall back to additive-only to avoid pruning real open
+    // prompts. Uses recoveredOpenIds.size (valid entries only) to match the metric
+    // used by the prune diff below.
+    const pruneIds = recoveredOpenIds.size >= GATEWAY_PENDING_APPROVALS_CAP
       ? []
       : preGetLocalOpenIds.filter(id => !recoveredOpenIds.has(id))
 

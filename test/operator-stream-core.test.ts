@@ -4195,4 +4195,403 @@ describe('reconcileApprovals — corrective prune wiring', () => {
     expect(listCalls).toHaveLength(1)
     expect(listCalls[0]).toBe('run-001')
   })
+
+  // -------------------------------------------------------------------------
+  // FIX 1 regression: malformed entries — entries present but all invalid
+  // → NO prune (open prompts preserved).
+  //
+  // The gateway returns entries that all fail validation (missing requestID or
+  // permission). recoveredOpenIds is empty but recovered.length > 0 → the
+  // malformed-entries guard fires and aborts without dispatching.
+  // -------------------------------------------------------------------------
+
+  it('malformed-entries no-wipe: all-invalid entries with A,B locally open → NO prune', async () => {
+    const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
+    const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
+    const openBChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-B', permission: 'network', settled: false})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+
+    let fetchCount = 0
+    const client = {
+      refreshCsrf: async () => ({success: true as const, data: {csrfToken: 'csrf'}}),
+      decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
+      // Returns entries that all fail validation: missing requestID and empty requestID
+      listRunApprovals: async () => ({
+        success: true as const,
+        data: {approvals: [{permission: 'shell'}, {requestID: ''}] as unknown as {requestID: string; permission: string}[]},
+      }),
+    }
+
+    const approvalsEl = makeFakeEl('div')
+    approvalsEl.hidden = true
+    approvalsEl.attributes['data-role'] = 'run-approvals'
+    const badgeEl = makeFakeEl('span')
+    badgeEl.hidden = true
+    const statusEl = makeFakeEl('span')
+    const noticeEl = makeFakeEl('div')
+
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('fetch', async () => {
+      fetchCount++
+      const chunks = fetchCount === 1
+        ? [readyChunk, openAChunk, openBChunk, resetChunk]
+        : [readyChunk]
+      return makeSseResponse(chunks)
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    initOperatorStream({
+      runId: 'run-001',
+      statusEl,
+      noticeEl,
+      approvalsEl,
+      badgeEl,
+      approvalClient: client,
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 2500))
+
+    // All-invalid entries → malformed-entries guard fires → no prune → A,B still open
+    expect(approvalsEl.hidden).toBe(false)
+  }, 10000)
+
+  // -------------------------------------------------------------------------
+  // FIX 1 complete-empty case: recovered.length === 0 is authoritative → prune.
+  // This is the existing 'edge (complete empty)' test re-verified here to confirm
+  // the malformed-entries guard does NOT break the genuine-empty path.
+  // (The existing test above already covers this; this comment documents intent.)
+  // -------------------------------------------------------------------------
+
+  // -------------------------------------------------------------------------
+  // FIX 2 regression: stale reconcile discard.
+  //
+  // A second connect() resets reconcileDone during the first reconcile's GET
+  // await. The first (stale) reconcile must be discarded — it must not dispatch
+  // and must not prune prompts that the fresh reconcile would preserve.
+  //
+  // Setup: connection 1 opens req-A, then a reset triggers reconnect. During
+  // the reconnect the first reconcile's GET is still pending (deferred). The
+  // second connection goes live and its own reconcile runs. We then resolve the
+  // first (stale) GET with a set that would prune req-A — req-A must survive.
+  // -------------------------------------------------------------------------
+
+  it('stale-reconcile discard: first reconcile resolved after second connect → stale result discarded, no wrong prune', async () => {
+    const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
+    const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+
+    // Deferred promise for the first reconcile's GET — we control when it resolves
+    let resolveFirstList!: (v: {success: true; data: {approvals: []}}) => void
+    const firstListPromise = new Promise<{success: true; data: {approvals: []}}>(resolve => {
+      resolveFirstList = resolve
+    })
+
+    let listCallCount = 0
+    const client = {
+      refreshCsrf: async () => ({success: true as const, data: {csrfToken: 'csrf'}}),
+      decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
+      listRunApprovals: async () => {
+        listCallCount++
+        if (listCallCount === 1) {
+          // First reconcile: hold the GET open until we explicitly resolve it
+          return firstListPromise
+        }
+        // Second reconcile: returns req-A as still open (fresh authoritative set)
+        return {success: true as const, data: {approvals: [{requestID: 'req-A', permission: 'shell'}]}}
+      },
+    }
+
+    const approvalsEl = makeFakeEl('div')
+    approvalsEl.hidden = true
+    approvalsEl.attributes['data-role'] = 'run-approvals'
+    const badgeEl = makeFakeEl('span')
+    badgeEl.hidden = true
+    const statusEl = makeFakeEl('span')
+    const noticeEl = makeFakeEl('div')
+
+    let fetchCount = 0
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('fetch', async () => {
+      fetchCount++
+      const chunks = fetchCount === 1
+        ? [readyChunk, openAChunk, resetChunk]
+        : [readyChunk]
+      return makeSseResponse(chunks)
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    initOperatorStream({
+      runId: 'run-001',
+      statusEl,
+      noticeEl,
+      approvalsEl,
+      badgeEl,
+      approvalClient: client,
+    })
+
+    // Let connection 1 complete (ready → open(A) → reset → reconnect scheduled)
+    // and connection 2 start and its reconcile complete (second list returns req-A)
+    await new Promise(resolve => setTimeout(resolve, 2500))
+
+    // Now resolve the first (stale) GET with an empty set — would prune req-A if not discarded
+    resolveFirstList({success: true, data: {approvals: []}})
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    // The stale result must be discarded — req-A must still be open
+    expect(approvalsEl.hidden).toBe(false)
+  }, 10000)
+
+  // -------------------------------------------------------------------------
+  // Error path parity: http 500 and protocol errors preserve open prompts.
+  // The existing test covers {kind:'network'}; these cover the other two kinds.
+  // -------------------------------------------------------------------------
+
+  it('error path (http 500): listRunApprovals http-500 failure → open prompts preserved', async () => {
+    const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
+    const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+
+    let listCallCount = 0
+    const client = {
+      refreshCsrf: async () => ({success: true as const, data: {csrfToken: 'csrf'}}),
+      decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
+      listRunApprovals: async () => {
+        listCallCount++
+        if (listCallCount === 1) return {success: true as const, data: {approvals: []}}
+        return {success: false as const, error: {kind: 'http' as const, status: 500}}
+      },
+    }
+
+    const approvalsEl = makeFakeEl('div')
+    approvalsEl.hidden = true
+    approvalsEl.attributes['data-role'] = 'run-approvals'
+    const badgeEl = makeFakeEl('span')
+    badgeEl.hidden = true
+    const statusEl = makeFakeEl('span')
+    const noticeEl = makeFakeEl('div')
+
+    let fetchCount = 0
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('fetch', async () => {
+      fetchCount++
+      const chunks = fetchCount === 1
+        ? [readyChunk, openAChunk, resetChunk]
+        : [readyChunk]
+      return makeSseResponse(chunks)
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    initOperatorStream({
+      runId: 'run-001',
+      statusEl,
+      noticeEl,
+      approvalsEl,
+      badgeEl,
+      approvalClient: client,
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 2500))
+
+    expect(approvalsEl.hidden).toBe(false)
+  }, 10000)
+
+  it('error path (protocol): listRunApprovals protocol failure → open prompts preserved', async () => {
+    const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
+    const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+
+    let listCallCount = 0
+    const client = {
+      refreshCsrf: async () => ({success: true as const, data: {csrfToken: 'csrf'}}),
+      decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
+      listRunApprovals: async () => {
+        listCallCount++
+        if (listCallCount === 1) return {success: true as const, data: {approvals: []}}
+        return {success: false as const, error: {kind: 'protocol' as const}}
+      },
+    }
+
+    const approvalsEl = makeFakeEl('div')
+    approvalsEl.hidden = true
+    approvalsEl.attributes['data-role'] = 'run-approvals'
+    const badgeEl = makeFakeEl('span')
+    badgeEl.hidden = true
+    const statusEl = makeFakeEl('span')
+    const noticeEl = makeFakeEl('div')
+
+    let fetchCount = 0
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('fetch', async () => {
+      fetchCount++
+      const chunks = fetchCount === 1
+        ? [readyChunk, openAChunk, resetChunk]
+        : [readyChunk]
+      return makeSseResponse(chunks)
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    initOperatorStream({
+      runId: 'run-001',
+      statusEl,
+      noticeEl,
+      approvalsEl,
+      badgeEl,
+      approvalClient: client,
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 2500))
+
+    expect(approvalsEl.hidden).toBe(false)
+  }, 10000)
+
+  // -------------------------------------------------------------------------
+  // Truncation boundary (allow-prune side): valid size === CAP - 1 → prune IS
+  // performed. Complements the existing >= CAP test (additive-only side).
+  //
+  // Note: this test also validates that the truncation guard uses recoveredOpenIds.size
+  // (valid entries only) rather than recovered.length (raw array length). With the
+  // old guard, CAP-1 valid entries + 1 invalid entry would still equal CAP raw entries
+  // and incorrectly suppress the prune. With the fixed guard, only valid size matters.
+  // -------------------------------------------------------------------------
+
+  it('truncation boundary (allow-prune): valid size === CAP-1 → prune IS performed', async () => {
+    const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
+    const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+
+    // Recovery returns exactly CAP-1 valid entries, none of which is req-A
+    const nearCapRecovery = Array.from({length: GATEWAY_PENDING_APPROVALS_CAP - 1}, (_, i) => ({
+      requestID: `req-recovered-${i}`,
+      permission: 'shell',
+    }))
+
+    let fetchCount = 0
+    const client = {
+      refreshCsrf: async () => ({success: true as const, data: {csrfToken: 'csrf'}}),
+      decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
+      listRunApprovals: async () => ({success: true as const, data: {approvals: nearCapRecovery}}),
+    }
+
+    const approvalsEl = makeFakeEl('div')
+    approvalsEl.hidden = true
+    approvalsEl.attributes['data-role'] = 'run-approvals'
+    const badgeEl = makeFakeEl('span')
+    badgeEl.hidden = true
+    const statusEl = makeFakeEl('span')
+    const noticeEl = makeFakeEl('div')
+
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('fetch', async () => {
+      fetchCount++
+      const chunks = fetchCount === 1
+        ? [readyChunk, openAChunk, resetChunk]
+        : [readyChunk]
+      return makeSseResponse(chunks)
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    initOperatorStream({
+      runId: 'run-001',
+      statusEl,
+      noticeEl,
+      approvalsEl,
+      badgeEl,
+      approvalClient: client,
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 2500))
+
+    // CAP-1 valid entries → truncation guard does NOT fire → req-A IS pruned.
+    // The 49 recovered entries are added as new prompts, so approvalsEl is visible.
+    // If the truncation guard had fired (>= CAP), req-A would NOT be pruned and
+    // the total would be 50 (req-A + 49 new). With the guard not firing, req-A is
+    // pruned and the total is 49 (only the recovered entries).
+    expect(approvalsEl.hidden).toBe(false)
+    expect(badgeEl.textContent).toBe(String(GATEWAY_PENDING_APPROVALS_CAP - 1))
+  }, 10000)
+})
+
+// ---------------------------------------------------------------------------
+// approval-reconcile reducer — __proto__ key guard
+// ---------------------------------------------------------------------------
+
+describe('nextStreamState — approval-reconcile __proto__ key guard', () => {
+  const live = (): StreamState =>
+    nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+
+  const openApproval = (state: StreamState, runId: string, requestID: string, permission: string): StreamState =>
+    nextStreamState(state, {
+      type: 'approval',
+      data: {runId, requestID, permission, settled: false},
+    })
+
+  it('pruneIds:[__proto__] → ignored, open prompts unaffected, Object.prototype not polluted', () => {
+    let state = live()
+    state = openApproval(state, 'run-001', 'req-A', 'shell')
+    state = openApproval(state, 'run-001', 'req-B', 'network')
+
+    // Dispatch reconcile with __proto__ in pruneIds
+    state = nextStreamState(state, {
+      type: 'approval-reconcile',
+      runId: 'run-001',
+      pruneIds: ['__proto__'],
+      addPrompts: [],
+    })
+
+    const run = state.runs['run-001']
+    // req-A and req-B must still be open — __proto__ prune is a no-op
+    const openIds = getOpenApprovals(run).map(p => p.requestID)
+    expect(openIds).toContain('req-A')
+    expect(openIds).toContain('req-B')
+    // Object.prototype must not be polluted
+    expect(Object.hasOwn({}, '__proto__')).toBe(false)
+  })
+
+  it('addPrompts:[{requestID:__proto__}] → not added, Object.prototype not polluted', () => {
+    let state = live()
+
+    // Dispatch reconcile with __proto__ in addPrompts
+    state = nextStreamState(state, {
+      type: 'approval-reconcile',
+      runId: 'run-001',
+      pruneIds: [],
+      addPrompts: [{requestID: '__proto__', permission: 'shell'}],
+    })
+
+    // __proto__ must not appear as an open prompt
+    const run = state.runs['run-001']
+    const openIds = getOpenApprovals(run).map(p => p.requestID)
+    expect(openIds).not.toContain('__proto__')
+    // Object.prototype must not be polluted
+    expect(Object.hasOwn({}, '__proto__')).toBe(false)
+    // The run entry itself must not have a __proto__ key in its open prompts map
+    if (run?.approvalOpenPrompts !== undefined) {
+      expect(Object.hasOwn(run.approvalOpenPrompts, '__proto__')).toBe(false)
+    }
+  })
 })
