@@ -1467,6 +1467,11 @@ export function initOperatorStream(opts) {
   // Reset on each connect() call so reconnects trigger a fresh reconcile.
   let reconcileDone = false
 
+  // Monotonic counter incremented on every connect() call. Each reconcileApprovals
+  // invocation captures the epoch before its await; if the epoch changed by the time
+  // the GET resolves, the result is stale and must be discarded.
+  let connectEpoch = 0
+
   function dispatch(event) {
     const prevConnection = state.connection
     state = nextStreamState(state, event)
@@ -1497,6 +1502,11 @@ export function initOperatorStream(opts) {
     if (reconcileDone) return
     reconcileDone = true
 
+    // Capture the epoch before the await. If connect() increments connectEpoch
+    // while the GET is in flight, myEpoch will differ from connectEpoch when we
+    // resume — that means this reconcile is stale and must be discarded.
+    const myEpoch = connectEpoch
+
     // Snapshot the locally-open ids BEFORE the await. Only prompts open at this
     // moment are eligible for pruning — prompts that arrive via SSE during the
     // GET window are never in this set and therefore never pruned.
@@ -1505,9 +1515,9 @@ export function initOperatorStream(opts) {
 
     const listResult = await approvalClient.listRunApprovals(runId)
 
-    // Staleness check: if connect() reset reconcileDone during the await, a newer
-    // reconnect cycle is already in progress — discard this stale result entirely.
-    if (!reconcileDone) return
+    // Epoch staleness check: if connect() started a new connection cycle during
+    // the await, connectEpoch will have advanced — discard this stale result.
+    if (myEpoch !== connectEpoch) return
 
     // On any failure, abort — never prune on an unsafe signal.
     if (!listResult.success) return
@@ -1518,6 +1528,7 @@ export function initOperatorStream(opts) {
     // the list of prompts to add (those not already locally open).
     const recoveredOpenIds = new Set()
     const addPrompts = []
+    let sawMalformed = false
     for (const approval of recovered) {
       if (
         typeof approval.requestID !== 'string' ||
@@ -1525,6 +1536,7 @@ export function initOperatorStream(opts) {
         typeof approval.permission !== 'string' ||
         approval.permission.length === 0
       ) {
+        sawMalformed = true
         continue
       }
       recoveredOpenIds.add(approval.requestID)
@@ -1536,11 +1548,17 @@ export function initOperatorStream(opts) {
       })
     }
 
-    // Malformed-entries guard: if the gateway returned entries but none passed
-    // validation, the response is not authoritative — abort rather than wiping
-    // all locally-open prompts. A genuinely empty response (recovered.length === 0)
+    // Partial-malformed guard: if ANY entry failed validation the recovered set is
+    // not a trustworthy complete picture — fall back to additive-only (no prune).
+    // A genuinely empty response (recovered.length === 0, sawMalformed === false)
     // is authoritative and still prunes normally.
-    if (recoveredOpenIds.size === 0 && preGetLocalOpenIds.length > 0 && recovered.length > 0) return
+    // An all-invalid response (recoveredOpenIds.size === 0, sawMalformed === true)
+    // is also additive-only — the valid subset is empty so addPrompts is empty too,
+    // meaning the dispatch is a no-op, but we never prune on a corrupt response.
+    if (sawMalformed) {
+      dispatch({type: 'approval-reconcile', runId, pruneIds: [], addPrompts})
+      return
+    }
 
     // Truncation guard: if the recovered VALID set is at or above the gateway cap
     // it may be incomplete — fall back to additive-only to avoid pruning real open
@@ -1560,6 +1578,10 @@ export function initOperatorStream(opts) {
     // Reset reconcile flag for this connection attempt — each connect/reconnect
     // triggers a fresh one-shot reconcile GET when the stream goes live.
     reconcileDone = false
+
+    // Advance the epoch so any in-flight reconcile from the previous connection
+    // cycle sees a stale epoch and discards its result.
+    connectEpoch++
 
     // Clear any previously-pending first-frame timer before arming a new one.
     // Without this, a reconnect would leak the old timer, which could fire later

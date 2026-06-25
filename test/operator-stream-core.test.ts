@@ -4534,6 +4534,186 @@ describe('reconcileApprovals — corrective prune wiring', () => {
     expect(approvalsEl.hidden).toBe(false)
     expect(badgeEl.textContent).toBe(String(GATEWAY_PENDING_APPROVALS_CAP - 1))
   }, 10000)
+
+  // -------------------------------------------------------------------------
+  // Partial-malformed recovery — a response with any invalid entry is not authoritative
+  // must NOT prune any locally-open prompt.
+  //
+  // A and B are locally open. Recovery returns [{requestID:'req-A',permission:'shell'},
+  // {permission:'bad'}] — A is valid, second entry is malformed (missing requestID).
+  // sawMalformed fires → pruneIds=[] → B is NOT pruned even though B is absent from
+  // the valid subset. A is retained (already open). B is retained (not pruned).
+  // -------------------------------------------------------------------------
+
+  it('mixed valid/invalid recovery — a locally-open prompt absent from the valid subset is NOT pruned', async () => {
+    const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
+    const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
+    const openBChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-B', permission: 'network', settled: false})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+
+    let fetchCount = 0
+    const client = {
+      refreshCsrf: async () => ({success: true as const, data: {csrfToken: 'csrf'}}),
+      decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
+      // A is valid; second entry is malformed (missing requestID) — partial-malformed response
+      listRunApprovals: async () => ({
+        success: true as const,
+        data: {
+          approvals: [
+            {requestID: 'req-A', permission: 'shell'},
+            {permission: 'bad'},
+          ] as unknown as {requestID: string; permission: string}[],
+        },
+      }),
+    }
+
+    const approvalsEl = makeFakeEl('div')
+    approvalsEl.hidden = true
+    approvalsEl.attributes['data-role'] = 'run-approvals'
+    const badgeEl = makeFakeEl('span')
+    badgeEl.hidden = true
+    const statusEl = makeFakeEl('span')
+    const noticeEl = makeFakeEl('div')
+
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('fetch', async () => {
+      fetchCount++
+      const chunks = fetchCount === 1
+        ? [readyChunk, openAChunk, openBChunk, resetChunk]
+        : [readyChunk]
+      return makeSseResponse(chunks)
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    initOperatorStream({
+      runId: 'run-001',
+      statusEl,
+      noticeEl,
+      approvalsEl,
+      badgeEl,
+      approvalClient: client,
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 2500))
+
+    // sawMalformed → pruneIds=[] → B is NOT pruned despite being absent from the
+    // valid recovered subset. Both A and B remain open.
+    expect(approvalsEl.hidden).toBe(false)
+    expect(badgeEl.hidden).toBe(false)
+    // Badge must show 2 (A retained, B retained — not pruned)
+    expect(badgeEl.textContent).toBe('2')
+  }, 10000)
+
+  // -------------------------------------------------------------------------
+  // Stale reconcile with a non-empty pre-GET snapshot resolving after a newer reconnect.
+  //
+  // The existing stale-reconcile test (above) captured an empty preGetLocalOpenIds
+  // for the stale reconcile (req-A hadn't opened yet when conn1 went live), so the
+  // stale dispatch was harmless regardless of the staleness guard. This test forces
+  // req-A to be open BEFORE the stale reconcile captures its snapshot, so the stale
+  // reconcile would prune A if the epoch guard doesn't fire.
+  //
+  // Setup:
+  //   - conn1 ready frame arrives; req-A is already in state (pre-seeded via a
+  //     synthetic approval dispatch before the stream goes live — achieved by
+  //     having conn1 emit open(A) BEFORE the ready frame so A is in state when
+  //     reconcileApprovals snapshots preGetLocalOpenIds).
+  //   - Actually: we use a two-step approach. conn1 emits ready+open(A)+reset.
+  //     The stale reconcile fires on conn1's ready frame. At that point A is NOT
+  //     yet open (open(A) arrives after ready). So we need A open before ready.
+  //
+  //   The trick: use a deferred first-list promise so the stale GET is still
+  //   pending when conn2 starts. conn2 goes live, its reconcile runs and preserves
+  //   A (returns [req-A]). Then we resolve the stale GET with [] — the stale
+  //   reconcile must bail on epoch mismatch and NOT prune A.
+  //
+  //   For preGetLocalOpenIds to contain A in the stale reconcile, we need A open
+  //   before conn1's ready frame. We achieve this by having conn1 emit open(A)
+  //   as the FIRST chunk (before ready), but the SSE reader only dispatches on
+  //   known event types — approval frames are dispatched immediately. So we emit
+  //   open(A) first, then ready. The approval frame opens A; the ready frame
+  //   transitions to live and triggers reconcileApprovals, which snapshots A.
+  // -------------------------------------------------------------------------
+
+  it('stale reconcile with a non-empty pre-GET snapshot bails on epoch mismatch — the prompt is NOT pruned', async () => {
+    const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
+    // open(A) emitted BEFORE ready so A is in state when reconcileApprovals snapshots preGetLocalOpenIds
+    const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+
+    // Deferred promise for the stale (first) reconcile's GET
+    let resolveStaleList!: (v: {success: true; data: {approvals: []}}) => void
+    const staleListPromise = new Promise<{success: true; data: {approvals: []}}>(resolve => {
+      resolveStaleList = resolve
+    })
+
+    let listCallCount = 0
+    const client = {
+      refreshCsrf: async () => ({success: true as const, data: {csrfToken: 'csrf'}}),
+      decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
+      listRunApprovals: async () => {
+        listCallCount++
+        if (listCallCount === 1) {
+          // Stale reconcile: hold the GET open until we explicitly resolve it
+          return staleListPromise
+        }
+        // Fresh reconcile (conn2): returns req-A as still open
+        return {success: true as const, data: {approvals: [{requestID: 'req-A', permission: 'shell'}]}}
+      },
+    }
+
+    const approvalsEl = makeFakeEl('div')
+    approvalsEl.hidden = true
+    approvalsEl.attributes['data-role'] = 'run-approvals'
+    const badgeEl = makeFakeEl('span')
+    badgeEl.hidden = true
+    const statusEl = makeFakeEl('span')
+    const noticeEl = makeFakeEl('div')
+
+    let fetchCount = 0
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('fetch', async () => {
+      fetchCount++
+      if (fetchCount === 1) {
+        // conn1: open(A) BEFORE ready so A is in preGetLocalOpenIds when reconcile snapshots
+        return makeSseResponse([openAChunk, readyChunk, resetChunk])
+      }
+      // conn2: ready only — fresh reconcile runs and preserves A
+      return makeSseResponse([readyChunk])
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    initOperatorStream({
+      runId: 'run-001',
+      statusEl,
+      noticeEl,
+      approvalsEl,
+      badgeEl,
+      approvalClient: client,
+    })
+
+    // Let conn1 complete (open(A) → ready → stale reconcile starts, GET pending →
+    // reset → reconnect scheduled) and conn2 start and its fresh reconcile complete.
+    await new Promise(resolve => setTimeout(resolve, 2500))
+
+    // Now resolve the stale GET with [] — would prune req-A if epoch guard doesn't fire
+    resolveStaleList({success: true, data: {approvals: []}})
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    // Epoch guard must have fired: stale reconcile discarded, req-A still open
+    expect(approvalsEl.hidden).toBe(false)
+    expect(badgeEl.hidden).toBe(false)
+  }, 10000)
 })
 
 // ---------------------------------------------------------------------------
