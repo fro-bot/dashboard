@@ -8,8 +8,9 @@
  * - Session cookie is HttpOnly, Secure, SameSite=Lax, 24h TTL.
  * - Operator login check is case-sensitive exact match.
  * - Logout requires a valid CSRF token (HMAC-derived, double-submit pattern).
- *   Token = HMAC-SHA256(cookieKey, login + ':logout') truncated to 32 hex chars.
- *   Verified with timingSafeEqual to prevent timing attacks.
+ *   Token = HMAC-SHA256(cookieKey, login + ':logout:' + window) truncated to 32 hex chars,
+ *   where window = floor(now / CSRF_WINDOW_MS). Binding to the time window means a leaked
+ *   token expires after at most 2 windows (~2 hours). Verified with timingSafeEqual.
  */
 import type {GitHubOAuthClient} from '../auth/oauth.ts'
 import type {SessionManager} from '../session.ts'

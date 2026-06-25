@@ -6,10 +6,13 @@
  * appears prompting the operator to reload. Clicking "Refresh" activates the
  * waiting SW and reloads the page.
  *
- * The hourly update check (setInterval → r.update()) ensures the operator
- * sees new builds within an hour even if they leave the tab open.
+ * The hourly update check (useEffect + setInterval) ensures the operator
+ * sees new builds within an hour even if they leave the tab open. The interval
+ * is cleaned up on unmount to prevent leaks under React 18 strict-mode
+ * double-mounts and conditional renders.
  */
 
+import {useEffect} from 'react'
 import {useRegisterSW} from 'virtual:pwa-register/react'
 
 export function ReloadPrompt() {
@@ -17,22 +20,24 @@ export function ReloadPrompt() {
     needRefresh: [needRefresh, setNeedRefresh],
     updateServiceWorker,
   } = useRegisterSW({
-    onRegistered(registration) {
-      if (registration) {
-        // Check for updates every hour so long-lived tabs pick up new builds.
-        setInterval(() => {
-          registration.update().catch(() => {
-            // Ignore update check failures (offline, etc.)
-          })
-        }, 60 * 60 * 1000)
-      }
-    },
     onRegisterError(error) {
       // SW registration failure must not crash the app — it still works as a
       // plain SPA. Log for diagnostics only.
       console.error('[SW] Registration error:', error)
     },
   })
+
+  // Check for updates every hour so long-lived tabs pick up new builds.
+  // useEffect with cleanup prevents interval leaks on unmount / strict-mode
+  // double-mounts. updateServiceWorker is stable across renders.
+  useEffect(() => {
+    const id = setInterval(() => {
+      updateServiceWorker().catch(() => {
+        // Ignore update check failures (offline, etc.)
+      })
+    }, 60 * 60 * 1000)
+    return () => clearInterval(id)
+  }, [updateServiceWorker])
 
   if (!needRefresh) return null
 

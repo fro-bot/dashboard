@@ -211,7 +211,7 @@ describe('/api/monitoring — BFF aggregation endpoint', () => {
     })
   })
 
-  // ── Unit 3 contract pin: Cache-Control: no-store must NOT change ────────────
+  // ── Contract pin: Cache-Control: no-store must NOT change ───────────────────
   // The SW Cache Storage API (cache.put()) stores responses regardless of
   // Cache-Control — the SW cache is independent of the HTTP cache. Therefore:
   //   - no-store does NOT prevent the SW from caching /api/monitoring.
@@ -220,7 +220,7 @@ describe('/api/monitoring — BFF aggregation endpoint', () => {
   //     correctly forbids.
   //   - The SW NetworkFirst strategy handles offline caching at the SW layer.
   // This test pins the exact header value so a "helpful" change is caught.
-  describe('Unit 3 contract pin — Cache-Control: no-store is UNCHANGED (SW caches independently)', () => {
+  describe('Cache-Control: no-store is UNCHANGED on /api/monitoring (SW caches independently)', () => {
     it('Cache-Control is exactly "no-store" — not "private", not "no-cache", not absent', async () => {
       const app = await buildTestApp(makeSnapshot())
       const res = await authedGet(app, '/api/monitoring')
@@ -475,6 +475,38 @@ describe('/api/status', () => {
       expect(monitoringBody.repos[0]?.full_name).toBe('fro-bot/shared-source')
       expect(statusBody.repos[0]?.full_name).toBe('fro-bot/shared-source')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// /auth/logout-csrf — auth-gate pin
+// ---------------------------------------------------------------------------
+// Pins that GET /auth/logout-csrf is behind the auth middleware. A future
+// isPublicPath drift that accidentally exposes this route would silently hand
+// an unauthenticated caller a valid CSRF token — this test catches that.
+
+describe('/auth/logout-csrf — auth-gate', () => {
+  it('GET /auth/logout-csrf without session → 302/401 (not 200)', async () => {
+    const app = await buildTestApp(makeSnapshot())
+    const res = await app.request('/auth/logout-csrf')
+    expect([302, 303, 401]).toContain(res.status)
+    expect(res.status).not.toBe(200)
+  })
+
+  it('GET /auth/logout-csrf with invalid session → 302/401 (not 200)', async () => {
+    const app = await buildTestApp(makeSnapshot())
+    const res = await app.request('/auth/logout-csrf', {headers: {cookie: 'session=bad.garbage'}})
+    expect([302, 303, 401]).toContain(res.status)
+    expect(res.status).not.toBe(200)
+  })
+
+  it('GET /auth/logout-csrf with valid session → 200 + {csrfToken} is 32 hex chars', async () => {
+    const app = await buildTestApp(makeSnapshot())
+    const res = await authedGet(app, '/auth/logout-csrf')
+    expect(res.status).toBe(200)
+    const body = await res.json() as {csrfToken: string}
+    expect(typeof body.csrfToken).toBe('string')
+    expect(body.csrfToken).toMatch(/^[0-9a-f]{32}$/)
   })
 })
 

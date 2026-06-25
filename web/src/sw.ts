@@ -44,7 +44,19 @@ declare const self: ServiceWorkerGlobalScope
 // The full Workbox callback params are destructured to match the WorkboxPlugin
 // interface (cachedResponse is optional per CachedResponseWillBeUsedCallbackParam).
 const staleSignalPlugin = {
-  cacheWillUpdate: async ({response}: {response: Response}) => addCachedAtHeader(response),
+  // Guard against cross-origin redirect poisoning: if a logged-out fetch to
+  // /api/monitoring follows the auth redirect chain (e.g. GitHub OAuth 200 HTML),
+  // the resolved response.url will be cross-origin. Caching that HTML as if it
+  // were the monitoring DTO would corrupt the cache — a later offline load would
+  // serve HTML that fails res.json(). Return null (skip caching) unless the
+  // response origin provably matches the request origin.
+  // Empty response.url (opaque responses) is treated conservatively: skip caching.
+  cacheWillUpdate: async ({request, response}: {request: Request; response: Response}) => {
+    const responseOrigin = response.url ? new URL(response.url).origin : null
+    const requestOrigin = new URL(request.url).origin
+    if (responseOrigin !== requestOrigin) return null
+    return addCachedAtHeader(response)
+  },
   cachedResponseWillBeUsed: async ({cachedResponse}: {cachedResponse?: Response}) =>
     markFromCache(cachedResponse),
 }
