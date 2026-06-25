@@ -194,6 +194,24 @@ describe('should-release — web/** changes trigger release', () => {
   })
 })
 
+describe('should-release — public/** changes trigger release', () => {
+  it('releases when a public/ asset changes (baked into the image)', () => {
+    const base = writePkg(tmpDir, 'base.json', BASE_PKG)
+    const head = writePkg(tmpDir, 'head.json', BASE_PKG)
+    const {exitCode, stdout} = runGuard('public/operator-stream.js', base, head)
+    expect(exitCode).toBe(0)
+    expect(stdout).toMatch(/^release:/)
+  })
+
+  it('releases when bare public path is listed as changed', () => {
+    const base = writePkg(tmpDir, 'base.json', BASE_PKG)
+    const head = writePkg(tmpDir, 'head.json', BASE_PKG)
+    const {exitCode, stdout} = runGuard('public', base, head)
+    expect(exitCode).toBe(0)
+    expect(stdout).toMatch(/^release:/)
+  })
+})
+
 describe('should-release — Dockerfile change triggers release', () => {
   it('releases when Dockerfile changes', () => {
     const base = writePkg(tmpDir, 'base.json', BASE_PKG)
