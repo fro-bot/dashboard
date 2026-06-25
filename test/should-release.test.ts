@@ -56,7 +56,7 @@
  */
 
 import {spawnSync} from 'node:child_process'
-import {mkdtempSync, rmSync, writeFileSync} from 'node:fs'
+import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 import process from 'node:process'
@@ -209,6 +209,22 @@ describe('should-release — public/** changes trigger release', () => {
     const {exitCode, stdout} = runGuard('public', base, head)
     expect(exitCode).toBe(0)
     expect(stdout).toMatch(/^release:/)
+  })
+})
+
+describe('should-release — workflow path filter parity', () => {
+  // GitHub Actions filters on.push.paths BEFORE the guard script runs, so any
+  // directory that the guard treats as a hard-release path must also appear in
+  // the release workflow's paths filter — otherwise the workflow never starts and
+  // the guard never executes. This pins the two in sync to prevent drift.
+  it('release.yaml on.push.paths includes every directory-glob hard-release path', () => {
+    const workflow = readFileSync(
+      resolve(process.cwd(), '.github/workflows/release.yaml'),
+      'utf8',
+    )
+    for (const dir of ['src/**', 'web/**', 'public/**']) {
+      expect(workflow).toContain(`'${dir}'`)
+    }
   })
 })
 
