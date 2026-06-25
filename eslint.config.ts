@@ -6,7 +6,7 @@ export default defineConfig({
   // are generated artifacts, not hand-authored source — exclude them from linting.
   // web/ is a Vite+React workspace with its own tsconfig — exclude it from the
   // backend's erasableSyntaxOnly config (full TS is valid there via Vite build).
-  ignores: ['docs/plans/**', 'docs/solutions/**', 'docs/brainstorms/**', 'web/**'],
+  ignores: ['docs/plans/**', 'docs/solutions/**', 'docs/brainstorms/**', 'web/**', '.agents/**'],
   typescript: {
     tsconfigPath: './tsconfig.json',
     // Enforce Node 24 strip-only TypeScript compatibility: rejects parameter properties,
