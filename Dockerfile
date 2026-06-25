@@ -1,4 +1,4 @@
-FROM node:24-slim@sha256:862263c612aa437e3037674b85419622a9d93bff80aa1eee5398dfe686375532 AS builder
+FROM node:24-slim@sha256:b31e7a42fdf8b8aa5f5ed477c72d694301273f1069c5a2f71d53c6482e99a2fc AS builder
 
 # Enable corepack for pnpm
 RUN corepack enable && corepack prepare pnpm@11.8.0 --activate
@@ -18,7 +18,7 @@ COPY web/ ./web/
 RUN pnpm build:web
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-FROM node:24-slim@sha256:862263c612aa437e3037674b85419622a9d93bff80aa1eee5398dfe686375532
+FROM node:24-slim@sha256:b31e7a42fdf8b8aa5f5ed477c72d694301273f1069c5a2f71d53c6482e99a2fc
 
 # Enable corepack for pnpm
 RUN corepack enable && corepack prepare pnpm@11.8.0 --activate
