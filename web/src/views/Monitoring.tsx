@@ -370,11 +370,11 @@ function OfflineState({onRetry}: OfflineStateProps) {
       role="alert"
       style={{
         backgroundColor: 'var(--color-surface)',
-        border: '1px solid var(--color-warning)',
+        border: '1px solid var(--color-error)',
         borderRadius: 'var(--radius-lg)',
         padding: 'var(--space-8)',
         textAlign: 'center',
-        color: 'var(--color-warning)',
+        color: 'var(--color-error)',
       }}
     >
       <p style={{fontSize: 'var(--text-body-lg)', fontWeight: 600, marginBottom: 'var(--space-2)'}}>
@@ -391,16 +391,7 @@ function OfflineState({onRetry}: OfflineStateProps) {
       </p>
       <button
         onClick={onRetry}
-        style={{
-          padding: 'var(--space-2) var(--space-4)',
-          borderRadius: 'var(--radius-md)',
-          border: '1px solid var(--color-warning)',
-          backgroundColor: 'transparent',
-          color: 'var(--color-warning)',
-          fontSize: 'var(--text-body-sm)',
-          fontWeight: 600,
-          cursor: 'pointer',
-        }}
+        className="px-4 py-2 rounded-md border border-error bg-transparent text-error text-body-sm font-semibold cursor-pointer transition-colors duration-fast ease-standard hover:bg-error hover:text-bg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-error"
       >
         Retry
       </button>
@@ -479,18 +470,11 @@ function MonitoringControls({
                 key={value}
                 onClick={() => setFilterState(value)}
                 aria-pressed={isActive}
-                style={{
-                  padding: 'var(--space-1) var(--space-3)',
-                  borderRadius: 'var(--radius-full)',
-                  border: '1px solid',
-                  borderColor: isActive ? 'var(--color-accent)' : 'var(--color-border-muted)',
-                  backgroundColor: isActive ? 'var(--color-surface-raised)' : 'transparent',
-                  color: isActive ? 'var(--color-text)' : 'var(--color-text-muted)',
-                  fontSize: 'var(--text-label)',
-                  cursor: 'pointer',
-                  fontWeight: isActive ? 600 : 400,
-                  transition: 'all 0.15s ease'
-                }}
+                className={`px-3 py-1 rounded-full border text-label cursor-pointer transition-colors duration-fast ease-standard focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
+                  isActive 
+                    ? 'border-accent bg-surface-raised text-text font-semibold' 
+                    : 'border-border-muted bg-transparent text-muted font-normal hover:border-border hover:text-text'
+                }`}
               >
                 {label}
               </button>
@@ -645,14 +629,14 @@ export function Monitoring() {
         </span>
       </div>
 
-      {/* Stale-from-cache banner (service worker offline signal) */}
-      {servedFromCache && <StaleCacheBanner cachedAt={cachedAt} />}
-
-      {/* Server-side stale banner (BFF snapshot staleness) */}
-      {staleBanner && <StaleBanner />}
-
-      {/* Drift notice */}
-      {driftCount > 0 && <DriftNotice count={driftCount} />}
+      {/* Coalesced warnings */}
+      {servedFromCache ? (
+        <StaleCacheBanner cachedAt={cachedAt} />
+      ) : staleBanner ? (
+        <StaleBanner />
+      ) : driftCount > 0 ? (
+        <DriftNotice count={driftCount} />
+      ) : null}
 
       {/* Repo grid or empty state */}
       {isEmpty ? (
@@ -691,19 +675,8 @@ export function Monitoring() {
                 <button
                   onClick={() => setHealthyExpanded(!healthyExpanded)}
                   aria-expanded={isHealthyExpanded}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 'var(--space-2)',
-                    background: 'none',
-                    border: 'none',
-                    color: 'var(--color-text)',
-                    fontSize: 'var(--text-body)',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    padding: 'var(--space-2) 0',
-                    marginBottom: isHealthyExpanded ? 'var(--space-4)' : 0,
-                  }}
+                  className="flex items-center gap-2 bg-transparent border-none text-text text-body font-semibold cursor-pointer py-2 transition-colors duration-fast ease-standard hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent rounded-md"
+                  style={{ marginBottom: isHealthyExpanded ? 'var(--space-4)' : 0 }}
                 >
                   <span style={{ 
                     display: 'inline-block', 

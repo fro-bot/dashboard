@@ -39,25 +39,9 @@ export function ReloadPrompt() {
   return (
     <div
       data-testid="reload-prompt"
-      role="alert"
+      role="status"
       aria-live="polite"
-      style={{
-        position: 'fixed',
-        bottom: 'var(--space-4)',
-        right: 'var(--space-4)',
-        zIndex: 50,
-        display: 'flex',
-        alignItems: 'center',
-        gap: 'var(--space-3)',
-        backgroundColor: 'var(--color-surface)',
-        border: '1px solid var(--color-accent)',
-        borderRadius: 'var(--radius-md)',
-        padding: 'var(--space-3) var(--space-4)',
-        boxShadow: 'var(--shadow-sm)',
-        fontSize: 'var(--text-body-sm)',
-        color: 'var(--color-text)',
-        maxWidth: '20rem',
-      }}
+      className="fixed bottom-4 right-4 z-50 flex items-center gap-3 bg-surface border border-accent rounded-md px-4 py-3 shadow-sm text-body-sm text-text max-w-[calc(100vw-2rem)] sm:max-w-xs animate-slide-in"
     >
       <span style={{flex: 1}}>New version available</span>
       <button
@@ -67,17 +51,7 @@ export function ReloadPrompt() {
           // No args — the bool arg is a deprecated no-op in vite-plugin-pwa v1.
           updateServiceWorker()
         }}
-        style={{
-          padding: 'var(--space-1) var(--space-3)',
-          borderRadius: 'var(--radius-md)',
-          border: '1px solid var(--color-accent)',
-          backgroundColor: 'var(--color-accent)',
-          color: 'var(--color-bg)',
-          fontSize: 'var(--text-label)',
-          fontWeight: 600,
-          cursor: 'pointer',
-          whiteSpace: 'nowrap',
-        }}
+        className="px-3 py-1 rounded-md border border-accent bg-accent text-bg text-label font-semibold cursor-pointer whitespace-nowrap transition-colors duration-fast ease-standard hover:bg-accent-hover hover:border-accent-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
       >
         Refresh
       </button>
@@ -86,20 +60,7 @@ export function ReloadPrompt() {
         data-testid="reload-prompt-dismiss"
         aria-label="Dismiss update notification"
         onClick={() => setNeedRefresh(false)}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          width: '1.5rem',
-          height: '1.5rem',
-          borderRadius: 'var(--radius-sm)',
-          border: '1px solid var(--color-border)',
-          backgroundColor: 'transparent',
-          color: 'var(--color-text-muted)',
-          cursor: 'pointer',
-          fontSize: 'var(--text-label)',
-          flexShrink: 0,
-        }}
+        className="flex items-center justify-center w-6 h-6 rounded-sm border border-border bg-transparent text-muted text-label shrink-0 cursor-pointer transition-colors duration-fast ease-standard hover:text-text hover:border-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
       >
         ✕
       </button>

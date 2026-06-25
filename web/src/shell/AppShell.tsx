@@ -181,19 +181,7 @@ export function AppShell({children}: AppShellProps) {
               aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
               data-testid="theme-toggle"
               onClick={toggleTheme}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                width: '2rem',
-                height: '2rem',
-                borderRadius: 'var(--radius-md)',
-                border: '1px solid var(--color-border)',
-                backgroundColor: 'transparent',
-                color: 'var(--color-text-muted)',
-                cursor: 'pointer',
-                transition: 'border-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard)',
-              }}
+              className="flex items-center justify-center w-8 h-8 rounded-md border border-border bg-transparent text-muted cursor-pointer transition-colors duration-fast ease-standard hover:border-accent hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             >
               {theme === 'dark' ? (
                 /* Sun icon */
@@ -228,19 +216,7 @@ export function AppShell({children}: AppShellProps) {
               aria-label="Log out"
               data-testid="logout-button"
               onClick={handleLogout}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                width: '2rem',
-                height: '2rem',
-                borderRadius: 'var(--radius-md)',
-                border: '1px solid var(--color-border)',
-                backgroundColor: 'transparent',
-                color: 'var(--color-text-muted)',
-                cursor: 'pointer',
-                transition: 'border-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard)',
-              }}
+              className="flex items-center justify-center w-8 h-8 rounded-md border border-border bg-transparent text-muted cursor-pointer transition-colors duration-fast ease-standard hover:border-accent hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             >
               {/* Exit/logout icon */}
               <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">

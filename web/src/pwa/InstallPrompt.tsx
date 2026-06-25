@@ -84,20 +84,7 @@ export function InstallPrompt() {
         type="button"
         data-testid="install-prompt-button"
         onClick={handleInstall}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 'var(--space-1)',
-          padding: 'var(--space-1) var(--space-3)',
-          borderRadius: 'var(--radius-md)',
-          border: '1px solid var(--color-border)',
-          backgroundColor: 'transparent',
-          color: 'var(--color-text-muted)',
-          fontSize: 'var(--text-label)',
-          fontWeight: 600,
-          cursor: 'pointer',
-          whiteSpace: 'nowrap',
-        }}
+        className="flex items-center gap-1 px-3 py-1 rounded-md border border-border bg-transparent text-muted text-label font-semibold cursor-pointer whitespace-nowrap transition-colors duration-fast ease-standard hover:border-accent hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
       >
         <svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" fill="none">
           <path d="M6 1v7M3 5l3 3 3-3M1 10h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
@@ -109,20 +96,8 @@ export function InstallPrompt() {
         data-testid="install-prompt-dismiss"
         aria-label="Dismiss install prompt"
         onClick={handleDismiss}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          width: '1.25rem',
-          height: '1.25rem',
-          borderRadius: 'var(--radius-sm)',
-          border: 'none',
-          backgroundColor: 'transparent',
-          color: 'var(--color-text-muted)',
-          cursor: 'pointer',
-          fontSize: '0.65rem',
-          flexShrink: 0,
-        }}
+        className="flex items-center justify-center w-5 h-5 rounded-sm border-none bg-transparent text-muted cursor-pointer shrink-0 transition-colors duration-fast ease-standard hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        style={{ fontSize: '0.65rem' }}
       >
         ✕
       </button>
