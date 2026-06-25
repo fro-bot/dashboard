@@ -75,13 +75,13 @@ describe('ReloadPrompt', () => {
     expect(mockUpdateServiceWorker).not.toHaveBeenCalled()
   })
 
-  it('has role=alert for accessibility', () => {
+  it('uses role=status (polite) for the non-urgent update notice', () => {
     vi.mocked(pwaRegister.useRegisterSW).mockReturnValue({
       needRefresh: [true, mockSetNeedRefresh],
       offlineReady: [false, vi.fn()],
       updateServiceWorker: mockUpdateServiceWorker,
     })
     render(<ReloadPrompt />)
-    expect(screen.getByRole('alert')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toBeInTheDocument()
   })
 })
