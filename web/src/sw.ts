@@ -27,15 +27,13 @@ import {createHandlerBoundToURL} from 'workbox-precaching'
 import {CacheableResponsePlugin} from 'workbox-cacheable-response'
 import {ExpirationPlugin} from 'workbox-expiration'
 import {addCachedAtHeader, markFromCache} from './sw-utils.ts'
+import {MONITORING_CACHE} from './pwa/cache-names.ts'
 
 export {addCachedAtHeader, markFromCache} from './sw-utils.ts'
+// Re-export so any existing imports from sw.ts continue to work.
+export {MONITORING_CACHE} from './pwa/cache-names.ts'
 
 declare const self: ServiceWorkerGlobalScope
-
-// ── Runtime cache name ───────────────────────────────────────────────────────
-// Shared constant used by the NetworkFirst route and the logout purge handler.
-// Export so the page side can reference the same name for caches.delete().
-export const MONITORING_CACHE = 'monitoring-v1'
 
 // ── Stale-signal plugin ──────────────────────────────────────────────────────
 // Workbox plugin lifecycle callbacks that stamp stale-signal headers.

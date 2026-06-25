@@ -278,35 +278,23 @@ describe('PWA SW asset serving — /sw.js', () => {
 // ---------------------------------------------------------------------------
 // PWA SW asset serving — /registerSW.js
 // ---------------------------------------------------------------------------
+// NOTE: vite-plugin-pwa only emits registerSW.js when the virtual module
+// virtual:pwa-register/react is NOT consumed by the app bundle (i.e. when
+// using the auto-register mode). Since the app uses useRegisterSW() in a
+// component (ReloadPrompt), the registration code is bundled into the main
+// JS chunk and registerSW.js is NOT emitted. The server-side route for
+// /registerSW.js remains (it is harmless and in isPublicPath), but the file
+// no longer exists in web/dist/ so requests return 404.
+// The public-path allowlist and no-cache header middleware are still correct
+// for forward-compatibility (if the build mode changes, the route is ready).
 
 describe('PWA SW asset serving — /registerSW.js', () => {
-  it('GET /registerSW.js returns 200', async () => {
+  it('GET /registerSW.js is in the public allowlist (no auth redirect)', async () => {
     const app = await buildTestApp(false)
     const res = await app.request('/registerSW.js')
-    expect(res.status).toBe(200)
-  })
-
-  it('GET /registerSW.js returns a JavaScript Content-Type', async () => {
-    const app = await buildTestApp(false)
-    const res = await app.request('/registerSW.js')
-    expect(res.status).toBe(200)
-    const ct = res.headers.get('content-type') ?? ''
-    // Both text/javascript (RFC 9239 standard) and application/javascript (legacy) are valid.
-    expect(ct).toMatch(/(?:text|application)\/javascript/)
-  })
-
-  it('GET /registerSW.js returns Cache-Control no-store', async () => {
-    const app = await buildTestApp(false)
-    const res = await app.request('/registerSW.js')
-    expect(res.status).toBe(200)
-    const cc = res.headers.get('cache-control') ?? ''
-    expect(cc).toContain('no-store')
-  })
-
-  it('GET /registerSW.js is reachable WITHOUT an auth session (public path)', async () => {
-    const app = await buildTestApp(false)
-    const res = await app.request('/registerSW.js')
-    expect(res.status).toBe(200)
+    // The file is not emitted when useRegisterSW is used in a component, so
+    // the response is 404 — but it must NOT be a 302 auth redirect or 401.
+    // The public-path allowlist ensures unauthenticated access is permitted.
     expect(res.status).not.toBe(302)
     expect(res.status).not.toBe(401)
   })
@@ -355,10 +343,13 @@ describe('auth boundary — SW assets public, protected routes still gated', () 
     expect(rootRes.status).not.toBe(200)
   })
 
-  it('/registerSW.js is public but /api/monitoring still requires auth', async () => {
+  it('/registerSW.js path is public (no auth redirect) but /api/monitoring still requires auth', async () => {
     const app = await buildTestApp(false)
     const swRes = await app.request('/registerSW.js')
-    expect(swRes.status).toBe(200)
+    // registerSW.js is in the public allowlist — no auth redirect even if the
+    // file is not emitted (useRegisterSW bundles registration into the main chunk).
+    expect(swRes.status).not.toBe(302)
+    expect(swRes.status).not.toBe(401)
     // /api/monitoring is protected — no session → deny
     const apiRes = await app.request('/api/monitoring')
     expect(apiRes.status).not.toBe(200)

@@ -155,6 +155,21 @@ export function buildAuthRouter(config: AuthRouteConfig): Hono {
   })
 
   /**
+   * GET /auth/logout-csrf
+   * Returns the CSRF token for the logout form POST. Requires a valid session.
+   * The SPA fetches this token before submitting the logout form.
+   *
+   * The token is HMAC-derived (cookieKey + operatorLogin + time window) and
+   * expires after at most 2 windows (~2 hours). It is safe to expose to the
+   * authenticated operator — an attacker without the session cookie cannot
+   * obtain it (the route is behind the auth middleware).
+   */
+  router.get('/logout-csrf', c => {
+    const token = deriveLogoutCsrfToken(cookieKey, operatorLogin)
+    return c.json({csrfToken: token})
+  })
+
+  /**
    * POST /auth/logout
    * Validates the CSRF token (derived from cookieKey + operatorLogin), clears the
    * session cookie, and redirects to /auth/login.

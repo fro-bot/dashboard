@@ -14,6 +14,9 @@
  */
 
 import {type ReactNode, useCallback, useEffect, useState} from 'react'
+import {InstallPrompt} from '../pwa/InstallPrompt.tsx'
+import {ReloadPrompt} from '../pwa/ReloadPrompt.tsx'
+import {purgeMonitoringCache} from '../pwa/logout-purge.ts'
 
 type Theme = 'dark' | 'light'
 
@@ -43,6 +46,42 @@ export function AppShell({children}: AppShellProps) {
 
   const toggleTheme = useCallback(() => {
     setTheme((t) => (t === 'dark' ? 'light' : 'dark'))
+  }, [])
+
+  /**
+   * Logout: purge the SW runtime cache then submit the logout form POST.
+   * The CSRF token is fetched from /auth/logout-csrf (authenticated endpoint)
+   * immediately before submission so it is always fresh.
+   */
+  const handleLogout = useCallback(async () => {
+    // Purge the /api/monitoring SW cache before navigating away so a
+    // logged-out user cannot see cached monitoring data offline.
+    purgeMonitoringCache()
+
+    try {
+      const res = await fetch('/auth/logout-csrf', {credentials: 'same-origin'})
+      if (!res.ok) {
+        // If we can't get the CSRF token, fall back to navigating to login.
+        window.location.href = '/auth/login'
+        return
+      }
+      const {csrfToken} = (await res.json()) as {csrfToken: string}
+
+      // Submit a form POST to /auth/logout with the CSRF token.
+      const form = document.createElement('form')
+      form.method = 'POST'
+      form.action = '/auth/logout'
+      const input = document.createElement('input')
+      input.type = 'hidden'
+      input.name = 'csrf_token'
+      input.value = csrfToken
+      form.appendChild(input)
+      document.body.appendChild(form)
+      form.submit()
+    } catch {
+      // Network error — fall back to login page.
+      window.location.href = '/auth/login'
+    }
   }, [])
 
   return (
@@ -133,6 +172,9 @@ export function AppShell({children}: AppShellProps) {
             aria-label="Primary navigation"
             style={{display: 'flex', alignItems: 'center', gap: 'var(--space-2)'}}
           >
+            {/* PWA install affordance — only visible when the app is installable */}
+            <InstallPrompt />
+
             {/* Theme toggle — plain button, no Radix needed */}
             <button
               type="button"
@@ -179,6 +221,34 @@ export function AppShell({children}: AppShellProps) {
                 </svg>
               )}
             </button>
+
+            {/* Logout */}
+            <button
+              type="button"
+              aria-label="Log out"
+              data-testid="logout-button"
+              onClick={handleLogout}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: '2rem',
+                height: '2rem',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--color-border)',
+                backgroundColor: 'transparent',
+                color: 'var(--color-text-muted)',
+                cursor: 'pointer',
+                transition: 'border-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard)',
+              }}
+            >
+              {/* Exit/logout icon */}
+              <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M6 2H3a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                <path d="M10 11l3-3-3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                <line x1="13" y1="8" x2="6" y2="8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+            </button>
           </nav>
         </div>
       </header>
@@ -197,6 +267,9 @@ export function AppShell({children}: AppShellProps) {
       >
         {children}
       </main>
+
+      {/* ── PWA update prompt — fixed toast, renders when a new build is waiting */}
+      <ReloadPrompt />
     </div>
   )
 }
