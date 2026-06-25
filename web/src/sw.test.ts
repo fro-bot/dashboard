@@ -210,6 +210,24 @@ describe('sw.js build output', () => {
     expect(monitoringIdx).toBeLessThan(apiCatchAllIdx)
   })
 
+  it('GUARD: source registers the precache BEFORE the NavigationRoute (createHandlerBoundToURL resolves against the precache at call time)', () => {
+    // This is the bug that crashed SW registration end-to-end: when
+    // createHandlerBoundToURL('index.html') runs before precacheAndRoute(),
+    // Workbox throws `non-precached-url: index.html` and the SW never registers
+    // (the app silently degrades to a plain SPA, which no string-presence test
+    // catches). Assert the source order so the precache is populated first.
+    // Read the SOURCE (not the minified bundle) so the ordering is stable.
+    const src = readFileSync(
+      resolve(import.meta.dirname, 'sw.ts'),
+      'utf8',
+    )
+    const precacheIdx = src.indexOf('precacheAndRoute(self.__WB_MANIFEST)')
+    const navHandlerIdx = src.indexOf("createHandlerBoundToURL('index.html')")
+    expect(precacheIdx).toBeGreaterThan(-1)
+    expect(navHandlerIdx).toBeGreaterThan(-1)
+    expect(precacheIdx).toBeLessThan(navHandlerIdx)
+  })
+
   it('GUARD: MONITORING_CACHE name is present in the built SW (runtime cache name)', () => {
     const content = readSW()
     // The cache name constant must appear in the bundle so the purge handler

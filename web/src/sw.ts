@@ -3,10 +3,14 @@
  *
  * Registration order is load-bearing (specific before catch-all):
  *   1. /auth/*            → NetworkOnly  (OAuth must reach the server)
- *   2. /api/monitoring    → NetworkFirst (offline data cache + stale signal; Unit 3)
+ *   2. /api/monitoring    → NetworkFirst (offline data cache + stale signal)
  *   3. /api/*             → NetworkOnly  (default-deny; all other API routes)
- *   4. navigate           → NavigationRoute(index.html) denylist [/auth/, /api/]
- *   5. precache           → precacheAndRoute(self.__WB_MANIFEST) + cleanupOutdatedCaches()
+ *   4. precache           → precacheAndRoute(self.__WB_MANIFEST) + cleanupOutdatedCaches()
+ *   5. navigate           → NavigationRoute(index.html) denylist [/auth/, /api/]
+ *
+ * Precache (4) MUST come before the NavigationRoute (5): createHandlerBoundToURL
+ * resolves index.html against the precache at call time, so the manifest must be
+ * precached first or SW registration throws non-precached-url and aborts.
  *
  * SECURITY: A SW intercepts ALL same-origin navigations + fetches once registered.
  * The denylist on NavigationRoute and the NetworkOnly routes for /auth/* and /api/*
@@ -20,10 +24,9 @@
  * See: W3C SW spec, MDN Cache, web.dev "Service workers and the Cache Storage API".
  */
 
-import {cleanupOutdatedCaches, precacheAndRoute} from 'workbox-precaching'
+import {cleanupOutdatedCaches, createHandlerBoundToURL, precacheAndRoute} from 'workbox-precaching'
 import {NavigationRoute, registerRoute} from 'workbox-routing'
 import {NetworkFirst, NetworkOnly} from 'workbox-strategies'
-import {createHandlerBoundToURL} from 'workbox-precaching'
 import {CacheableResponsePlugin} from 'workbox-cacheable-response'
 import {ExpirationPlugin} from 'workbox-expiration'
 import {addCachedAtHeader, markFromCache} from './sw-utils.ts'
@@ -88,21 +91,27 @@ registerRoute(
   new NetworkOnly(),
 )
 
-// ── 4. Navigation requests → precached app shell ────────────────────────────
-// index.html is precached; the auth gate runs in-app after hydration (SPA pattern).
-// /auth/* and /api/* navigations are denylisted so those hit the network directly
-// (server-side auth redirects must run for those paths).
+// ── 4. Precache hashed app-shell assets ─────────────────────────────────────
+// self.__WB_MANIFEST is replaced at build time by vite-plugin-pwa (injectManifest).
+// cleanupOutdatedCaches removes stale precache entries from previous builds.
+//
+// ORDER: precacheAndRoute MUST run before the NavigationRoute below.
+// createHandlerBoundToURL('index.html') resolves the URL against the precache
+// AT CALL TIME — if the manifest isn't precached yet, Workbox throws
+// `non-precached-url: index.html` and SW registration aborts entirely (the app
+// silently falls back to a plain SPA). Precache first, then bind the handler.
+precacheAndRoute(self.__WB_MANIFEST)
+cleanupOutdatedCaches()
+
+// ── 5. Navigation requests → precached app shell ────────────────────────────
+// index.html is precached (above); the auth gate runs in-app after hydration
+// (SPA pattern). /auth/* and /api/* navigations are denylisted so those hit the
+// network directly (server-side auth redirects must run for those paths).
 registerRoute(
   new NavigationRoute(createHandlerBoundToURL('index.html'), {
     denylist: [/^\/auth(\/|$)/, /^\/api(\/|$)/],
   }),
 )
-
-// ── 5. Precache hashed app-shell assets ─────────────────────────────────────
-// self.__WB_MANIFEST is replaced at build time by vite-plugin-pwa (injectManifest).
-// cleanupOutdatedCaches removes stale precache entries from previous builds.
-precacheAndRoute(self.__WB_MANIFEST)
-cleanupOutdatedCaches()
 
 // ── Logout purge handler ─────────────────────────────────────────────────────
 // On logout, the page posts {type:'PURGE_RUNTIME'} to purge the /api/monitoring
