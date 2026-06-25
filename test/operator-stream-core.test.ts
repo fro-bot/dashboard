@@ -4612,41 +4612,42 @@ describe('reconcileApprovals — corrective prune wiring', () => {
   // -------------------------------------------------------------------------
   // Stale reconcile with a non-empty pre-GET snapshot resolving after a newer reconnect.
   //
-  // The existing stale-reconcile test (above) captured an empty preGetLocalOpenIds
-  // for the stale reconcile (req-A hadn't opened yet when conn1 went live), so the
-  // stale dispatch was harmless regardless of the staleness guard. This test forces
-  // req-A to be open BEFORE the stale reconcile captures its snapshot, so the stale
-  // reconcile would prune A if the epoch guard doesn't fire.
+  // The previous version of this test was broken: it emitted open(A) BEFORE ready
+  // on conn1, but the reducer drops approval frames when connection !== 'live', so
+  // open(A) was silently discarded. The stale reconcile's preGetLocalOpenIds was
+  // therefore empty, and pruneIds was always [] regardless of the epoch guard —
+  // the test passed even without the guard.
   //
-  // Setup:
-  //   - conn1 ready frame arrives; req-A is already in state (pre-seeded via a
-  //     synthetic approval dispatch before the stream goes live — achieved by
-  //     having conn1 emit open(A) BEFORE the ready frame so A is in state when
-  //     reconcileApprovals snapshots preGetLocalOpenIds).
-  //   - Actually: we use a two-step approach. conn1 emits ready+open(A)+reset.
-  //     The stale reconcile fires on conn1's ready frame. At that point A is NOT
-  //     yet open (open(A) arrives after ready). So we need A open before ready.
+  // This version uses three connections to guarantee a non-empty snapshot:
   //
-  //   The trick: use a deferred first-list promise so the stale GET is still
-  //   pending when conn2 starts. conn2 goes live, its reconcile runs and preserves
-  //   A (returns [req-A]). Then we resolve the stale GET with [] — the stale
-  //   reconcile must bail on epoch mismatch and NOT prune A.
+  //   conn1: [readyChunk, openAChunk, resetChunk]
+  //     reconcile-1 returns [] immediately (no-op). After ready, A enters state
+  //     via SSE (connection is live). Reset triggers reconnect.
   //
-  //   For preGetLocalOpenIds to contain A in the stale reconcile, we need A open
-  //   before conn1's ready frame. We achieve this by having conn1 emit open(A)
-  //   as the FIRST chunk (before ready), but the SSE reader only dispatches on
-  //   known event types — approval frames are dispatched immediately. So we emit
-  //   open(A) first, then ready. The approval frame opens A; the ready frame
-  //   transitions to live and triggers reconcileApprovals, which snapshots A.
+  //   conn2: [readyChunk, resetChunk]
+  //     reconcile-2 is the STALE one — its GET is deferred. When ready fires,
+  //     reconcileApprovals snapshots preGetLocalOpenIds: A is already in state
+  //     from conn1's SSE, so preGetLocalOpenIds = ['req-A']. The GET is held.
+  //     Reset triggers reconnect, incrementing connectEpoch (making reconcile-2
+  //     stale).
+  //
+  //   conn3: [readyChunk]
+  //     reconcile-3 returns [req-A] immediately, preserving A in state.
+  //
+  //   We then resolve reconcile-2's deferred GET with [] — without the epoch
+  //   guard this would dispatch pruneIds=['req-A'] and close A's prompt. With
+  //   the guard (myEpoch !== connectEpoch) it bails and A is preserved.
+  //
+  // Failure mode: removing the `if (myEpoch !== connectEpoch) return` line from
+  // reconcileApprovals causes this test to fail (approvalsEl.hidden becomes true).
   // -------------------------------------------------------------------------
 
   it('stale reconcile with a non-empty pre-GET snapshot bails on epoch mismatch — the prompt is NOT pruned', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
-    // open(A) emitted BEFORE ready so A is in state when reconcileApprovals snapshots preGetLocalOpenIds
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
     const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
 
-    // Deferred promise for the stale (first) reconcile's GET
+    // Deferred promise for reconcile-2 (the stale one on conn2)
     let resolveStaleList!: (v: {success: true; data: {approvals: []}}) => void
     const staleListPromise = new Promise<{success: true; data: {approvals: []}}>(resolve => {
       resolveStaleList = resolve
@@ -4659,10 +4660,15 @@ describe('reconcileApprovals — corrective prune wiring', () => {
       listRunApprovals: async () => {
         listCallCount++
         if (listCallCount === 1) {
-          // Stale reconcile: hold the GET open until we explicitly resolve it
+          // reconcile-1 (conn1): no-op, returns immediately so conn1 can proceed
+          return {success: true as const, data: {approvals: []}}
+        }
+        if (listCallCount === 2) {
+          // reconcile-2 (conn2): STALE — hold the GET open. preGetLocalOpenIds
+          // will contain req-A (added via SSE on conn1 after ready).
           return staleListPromise
         }
-        // Fresh reconcile (conn2): returns req-A as still open
+        // reconcile-3 (conn3): fresh, authoritative — preserves req-A
         return {success: true as const, data: {approvals: [{requestID: 'req-A', permission: 'shell'}]}}
       },
     }
@@ -4685,11 +4691,18 @@ describe('reconcileApprovals — corrective prune wiring', () => {
     vi.stubGlobal('fetch', async () => {
       fetchCount++
       if (fetchCount === 1) {
-        // conn1: open(A) BEFORE ready so A is in preGetLocalOpenIds when reconcile snapshots
-        return makeSseResponse([openAChunk, readyChunk, resetChunk])
+        // conn1: ready → live → reconcile-1 (immediate []) → open(A) enters state → reset → reconnect
+        return makeSseResponse([readyChunk, openAChunk, resetChunk])
       }
-      // conn2: ready only — fresh reconcile runs and preserves A
-      return makeSseResponse([readyChunk])
+      if (fetchCount === 2) {
+        // conn2: ready → live → reconcile-2 snapshots preGetLocalOpenIds=[req-A], GET deferred → reset → reconnect
+        return makeSseResponse([readyChunk, resetChunk])
+      }
+      // conn3: keepOpen so the connection stays live when reconcile-2's stale GET resolves.
+      // Without keepOpen, stream-closed fires and connection becomes 'closed', which gates
+      // the approval-reconcile reducer — the stale prune would be silently dropped even
+      // without the epoch guard, making the test a false positive.
+      return makeSseResponse([readyChunk], {keepOpen: true})
     })
     vi.stubGlobal('addEventListener', () => {})
 
@@ -4702,18 +4715,25 @@ describe('reconcileApprovals — corrective prune wiring', () => {
       approvalClient: client,
     })
 
-    // Let conn1 complete (open(A) → ready → stale reconcile starts, GET pending →
-    // reset → reconnect scheduled) and conn2 start and its fresh reconcile complete.
-    await new Promise(resolve => setTimeout(resolve, 2500))
+    // Wait for conn1 → conn2 → conn3 to complete.
+    // Backoff: conn1→conn2 = RETRY_BASE_MS * 2^1 = 2000ms,
+    //          conn2→conn3 = RETRY_BASE_MS * 2^2 = 4000ms.
+    // Total minimum: ~6000ms. Use 7000ms for margin.
+    await new Promise(resolve => setTimeout(resolve, 7000))
 
-    // Now resolve the stale GET with [] — would prune req-A if epoch guard doesn't fire
+    // Sanity check: verify we actually got 3 connections and 3 list calls
+    expect(fetchCount).toBe(3)
+    expect(listCallCount).toBe(3)
+
+    // Now resolve the stale GET with [] — without the epoch guard this would
+    // dispatch pruneIds=['req-A'] and close A's prompt.
     resolveStaleList({success: true, data: {approvals: []}})
-    await new Promise(resolve => setTimeout(resolve, 20))
+    await new Promise(resolve => setTimeout(resolve, 50))
 
     // Epoch guard must have fired: stale reconcile discarded, req-A still open
     expect(approvalsEl.hidden).toBe(false)
     expect(badgeEl.hidden).toBe(false)
-  }, 10000)
+  }, 20000)
 })
 
 // ---------------------------------------------------------------------------
