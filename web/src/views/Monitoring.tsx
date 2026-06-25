@@ -221,7 +221,7 @@ function RepoCard({repo, compact}: RepoCardProps) {
 }
 
 // ---------------------------------------------------------------------------
-// Stale banner
+// Stale banner (server-side staleness signal from the BFF snapshot)
 // ---------------------------------------------------------------------------
 
 function StaleBanner() {
@@ -240,6 +240,63 @@ function StaleBanner() {
       }}
     >
       ⚠ Showing cached data — live refresh unavailable
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Stale-from-cache banner (service worker offline cache signal)
+// ---------------------------------------------------------------------------
+
+/**
+ * Format a Unix ms timestamp as a human-readable age string.
+ * Returns null when cachedAt is null (caller shows a generic fallback).
+ */
+function formatCacheAge(cachedAt: number | null): string | null {
+  if (cachedAt === null) return null
+  const ageMs = Date.now() - cachedAt
+  if (ageMs < 0) return null // clock skew — treat as unknown
+
+  const seconds = Math.floor(ageMs / 1000)
+  if (seconds < 60) return `${seconds} second${seconds !== 1 ? 's' : ''} ago`
+
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} minute${minutes !== 1 ? 's' : ''} ago`
+
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} hour${hours !== 1 ? 's' : ''} ago`
+
+  const days = Math.floor(hours / 24)
+  return `${days} day${days !== 1 ? 's' : ''} ago`
+}
+
+interface StaleCacheBannerProps {
+  readonly cachedAt: number | null
+}
+
+function StaleCacheBanner({cachedAt}: StaleCacheBannerProps) {
+  const age = formatCacheAge(cachedAt)
+  const message =
+    age !== null
+      ? `Showing data from ${age} — connection lost`
+      : 'Showing offline data — connection lost'
+
+  return (
+    <div
+      data-testid="stale-cache-banner"
+      role="alert"
+      style={{
+        backgroundColor: 'var(--color-surface-raised)',
+        border: '1px solid var(--color-warning)',
+        color: 'var(--color-warning)',
+        padding: 'var(--space-3) var(--space-4)',
+        borderRadius: 'var(--radius-md)',
+        fontWeight: 600,
+        fontSize: 'var(--text-body-sm)',
+        marginBottom: 'var(--space-4)',
+      }}
+    >
+      ⚠ {message}
     </div>
   )
 }
@@ -299,17 +356,17 @@ function EmptyState() {
 }
 
 // ---------------------------------------------------------------------------
-// Error state (fail-closed)
+// Offline state — fetch failed, no cached snapshot available
 // ---------------------------------------------------------------------------
 
-interface ErrorStateProps {
-  readonly message: string
+interface OfflineStateProps {
+  readonly onRetry: () => void
 }
 
-function ErrorState({message}: ErrorStateProps) {
+function OfflineState({onRetry}: OfflineStateProps) {
   return (
     <div
-      data-testid="monitoring-error"
+      data-testid="monitoring-offline"
       role="alert"
       style={{
         backgroundColor: 'var(--color-surface)',
@@ -321,11 +378,23 @@ function ErrorState({message}: ErrorStateProps) {
       }}
     >
       <p style={{fontSize: 'var(--text-body-lg)', fontWeight: 600, marginBottom: 'var(--space-2)'}}>
-        Unable to load monitoring data
+        Offline — no cached data available
       </p>
-      <p style={{fontSize: 'var(--text-body-sm)', color: 'var(--color-text-muted)'}}>
-        {message}
+      <p
+        style={{
+          fontSize: 'var(--text-body-sm)',
+          color: 'var(--color-text-muted)',
+          marginBottom: 'var(--space-4)',
+        }}
+      >
+        Could not reach the server and there is no cached snapshot to show.
       </p>
+      <button
+        onClick={onRetry}
+        className="px-4 py-2 rounded-md border border-error bg-transparent text-error text-body-sm font-semibold cursor-pointer transition-colors duration-fast ease-standard hover:bg-error hover:text-bg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-error"
+      >
+        Retry
+      </button>
     </div>
   )
 }
@@ -401,18 +470,11 @@ function MonitoringControls({
                 key={value}
                 onClick={() => setFilterState(value)}
                 aria-pressed={isActive}
-                style={{
-                  padding: 'var(--space-1) var(--space-3)',
-                  borderRadius: 'var(--radius-full)',
-                  border: '1px solid',
-                  borderColor: isActive ? 'var(--color-accent)' : 'var(--color-border-muted)',
-                  backgroundColor: isActive ? 'var(--color-surface-raised)' : 'transparent',
-                  color: isActive ? 'var(--color-text)' : 'var(--color-text-muted)',
-                  fontSize: 'var(--text-label)',
-                  cursor: 'pointer',
-                  fontWeight: isActive ? 600 : 400,
-                  transition: 'all 0.15s ease'
-                }}
+                className={`px-3 py-1 rounded-full border text-label cursor-pointer transition-colors duration-fast ease-standard focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
+                  isActive 
+                    ? 'border-accent bg-surface-raised text-text font-semibold' 
+                    : 'border-border-muted bg-transparent text-muted font-normal hover:border-border hover:text-text'
+                }`}
               >
                 {label}
               </button>
@@ -450,11 +512,12 @@ function RepoGrid({repos, compact}: {repos: readonly DashboardRepo[], compact?: 
 
 type FetchStateStatus =
   | {readonly kind: 'loading'}
-  | {readonly kind: 'error'; readonly message: string}
-  | {readonly kind: 'ok'; readonly snapshot: AggregatorSnapshot}
+  | {readonly kind: 'offline'}
+  | {readonly kind: 'ok'; readonly snapshot: AggregatorSnapshot; readonly servedFromCache: boolean; readonly cachedAt: number | null}
 
 export function Monitoring() {
   const [state, setState] = useState<FetchStateStatus>({kind: 'loading'})
+  const [retryCount, setRetryCount] = useState(0)
   
   const [filterText, setFilterText] = useState('')
   const [filterState, setFilterState] = useState<FilterState>('all')
@@ -463,24 +526,29 @@ export function Monitoring() {
   useEffect(() => {
     let cancelled = false
 
+    setState({kind: 'loading'})
+
     fetchAggregationSnapshot()
-      .then(snapshot => {
+      .then(result => {
         if (!cancelled) {
-          setState({kind: 'ok', snapshot})
+          setState({
+            kind: 'ok',
+            snapshot: result.data,
+            servedFromCache: result.servedFromCache,
+            cachedAt: result.cachedAt,
+          })
         }
       })
-      .catch((error: unknown) => {
+      .catch(() => {
         if (!cancelled) {
-          const message =
-            error instanceof Error ? error.message : 'Unknown error fetching monitoring data'
-          setState({kind: 'error', message})
+          setState({kind: 'offline'})
         }
       })
 
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [retryCount])
 
   if (state.kind === 'loading') {
     return (
@@ -490,11 +558,11 @@ export function Monitoring() {
     )
   }
 
-  if (state.kind === 'error') {
-    return <ErrorState message={state.message} />
+  if (state.kind === 'offline') {
+    return <OfflineState onRetry={() => setRetryCount(c => c + 1)} />
   }
 
-  const {snapshot} = state
+  const {snapshot, servedFromCache, cachedAt} = state
   const {repos, staleBanner, driftCount, refreshedAt} = snapshot
   const isEmpty = repos.length === 0
 
@@ -561,11 +629,14 @@ export function Monitoring() {
         </span>
       </div>
 
-      {/* Stale banner */}
-      {staleBanner && <StaleBanner />}
-
-      {/* Drift notice */}
-      {driftCount > 0 && <DriftNotice count={driftCount} />}
+      {/* Coalesced warnings */}
+      {servedFromCache ? (
+        <StaleCacheBanner cachedAt={cachedAt} />
+      ) : staleBanner ? (
+        <StaleBanner />
+      ) : driftCount > 0 ? (
+        <DriftNotice count={driftCount} />
+      ) : null}
 
       {/* Repo grid or empty state */}
       {isEmpty ? (
@@ -604,19 +675,8 @@ export function Monitoring() {
                 <button
                   onClick={() => setHealthyExpanded(!healthyExpanded)}
                   aria-expanded={isHealthyExpanded}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 'var(--space-2)',
-                    background: 'none',
-                    border: 'none',
-                    color: 'var(--color-text)',
-                    fontSize: 'var(--text-body)',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    padding: 'var(--space-2) 0',
-                    marginBottom: isHealthyExpanded ? 'var(--space-4)' : 0,
-                  }}
+                  className="flex items-center gap-2 bg-transparent border-none text-text text-body font-semibold cursor-pointer py-2 transition-colors duration-fast ease-standard hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent rounded-md"
+                  style={{ marginBottom: isHealthyExpanded ? 'var(--space-4)' : 0 }}
                 >
                   <span style={{ 
                     display: 'inline-block', 

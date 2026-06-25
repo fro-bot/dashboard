@@ -383,6 +383,24 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
 
   const app = new Hono<{Variables: Variables}>()
 
+  // ── PWA service worker CSP bypass (registered BEFORE secureHeaders) ──────────
+  // secureHeaders is a post-next() middleware: it sets headers AFTER calling next().
+  // To remove the CSP from /sw.js responses, this middleware must be registered
+  // BEFORE secureHeaders so it is the outer layer — its post-next() code runs
+  // AFTER secureHeaders has set the CSP, allowing the delete to take effect.
+  //
+  // Workers do not inherit the page CSP (they have their own execution context).
+  // A too-restrictive page CSP on the SW response can block Workbox importScripts().
+  // The existing worker-src 'self' + manifest-src 'self' in the page CSP already
+  // cover SW registration and manifest fetch — no widening needed.
+  app.use('/sw.js', async (c, next) => {
+    await next()
+    // secureHeaders has now set the CSP — remove it from the SW response.
+    c.res.headers.delete('content-security-policy')
+    // No-cache so the browser re-fetches on every load and detects SW updates.
+    c.res.headers.set('cache-control', 'no-cache, no-store, must-revalidate')
+  })
+
   // ── Security headers + CSP (applied to all responses) ──────────────────────
   // Placed first so every response — including error responses — carries the
   // security headers. The tight CSP (script-src 'self', no unsafe-inline)
@@ -478,9 +496,14 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     // /assets/* — hashed JS/CSS chunks from web/dist/assets/
     // /manifest.webmanifest — PWA manifest
     // /icon-*.svg — PWA icons
+    // /sw.js — service worker script (must be public so the browser can register
+    //   it before the auth redirect; the SW itself carries no sensitive data)
+    // /registerSW.js — vite-plugin-pwa inline registration helper (also public)
     path.startsWith('/assets/') ||
     path === '/manifest.webmanifest' ||
     path.startsWith('/icon-') ||
+    path === '/sw.js' ||
+    path === '/registerSW.js' ||
     (operatorUiEnabled && path.startsWith('/static/'))
 
   app.use('*', async (c: Context, next) => {
@@ -705,13 +728,54 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // /assets/* — hashed JS/CSS chunks (Vite content-addressed, safe to cache)
   // /manifest.webmanifest — PWA manifest
   // /icon-*.svg — PWA icons
+  // /sw.js — service worker script (root scope, no-cache so updates are detected)
+  // /registerSW.js — vite-plugin-pwa registration helper (no-cache)
   //
   // root is relative to WORKDIR (/app) in the container, matching Dockerfile.
   // The builder stage copies web/dist/ to /app/web/dist/ in the runtime image.
   app.use('/assets/*', serveStatic({root: './web/dist'}))
-  app.use('/manifest.webmanifest', serveStatic({root: './web/dist'}))
   // PWA icons: icon-192.svg, icon-512.svg (and any future icon-*.svg)
   app.use('/icon-*', serveStatic({root: './web/dist'}))
+
+  // ── PWA manifest ─────────────────────────────────────────────────────────
+  // serveStatic serves .webmanifest files as application/octet-stream by default
+  // (the extension is not in the standard MIME map). The header middleware must
+  // be registered BEFORE serveStatic so it wraps the static handler and can
+  // override the Content-Type after serveStatic sets it.
+  // application/manifest+json is required for PWA installability.
+  app.use('/manifest.webmanifest', async (c, next) => {
+    await next()
+    c.res.headers.set('content-type', 'application/manifest+json; charset=UTF-8')
+  })
+  app.use('/manifest.webmanifest', serveStatic({root: './web/dist'}))
+
+  // ── PWA service worker + registration helper ──────────────────────────────
+  // /sw.js and /registerSW.js must be served at root scope (not under /assets/)
+  // so the SW's scope covers the entire origin. Both are emitted by vite-plugin-pwa
+  // into web/dist/ at build time.
+  //
+  // Header contract (load-bearing):
+  //   Content-Type: text/javascript (set by serveStatic from the .js extension) —
+  //     a wrong MIME (e.g. text/html) causes the browser to reject SW registration.
+  //   Cache-Control: no-cache, no-store, must-revalidate — set by the /sw.js
+  //     middleware registered before secureHeaders (see above).
+  //
+  // CSP: removed from /sw.js by the pre-secureHeaders middleware (see above).
+  //   Workers do not inherit the page CSP; a too-restrictive CSP can break Workbox.
+  //   The existing worker-src 'self' + manifest-src 'self' in the page CSP already
+  //   cover SW registration and manifest fetch — no widening needed.
+  //
+  // /registerSW.js Cache-Control: set by the middleware registered here (after
+  //   secureHeaders), which is sufficient since we only need to set Cache-Control
+  //   (not remove CSP — the page CSP is harmless on the registration helper).
+  app.use('/sw.js', serveStatic({root: './web/dist'}))
+
+  app.use('/registerSW.js', async (c, next) => {
+    await next()
+    // No-cache so the registration helper is always fresh alongside sw.js.
+    c.res.headers.set('cache-control', 'no-cache, no-store, must-revalidate')
+  })
+  app.use('/registerSW.js', serveStatic({root: './web/dist'}))
 
   // ── web/dist presence check ───────────────────────────────────────────────
   // Warn early if the SPA build artifact is missing. GET / will 404 silently

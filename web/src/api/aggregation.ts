@@ -53,6 +53,24 @@ export interface AggregatorSnapshot {
 }
 
 // ---------------------------------------------------------------------------
+// Fetch result type
+// ---------------------------------------------------------------------------
+
+/**
+ * Result of a successful /api/monitoring fetch.
+ *
+ * servedFromCache: true when the service worker served this response from its
+ *   offline cache (X-From-Cache: true header). The data is last-known-good.
+ * cachedAt: Unix ms timestamp of when the response was cached, or null if the
+ *   header was absent or malformed.
+ */
+export interface AggregationResult {
+  readonly data: AggregatorSnapshot
+  readonly servedFromCache: boolean
+  readonly cachedAt: number | null
+}
+
+// ---------------------------------------------------------------------------
 // Fetch
 // ---------------------------------------------------------------------------
 
@@ -62,9 +80,13 @@ export interface AggregatorSnapshot {
  * Uses credentials:'include' so the session cookie is forwarded.
  * The BFF endpoint is behind auth — a 401/403 means the session expired.
  *
+ * Reads X-From-Cache and X-Cached-At response headers stamped by the service
+ * worker when serving a cached offline response. Callers use these to render
+ * a stale-data banner or an explicit offline state.
+ *
  * @throws {Error} on network failure, non-2xx response, or JSON parse failure.
  */
-export async function fetchAggregationSnapshot(): Promise<AggregatorSnapshot> {
+export async function fetchAggregationSnapshot(): Promise<AggregationResult> {
   const res = await fetch('/api/monitoring', {
     method: 'GET',
     credentials: 'include',
@@ -75,6 +97,11 @@ export async function fetchAggregationSnapshot(): Promise<AggregatorSnapshot> {
     throw new Error(`BFF aggregation endpoint returned ${res.status} ${res.statusText}`)
   }
 
+  const servedFromCache = res.headers.get('X-From-Cache') === 'true'
+  const cachedAtRaw = res.headers.get('X-Cached-At')
+  const cachedAtParsed = cachedAtRaw !== null && cachedAtRaw !== '' ? Number(cachedAtRaw) : NaN
+  const cachedAt = Number.isFinite(cachedAtParsed) ? cachedAtParsed : null
+
   const data = await res.json() as AggregatorSnapshot
-  return data
+  return {data, servedFromCache, cachedAt}
 }
