@@ -211,6 +211,45 @@ describe('/api/monitoring — BFF aggregation endpoint', () => {
     })
   })
 
+  // ── Unit 3 contract pin: Cache-Control: no-store must NOT change ────────────
+  // The SW Cache Storage API (cache.put()) stores responses regardless of
+  // Cache-Control — the SW cache is independent of the HTTP cache. Therefore:
+  //   - no-store does NOT prevent the SW from caching /api/monitoring.
+  //   - Changing no-store to 'private' would be a regression: it would allow
+  //     the browser HTTP disk cache to store the response, which no-store
+  //     correctly forbids.
+  //   - The SW NetworkFirst strategy handles offline caching at the SW layer.
+  // This test pins the exact header value so a "helpful" change is caught.
+  describe('Unit 3 contract pin — Cache-Control: no-store is UNCHANGED (SW caches independently)', () => {
+    it('Cache-Control is exactly "no-store" — not "private", not "no-cache", not absent', async () => {
+      const app = await buildTestApp(makeSnapshot())
+      const res = await authedGet(app, '/api/monitoring')
+
+      expect(res.status).toBe(200)
+      // Exact match — any change to this header is a regression.
+      // The SW Cache Storage API ignores Cache-Control; no-store is correct
+      // and must not be changed to enable SW offline caching (it already works).
+      expect(res.headers.get('cache-control')).toBe('no-store')
+    })
+
+    it('Cache-Control is not "private" (private would allow browser HTTP disk caching — regression)', async () => {
+      const app = await buildTestApp(makeSnapshot())
+      const res = await authedGet(app, '/api/monitoring')
+
+      expect(res.status).toBe(200)
+      expect(res.headers.get('cache-control')).not.toBe('private')
+      expect(res.headers.get('cache-control')).not.toContain('private')
+    })
+
+    it('Cache-Control is not absent (must always be set to prevent intermediary caching)', async () => {
+      const app = await buildTestApp(makeSnapshot())
+      const res = await authedGet(app, '/api/monitoring')
+
+      expect(res.status).toBe(200)
+      expect(res.headers.get('cache-control')).not.toBeNull()
+    })
+  })
+
   describe('security — unauthenticated access denied', () => {
     it('GET /api/monitoring without session cookie → denied', async () => {
       const app = await buildTestApp(makeSnapshot())
