@@ -2194,6 +2194,7 @@ interface FakeElement {
   tagName: string
   textContent: string
   hidden: boolean
+  className: string
   children: FakeElement[]
   attributes: Record<string, string>
   style: Record<string, string>
@@ -2225,6 +2226,7 @@ function makeFakeEl(tagName = 'div'): FakeElement {
       }
     },
     hidden: false,
+    className: '',
     children: [] as FakeElement[],
     attributes: {} as Record<string, string>,
     style: {} as Record<string, string>,
@@ -3372,7 +3374,7 @@ describe('approval badge indicator', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Unit 2: approval-reconcile reducer action
+// approval-reconcile reducer action
 // ---------------------------------------------------------------------------
 
 describe('nextStreamState — approval-reconcile action', () => {
@@ -3674,5 +3676,523 @@ describe('GATEWAY_PENDING_APPROVALS_CAP constant', () => {
     expect(typeof GATEWAY_PENDING_APPROVALS_CAP).toBe('number')
     expect(GATEWAY_PENDING_APPROVALS_CAP).toBeGreaterThan(0)
     expect(GATEWAY_PENDING_APPROVALS_CAP).toBeLessThan(MAX_OPEN_APPROVALS)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// reconcileApprovals — wired integration (corrective prune)
+//
+// These tests drive initOperatorStream with a fake SSE stream that emits a
+// ready frame (transitioning the stream to "live"), then await the async
+// reconcile GET and assert the resulting DOM/state effects.
+//
+// Ghost-prompt scenario (the issue): req-A was open before a disconnect.
+// On reconnect the stream goes live again, reconcileApprovals runs, and the
+// gateway reports req-A is no longer open → req-A is pruned from the UI.
+//
+// To simulate "req-A was open before the reconnect", the tests use a two-
+// connection approach: first connection opens req-A, then a reset frame
+// triggers a reconnect (via fake timers), and the second connection's
+// reconcile GET returns a set that omits req-A.
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a fake SSE ReadableStream that emits the given SSE text chunks.
+ * Pass `keepOpen: true` to leave the stream open after all chunks are emitted
+ * (simulates a live connection that stays open). By default the stream closes
+ * after all chunks, which triggers the reconnect path in the SSE reader.
+ */
+function makeSseStream(chunks: string[], opts: {keepOpen?: boolean} = {}): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(encoder.encode(chunk))
+      }
+      if (!opts.keepOpen) {
+        controller.close()
+      }
+    },
+  })
+}
+
+/**
+ * Build a minimal fake SSE response for a 200 text/event-stream.
+ * By default the stream closes after all chunks (triggers reconnect path).
+ * Pass `keepOpen: true` to keep the stream open (simulates a live connection).
+ */
+function makeSseResponse(chunks: string[], opts: {keepOpen?: boolean} = {}): Response {
+  return {
+    ok: true,
+    status: 200,
+    headers: {get: (h: string) => (h === 'content-type' ? 'text/event-stream' : null)},
+    body: makeSseStream(chunks, opts),
+  } as unknown as Response
+}
+
+describe('reconcileApprovals — corrective prune wiring', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  // -------------------------------------------------------------------------
+  // Integration (issue scenario): open(A) → disconnect → A settles during gap
+  // → reconnect, recovery returns complete set WITHOUT A → A pruned.
+  //
+  // Two-connection approach:
+  //   Connection 1: ready + open(A) + reset → req-A in state, reconnect scheduled
+  //   Connection 2: ready → reconcile GET returns [] → req-A pruned
+  // -------------------------------------------------------------------------
+
+  it('integration: ghost prompt A absent from complete recovery set is pruned on reconnect', async () => {
+    const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
+    const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', command: 'echo A', settled: false})}\n\n`
+    // Reset frame triggers reconnect (shouldReconnect = true)
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+
+    // Connection 1: ready + open(A) + reset (stream closes after reset)
+    const conn1Chunks = [readyChunk, openAChunk, resetChunk]
+    // Connection 2: ready only (reconcile GET will run)
+    const conn2Chunks = [readyChunk]
+
+    let connectionCount = 0
+    const listCalls: string[] = []
+
+    const client = {
+      refreshCsrf: async () => ({success: true as const, data: {csrfToken: 'csrf'}}),
+      decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
+      listRunApprovals: async (runId: string) => {
+        listCalls.push(runId)
+        // Both connections return empty recovery (req-A settled during gap)
+        return {success: true as const, data: {approvals: []}}
+      },
+    }
+
+    const approvalsEl = makeFakeEl('div')
+    approvalsEl.hidden = true
+    approvalsEl.attributes['data-role'] = 'run-approvals'
+    const badgeEl = makeFakeEl('span')
+    badgeEl.hidden = true
+    const statusEl = makeFakeEl('span')
+    const noticeEl = makeFakeEl('div')
+
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('fetch', async () => {
+      connectionCount++
+      const chunks = connectionCount === 1 ? conn1Chunks : conn2Chunks
+      return makeSseResponse(chunks)
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    initOperatorStream({
+      runId: 'run-001',
+      statusEl,
+      noticeEl,
+      approvalsEl,
+      badgeEl,
+      approvalClient: client,
+    })
+
+    // Wait for connection 1 to complete (ready → live → reconcile → open(A) → reset → done)
+    // and for the reconnect timer to fire (RETRY_BASE_MS = 1000ms) and connection 2 to complete.
+    await new Promise(resolve => setTimeout(resolve, 2500))
+
+    // listRunApprovals must have been called at least twice (once per connection)
+    expect(listCalls.length).toBeGreaterThanOrEqual(2)
+
+    // After the second reconcile, req-A must be pruned — approvalsEl hidden
+    expect(approvalsEl.hidden).toBe(true)
+  }, 10000)
+
+  // -------------------------------------------------------------------------
+  // Error path (catastrophic-wipe guard): listRunApprovals returns {success:false}
+  // → NO prune, open prompts preserved.
+  //
+  // On the first connection, req-A opens during the GET window (so it's not in
+  // the pre-GET snapshot). On the second connection, req-A IS in the pre-GET
+  // snapshot, but the GET fails → req-A must NOT be pruned.
+  // -------------------------------------------------------------------------
+
+  it('error path: listRunApprovals failure → open prompts preserved, no prune', async () => {
+    const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
+    const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+
+    let listCallCount = 0
+    const listCalls: string[] = []
+
+    const client = {
+      refreshCsrf: async () => ({success: true as const, data: {csrfToken: 'csrf'}}),
+      decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
+      listRunApprovals: async (runId: string) => {
+        listCalls.push(runId)
+        listCallCount++
+        if (listCallCount === 1) {
+          // First connection: success with empty (req-A arrives during GET window)
+          return {success: true as const, data: {approvals: []}}
+        }
+        // Second connection: failure — must NOT prune req-A
+        return {success: false as const, error: {kind: 'network' as const}}
+      },
+    }
+
+    const approvalsEl = makeFakeEl('div')
+    approvalsEl.hidden = true
+    approvalsEl.attributes['data-role'] = 'run-approvals'
+    const badgeEl = makeFakeEl('span')
+    badgeEl.hidden = true
+    const statusEl = makeFakeEl('span')
+    const noticeEl = makeFakeEl('div')
+
+    let fetchCount = 0
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('fetch', async () => {
+      fetchCount++
+      const chunks = fetchCount === 1
+        ? [readyChunk, openAChunk, resetChunk]
+        : [readyChunk]
+      return makeSseResponse(chunks)
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    initOperatorStream({
+      runId: 'run-001',
+      statusEl,
+      noticeEl,
+      approvalsEl,
+      badgeEl,
+      approvalClient: client,
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 2500))
+
+    // listRunApprovals must have been called at least twice
+    expect(listCalls.length).toBeGreaterThanOrEqual(2)
+
+    // req-A must NOT have been pruned (second reconcile failed) — approvalsEl visible
+    expect(approvalsEl.hidden).toBe(false)
+  }, 10000)
+
+  // -------------------------------------------------------------------------
+  // Race guard: a prompt C is locally open but was added AFTER preGetLocalOpenIds
+  // capture (i.e. C opened during the await window) → C is NOT pruned.
+  //
+  // Structural assertion: pruneIds is derived from the pre-GET snapshot, so a
+  // prompt opened after the snapshot and absent from the recovered set survives.
+  //
+  // Setup: stream goes live (no pre-existing open prompts), reconcileApprovals
+  // starts (GET pending). req-C's open frame arrives via SSE DURING the await.
+  // Recovery returns [] (empty). req-C must NOT be pruned.
+  // -------------------------------------------------------------------------
+
+  it('race guard: prompt C opened during the GET window is NOT pruned even when absent from recovery', async () => {
+    // Use a controllable listRunApprovals that delays resolution so req-C can
+    // arrive via SSE before the GET resolves.
+    let resolveList!: (v: {success: true; data: {approvals: []}}) => void
+    const listPromise = new Promise<{success: true; data: {approvals: []}}>(resolve => {
+      resolveList = resolve
+    })
+
+    const approvalsEl = makeFakeEl('div')
+    approvalsEl.hidden = true
+    approvalsEl.attributes['data-role'] = 'run-approvals'
+    const badgeEl = makeFakeEl('span')
+    badgeEl.hidden = true
+    const statusEl = makeFakeEl('span')
+    const noticeEl = makeFakeEl('div')
+
+    const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
+    // req-C arrives AFTER the ready frame (during the GET await window)
+    const openCChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-C', permission: 'network', settled: false})}\n\n`
+
+    const client = {
+      refreshCsrf: async () => ({success: true as const, data: {csrfToken: 'csrf'}}),
+      decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
+      listRunApprovals: async (_runId: string) => listPromise,
+    }
+
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    // SSE stream: ready (triggers reconcile), then req-C open (during await).
+    // Keep the stream open so the connection stays live during the await.
+    vi.stubGlobal('fetch', async () => makeSseResponse([readyChunk, openCChunk], {keepOpen: true}))
+    vi.stubGlobal('addEventListener', () => {})
+
+    initOperatorStream({
+      runId: 'run-001',
+      statusEl,
+      noticeEl,
+      approvalsEl,
+      badgeEl,
+      approvalClient: client,
+    })
+
+    // Let the SSE stream process: ready fires, reconcileApprovals starts (GET pending),
+    // req-C open frame arrives during the await window.
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    // Now resolve the list — recovery returns empty (req-C absent from recovery)
+    resolveList({success: true, data: {approvals: []}})
+
+    // Wait for the reconcile to complete
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    // req-C was NOT in the pre-GET snapshot (it arrived during the await) →
+    // it must NOT be pruned. approvalsEl must be visible (req-C still open).
+    expect(approvalsEl.hidden).toBe(false)
+  })
+
+  // -------------------------------------------------------------------------
+  // Happy path: recovery returns [A,B] while only A was locally open
+  // → B added, A retained, nothing pruned.
+  //
+  // On the first connection, req-A opens during the GET window (not in snapshot).
+  // On the second connection, req-A IS in the snapshot. Recovery returns [A,B].
+  // req-A retained, req-B added, nothing pruned.
+  // -------------------------------------------------------------------------
+
+  it('happy: recovery returns [A,B] while only A locally open → B added, A retained, nothing pruned', async () => {
+    const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
+    const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+
+    let fetchCount = 0
+    const client = {
+      refreshCsrf: async () => ({success: true as const, data: {csrfToken: 'csrf'}}),
+      decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
+      listRunApprovals: async () => ({
+        success: true as const,
+        data: {approvals: [{requestID: 'req-A', permission: 'shell'}, {requestID: 'req-B', permission: 'network'}]},
+      }),
+    }
+
+    const approvalsEl = makeFakeEl('div')
+    approvalsEl.hidden = true
+    approvalsEl.attributes['data-role'] = 'run-approvals'
+    const badgeEl = makeFakeEl('span')
+    badgeEl.hidden = true
+    const statusEl = makeFakeEl('span')
+    const noticeEl = makeFakeEl('div')
+
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('fetch', async () => {
+      fetchCount++
+      const chunks = fetchCount === 1
+        ? [readyChunk, openAChunk, resetChunk]
+        : [readyChunk]
+      return makeSseResponse(chunks)
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    initOperatorStream({
+      runId: 'run-001',
+      statusEl,
+      noticeEl,
+      approvalsEl,
+      badgeEl,
+      approvalClient: client,
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 2500))
+
+    // Both A and B should be open — approvalsEl visible, badge shows 2
+    expect(approvalsEl.hidden).toBe(false)
+    expect(badgeEl.hidden).toBe(false)
+    expect(badgeEl.textContent).toBe('2')
+  }, 10000)
+
+  // -------------------------------------------------------------------------
+  // Edge (truncation): recovery size >= GATEWAY_PENDING_APPROVALS_CAP
+  // → pruneIds empty, additive only (no prune).
+  //
+  // On the second connection, req-A is in the pre-GET snapshot. Recovery returns
+  // exactly GATEWAY_PENDING_APPROVALS_CAP entries (none is req-A). Truncation
+  // guard fires → req-A must NOT be pruned.
+  // -------------------------------------------------------------------------
+
+  it('edge (truncation): recovery size >= cap → pruneIds empty, open prompts preserved', async () => {
+    const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
+    const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+
+    // Recovery returns exactly GATEWAY_PENDING_APPROVALS_CAP entries (none is req-A)
+    const bigRecovery = Array.from({length: GATEWAY_PENDING_APPROVALS_CAP}, (_, i) => ({
+      requestID: `req-recovered-${i}`,
+      permission: 'shell',
+    }))
+
+    let fetchCount = 0
+    const client = {
+      refreshCsrf: async () => ({success: true as const, data: {csrfToken: 'csrf'}}),
+      decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
+      listRunApprovals: async () => ({success: true as const, data: {approvals: bigRecovery}}),
+    }
+
+    const approvalsEl = makeFakeEl('div')
+    approvalsEl.hidden = true
+    approvalsEl.attributes['data-role'] = 'run-approvals'
+    const badgeEl = makeFakeEl('span')
+    badgeEl.hidden = true
+    const statusEl = makeFakeEl('span')
+    const noticeEl = makeFakeEl('div')
+
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('fetch', async () => {
+      fetchCount++
+      const chunks = fetchCount === 1
+        ? [readyChunk, openAChunk, resetChunk]
+        : [readyChunk]
+      return makeSseResponse(chunks)
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    initOperatorStream({
+      runId: 'run-001',
+      statusEl,
+      noticeEl,
+      approvalsEl,
+      badgeEl,
+      approvalClient: client,
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 2500))
+
+    // req-A must NOT be pruned (truncation guard) — approvalsEl visible
+    expect(approvalsEl.hidden).toBe(false)
+  }, 10000)
+
+  // -------------------------------------------------------------------------
+  // Edge (complete empty): recovery success {approvals:[]} while A,B locally open
+  // → both pruned.
+  //
+  // On the second connection, req-A and req-B are in the pre-GET snapshot.
+  // Recovery returns [] → both pruned.
+  // -------------------------------------------------------------------------
+
+  it('edge (complete empty): recovery returns empty set while A,B open → both pruned', async () => {
+    const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
+    const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
+    const openBChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-B', permission: 'network', settled: false})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+
+    let fetchCount = 0
+    const client = {
+      refreshCsrf: async () => ({success: true as const, data: {csrfToken: 'csrf'}}),
+      decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
+      listRunApprovals: async () => ({success: true as const, data: {approvals: []}}),
+    }
+
+    const approvalsEl = makeFakeEl('div')
+    approvalsEl.hidden = true
+    approvalsEl.attributes['data-role'] = 'run-approvals'
+    const badgeEl = makeFakeEl('span')
+    badgeEl.hidden = true
+    const statusEl = makeFakeEl('span')
+    const noticeEl = makeFakeEl('div')
+
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('fetch', async () => {
+      fetchCount++
+      const chunks = fetchCount === 1
+        ? [readyChunk, openAChunk, openBChunk, resetChunk]
+        : [readyChunk]
+      return makeSseResponse(chunks)
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    initOperatorStream({
+      runId: 'run-001',
+      statusEl,
+      noticeEl,
+      approvalsEl,
+      badgeEl,
+      approvalClient: client,
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 2500))
+
+    // Both A and B must be pruned — approvalsEl hidden
+    expect(approvalsEl.hidden).toBe(true)
+  }, 10000)
+
+  // -------------------------------------------------------------------------
+  // One-shot guard: reconcile fires only once per connect, not on every dispatch.
+  // -------------------------------------------------------------------------
+
+  it('one-shot: listRunApprovals called exactly once per connect', async () => {
+    const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
+    const listCalls: string[] = []
+
+    const client = {
+      refreshCsrf: async () => ({success: true as const, data: {csrfToken: 'csrf'}}),
+      decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
+      listRunApprovals: async (runId: string) => {
+        listCalls.push(runId)
+        return {success: true as const, data: {approvals: []}}
+      },
+    }
+
+    const approvalsEl = makeFakeEl('div')
+    approvalsEl.hidden = true
+    approvalsEl.attributes['data-role'] = 'run-approvals'
+    const badgeEl = makeFakeEl('span')
+    badgeEl.hidden = true
+    const statusEl = makeFakeEl('span')
+    const noticeEl = makeFakeEl('div')
+
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    // Keep the stream open so the connection stays live (no reconnect)
+    vi.stubGlobal('fetch', async () => makeSseResponse([readyChunk], {keepOpen: true}))
+    vi.stubGlobal('addEventListener', () => {})
+
+    initOperatorStream({
+      runId: 'run-001',
+      statusEl,
+      noticeEl,
+      approvalsEl,
+      badgeEl,
+      approvalClient: client,
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    // Must have been called exactly once
+    expect(listCalls).toHaveLength(1)
+    expect(listCalls[0]).toBe('run-001')
   })
 })

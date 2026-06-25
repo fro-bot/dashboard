@@ -69,7 +69,7 @@ export const MAX_OPEN_APPROVALS = 100
  * Mirrors the gateway's PENDING_APPROVALS_MAX_RESULTS cap (50) from
  * fro-bot/agent v0.76.2 packages/gateway/src/web/operator/pending-approvals-route.ts.
  *
- * The reconcile caller (Unit 3) uses this to guard against truncated recovery
+ * The reconnect-reconcile caller uses this to guard against truncated recovery
  * responses: if the recovered set size is >= this cap, the response may be
  * truncated and corrective pruning is skipped (additive-only fallback).
  *
@@ -693,7 +693,7 @@ export function nextStreamState(current, event) {
 
     case 'approval-reconcile': {
       // Corrective reconcile action dispatched by reconcileApprovals on reconnect.
-      // The caller (Unit 3) computes the explicit pruneIds and addPrompts lists from
+      // The reconnect-reconcile caller computes the explicit pruneIds and addPrompts lists from
       // a pre-GET snapshot diff — the reducer does NOT re-derive the diff, which is
       // what makes the reconcile-window race impossible.
       //
@@ -1479,9 +1479,17 @@ export function initOperatorStream(opts) {
   }
 
   /**
-   * Reconcile open approvals on (re)connect: one-shot GET on stream open.
-   * Feeds returned open prompts into the reducer as synthetic open frames.
-   * The reducer's tombstone logic drops any already-settled prompts.
+   * Reconcile open approvals on (re)connect: one-shot corrective GET on stream open.
+   *
+   * Snapshots the locally-open approval ids BEFORE the GET so that any prompt
+   * opening via SSE during the await window is never eligible for pruning (race-proof).
+   * On a successful response, dispatches a single approval-reconcile action that
+   * both prunes ghost prompts and adds any recovered-but-not-local prompts.
+   * On any failure, dispatches nothing — open prompts are preserved (fail-closed).
+   *
+   * Truncation guard: if the recovered set is at or above the gateway cap it may be
+   * incomplete, so pruneIds is left empty (additive-only) to avoid false pruning.
+   *
    * Never called on a timer — only once per connect() invocation.
    */
   async function reconcileApprovals() {
@@ -1489,12 +1497,24 @@ export function initOperatorStream(opts) {
     if (reconcileDone) return
     reconcileDone = true
 
-    // Unit 1 bridge: read the discriminated result; on failure abort (no prune, no add).
-    // Unit 3 will replace this with the full corrective-prune wiring.
+    // Snapshot the locally-open ids BEFORE the await. Only prompts open at this
+    // moment are eligible for pruning — prompts that arrive via SSE during the
+    // GET window are never in this set and therefore never pruned.
+    const runEntry = state.runs[runId]
+    const preGetLocalOpenIds = getOpenApprovals(runEntry).map(p => p.requestID)
+
     const listResult = await approvalClient.listRunApprovals(runId)
-    const openApprovals = listResult.success ? listResult.data.approvals : []
-    for (const approval of openApprovals) {
-      // Validate the approval summary before dispatching
+
+    // On any failure, abort — never prune on an unsafe signal.
+    if (!listResult.success) return
+
+    const recovered = listResult.data.approvals
+
+    // Validate each recovered summary and build the recovered open-id set and
+    // the list of prompts to add (those not already locally open).
+    const recoveredOpenIds = new Set()
+    const addPrompts = []
+    for (const approval of recovered) {
       if (
         typeof approval.requestID !== 'string' ||
         approval.requestID.length === 0 ||
@@ -1503,21 +1523,22 @@ export function initOperatorStream(opts) {
       ) {
         continue
       }
-      // Dispatch as a synthetic open approval frame — the reducer's tombstone
-      // logic will drop it if already settled (reconcile-additive-only).
-      const syntheticFrame = {
-        type: 'approval',
-        data: {
-          runId,
-          requestID: approval.requestID,
-          permission: approval.permission,
-          settled: false,
-          ...(typeof approval.command === 'string' ? {command: approval.command} : {}),
-          ...(typeof approval.filepath === 'string' ? {filepath: approval.filepath} : {}),
-        },
-      }
-      dispatch(syntheticFrame)
+      recoveredOpenIds.add(approval.requestID)
+      addPrompts.push({
+        requestID: approval.requestID,
+        permission: approval.permission,
+        ...(typeof approval.command === 'string' ? {command: approval.command} : {}),
+        ...(typeof approval.filepath === 'string' ? {filepath: approval.filepath} : {}),
+      })
     }
+
+    // Truncation guard: if the recovered set is at or above the gateway cap it may
+    // be incomplete — fall back to additive-only to avoid pruning real open prompts.
+    const pruneIds = recovered.length >= GATEWAY_PENDING_APPROVALS_CAP
+      ? []
+      : preGetLocalOpenIds.filter(id => !recoveredOpenIds.has(id))
+
+    dispatch({type: 'approval-reconcile', runId, pruneIds, addPrompts})
   }
 
   function connect() {

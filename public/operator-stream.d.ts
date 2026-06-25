@@ -21,7 +21,7 @@ export declare const FIRST_FRAME_TIMEOUT_MS: number
 /**
  * Mirrors the gateway's PENDING_APPROVALS_MAX_RESULTS cap (50) from
  * fro-bot/agent v0.76.2 packages/gateway/src/web/operator/pending-approvals-route.ts.
- * Used by reconcileApprovals (Unit 3) to guard against truncated recovery responses.
+ * Used by reconcileApprovals to guard against truncated recovery responses.
  */
 export declare const GATEWAY_PENDING_APPROVALS_CAP: number
 
@@ -142,13 +142,13 @@ export interface StreamState {
 }
 
 // ---------------------------------------------------------------------------
-// Reconcile action (Unit 2)
+// Corrective reconnect-reconcile action
 // ---------------------------------------------------------------------------
 
 /**
  * Corrective reconcile action dispatched by reconcileApprovals on reconnect.
  *
- * The caller (Unit 3) computes the explicit diff from a pre-GET snapshot so the
+ * The caller computes the explicit diff from a pre-GET snapshot so the
  * reducer does NOT re-derive it — this is what makes the reconcile-window race
  * impossible.
  *
