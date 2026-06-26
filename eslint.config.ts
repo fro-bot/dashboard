@@ -6,6 +6,9 @@ export default defineConfig({
   // are generated artifacts, not hand-authored source — exclude them from linting.
   // web/ is a Vite+React workspace with its own tsconfig — exclude it from the
   // backend's erasableSyntaxOnly config (full TS is valid there via Vite build).
+  // .agents/ is a vendored shared-skill bundle (e.g. .agents/skills/impeccable) of
+  // third-party .mjs/.md files — not our source; linting it reports tens of thousands
+  // of errors.
   ignores: ['docs/plans/**', 'docs/solutions/**', 'docs/brainstorms/**', 'web/**', '.agents/**'],
   typescript: {
     tsconfigPath: './tsconfig.json',

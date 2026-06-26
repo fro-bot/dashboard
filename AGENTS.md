@@ -32,6 +32,13 @@ cross-repo footprint.
 - `docs/solutions/` — documented solutions to past problems, organized by category
   with YAML frontmatter (`module`, `tags`, `problem_type`). Relevant when
   implementing or debugging in documented areas.
+- `.agents/skills/` is the canonical home for cross-harness agent skills (read by
+  both OpenCode and GitHub Copilot). Install shared skills there, not per-harness:
+  e.g. `npx impeccable skills install --providers=agents --scope=project`.
+- Live/browser verification needs the dev server backgrounded and run without
+  `--watch` (which masks crashes by parking). The recipe — and the orchestrator-owns-
+  the-server pattern for subagent verification — is in
+  `docs/solutions/workflow-issues/dev-server-hang-background-no-watch-kill-orphans-2026-06-25.md`.
 
 ## Cloned Dependency Source
 
