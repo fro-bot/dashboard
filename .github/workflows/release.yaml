@@ -336,7 +336,7 @@ jobs:
   dispatch-deploy:
     name: Dispatch infra deploy
     needs: [release]
-    if: needs.release.result == 'success' && needs.release.outputs.tag != ''
+    if: needs.release.result == 'success' && needs.release.outputs.tag != '' && needs.release.outputs.digest != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # Scopes the INFRA_DISPATCH_* secrets to this job only — no other workflow/job
@@ -345,15 +345,22 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: 🔎 Validate the released version (CalVer)
+      - name: 🔎 Validate the released version + digest
         env:
           VERSION: ${{ needs.release.outputs.tag }}
+          DIGEST: ${{ needs.release.outputs.digest }}
         run: |
           if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]+$'; then
             echo "Refusing to dispatch: '$VERSION' is not a valid CalVer (YYYY.MM.N)."
             exit 1
           fi
-          echo "Dispatching deploy for $VERSION"
+          # Fail fast on a malformed digest rather than dispatching a bad payload that
+          # only infra would catch (defense-in-depth; mirrors the CalVer check).
+          if ! printf '%s' "$DIGEST" | grep -Eq '^sha256:[a-f0-9]{64}$'; then
+            echo "Refusing to dispatch: '$DIGEST' is not a valid sha256 digest."
+            exit 1
+          fi
+          echo "Dispatching deploy for $VERSION ($DIGEST)"
 
       - name: 🤖 Mint the infra-dispatch token
         id: dispatch-token
