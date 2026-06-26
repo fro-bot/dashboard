@@ -115,5 +115,6 @@ If any box is unchecked, the SW is broken regardless of CI color — fix it befo
 ## Related
 
 - `docs/solutions/workflow-issues/unit-green-is-not-feature-done-verify-the-assembled-surface-2026-06-23.md` — the parent "verify the assembled surface" lesson; this is its PWA/SW-specific sibling.
+- `docs/solutions/workflow-issues/dev-server-hang-background-no-watch-kill-orphans-2026-06-25.md` — *how* to stand up the server for the browser verification this doc requires.
 - `docs/solutions/workflow-issues/release-paths-filter-must-cover-runtime-image-contents-2026-06-25.md` — same "green but broken because a contract boundary is wrong" family, at the release-config layer.
 - PR #107 (the PWA); fix commits `807138b` (precache ordering), `075a2ee` (precache shell at `/`), `4eb8b3a` (prompt-mode update lifecycle).
