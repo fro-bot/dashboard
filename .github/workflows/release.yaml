@@ -390,10 +390,9 @@ jobs:
               --repo marcusrbrown/infra \
               --ref main \
               -f version="$VERSION" \
-              -f digest="$DIGEST" \
-              -f contract_version=1; then
+              -f digest="$DIGEST"; then
             echo "Dispatched deploy-dashboard for $VERSION (digest $DIGEST) — awaiting operator approval in infra."
           else
             rc=$?
-            echo "::warning title=Deploy dispatch failed::Could not dispatch infra deploy-dashboard for $VERSION (exit $rc). The image is published; trigger the infra deploy manually. A 422 usually means the infra input contract changed (see contract_version)."
+            echo "::warning title=Deploy dispatch failed::Could not dispatch infra deploy-dashboard for $VERSION (exit $rc). The image is published; trigger the infra deploy manually. A 422 means the infra input contract changed (e.g. a renamed input)."
           fi
