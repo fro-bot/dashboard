@@ -339,6 +339,12 @@ jobs:
     if: needs.release.result == 'success' && needs.release.outputs.tag != '' && needs.release.outputs.digest != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # Best-effort for the WHOLE job: the release is already published, so nothing here
+    # may fail the workflow run. continue-on-error covers every step — validation,
+    # token mint (which WILL fail until the INFRA_DISPATCH_* secrets are provisioned),
+    # and dispatch — so a missing secret or infra-contract gap warns without reddening
+    # the release. Failed steps still surface in the run UI as the actionable signal.
+    continue-on-error: true
     # Scopes the INFRA_DISPATCH_* secrets to this job only — no other workflow/job
     # in the repo can read the dispatch key.
     environment: release
@@ -351,13 +357,13 @@ jobs:
           DIGEST: ${{ needs.release.outputs.digest }}
         run: |
           if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]+$'; then
-            echo "Refusing to dispatch: '$VERSION' is not a valid CalVer (YYYY.MM.N)."
+            echo "::warning title=Deploy dispatch skipped::'$VERSION' is not a valid CalVer (YYYY.MM.N); not dispatching. The release is published."
             exit 1
           fi
           # Fail fast on a malformed digest rather than dispatching a bad payload that
           # only infra would catch (defense-in-depth; mirrors the CalVer check).
           if ! printf '%s' "$DIGEST" | grep -Eq '^sha256:[a-f0-9]{64}$'; then
-            echo "Refusing to dispatch: '$DIGEST' is not a valid sha256 digest."
+            echo "::warning title=Deploy dispatch skipped::'$DIGEST' is not a valid sha256 digest; not dispatching. The release is published."
             exit 1
           fi
           echo "Dispatching deploy for $VERSION ($DIGEST)"
