@@ -1766,7 +1766,22 @@ export function initOperatorStream(opts) {
  * stream for each, and closes all handles on page unload. Runs only in a browser
  * (guarded on `document`), so importing this module in Node for tests is a no-op.
  */
+// Module-level state: tracks whether bootstrapOperatorStreams has been called,
+// the active stream handles, and the registered pagehide listener.
+// resetBootstrapState() closes handles and removes the listener before clearing.
+let _bootstrapCalled = false
+let _bootstrapHandles = []
+let _pagehideListener = null
+
 export function bootstrapOperatorStreams() {
+  // Idempotency guard: only bootstrap once per page load.
+  // The React runtime seam calls this explicitly after the DOM skeleton is
+  // rendered; the auto-start guard below also fires on DOMContentLoaded.
+  // Without this guard, double-calling would register duplicate pagehide
+  // listeners and duplicate stream handles.
+  if (_bootstrapCalled) return
+  _bootstrapCalled = true
+
   const section = document.querySelector('#run-status-section')
   if (section === null) return
 
@@ -1786,16 +1801,63 @@ export function bootstrapOperatorStreams() {
     handles.push(initOperatorStream({runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl}))
   }
 
-  globalThis.addEventListener('pagehide', () => {
+  _bootstrapHandles = handles
+
+  const listener = () => {
     for (const handle of handles) handle.close()
-  })
+  }
+  _pagehideListener = listener
+  globalThis.addEventListener('pagehide', listener)
+}
+
+/**
+ * Reset the bootstrap state.
+ *
+ * Closes all active stream handles and removes the pagehide listener registered
+ * during the last bootstrapOperatorStreams() call. Called by the React runtime
+ * seam cleanup so that a remount (e.g. after auth expiry and re-login) can
+ * re-bootstrap the streams without leaking handles or duplicate listeners.
+ * Also used in tests.
+ */
+export function resetBootstrapState() {
+  // Close all active handles before clearing state
+  for (const handle of _bootstrapHandles) {
+    try {
+      handle.close()
+    } catch {
+      // ignore close errors
+    }
+  }
+  _bootstrapHandles = []
+
+  // Remove the pagehide listener before clearing state
+  if (_pagehideListener !== null) {
+    if (typeof globalThis.removeEventListener === 'function') {
+      globalThis.removeEventListener('pagehide', _pagehideListener)
+    }
+    _pagehideListener = null
+  }
+
+  _bootstrapCalled = false
 }
 
 // Auto-start in the browser. Guarded so a Node/test import never touches the DOM.
+// When imported with ?manual=1 (by the React runtime seam), auto-bootstrap is
+// skipped so the seam has deterministic lifecycle control. Normal /static/operator-
+// stream.js loads (without ?manual=1) retain the legacy auto-start behavior.
 if (typeof document !== 'undefined') {
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', bootstrapOperatorStreams)
-  } else {
-    bootstrapOperatorStreams()
+  const isManual = (() => {
+    try {
+      return new URL(import.meta.url).searchParams.has('manual')
+    } catch {
+      return false
+    }
+  })()
+  if (!isManual) {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', bootstrapOperatorStreams)
+    } else {
+      bootstrapOperatorStreams()
+    }
   }
 }

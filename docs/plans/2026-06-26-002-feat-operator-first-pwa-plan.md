@@ -323,7 +323,7 @@ Runtime loading must preserve module singleton integrity, error isolation, and l
 **Verification:**
 - SW tests prove routing order, local `/operator` redirect handling, denylist for auth/API paths, cache policy, and update-prompt behavior.
 
-- [ ] **Unit 5: Mount existing operator runtime inside the root shell**
+- [x] **Unit 5: Mount existing operator runtime inside the root shell**
 
 **Goal:** Connect the operator React shell to existing browser-direct operator runtimes without duplicating Gateway logic or adding a proxy.
 

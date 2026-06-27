@@ -1,9 +1,6 @@
 /**
  * Tests for the canonical operator state copy mapping.
  *
- * TDD: these tests are written BEFORE the implementation.
- * Run with: npx vitest run --config web/vitest.config.ts web/src/operator/copy.test.ts
- *
  * Security invariants:
  * - Copy must never include raw signal values, status codes, payload snippets,
  *   URLs, tokens, cookies, CSRF values, repo names, run IDs, or stack traces.

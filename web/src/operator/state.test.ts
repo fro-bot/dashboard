@@ -1,16 +1,5 @@
-/**
- * Tests for the canonical operator state classifier.
- *
- * TDD: these tests are written BEFORE the implementation.
- * Run with: npx vitest run --config web/vitest.config.ts web/src/operator/state.test.ts
- */
-
 import {describe, expect, it} from 'vitest'
 import {classifySignal, type OperatorSignal, type OperatorState} from './state.ts'
-
-// ---------------------------------------------------------------------------
-// Happy path — ready / loading
-// ---------------------------------------------------------------------------
 
 describe('classifySignal — ready/loading', () => {
   it('maps a usable 200 response to ready', () => {

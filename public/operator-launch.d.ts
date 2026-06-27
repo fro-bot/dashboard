@@ -98,3 +98,10 @@ export declare function buildPendingCardHooks(runId: string): PendingCardHooks
  * Must only be called from a browser context.
  */
 export declare function initOperatorLaunch(): Promise<void>
+
+/**
+ * Reset the launch-initialized flag.
+ * Called by the React runtime seam cleanup to allow remount after auth expiry.
+ * Internal to the runtime seam contract — not part of the public operator API.
+ */
+export declare function resetLaunchState(): void

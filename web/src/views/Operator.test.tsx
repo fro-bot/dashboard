@@ -80,15 +80,10 @@ describe('Operator', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// Unit 3: State-driven rendering
-// ---------------------------------------------------------------------------
-
 describe('Operator — state prop rendering', () => {
   it('renders loading state with connecting headline', () => {
     render(<Operator state="loading" />)
     expect(screen.getByRole('heading')).toBeInTheDocument()
-    // Live region should contain state detail
     const liveRegion = document.querySelector('[aria-live]')
     expect(liveRegion).not.toBeNull()
   })
@@ -115,13 +110,9 @@ describe('Operator — state prop rendering', () => {
 
   it('renders ready state with operator headline', () => {
     render(<Operator state="ready" />)
-    expect(screen.getByRole('heading')).toBeInTheDocument()
+    expect(screen.getByRole('heading', {level: 1})).toBeInTheDocument()
   })
 })
-
-// ---------------------------------------------------------------------------
-// Unit 3: Disabled action reasons
-// ---------------------------------------------------------------------------
 
 describe('Operator — disabled action reasons', () => {
   const disabledStates: OperatorState[] = ['auth-required', 'rate-limited', 'offline', 'unavailable', 'loading']
@@ -141,10 +132,6 @@ describe('Operator — disabled action reasons', () => {
     expect(reasonEl).toBeNull()
   })
 })
-
-// ---------------------------------------------------------------------------
-// Unit 3: Aria-live announcement
-// ---------------------------------------------------------------------------
 
 describe('Operator — aria-live region', () => {
   it('has aria-live="polite" region', () => {
@@ -172,14 +159,9 @@ describe('Operator — aria-live region', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// Unit 3: Auth expiry — empty/cleared active state
-// ---------------------------------------------------------------------------
-
 describe('Operator — auth expiry clears active state', () => {
   it('auth-required state renders no run output placeholders', () => {
     render(<Operator state="auth-required" />)
-    // No run output, run cards, or stale run data should appear
     expect(document.querySelector('[data-testid="run-output"]')).toBeNull()
     expect(document.querySelector('[data-testid="run-card"]')).toBeNull()
     expect(document.querySelector('[data-testid="run-list"]')).toBeNull()
@@ -187,15 +169,10 @@ describe('Operator — auth expiry clears active state', () => {
 
   it('auth-required state renders no approval action buttons', () => {
     render(<Operator state="auth-required" />)
-    // No approval buttons should be enabled
     const approvalButtons = document.querySelectorAll('[data-testid="approval-button"]')
     expect(approvalButtons).toHaveLength(0)
   })
 })
-
-// ---------------------------------------------------------------------------
-// Unit 3: Security — copy does not include raw signal values
-// ---------------------------------------------------------------------------
 
 describe('Operator — copy security', () => {
   const errorStates: OperatorState[] = ['auth-required', 'rate-limited', 'offline', 'unavailable']

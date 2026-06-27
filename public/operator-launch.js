@@ -179,6 +179,13 @@ export function buildPendingCardHooks(runId) {
 // DOM shell — only runs in a browser (document must exist)
 // ---------------------------------------------------------------------------
 
+// Module-level state: tracks whether initOperatorLaunch has been called and
+// the AbortController used to remove the submit listener on reset.
+// resetLaunchState() aborts the prior listener before clearing state.
+// Declared here (before initOperatorLaunch) to satisfy no-use-before-define.
+let _launchInitialized = false
+let _launchAbortController = null
+
 /**
  * Initialize the operator launch UI.
  *
@@ -196,6 +203,13 @@ export function buildPendingCardHooks(runId) {
  * - All 400s → one generic failure message; 404 → one uniform unavailable message.
  */
 export async function initOperatorLaunch() {
+  // Create an AbortController for this init session. The controller's signal is
+  // passed to the submit event listener so that resetLaunchState() can abort it,
+  // removing the listener without needing a reference to the handler function.
+  // This prevents double-registration under React Strict Mode.
+  const abortController = new AbortController()
+  _launchAbortController = abortController
+
   const {initOperatorStream} = await import('/static/operator-stream.js')
 
   // Browser fetch adapter: credentials:'include', redirect:'error'
@@ -294,8 +308,31 @@ export async function initOperatorLaunch() {
   if (pickerContainer !== null) {
     const reposResult = await client.listRepos()
 
-    if (!reposResult.success || reposResult.data.length === 0) {
-      pickerContainer.textContent = 'No repositories available.'
+    if (!reposResult.success) {
+      // Failure — classify into a neutral operator failure state.
+      // Never render "No repositories available" for auth/rate-limit/network/protocol failures.
+      // The copy is fixed and coarse — no raw error details, status codes, or paths.
+      const error = reposResult.error
+      let failureCopy
+      if (error.kind === 'http') {
+        const status = error.status ?? 0
+        if (status === 401 || status === 403) {
+          failureCopy = 'Sign in required to load repositories.'
+        } else if (status === 429) {
+          failureCopy = 'Repository list temporarily unavailable. Try again shortly.'
+        } else {
+          failureCopy = 'Repository list unavailable.'
+        }
+      } else if (error.kind === 'network') {
+        failureCopy = 'Repository list unavailable \u2014 check your connection.'
+      } else {
+        // protocol or unknown
+        failureCopy = 'Repository list unavailable.'
+      }
+      pickerContainer.textContent = failureCopy
+    } else if (reposResult.data.length === 0) {
+      // Successful fetch but empty list — this is the only case where "no repos" is accurate.
+      pickerContainer.textContent = 'No repositories configured.'
     } else {
       // Render a <select> with the available repos
       const select = document.createElement('select')
@@ -434,17 +471,52 @@ export async function initOperatorLaunch() {
         launchError.textContent = 'Launch failed. Please try again.'
         launchError.hidden = false
       }
-    })
+    }, {signal: abortController.signal})
   }
 }
 
+/**
+ * Reset the launch state.
+ *
+ * Aborts the AbortController that was passed to the submit event listener,
+ * removing it from the form. Called by the React runtime seam cleanup so that
+ * a remount (e.g. after auth expiry and re-login) can re-initialize the launch
+ * UI without double-registering submit handlers. Also used in tests.
+ */
+export function resetLaunchState() {
+  if (_launchAbortController !== null) {
+    _launchAbortController.abort()
+    _launchAbortController = null
+  }
+  _launchInitialized = false
+}
+
+// Wrap initOperatorLaunch to be idempotent.
+const _initOperatorLaunchOnce = async () => {
+  if (_launchInitialized) return
+  _launchInitialized = true
+  await initOperatorLaunch()
+}
+
 // Auto-start in the browser. Guarded so a Node/test import never touches the DOM.
+// When imported with ?manual=1 (by the React runtime seam), auto-start is skipped
+// so the seam has deterministic lifecycle control. Normal /static/operator-launch.js
+// loads (without ?manual=1) retain the legacy auto-start behavior.
 if (typeof document !== 'undefined') {
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => {
-      initOperatorLaunch()
-    })
-  } else {
-    initOperatorLaunch()
+  const isManual = (() => {
+    try {
+      return new URL(import.meta.url).searchParams.has('manual')
+    } catch {
+      return false
+    }
+  })()
+  if (!isManual) {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', () => {
+        _initOperatorLaunchOnce()
+      })
+    } else {
+      _initOperatorLaunchOnce()
+    }
   }
 }
