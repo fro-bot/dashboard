@@ -99,3 +99,58 @@ describe('App', () => {
     expect(screen.getByTestId('app-shell')).toBeInTheDocument()
   })
 })
+
+// ---------------------------------------------------------------------------
+// TDD: App/Operator wiring — runtime state propagation (RED phase)
+// ---------------------------------------------------------------------------
+
+describe('App — runtime state wiring', () => {
+  beforeEach(() => {
+    stubMatchMedia()
+    window.localStorage.clear()
+    document.documentElement.removeAttribute('data-theme')
+  })
+
+  it('runtime reporting unavailable transitions shell to unavailable state', async () => {
+    const {vi} = await import('vitest')
+    const {act} = await import('react')
+    const runtimeModule = await import('./operator/runtime.ts')
+
+    let capturedOnStateChange: ((state: import('./operator/state.ts').OperatorState) => void) | undefined
+
+    const createSpy = vi.spyOn(runtimeModule, 'createOperatorRuntime')
+    createSpy.mockImplementation((opts) => {
+      capturedOnStateChange = opts.onStateChange
+      return {isMounted: true, cleanup: vi.fn()}
+    })
+
+    render(<App />)
+
+    // Simulate runtime reporting unavailable
+    await act(async () => {
+      capturedOnStateChange?.('unavailable')
+    })
+
+    // Shell should now show unavailable state (service unavailable headline)
+    expect(screen.getByText(/service unavailable/i)).toBeInTheDocument()
+
+    createSpy.mockRestore()
+  })
+
+  it('App passes onRuntimeStateChange to Operator', async () => {
+    const {vi} = await import('vitest')
+    const runtimeModule = await import('./operator/runtime.ts')
+
+    const createSpy = vi.spyOn(runtimeModule, 'createOperatorRuntime')
+    createSpy.mockImplementation(() => ({isMounted: true, cleanup: vi.fn()}))
+
+    render(<App />)
+
+    // createOperatorRuntime should have been called (Operator is in ready state and wired)
+    expect(createSpy).toHaveBeenCalled()
+    const callOpts = createSpy.mock.calls[0]?.[0]
+    expect(typeof callOpts?.onStateChange).toBe('function')
+
+    createSpy.mockRestore()
+  })
+})

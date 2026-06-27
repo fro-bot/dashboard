@@ -200,9 +200,5 @@ export function createOperatorRuntime(opts: OperatorRuntimeOptions): OperatorRun
     }
   })
 
-  cleanupFns.push(() => {
-    onStateChange('loading')
-  })
-
   return handle
 }

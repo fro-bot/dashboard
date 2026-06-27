@@ -174,6 +174,35 @@ describe('Operator — auth expiry clears active state', () => {
   })
 })
 
+describe('Operator — agent-native state hooks', () => {
+  it('operator-shell has data-state matching the state prop', () => {
+    render(<Operator state="loading" />)
+    const shell = document.querySelector('[data-testid="operator-shell"]')
+    expect(shell).not.toBeNull()
+    expect(shell?.getAttribute('data-state')).toBe('loading')
+  })
+
+  it('operator-shell data-state updates when state prop changes', () => {
+    const {rerender} = render(<Operator state="loading" />)
+    const shell = document.querySelector('[data-testid="operator-shell"]')
+    expect(shell?.getAttribute('data-state')).toBe('loading')
+    rerender(<Operator state="ready" />)
+    expect(shell?.getAttribute('data-state')).toBe('ready')
+  })
+
+  it('operator-shell data-state is "auth-required" for auth-required state', () => {
+    render(<Operator state="auth-required" />)
+    const shell = document.querySelector('[data-testid="operator-shell"]')
+    expect(shell?.getAttribute('data-state')).toBe('auth-required')
+  })
+
+  it('operator-shell data-state defaults to "loading" when no state prop given', () => {
+    render(<Operator />)
+    const shell = document.querySelector('[data-testid="operator-shell"]')
+    expect(shell?.getAttribute('data-state')).toBe('loading')
+  })
+})
+
 describe('Operator — copy security', () => {
   const errorStates: OperatorState[] = ['auth-required', 'rate-limited', 'offline', 'unavailable']
 
@@ -191,4 +220,65 @@ describe('Operator — copy security', () => {
       expect(text).not.toMatch(/\/operator\//)
     })
   }
+})
+
+// ---------------------------------------------------------------------------
+// TDD: New lifecycle tests (RED phase)
+// ---------------------------------------------------------------------------
+
+describe('Operator — callback identity stability (ref guard)', () => {
+  it('re-render with new inline callback while ready does not cleanup/recreate runtime', async () => {
+    const {vi} = await import('vitest')
+    const {act} = await import('react')
+    const runtimeModule = await import('../operator/runtime.ts')
+
+    const createSpy = vi.spyOn(runtimeModule, 'createOperatorRuntime')
+    const cleanupMock = vi.fn()
+    createSpy.mockImplementation(() => ({
+      isMounted: true,
+      cleanup: cleanupMock,
+    }))
+
+    const {rerender} = render(<Operator state="ready" onRuntimeStateChange={() => {}} />)
+
+    // First render: runtime should be created once
+    expect(createSpy).toHaveBeenCalledTimes(1)
+    expect(cleanupMock).not.toHaveBeenCalled()
+
+    // Re-render with a new inline callback (different identity each render)
+    await act(async () => {
+      rerender(<Operator state="ready" onRuntimeStateChange={() => {}} />)
+    })
+
+    // Runtime must NOT have been cleaned up or recreated due to callback identity change
+    expect(cleanupMock).not.toHaveBeenCalled()
+    expect(createSpy).toHaveBeenCalledTimes(1)
+
+    createSpy.mockRestore()
+  })
+})
+
+describe('Operator — runtime state wiring', () => {
+  it('runtime reporting unavailable triggers onRuntimeStateChange', async () => {
+    const {vi} = await import('vitest')
+    const runtimeModule = await import('../operator/runtime.ts')
+
+    let capturedOnStateChange: ((state: import('../operator/state.ts').OperatorState) => void) | undefined
+
+    const createSpy = vi.spyOn(runtimeModule, 'createOperatorRuntime')
+    createSpy.mockImplementation((opts) => {
+      capturedOnStateChange = opts.onStateChange
+      return {isMounted: true, cleanup: vi.fn()}
+    })
+
+    const onRuntimeStateChange = vi.fn()
+    render(<Operator state="ready" onRuntimeStateChange={onRuntimeStateChange} />)
+
+    // Simulate runtime reporting unavailable
+    capturedOnStateChange?.('unavailable')
+
+    expect(onRuntimeStateChange).toHaveBeenCalledWith('unavailable')
+
+    createSpy.mockRestore()
+  })
 })

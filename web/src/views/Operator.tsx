@@ -47,6 +47,9 @@ export function Operator({state = 'loading', onRuntimeStateChange}: OperatorProp
 
   const contentRef = useRef<HTMLDivElement>(null)
   const runtimeHandleRef = useRef<OperatorRuntimeHandle | null>(null)
+  // Stable ref for the callback so effect does not re-run on callback identity changes
+  const onRuntimeStateChangeRef = useRef(onRuntimeStateChange)
+  onRuntimeStateChangeRef.current = onRuntimeStateChange
 
   useEffect(() => {
     if (state !== 'ready') {
@@ -67,7 +70,7 @@ export function Operator({state = 'loading', onRuntimeStateChange}: OperatorProp
     const handle = createOperatorRuntime({
       container,
       onStateChange: (newState) => {
-        onRuntimeStateChange?.(newState)
+        onRuntimeStateChangeRef.current?.(newState)
       },
     })
 
@@ -77,10 +80,10 @@ export function Operator({state = 'loading', onRuntimeStateChange}: OperatorProp
       handle.cleanup()
       runtimeHandleRef.current = null
     }
-  }, [state, onRuntimeStateChange])
+  }, [state])
 
   return (
-    <div data-testid="operator-shell">
+      <div data-testid="operator-shell" data-state={state}>
       <div style={{ marginBottom: 'var(--space-6)' }}>
         <h1
           style={{

@@ -90,8 +90,13 @@ export function resetRateLimitForTesting(): void {
 // the GATEWAY operator login (which mints the __Host-session the gateway requires),
 // never the dashboard's Arctic flow (which mints a `session` cookie the gateway
 // rejects, causing a re-auth loop on gateway restart — see issue #70).
-// return_to=/ is a fixed same-origin literal — no request-derived component, no open redirect.
-const GATEWAY_LOGIN_REDIRECT = '/operator/auth/github/start?return_to=/'
+//
+// INVARIANT: return_to MUST be /operator — Gateway validates return_to against an
+// exact allowlist and rejects any other value. Do NOT derive from the request.
+// After gateway returns to /operator, the dashboard redirects to / server-side
+// (see app.get('/operator', c => c.redirect('/', 302)) below), so the user lands
+// on / as intended. return_to=/ is NOT on the Gateway allowlist.
+const GATEWAY_LOGIN_REDIRECT = '/operator/auth/github/start?return_to=/operator'
 
 function sweepRateLimitMap(now: number): void {
   for (const [key, entry] of rateLimitMap) {

@@ -17,14 +17,26 @@
 import {OPERATOR_RUNTIME_CACHE} from './cache-names.ts'
 
 /**
+ * Legacy cache name from the monitoring-era SW. Clients that installed the old
+ * SW may still have this cache on disk. Purge it alongside the current runtime
+ * cache so stale monitoring data does not linger after migration.
+ */
+const LEGACY_MONITORING_CACHE = 'monitoring-v1'
+
+/**
  * Purge operator runtime caches on logout, auth change, or app-version change.
- * Clears OPERATOR_RUNTIME_CACHE without touching the precache (shell continuity).
+ * Clears OPERATOR_RUNTIME_CACHE and the legacy MONITORING_CACHE without touching
+ * the precache (shell continuity).
  * Safe to call without awaiting — errors are swallowed (best-effort).
  */
 export function purgeOperatorCache(): void {
   // Direct Cache Storage delete — robust even if SW is mid-update.
   if (typeof caches !== 'undefined') {
     caches.delete(OPERATOR_RUNTIME_CACHE).catch(() => {
+      // Best-effort — ignore errors (quota, permissions, etc.)
+    })
+    // Legacy purge: remove orphaned monitoring-v1 cache from pre-migration clients.
+    caches.delete(LEGACY_MONITORING_CACHE).catch(() => {
       // Best-effort — ignore errors (quota, permissions, etc.)
     })
   }

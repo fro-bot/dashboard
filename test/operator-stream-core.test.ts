@@ -4962,3 +4962,93 @@ describe('resetBootstrapState — handle cleanup and pagehide listener removal',
     expect(pagehideCount).toBe(2)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Agent-native: stream notice exposes data-connection-state attribute
+// ---------------------------------------------------------------------------
+
+describe('initOperatorStream — noticeEl gets data-connection-state attribute', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('noticeEl has data-connection-state="live" when stream goes live', async () => {
+    // Use the existing makeFakeEl helper (defined above in this file) which
+    // stores setAttribute calls in el.attributes — the same shape the DOM shell uses.
+    const noticeEl = makeFakeEl('div')
+    const statusEl = makeFakeEl('span')
+
+    // Stub fetch to return a readable stream that sends a ready frame
+    const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
+    const encoder = new TextEncoder()
+    // Capture the controller via a promise to avoid non-null assertion
+    let resolveController: (c: ReadableStreamDefaultController<Uint8Array>) => void
+    const controllerReady = new Promise<ReadableStreamDefaultController<Uint8Array>>(resolve => {
+      resolveController = resolve
+    })
+    const body = new ReadableStream<Uint8Array>({
+      start(c) { resolveController(c) },
+    })
+
+    vi.stubGlobal('fetch', async () => ({
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body,
+    }))
+
+    const handle = initOperatorStream({runId: 'run-state-test', statusEl, noticeEl})
+
+    // Push the ready frame once the controller is available
+    const controller = await controllerReady
+    controller.enqueue(encoder.encode(readyFrame))
+
+    // Allow microtasks to process
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    // dataset.connectionState mirrors the data-connection-state attribute (camelCase)
+    expect(noticeEl.dataset.connectionState).toBe('live')
+
+    handle.close()
+  })
+
+  it('noticeEl has data-connection-state="reconnecting" when stream gets a 500 (network-error path)', async () => {
+    const noticeEl = makeFakeEl('div')
+    const statusEl = makeFakeEl('span')
+
+    // Stub fetch to return a non-200 status — triggers network-error → reconnecting
+    vi.stubGlobal('fetch', async () => ({
+      status: 500,
+      headers: {get: () => 'text/html'},
+      body: null,
+    }))
+
+    const handle = initOperatorStream({runId: 'run-fail-test', statusEl, noticeEl})
+
+    // Allow microtasks to process
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    // A 500 triggers network-error → reconnecting (not immediately failed)
+    expect(noticeEl.dataset.connectionState).toBe('reconnecting')
+
+    handle.close()
+  })
+
+  it('noticeEl has data-connection-state="not-found" on 404', async () => {
+    const noticeEl = makeFakeEl('div')
+    const statusEl = makeFakeEl('span')
+
+    vi.stubGlobal('fetch', async () => ({
+      status: 404,
+      headers: {get: () => 'text/html'},
+      body: null,
+    }))
+
+    const handle = initOperatorStream({runId: 'run-404-test', statusEl, noticeEl})
+
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    expect(noticeEl.dataset.connectionState).toBe('not-found')
+
+    handle.close()
+  })
+})

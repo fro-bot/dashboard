@@ -363,3 +363,93 @@ describe('createOperatorRuntime — repo-list failure classification', () => {
     expect(state).toBe('unavailable')
   })
 })
+
+// ---------------------------------------------------------------------------
+// TDD: New lifecycle/race-condition tests (RED phase)
+// ---------------------------------------------------------------------------
+
+describe('createOperatorRuntime — cleanup does not emit loading state', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('cleanup does not call onStateChange with "loading"', () => {
+    const onStateChange = vi.fn()
+    const opts = makeOptions({onStateChange})
+    const handle = createOperatorRuntime(opts)
+    handle.cleanup()
+    const loadingCalls = onStateChange.mock.calls.filter(([s]) => s === 'loading')
+    expect(loadingCalls).toHaveLength(0)
+  })
+
+  it('cleanup does not call onStateChange at all (no spurious state transitions)', () => {
+    const onStateChange = vi.fn()
+    const opts = makeOptions({onStateChange})
+    const handle = createOperatorRuntime(opts)
+    handle.cleanup()
+    // Cleanup itself must not emit any state change — only the loader failure path does
+    expect(onStateChange).not.toHaveBeenCalled()
+  })
+})
+
+describe('createOperatorRuntime — stale loader race: second instance owns module-level resets', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('stale (first) loader cleanup does not call the active (second) runtime cleanup fn', async () => {
+    const firstCleanup = vi.fn()
+    const secondCleanup = vi.fn()
+
+    let resolveFirst!: (fn: () => void) => void
+    const firstLoader = new Promise<() => void>(resolve => { resolveFirst = resolve })
+
+    // Second loader resolves immediately
+    const secondLoaderFn = vi.fn(async () => secondCleanup)
+
+    const opts1 = makeOptions({_runtimeLoader: async () => firstLoader})
+    const handle1 = createOperatorRuntime(opts1)
+
+    // Start second runtime before first loader resolves
+    const opts2 = makeOptions({_runtimeLoader: secondLoaderFn})
+    const handle2 = createOperatorRuntime(opts2)
+
+    // Wait for second loader to resolve
+    await vi.waitFor(() => expect(secondLoaderFn).toHaveBeenCalled())
+
+    // Now resolve the first (stale) loader
+    resolveFirst(firstCleanup)
+
+    // Give microtasks time to settle
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    // Stale first loader's cleanup fn should be called immediately (handle1 was already cleaned up or stale)
+    // But second runtime's cleanup fn must NOT have been called
+    expect(secondCleanup).not.toHaveBeenCalled()
+
+    // Cleanup second handle properly
+    handle2.cleanup()
+    expect(secondCleanup).toHaveBeenCalledTimes(1)
+
+    handle1.cleanup()
+  })
+
+  it('stale loader resolving after handle cleanup calls its own cleanup fn immediately', async () => {
+    const staleCleanup = vi.fn()
+    let resolveStale!: (fn: () => void) => void
+    const staleLoader = new Promise<() => void>(resolve => { resolveStale = resolve })
+
+    const opts = makeOptions({_runtimeLoader: async () => staleLoader})
+    const handle = createOperatorRuntime(opts)
+
+    // Cleanup before loader resolves
+    handle.cleanup()
+
+    // Now resolve the stale loader
+    resolveStale(staleCleanup)
+
+    await vi.waitFor(() => {
+      expect(staleCleanup).toHaveBeenCalledTimes(1)
+    })
+  })
+})

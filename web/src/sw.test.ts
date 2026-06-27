@@ -73,11 +73,6 @@ describe('sw.js build output', () => {
     expect(content).not.toContain('/api/monitoring')
   })
 
-  it('REGRESSION: MONITORING_CACHE (monitoring-v1) is ABSENT from the built SW', () => {
-    const content = readSW()
-    expect(content).not.toContain('monitoring-v1')
-  })
-
   it('REGRESSION: X-From-Cache stale-snapshot header is ABSENT from the built SW', () => {
     const content = readSW()
     expect(content).not.toContain('X-From-Cache')
@@ -123,9 +118,14 @@ describe('sw.js build output', () => {
     expect(content).toContain('PURGE_RUNTIME')
   })
 
-  it('GUARD: purge handler does NOT reference monitoring-v1 (monitoring cache removed)', () => {
+  it('GUARD: purge handler targets operator-runtime-v1 (positive assertion)', () => {
     const content = readSW()
-    expect(content).not.toContain('monitoring-v1')
+    expect(content).toContain('operator-runtime-v1')
+  })
+
+  it('GUARD: purge handler also deletes legacy monitoring-v1 cache (migration cleanup)', () => {
+    const content = readSW()
+    expect(content).toContain('monitoring-v1')
   })
 
   it('GUARD: purge handler does NOT delete the precache (workbox-precache-v2)', () => {

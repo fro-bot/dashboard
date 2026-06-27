@@ -203,6 +203,22 @@ export function streamModuleSpecifier() {
 // Declared here (before initOperatorLaunch) to satisfy no-use-before-define.
 let _launchInitialized = false
 let _launchAbortController = null
+// Tracks the stream handle returned by initOperatorStream for launch-created runs.
+// resetLaunchState() closes this handle to prevent leaked connections/timers.
+let _launchStreamHandle = null
+
+/**
+ * Set the launch-created stream handle.
+ *
+ * Called internally by initOperatorLaunch after a successful launch to track
+ * the stream handle so resetLaunchState() can close it. Exported for testing
+ * so tests can inject a fake handle without calling the DOM-touching initOperatorLaunch.
+ *
+ * @param {{close(): void}} handle - The stream handle returned by initOperatorStream.
+ */
+export function setLaunchStreamHandle(handle) {
+  _launchStreamHandle = handle
+}
 
 /**
  * Initialize the operator launch UI.
@@ -457,6 +473,7 @@ export async function initOperatorLaunch() {
           card.className = 'run-card'
           card.tabIndex = 0
           card.setAttribute('aria-label', 'New run, status: Pending')
+          card.dataset.testid = 'run-card'
           card.dataset.runId = runId
 
           const statusSpan = document.createElement('span')
@@ -467,9 +484,11 @@ export async function initOperatorLaunch() {
           card.append(statusSpan)
           runStatusSection.append(card)
 
-          // Wire the SSE stream directly — do NOT re-run bootstrapOperatorStreams
+          // Wire the SSE stream directly — do NOT re-run bootstrapOperatorStreams.
+          // Store the returned handle so resetLaunchState() can close it on cleanup.
           const statusEl = card.querySelector('[data-role="run-status"]')
-          initOperatorStream({runId, statusEl, noticeEl: sharedNoticeEl})
+          const streamHandle = initOperatorStream({runId, statusEl, noticeEl: sharedNoticeEl})
+          setLaunchStreamHandle(streamHandle)
         }
 
         // Reset the form
@@ -505,6 +524,15 @@ export function resetLaunchState() {
   if (_launchAbortController !== null) {
     _launchAbortController.abort()
     _launchAbortController = null
+  }
+  // Close the launch-created stream handle to prevent leaked connections/timers.
+  if (_launchStreamHandle !== null) {
+    try {
+      _launchStreamHandle.close()
+    } catch {
+      // ignore close errors
+    }
+    _launchStreamHandle = null
   }
   _launchInitialized = false
 }

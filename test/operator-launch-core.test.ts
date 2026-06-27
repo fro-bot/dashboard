@@ -477,6 +477,61 @@ describe('module-level safety', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Agent-native: launch-created stream handle is closed on resetLaunchState
+// ---------------------------------------------------------------------------
+
+describe('resetLaunchState — closes launch-created stream handle', () => {
+  it('resetLaunchState calls close() on the stream handle stored by initOperatorLaunch', async () => {
+    // We cannot call initOperatorLaunch in Node (it touches DOM), but we can
+    // verify the exported seam: _launchStreamHandle is set by initOperatorLaunch
+    // and cleared+closed by resetLaunchState. We test this via the exported
+    // setLaunchStreamHandle / resetLaunchState pair.
+    const mod = await import('../public/operator-launch.js')
+    const setHandle = (mod as {setLaunchStreamHandle?: (h: {close: () => void}) => void}).setLaunchStreamHandle
+    const reset = (mod as {resetLaunchState?: () => void}).resetLaunchState
+    if (typeof setHandle !== 'function') throw new Error('setLaunchStreamHandle not exported')
+    if (typeof reset !== 'function') throw new Error('resetLaunchState not exported')
+
+    let closeCalled = false
+    const fakeHandle = {
+      close: () => {
+        closeCalled = true
+      },
+    }
+    setHandle(fakeHandle)
+    reset()
+    expect(closeCalled).toBe(true)
+  })
+
+  it('resetLaunchState does not throw when no stream handle is set', async () => {
+    const mod = await import('../public/operator-launch.js')
+    const reset = (mod as {resetLaunchState?: () => void}).resetLaunchState
+    if (typeof reset !== 'function') throw new Error('resetLaunchState not exported')
+    // Call reset with no handle set — must not throw
+    expect(() => reset()).not.toThrow()
+  })
+
+  it('resetLaunchState clears the handle so a second reset does not double-close', async () => {
+    const mod = await import('../public/operator-launch.js')
+    const setHandle = (mod as {setLaunchStreamHandle?: (h: {close: () => void}) => void}).setLaunchStreamHandle
+    const reset = (mod as {resetLaunchState?: () => void}).resetLaunchState
+    if (typeof setHandle !== 'function') throw new Error('setLaunchStreamHandle not exported')
+    if (typeof reset !== 'function') throw new Error('resetLaunchState not exported')
+
+    let closeCount = 0
+    const fakeHandle = {
+      close: () => {
+        closeCount++
+      },
+    }
+    setHandle(fakeHandle)
+    reset()
+    reset() // second reset — handle should already be cleared
+    expect(closeCount).toBe(1) // close called exactly once
+  })
+})
+
+// ---------------------------------------------------------------------------
 // resetLaunchState — AbortController lifecycle (double init/reset/init)
 // ---------------------------------------------------------------------------
 

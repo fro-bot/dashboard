@@ -85,6 +85,10 @@ registerRoute(
 // change, or app-version change. Only runtime caches are deleted — NOT the
 // precache (app shell must survive logout for instant next-user load).
 //
+// Legacy purge: monitoring-v1 is the orphaned cache from the pre-migration SW.
+// Clients that installed the old SW may still have it on disk; delete it here
+// so stale monitoring data does not linger after migration.
+//
 // Type note: ExtendableMessageEvent is in the WebWorker lib (not DOM). Minimal
 // inline interface avoids adding the WebWorker lib to tsconfig (conflicting globals).
 interface SWMessageEvent extends Event {
@@ -92,9 +96,15 @@ interface SWMessageEvent extends Event {
   waitUntil(f: Promise<unknown>): void
 }
 
+const LEGACY_MONITORING_CACHE = 'monitoring-v1'
+
 addEventListener('message', (event: Event) => {
   const e = event as SWMessageEvent
   if ((e.data as {type?: string} | null)?.type === 'PURGE_RUNTIME') {
-    e.waitUntil(caches.delete(OPERATOR_RUNTIME_CACHE))
+    e.waitUntil(
+      Promise.all([caches.delete(OPERATOR_RUNTIME_CACHE), caches.delete(LEGACY_MONITORING_CACHE)]).then(
+        () => undefined,
+      ),
+    )
   }
 })

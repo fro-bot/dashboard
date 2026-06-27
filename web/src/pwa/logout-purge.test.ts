@@ -38,9 +38,9 @@ describe('purgeOperatorCache', () => {
     expect(mockCachesDelete).toHaveBeenCalledWith(OPERATOR_RUNTIME_CACHE)
   })
 
-  it('does NOT call caches.delete with the old monitoring-v1 cache name', () => {
+  it('LEGACY PURGE: also calls caches.delete with the old monitoring-v1 cache name', () => {
     purgeOperatorCache()
-    expect(mockCachesDelete).not.toHaveBeenCalledWith('monitoring-v1')
+    expect(mockCachesDelete).toHaveBeenCalledWith('monitoring-v1')
   })
 
   it('posts PURGE_RUNTIME to the SW controller', () => {
@@ -48,9 +48,9 @@ describe('purgeOperatorCache', () => {
     expect(mockPostMessage).toHaveBeenCalledWith({type: 'PURGE_RUNTIME'})
   })
 
-  it('calls both purge paths in a single invocation', () => {
+  it('calls caches.delete twice (operator-runtime-v1 + legacy monitoring-v1) in a single invocation', () => {
     purgeOperatorCache()
-    expect(mockCachesDelete).toHaveBeenCalledTimes(1)
+    expect(mockCachesDelete).toHaveBeenCalledTimes(2)
     expect(mockPostMessage).toHaveBeenCalledTimes(1)
   })
 

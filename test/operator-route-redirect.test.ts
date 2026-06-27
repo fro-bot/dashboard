@@ -72,22 +72,22 @@ function makeFakeOperatorClient(
     launchRun: () => {
       throw new Error('launchRun must not be called during redirect')
     },
-    getRepos: () => {
-      throw new Error('getRepos must not be called during redirect')
+    listRepos: () => {
+      throw new Error('listRepos must not be called during redirect')
     },
-    getRunIndex: () => {
-      throw new Error('getRunIndex must not be called during redirect')
+    getRunSnapshot: () => {
+      throw new Error('getRunSnapshot must not be called during redirect')
     },
-    approveRun: () => {
-      throw new Error('approveRun must not be called during redirect')
+    connectRunStream: () => {
+      throw new Error('connectRunStream must not be called during redirect')
     },
-    denyRun: () => {
-      throw new Error('denyRun must not be called during redirect')
+    listRunApprovals: () => {
+      throw new Error('listRunApprovals must not be called during redirect')
     },
-    createEventStream: () => {
-      throw new Error('createEventStream must not be called during redirect')
+    decideRunApproval: () => {
+      throw new Error('decideRunApproval must not be called during redirect')
     },
-  } as unknown as OperatorClient
+  }
 }
 
 async function buildGatewayApp(client: OperatorClient) {
@@ -188,29 +188,51 @@ describe('/operator redirect — response body safety', () => {
 // Auth recovery: Gateway login redirects return to /, not /operator
 // ---------------------------------------------------------------------------
 
-describe('Gateway login recovery — return_to is /', () => {
-  it('unauthenticated request in gateway mode redirects to /operator/auth/github/start?return_to=/', async () => {
+// INVARIANT: return_to is fixed to /operator because Gateway validates against an
+// exact allowlist. Do not derive from request. After gateway returns to /operator,
+// the dashboard redirects to / server-side (see app.get('/operator', ...)).
+describe('Gateway login recovery — return_to is /operator', () => {
+  it('unauthenticated request in gateway mode redirects to /operator/auth/github/start?return_to=/operator', async () => {
     const client = makeFakeOperatorClient(async () => {
       throw new Error('getCurrentSession must not be called without a cookie')
     })
     const app = await buildGatewayApp(client)
     const res = await app.request('/')
     expect(res.status).toBe(302)
-    const location = res.headers.get('location') ?? ''
-    expect(location).toContain('/operator/auth/github/start')
-    expect(location).toContain('return_to=/')
-    expect(location).not.toContain('return_to=/operator')
+    // Exact match — Gateway allowlist requires return_to=/operator precisely.
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 
-  it('gateway mode /auth/login redirects to /operator/auth/github/start?return_to=/', async () => {
+  it('gateway mode /auth/login redirects to /operator/auth/github/start?return_to=/operator', async () => {
     const client = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
     const app = await buildGatewayApp(client)
     const res = await app.request('/auth/login')
     expect(res.status).toBe(302)
+    // Exact match — Gateway allowlist requires return_to=/operator precisely.
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Unauthenticated /operator — exact Location header
+// ---------------------------------------------------------------------------
+
+describe('/operator unauthenticated — exact Location header', () => {
+  it('unauthenticated GET /operator in Arctic mode redirects to /auth/login (not /operator)', async () => {
+    const app = await buildArcticApp(true)
+    const res = await app.request('/operator')
+    // /operator is auth-gated; unauthenticated requests redirect to login
+    expect(res.status).toBe(302)
     const location = res.headers.get('location') ?? ''
-    expect(location).toContain('/operator/auth/github/start')
-    expect(location).toContain('return_to=/')
-    expect(location).not.toContain('return_to=/operator')
+    expect(location).toBe('/auth/login')
+  })
+
+  it('unauthenticated GET /operator in Arctic mode (flag off) redirects to /auth/login', async () => {
+    const app = await buildArcticApp(false)
+    const res = await app.request('/operator')
+    expect(res.status).toBe(302)
+    const location = res.headers.get('location') ?? ''
+    expect(location).toBe('/auth/login')
   })
 })
 
@@ -233,7 +255,6 @@ describe('auth path — unauthenticated / enters login flow', () => {
     const app = await buildGatewayApp(client)
     const res = await app.request('/')
     expect(res.status).toBe(302)
-    const location = res.headers.get('location') ?? ''
-    expect(location).toContain('/operator/auth/github/start')
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 })

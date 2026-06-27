@@ -104,6 +104,20 @@ describe('security headers — CSP', () => {
     expect(csp).toContain("frame-ancestors 'none'")
   })
 
+  it("CSP contains connect-src 'self' (restricts XHR/fetch/WebSocket origins)", async () => {
+    const app = await buildTestApp(true)
+    const res = await app.request('/api/healthz')
+    const csp = res.headers.get('content-security-policy') ?? ''
+    expect(csp).toContain("connect-src 'self'")
+  })
+
+  it("CSP contains form-action 'self' (prevents form submission to external origins)", async () => {
+    const app = await buildTestApp(true)
+    const res = await app.request('/api/healthz')
+    const csp = res.headers.get('content-security-policy') ?? ''
+    expect(csp).toContain("form-action 'self'")
+  })
+
   it('CSP is present on error responses too (applies to all routes)', async () => {
     const app = await buildTestApp(false)
     // An unauthenticated request to a protected route gets denied

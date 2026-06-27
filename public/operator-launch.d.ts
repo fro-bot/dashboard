@@ -100,6 +100,15 @@ export declare function buildPendingCardHooks(runId: string): PendingCardHooks
 export declare function initOperatorLaunch(): Promise<void>
 
 /**
+ * Set the launch-created stream handle.
+ *
+ * Called internally by initOperatorLaunch after a successful launch to track
+ * the stream handle so resetLaunchState() can close it. Exported for testing
+ * so tests can inject a fake handle without calling the DOM-touching initOperatorLaunch.
+ */
+export declare function setLaunchStreamHandle(handle: {close: () => void}): void
+
+/**
  * Reset the launch-initialized flag.
  * Called by the React runtime seam cleanup to allow remount after auth expiry.
  * Internal to the runtime seam contract — not part of the public operator API.

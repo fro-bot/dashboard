@@ -1348,6 +1348,10 @@ export function initOperatorStream(opts) {
   function updateDOM() {
     if (noticeEl) {
       const conn = state.connection
+      // Expose the connection state as a machine-readable attribute so agents
+      // can query state without text parsing. The value mirrors the connection
+      // token from the state machine (e.g. 'live', 'failed', 'not-found').
+      noticeEl.dataset.connectionState = conn
       if (conn === 'live') {
         noticeEl.textContent = ''
         noticeEl.hidden = true
