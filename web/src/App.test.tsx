@@ -44,8 +44,9 @@ describe('App', () => {
 
   it('renders Operator view inside AppShell', () => {
     render(<App />)
-    // Operator shell renders a heading — not a monitoring loading state
-    expect(screen.getByRole('heading')).toBeInTheDocument()
+    // Operator shell renders an h1 heading — not a monitoring loading state.
+    // Use level:1 because ready state also renders h2 section headings.
+    expect(screen.getByRole('heading', {level: 1})).toBeInTheDocument()
   })
 
   // ── Regression: no monitoring artifacts ────────────────────────────────────
@@ -63,6 +64,29 @@ describe('App', () => {
   it('does not render monitoring dashboard title', () => {
     render(<App />)
     expect(screen.queryByText(/repository status/i)).not.toBeInTheDocument()
+  })
+
+  // ── Regression: operator runtime shell mounts by default ──────────────────
+
+  it('renders operator runtime shell by default (not indefinite connecting state)', () => {
+    render(<App />)
+    // The assembled app must enter ready state so the runtime DOM skeleton is present.
+    // A browser-direct operator has no Gateway session-check wiring, so it should
+    // start ready and let the runtime classify failures itself.
+    expect(document.querySelector('#launch-form')).not.toBeNull()
+    expect(document.querySelector('#repo-picker-container')).not.toBeNull()
+    expect(document.querySelector('#run-status-section')).not.toBeNull()
+  })
+
+  it('does not render indefinite connecting state as primary UI', () => {
+    render(<App />)
+    // "Connecting…" / "Establishing operator session." must not be the only visible state.
+    // If the runtime shell is present, the connecting copy is superseded.
+    const launchForm = document.querySelector('#launch-form')
+    expect(launchForm).not.toBeNull()
+    // Connecting text may still exist in the DOM (aria-live region) but the
+    // runtime shell must also be present — not stuck behind a loading gate.
+    expect(document.querySelector('[data-testid="operator-content"]')).not.toBeNull()
   })
 
   // ── Regression: SW prompts remain reachable ────────────────────────────────

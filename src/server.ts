@@ -415,6 +415,10 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     path.startsWith('/icon-') ||
     path === '/sw.js' ||
     path === '/registerSW.js' ||
+    // Operator runtime JS modules — always public because root / owns the operator
+    // shell and always depends on these assets, regardless of operatorUiEnabled.
+    path === '/static/operator-stream.js' ||
+    path === '/static/operator-launch.js' ||
     (operatorUiEnabled && path.startsWith('/static/'))
 
   app.use('*', async (c: Context, next) => {
@@ -568,6 +572,19 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // Mounted before the operatorUiEnabled-gated handler so the flag has no effect.
   app.get('/operator', c => c.redirect('/', 302))
 
+  // ── Operator runtime JS assets — always served (flag-independent) ────────────
+  // Root / owns the operator shell and always depends on these two modules.
+  // Mounted unconditionally so they are available regardless of operatorUiEnabled.
+  // isPublicPath already allows these paths so auth middleware passes them through.
+  app.use(
+    '/static/operator-stream.js',
+    serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}),
+  )
+  app.use(
+    '/static/operator-launch.js',
+    serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}),
+  )
+
   // ── Operator UI skeleton route ────────────────────────────────────────────────
   // Only mounted when operatorUiEnabled is true (default: false).
   if (operatorUiEnabled) {
@@ -576,6 +593,8 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
 
     // Serves public/ at /static/* — flag-gated alongside the operator route.
     // /static/ is in isPublicPath so unauthenticated browsers can load assets.
+    // Note: operator-stream.js and operator-launch.js are already mounted above;
+    // this catch-all additionally serves operator.css and any other static assets.
     app.use('/static/*', serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}))
   }
 

@@ -176,6 +176,24 @@ export function buildPendingCardHooks(runId) {
 }
 
 // ---------------------------------------------------------------------------
+// Pure: stream module specifier
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the module specifier for operator-stream that includes ?manual=1.
+ *
+ * Using ?manual=1 ensures operator-stream's top-level auto-bootstrap guard
+ * treats the import as a manual (React runtime) load and skips auto-bootstrap,
+ * preventing double lifecycle ownership when launch imports stream.
+ *
+ * Exported so tests can assert the correct specifier without intercepting
+ * dynamic imports.
+ */
+export function streamModuleSpecifier() {
+  return '/static/operator-stream.js?manual=1'
+}
+
+// ---------------------------------------------------------------------------
 // DOM shell — only runs in a browser (document must exist)
 // ---------------------------------------------------------------------------
 
@@ -210,7 +228,7 @@ export async function initOperatorLaunch() {
   const abortController = new AbortController()
   _launchAbortController = abortController
 
-  const {initOperatorStream} = await import('/static/operator-stream.js')
+  const {initOperatorStream} = await import(streamModuleSpecifier())
 
   // Browser fetch adapter: credentials:'include', redirect:'error'
   const browserFetch = (input, init) =>

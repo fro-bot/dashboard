@@ -4,7 +4,7 @@ import {Operator} from './views/Operator.tsx'
 export default function App() {
   return (
     <AppShell>
-      <Operator />
+      <Operator state="ready" />
     </AppShell>
   )
 }

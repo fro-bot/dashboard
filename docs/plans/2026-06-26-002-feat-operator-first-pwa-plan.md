@@ -411,7 +411,7 @@ Runtime loading must preserve module singleton integrity, error isolation, and l
 **Verification:**
 - Backend and frontend regression tests prove route, no-leak, no-proxy, and release gates are updated.
 
-- [ ] **Unit 7: Verify assembled PWA and document the operator-first pattern**
+- [x] **Unit 7: Verify assembled PWA and document the operator-first pattern**
 
 **Goal:** Prove the shipped surface works in a real browser and capture the new pattern for future sessions.
 

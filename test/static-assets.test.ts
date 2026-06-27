@@ -210,6 +210,100 @@ describe('static route absent when operator UI disabled', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Operator runtime JS assets — always served regardless of operatorUiEnabled
+//
+// Root / now owns the operator shell. The browser-side runtime modules
+// (operator-stream.js, operator-launch.js) must be served unconditionally
+// because the SPA shell at / always depends on them — the old operatorUiEnabled
+// flag-gate was for the SSR /operator route, not the root app.
+// ---------------------------------------------------------------------------
+
+describe('operator runtime JS assets — served regardless of operatorUiEnabled flag', () => {
+  it('GET /static/operator-stream.js returns 200 when operatorUiEnabled=false', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/static/operator-stream.js')
+    expect(res.status).toBe(200)
+  })
+
+  it('GET /static/operator-stream.js?manual=1 returns 200 when operatorUiEnabled=false', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/static/operator-stream.js?manual=1')
+    expect(res.status).toBe(200)
+  })
+
+  it('GET /static/operator-launch.js returns 200 when operatorUiEnabled=false', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/static/operator-launch.js')
+    expect(res.status).toBe(200)
+  })
+
+  it('GET /static/operator-launch.js?manual=1 returns 200 when operatorUiEnabled=false', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/static/operator-launch.js?manual=1')
+    expect(res.status).toBe(200)
+  })
+
+  it('GET /static/operator-stream.js returns 200 when operatorUiEnabled=true', async () => {
+    const app = await buildTestApp(true)
+    const res = await app.request('/static/operator-stream.js')
+    expect(res.status).toBe(200)
+  })
+
+  it('GET /static/operator-launch.js returns 200 when operatorUiEnabled=true', async () => {
+    const app = await buildTestApp(true)
+    const res = await app.request('/static/operator-launch.js')
+    expect(res.status).toBe(200)
+  })
+
+  it('GET /static/operator-stream.js is reachable WITHOUT an auth session (public path)', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/static/operator-stream.js')
+    expect(res.status).toBe(200)
+    expect(res.status).not.toBe(302)
+    expect(res.status).not.toBe(401)
+  })
+
+  it('GET /static/operator-launch.js is reachable WITHOUT an auth session (public path)', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/static/operator-launch.js')
+    expect(res.status).toBe(200)
+    expect(res.status).not.toBe(302)
+    expect(res.status).not.toBe(401)
+  })
+
+  it('GET /static/nonexistent.js is not served (not a catch-all for unknown paths)', async () => {
+    // When operatorUiEnabled=false the /static/* catch-all is not mounted.
+    // Unknown /static/* paths are not served as 200 — they get a redirect or 404.
+    const app = await buildTestApp(false)
+    const res = await app.request('/static/nonexistent.js')
+    expect(res.status).not.toBe(200)
+  })
+
+  it('GET /static/nonexistent.js returns 404 when operatorUiEnabled=true (not a catch-all)', async () => {
+    // When the /static/* catch-all IS mounted, missing files return 404.
+    const app = await buildTestApp(true)
+    const res = await app.request('/static/nonexistent.js')
+    expect(res.status).toBe(404)
+  })
+
+  it('GET /static/operator-stream.js returns a JavaScript Content-Type', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/static/operator-stream.js')
+    expect(res.status).toBe(200)
+    const ct = res.headers.get('content-type') ?? ''
+    expect(ct).toMatch(/(?:text|application)\/javascript/)
+  })
+
+  it('GET /static/operator-launch.js returns a JavaScript Content-Type', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/static/operator-launch.js')
+    expect(res.status).toBe(200)
+    const ct = res.headers.get('content-type') ?? ''
+    expect(ct).toMatch(/(?:text|application)\/javascript/)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // PWA SW asset serving — /sw.js
 // ---------------------------------------------------------------------------
 

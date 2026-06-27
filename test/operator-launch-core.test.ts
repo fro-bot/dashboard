@@ -427,6 +427,44 @@ describe('submitLaunch — 202 with missing or invalid runId → failure (not la
 })
 
 // ---------------------------------------------------------------------------
+// streamModuleSpecifier — manual import path for operator-stream
+// ---------------------------------------------------------------------------
+
+describe('streamModuleSpecifier — manual launch path imports stream with ?manual=1', () => {
+  it('streamModuleSpecifier export exists and is a function', async () => {
+    const mod = await import('../public/operator-launch.js')
+    expect(typeof (mod as {streamModuleSpecifier?: unknown}).streamModuleSpecifier).toBe('function')
+  })
+
+  it('streamModuleSpecifier returns a string ending with ?manual=1', async () => {
+    const mod = await import('../public/operator-launch.js')
+    const fn = (mod as {streamModuleSpecifier?: () => string}).streamModuleSpecifier
+    if (typeof fn !== 'function') throw new Error('streamModuleSpecifier not exported')
+    const specifier = fn()
+    expect(typeof specifier).toBe('string')
+    expect(specifier).toMatch(/\?manual=1$/)
+  })
+
+  it('streamModuleSpecifier returns the operator-stream module path', async () => {
+    const mod = await import('../public/operator-launch.js')
+    const fn = (mod as {streamModuleSpecifier?: () => string}).streamModuleSpecifier
+    if (typeof fn !== 'function') throw new Error('streamModuleSpecifier not exported')
+    const specifier = fn()
+    expect(specifier).toContain('operator-stream')
+  })
+
+  it('streamModuleSpecifier does NOT return the bare path without ?manual=1 (no auto-bootstrap)', async () => {
+    const mod = await import('../public/operator-launch.js')
+    const fn = (mod as {streamModuleSpecifier?: () => string}).streamModuleSpecifier
+    if (typeof fn !== 'function') throw new Error('streamModuleSpecifier not exported')
+    const specifier = fn()
+    // Must not be the bare path that triggers auto-bootstrap
+    expect(specifier).not.toBe('/static/operator-stream.js')
+    expect(specifier).not.toMatch(/operator-stream\.js$/)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // No DOM access at module top-level (safe to import in Node)
 // ---------------------------------------------------------------------------
 
