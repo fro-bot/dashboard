@@ -32,8 +32,6 @@ describe('AppShell', () => {
     document.documentElement.removeAttribute('data-theme')
   })
 
-  // ── Happy path ────────────────────────────────────────────────────────────
-
   it('renders a nav/header', () => {
     render(<AppShell>content</AppShell>)
     expect(screen.getByTestId('app-nav')).toBeInTheDocument()
@@ -62,19 +60,15 @@ describe('AppShell', () => {
     expect(screen.getByRole('navigation', {name: /primary navigation/i})).toBeInTheDocument()
   })
 
-  // ── Responsive structure ──────────────────────────────────────────────────
-
   it('header has sticky positioning style', () => {
     render(<AppShell>content</AppShell>)
     const header = screen.getByTestId('app-nav')
-    // Inline style sets position: sticky
     expect(header).toHaveStyle({position: 'sticky'})
   })
 
   it('content slot has responsive padding classes', () => {
     render(<AppShell>content</AppShell>)
     const main = screen.getByTestId('app-content')
-    // Tailwind breakpoint classes are present in className
     expect(main.className).toMatch(/sm:px-6/)
     expect(main.className).toMatch(/md:px-8/)
     expect(main.className).toMatch(/lg:px-10/)
@@ -86,8 +80,6 @@ describe('AppShell', () => {
     const inner = nav.querySelector('[class*="sm:px-6"]')
     expect(inner).not.toBeNull()
   })
-
-  // ── Theme toggle ──────────────────────────────────────────────────────────
 
   it('renders a theme toggle button', () => {
     render(<AppShell>content</AppShell>)
@@ -150,8 +142,6 @@ describe('AppShell', () => {
     )
   })
 
-  // ── Logout purge regression ────────────────────────────────────────────────
-
   it('logout calls purgeOperatorCache, not purgeMonitoringCache', () => {
     // AppShell must call the generalized operator purge on logout,
     // not the monitoring-named cache purge.
@@ -167,22 +157,5 @@ describe('AppShell', () => {
 
     vi.unstubAllGlobals()
     purgeSpy.mockRestore()
-  })
-
-  it('logout does not call purgeMonitoringCache', () => {
-    // Ensure the monitoring-named purge is not called from AppShell logout.
-    const monitoringPurgeSpy = vi
-      .spyOn(logoutPurgeModule, 'purgeMonitoringCache')
-      .mockReturnValue(undefined)
-
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network')))
-
-    render(<AppShell>content</AppShell>)
-    fireEvent.click(screen.getByTestId('logout-button'))
-
-    expect(monitoringPurgeSpy).not.toHaveBeenCalled()
-
-    vi.unstubAllGlobals()
-    monitoringPurgeSpy.mockRestore()
   })
 })

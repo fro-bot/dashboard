@@ -234,7 +234,7 @@ Runtime loading must preserve module singleton integrity, error isolation, and l
 **Verification:**
 - Server/static tests prove route ownership and PWA metadata align to operator-first behavior.
 
-- [ ] **Unit 3: Add canonical operator state classifier and copy**
+- [x] **Unit 3: Add canonical operator state classifier and copy**
 
 **Goal:** Replace generic monitoring offline handling with a fixed operator failure taxonomy.
 
@@ -276,7 +276,7 @@ Runtime loading must preserve module singleton integrity, error isolation, and l
 **Verification:**
 - Pure classifier and render tests cover every signal in the origin failure matrix.
 
-- [ ] **Unit 4: Rewire service worker caching and installed-client migration**
+- [x] **Unit 4: Rewire service worker caching and installed-client migration**
 
 **Goal:** Remove monitoring runtime caching, keep operator data network-owned, and make existing installs migrate safely.
 
@@ -374,7 +374,7 @@ Runtime loading must preserve module singleton integrity, error isolation, and l
 **Verification:**
 - Runtime bridge tests prove the root shell uses existing operator clients without adding server proxy behavior.
 
-- [ ] **Unit 6: Remove monitoring tests and expand no-proxy/no-leak coverage**
+- [x] **Unit 6: Remove monitoring tests and expand no-proxy/no-leak coverage**
 
 **Goal:** Convert monitoring-era assertions into operator-first regressions and lock down the security boundary.
 

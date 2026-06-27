@@ -2,20 +2,22 @@ import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
 import type {GatewayClientError, OperatorClient, SessionDto} from '../src/gateway/operator-client.ts'
 import type {Result} from '../src/result.ts'
 /**
- * Operator UI skeleton integration tests.
+ * Operator UI integration tests.
  *
- * TDD: written before implementation.
+ * Post-Units-1-4 state:
+ * - /operator unconditionally redirects to / (302), flag-independent.
+ * - / serves the React SPA shell (index.html from web/dist).
+ * - The old SSR skeleton at /operator is gone; all operator UI is client-side.
+ *
  * Covers:
- * - Flag off → /operator returns denied/redirect, zero operator objects constructed
- * - Flag on + authed → 200 renders skeleton with all taxonomy states
- * - Flag on + unauthed → denied
- * - Mock client's injected fetch is never called during SSR render
- * - No sensitive values rendered (tokens, CSRF values, session cookies, raw prompts,
- *   tool args, workspace paths, internal URLs)
- * - Safe copy: failed_to_settle not rendered as primary label
- * - Copy distinguishes dashboard auth from Gateway auth
- * - Flag-aware copy: separate-domains wording when Arctic is active, converged
- *   single-authority wording when gateway session governs operator access
+ * - /operator → 302 redirect to / (flag ON and OFF)
+ * - Root / serves the SPA shell with no sensitive value leaks
+ * - No-dashboard-proxy invariant: /operator/runs, /operator/repos, stream,
+ *   approval decision, etc. are not dashboard-owned proxy routes (404)
+ * - Gateway session validation trust-boundary tests (redirect, cookie-only
+ *   principal, origin checks) remain intact
+ * - No sensitive values in SPA shell: tokens, CSRF, session cookies, raw
+ *   prompts, tool args, workspace paths, internal URLs, private repo text
  */
 import {Buffer} from 'node:buffer'
 
@@ -144,13 +146,8 @@ describe('operator UI — flag OFF (default)', () => {
   it('GET /operator without flag → denied (redirect or 401)', async () => {
     const app = await buildTestApp(false)
     const res = await authedGet(app, '/operator')
-    // When flag is off, /operator is not mounted → falls through to auth middleware
-    // which either redirects or 401s (it's a protected unknown path)
-    // The auth middleware redirects to /auth/login for authed users hitting unknown paths
-    // Actually: authed users hitting unmounted paths get 404 from Hono
-    // But the spec says "falls through to existing auth middleware and returns standard deny/redirect"
-    // In practice, Hono returns 404 for unmounted routes after auth passes
-    // The key invariant is: no operator content is served
+    // When flag is off, /operator still redirects to / (302) — the redirect is
+    // flag-independent and mounted before the operatorUiEnabled-gated handler.
     expect([302, 303, 401, 404]).toContain(res.status)
     // Unconditionally assert no operator content — a redirect/401/404 body won't contain these;
     // an accidental mount would.
@@ -178,133 +175,164 @@ describe('operator UI — flag OFF (default)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Flag-on + authenticated tests
+// /operator redirect tests (flag ON)
 // ---------------------------------------------------------------------------
 
-describe('operator UI — flag ON + authenticated', () => {
-  it('GET /operator → 200 with operator skeleton', async () => {
+describe('operator UI — /operator redirect (flag ON)', () => {
+  it('GET /operator → 302 redirect to /', async () => {
+    // /operator unconditionally redirects to / regardless of flag state.
+    // The React SPA shell at / is the canonical operator launch route.
     const app = await buildTestApp(true)
     const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toBe('/')
+  })
+
+  it('GET /operator redirect body contains no sensitive values', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(302)
+    const body = await res.text()
+    // Redirect body must not leak any sensitive fixture or session values
+    expect(body).not.toContain('[Fixture prompt — not rendered in UI]')
+    expect(body).not.toContain('fixture-csrf-placeholder')
+    expect(body).not.toContain('fixture-idempotency-key-001')
+    expect(body).not.toContain('fixture-idempotency-key-002')
+    expect(body).not.toContain('test-gateway-cookie')
+    expect(body).not.toContain('Gateway Operator Controls')
+  })
+
+  it('GET /operator redirect body contains no monitoring, mock skeleton, or private repo text', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect(res.status).toBe(302)
+    const body = await res.text()
+    expect(body).not.toContain('Mock skeleton')
+    expect(body).not.toContain('entityRef')
+    expect(body).not.toContain('contractVersion')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// SPA shell at / — no-leak assertions
+// ---------------------------------------------------------------------------
+
+describe('operator UI — SPA shell at / (flag ON + authenticated)', () => {
+  it('GET / → 200 with SPA shell HTML', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/')
     expect(res.status).toBe(200)
     const body = await res.text()
     expect(body).toContain('<html')
   })
 
-  it('renders all run status states', async () => {
+  it('SPA shell has valid HTML with lang attribute', async () => {
     const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
+    const res = await authedGet(app, '/')
     expect(res.status).toBe(200)
     const body = await res.text()
-
-    // All run states should be represented in the skeleton
-    // (via fixture data rendered in the page)
-    // We check for human-readable labels, not raw tokens
-    expect(body).toMatch(/queue|waiting|pending/i)
-    expect(body).toMatch(/running|in progress/i)
-    expect(body).toMatch(/approval/i)
-    expect(body).toMatch(/success|complete/i)
+    expect(body).toContain('lang="en"')
+    expect(body).toContain('<!doctype html>')
   })
 
-  it('renders approval states with safe copy', async () => {
+  it('CRITICAL: failed_to_settle raw token never appears in SPA shell', async () => {
     const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-
-    // failed_to_settle must NOT appear as primary label
-    expect(body).not.toContain('failed_to_settle')
-    // already_claimed must NOT appear as raw token
-    expect(body).not.toContain('already_claimed')
-    // scope_mismatch must NOT appear as raw token
-    expect(body).not.toContain('scope_mismatch')
-    // waiting_for_approval must NOT appear as raw token in primary labels
-    // (it may appear in data attributes or aria, but not as visible text)
-
-    // Approval prompts are rendered by the browser client (not SSR).
-    // The SSR ships the approval region empty and hidden; the browser fills it
-    // from getOpenApprovals(runEntry). The old fixture approval section is gone.
-    // The no-raw-token invariants above are the load-bearing assertions here.
-  })
-
-  it('CRITICAL: failed_to_settle raw token never appears in rendered HTML', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
+    const res = await authedGet(app, '/')
     expect(res.status).toBe(200)
     const body = await res.text()
     expect(body).not.toContain('failed_to_settle')
   })
 
-  it('renders a run-output surface element per run card (flag ON)', async () => {
+  it('no sensitive values in SPA shell: no CSRF tokens, session cookies, or raw tokens', async () => {
     const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
+    const res = await authedGet(app, '/')
     expect(res.status).toBe(200)
     const body = await res.text()
-    // The browser client writes accumulated run output into this element via safe DOM.
-    expect(body).toContain('data-role="run-output"')
-  })
-
-  it('the SSR run-output surface starts empty and hidden (no fixture output rendered)', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    const body = await res.text()
-    // The output element ships hidden with no content — output only appears when the
-    // live stream writes it client-side. The SSR must not render any output text.
-    expect(body).toMatch(/<pre class="run-output" data-role="run-output" hidden/)
-    expect(body).toMatch(/data-role="run-output"[^>]*><\/pre>/)
-  })
-
-  it('copy distinguishes dashboard auth from Gateway auth', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-
-    // Must NOT imply dashboard session authorizes Gateway actions
-    // Should have language distinguishing the two auth domains
-    // The page should mention Gateway separately from dashboard session
-    expect(body).toMatch(/gateway/i)
-    // Should NOT say "you are signed in to Gateway" based on dashboard session alone
-    // (the skeleton shows unauthenticated Gateway state)
-  })
-
-  it('no sensitive values rendered: no CSRF tokens, session cookies, or raw tokens', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-
-    // No raw CSRF token values from fixtures should appear as visible content
-    // (fixture CSRF tokens are not rendered in the skeleton)
+    // No raw CSRF token values
+    expect(body).not.toContain('fixture-csrf-placeholder')
     // No session cookie values
-    // No internal URLs (only relative /operator/* paths)
+    expect(body).not.toContain('test-gateway-cookie')
+    // No internal URLs (only relative paths)
     expect(body).not.toMatch(/https?:\/\/(?!github\.com)[\w.-]+\/operator/i)
   })
 
-  it('no raw prompts or tool args from fixtures rendered', async () => {
+  it('no raw prompts or tool args from fixtures in SPA shell', async () => {
     const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
+    const res = await authedGet(app, '/')
     expect(res.status).toBe(200)
     const body = await res.text()
-
     // Pin the ACTUAL sensitive fixture values that must never appear in rendered HTML.
-    // If a future refactor wires the launch form to render request fields, these will catch it.
-    // FIXTURE_LAUNCH_REQUEST.prompt
     expect(body).not.toContain('[Fixture prompt — not rendered in UI]')
-    // FIXTURE_CSRF.csrfToken / FIXTURE_LAUNCH_REQUEST.csrfToken
     expect(body).not.toContain('fixture-csrf-placeholder')
-    // FIXTURE_LAUNCH_REQUEST.idempotencyKey
     expect(body).not.toContain('fixture-idempotency-key-001')
-    // FIXTURE_APPROVAL_DECISION_REQUEST.idempotencyKey
     expect(body).not.toContain('fixture-idempotency-key-002')
   })
 
-  it('SSR renders without network AND mock client fetch guard converts calls to network errors', async () => {
-    // Part 1: SSR renders from static fixtures — the throwing fetch is never called during render.
+  it('no fixture/stream payload literals in SPA shell', async () => {
     const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
+    const res = await authedGet(app, '/')
     expect(res.status).toBe(200)
+    const body = await res.text()
+    // Existing no-leak assertions — these must continue to pass
+    expect(body).not.toContain('[Fixture prompt — not rendered in UI]')
+    expect(body).not.toContain('fixture-csrf-placeholder')
+    expect(body).not.toContain('fixture-idempotency-key-001')
+    expect(body).not.toContain('fixture-idempotency-key-002')
+    // Stream payload fields that must never appear in SSR output
+    expect(body).not.toContain('entityRef')
+    expect(body).not.toContain('contractVersion')
+  })
 
-    // Part 2: Prove the no-network guarantee at the client layer.
+  it('no approval fixture command/filepath text in SPA shell (inert SSR)', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // The SPA shell must not render any fixture command or filepath text
+    expect(body).not.toContain('echo hello')
+    expect(body).not.toContain('/workspace/')
+  })
+
+  it('no "approval unavailable" fixture copy in SPA shell (misleading copy removed)', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // The old fixture-only "approval unavailable" copy must be gone
+    expect(body).not.toContain('Approval actions are disabled: the operator UI is not yet enabled')
+    expect(body).not.toContain('Live approval actions will be available once the operator UI is enabled')
+  })
+
+  it('no raw fixture approval requestID in SPA shell', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // The fixture requestID must not appear in the rendered HTML
+    expect(body).not.toContain('req-fixture-001')
+  })
+
+  it('no inline script tags in SPA shell (CSP clean)', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // All <script> elements must have a src= attribute (no inline scripts)
+    const scriptTagsWithoutSrc = body.match(/<script(?![^>]* src=)[^>]*>/g)
+    expect(scriptTagsWithoutSrc).toBeNull()
+  })
+
+  it('script src is a relative path in SPA shell (no absolute URL)', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // The script src must be /assets/... not https://...
+    expect(body).not.toMatch(/src="https?:\/\//)
+  })
+
+  it('mock client fetch guard: getCurrentSession and getRunSnapshot return network errors', async () => {
+    // Prove the no-network guarantee at the client layer.
     // The mock client's injected fetch throws if called; the fetchJson wrapper
     // catches the throw and converts it to a network-error Result.
     const client = createMockOperatorClient()
@@ -321,73 +349,6 @@ describe('operator UI — flag ON + authenticated', () => {
       expect(snapshotResult.error.kind).toBe('network')
     }
   })
-
-  it('renders launch form as inert (no live submit)', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-
-    // Launch form should be present but disabled/inert
-    // Should have a concrete reason why it's unavailable
-    expect(body).toMatch(/launch|run/i)
-    // Should indicate it's not ready/disabled
-    expect(body).toMatch(/not ready|unavailable|disabled|pending/i)
-  })
-
-  it('renders pending approval card with keyboard-reachable controls', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-
-    // Approval card should be present
-    expect(body).toMatch(/approval|approve|reject/i)
-  })
-
-  it('renders approval decision states as non-actionable', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-
-    // Approval decision states are rendered by the browser client (not SSR).
-    // The SSR ships the approval region empty and hidden; the browser fills it
-    // from getOpenApprovals(runEntry) and maps decision outcomes to interaction states.
-    // The no-raw-token invariants in 'renders approval states with safe copy' cover the
-    // critical safety property. The approval region hook is present (tested separately).
-    expect(body).toContain('data-role="run-approvals"')
-  })
-
-  it('renders Gateway unauthenticated panel', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-
-    // Should show Gateway session state separately from dashboard session
-    expect(body).toMatch(/gateway.*session|session.*gateway|sign in.*gateway|gateway.*sign in/i)
-  })
-
-  it('disabled controls have text reasons, not color-only', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-
-    // Disabled reasons must be text, not just color
-    // The page should contain explanatory text for why things are unavailable
-    expect(body).toMatch(/not ready|unavailable|pending gateway|gateway.*not ready/i)
-  })
-
-  it('renders valid HTML with lang attribute', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    expect(body).toContain('lang="en"')
-    expect(body).toContain('<!doctype html>')
-  })
 })
 
 // ---------------------------------------------------------------------------
@@ -395,16 +356,15 @@ describe('operator UI — flag ON + authenticated', () => {
 // ---------------------------------------------------------------------------
 
 describe('operator UI — flag ON + unauthenticated', () => {
-  it('GET /operator without session → denied (redirect or 401)', async () => {
+  it('GET /operator without session → redirect (302 to /)', async () => {
+    // /operator redirects unconditionally — even unauthenticated requests get 302
     const app = await buildTestApp(true)
     const res = await app.request('/operator')
+    // The redirect is flag-independent and mounted before auth middleware for /operator
     expect([302, 303, 401]).toContain(res.status)
-    if (res.status === 302 || res.status === 303) {
-      expect(res.headers.get('location')).toContain('/auth/login')
-    }
   })
 
-  it('GET /operator with invalid session → denied', async () => {
+  it('GET /operator with invalid session → redirect or denied', async () => {
     const app = await buildTestApp(true)
     const res = await app.request('/operator', {headers: {cookie: 'session=invalid.garbage'}})
     expect([302, 303, 401]).toContain(res.status)
@@ -438,40 +398,19 @@ describe('existing routes unaffected by operator flag', () => {
 // ---------------------------------------------------------------------------
 // Flag-aware credential-domain copy
 //
-// The operator page copy must accurately reflect which session authority is
-// active. When the Arctic session governs access, the page states that
-// dashboard sign-in is separate from Gateway sign-in. When the gateway
-// operator session governs access, the page states that the gateway session
-// is the authority for operator actions and that dashboard sign-in alone
-// does not authorize gateway actions.
+// The /operator route now redirects to / unconditionally. The credential-domain
+// copy tests verify that the redirect response itself does not leak backend state
+// and that the redirect target (/) serves the SPA shell without sensitive values.
+// The old SSR copy assertions (separate-domains wording, converged wording) are
+// removed because the SSR operator page no longer exists.
 // ---------------------------------------------------------------------------
 
-describe('operator UI — credential-domain copy when Arctic session governs (gateway flag OFF)', () => {
-  it('renders the separate-domains wording when Arctic session is the authority', async () => {
+describe('operator UI — credential-domain: /operator redirect contains no backend state (gateway flag OFF)', () => {
+  it('/operator redirect contains no raw backend state (flag-off render)', async () => {
     const app = await buildTestApp({operatorUiEnabled: true, gatewayOperatorSessionEnabled: false})
     const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-
-    // The exact phrase from the current separate-domains copy — pinned so any
-    // accidental change to the flag-off wording is caught immediately.
-    expect(body).toContain('separate from Gateway sign-in')
-  })
-
-  it('does NOT contain the converged single-authority wording when Arctic session governs', async () => {
-    const app = await buildTestApp({operatorUiEnabled: true, gatewayOperatorSessionEnabled: false})
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-
-    // The converged phrase must not appear when the gateway flag is off
-    expect(body).not.toContain('gateway session governs operator access')
-  })
-
-  it('no raw backend state leaks in flag-off render', async () => {
-    const app = await buildTestApp({operatorUiEnabled: true, gatewayOperatorSessionEnabled: false})
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
+    // /operator redirects to / regardless of flag state
+    expect([302, 303]).toContain(res.status)
     const body = await res.text()
 
     expect(body).not.toContain('[Fixture prompt — not rendered in UI]')
@@ -479,228 +418,63 @@ describe('operator UI — credential-domain copy when Arctic session governs (ga
     expect(body).not.toContain('fixture-idempotency-key-001')
     expect(body).not.toContain('fixture-idempotency-key-002')
   })
+
+  it('/operator redirect does not contain converged single-authority wording', async () => {
+    const app = await buildTestApp({operatorUiEnabled: true, gatewayOperatorSessionEnabled: false})
+    const res = await authedGet(app, '/operator')
+    expect([302, 303]).toContain(res.status)
+    const body = await res.text()
+    // The converged phrase must not appear in the redirect response
+    expect(body).not.toContain('gateway session governs operator access')
+  })
 })
 
 // ---------------------------------------------------------------------------
-// SSE stream wiring — DOM hooks and script tag
+// SSE stream wiring — no-proxy invariant (flag ON)
 // ---------------------------------------------------------------------------
 
-describe('operator UI — SSE stream wiring (flag ON + authenticated)', () => {
-  it('page includes the operator-stream script tag with src and type=module', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    expect(body).toContain('src="/static/operator-stream.js"')
-    expect(body).toContain('type="module"')
-  })
-
-  it('run cards carry data-run-id attributes for all fixture runs', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    // All fixture run IDs must appear as data-run-id attributes
-    expect(body).toContain('data-run-id="run-fixture-queued-001"')
-    expect(body).toContain('data-run-id="run-fixture-running-002"')
-    expect(body).toContain('data-run-id="run-fixture-approval-003"')
-    expect(body).toContain('data-run-id="run-fixture-blocked-004"')
-    expect(body).toContain('data-run-id="run-fixture-failed-005"')
-    expect(body).toContain('data-run-id="run-fixture-cancelled-006"')
-    expect(body).toContain('data-run-id="run-fixture-succeeded-007"')
-  })
-
-  it('status pill spans carry data-role="run-status"', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    expect(body).toContain('data-role="run-status"')
-  })
-
-  it('run status section has a stable container id', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    expect(body).toContain('id="run-status-section"')
-  })
-
-  it('stream-status notice element has a stable data-role hook', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    expect(body).toContain('data-role="stream-status"')
-  })
-
-  it('no inline script tags with executable content (CSP clean)', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    // All <script> elements must have a src= attribute (no inline scripts)
-    const scriptTagsWithoutSrc = body.match(/<script(?![^>]* src=)[^>]*>/g)
-    expect(scriptTagsWithoutSrc).toBeNull()
-  })
-
-  it('script src is a relative path (no absolute URL)', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    // The script src must be /static/... not https://...
-    expect(body).not.toMatch(/src="https?:\/\//)
-  })
-
-  it('SSR render does not call connectRunStream', async () => {
-    // connectRunStream must never be called during server-side render —
-    // stream connections only happen in the browser.
+describe('operator UI — SSE stream wiring: no-proxy invariant (flag ON + authenticated)', () => {
+  it('/operator → 302 redirect (no SSR, no connectRunStream called)', async () => {
+    // connectRunStream must never be called — /operator redirects before any SSR.
+    // The throwing fake surfaces any accidental call to this method.
     const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
     const app = await buildTestApp({
       operatorUiEnabled: true,
       gatewayOperatorSessionEnabled: true,
       operatorClient,
     })
-    // If connectRunStream were called, it would throw and the request would fail.
+    // /operator redirects to / — no SSR, no stream connection
     const res = await gatewayAuthedGet(app, '/operator')
-    expect(res.status).toBe(200)
+    expect([302, 303]).toContain(res.status)
   })
 
   it('flag OFF → no script tag and no run-status section', async () => {
     const app = await buildTestApp(false)
     const res = await authedGet(app, '/operator')
-    // Route is not mounted when flag is off
+    // Route redirects to / when flag is off too
     expect([302, 303, 401, 404]).toContain(res.status)
     const body = await res.text()
     expect(body).not.toContain('operator-stream.js')
     expect(body).not.toContain('run-status-section')
   })
-
-  it('no fixture/stream payload literals leak beyond existing rendered values', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    // Existing no-leak assertions — these must continue to pass
-    expect(body).not.toContain('[Fixture prompt — not rendered in UI]')
-    expect(body).not.toContain('fixture-csrf-placeholder')
-    expect(body).not.toContain('fixture-idempotency-key-001')
-    expect(body).not.toContain('fixture-idempotency-key-002')
-    // Stream payload fields that must never appear in SSR output
-    expect(body).not.toContain('entityRef')
-    expect(body).not.toContain('contractVersion')
-  })
 })
 
 // ---------------------------------------------------------------------------
-// Launch surface — operator-launch.js script, repo picker, live form, v1 caveats
+// Launch surface — no-proxy invariant (flag ON)
 // ---------------------------------------------------------------------------
 
-describe('operator UI — launch surface (flag ON + authenticated)', () => {
-  it('page includes the operator-launch script tag with src and type=module', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    expect(body).toContain('src="/static/operator-launch.js"')
-    expect(body).toContain('type="module"')
-  })
-
-  it('repo-picker container is present in the rendered HTML', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    expect(body).toContain('id="repo-picker-container"')
-  })
-
-  it('launch form is present and not wrapped in a disabled fieldset', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    // The live form must be present
-    expect(body).toContain('id="launch-form"')
-    // The form must NOT have a disabled fieldset (the old skeleton had one)
-    expect(body).not.toContain('<fieldset disabled')
-    // The form itself must not carry aria-disabled
-    expect(body).not.toContain('id="launch-form" aria-disabled')
-    expect(body).not.toContain('aria-disabled="true" id="launch-form"')
-  })
-
-  it('launch form has a prompt textarea', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    expect(body).toContain('name="prompt"')
-    expect(body).toContain('<textarea')
-  })
-
-  it('launch form has a submit button', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    expect(body).toContain('type="submit"')
-  })
-
-  it('v1-caveat copy is present: status-only observation', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    expect(body).toMatch(/status.only/i)
-  })
-
-  it('v1-caveat copy is present: tool approval auto-deny', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    expect(body).toMatch(/tool approval|automatically denied|auto.deny/i)
-  })
-
-  it('v1-caveat copy is present: repos are access-scoped', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    expect(body).toMatch(/scoped|gateway.*access|access.*gateway/i)
-  })
-
-  it('no inline script tags (CSP clean — all scripts have src=)', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    const scriptTagsWithoutSrc = body.match(/<script(?![^>]* src=)[^>]*>/g)
-    expect(scriptTagsWithoutSrc).toBeNull()
-  })
-
-  it('no-leak: fixture sensitive values never in rendered HTML', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    expect(body).not.toContain('[Fixture prompt — not rendered in UI]')
-    expect(body).not.toContain('fixture-csrf-placeholder')
-    expect(body).not.toContain('fixture-idempotency-key-001')
-    expect(body).not.toContain('fixture-idempotency-key-002')
-  })
-
-  it('SSR render does not call listRepos, launchRun, or refreshCsrf', async () => {
+describe('operator UI — launch surface: no-proxy invariant (flag ON + authenticated)', () => {
+  it('/operator → 302 redirect (no SSR, no listRepos/launchRun/refreshCsrf called)', async () => {
     // The throwing fake surfaces any accidental SSR call to these methods.
+    // /operator redirects before any SSR, so none of these should be called.
     const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
     const app = await buildTestApp({
       operatorUiEnabled: true,
       gatewayOperatorSessionEnabled: true,
       operatorClient,
     })
-    // If listRepos/launchRun/refreshCsrf were called, they would throw and the request would fail.
     const res = await gatewayAuthedGet(app, '/operator')
-    expect(res.status).toBe(200)
+    expect([302, 303]).toContain(res.status)
   })
 
   it('flag OFF → no operator-launch.js script, no launch form', async () => {
@@ -712,62 +486,24 @@ describe('operator UI — launch surface (flag ON + authenticated)', () => {
     expect(body).not.toContain('launch-form')
     expect(body).not.toContain('repo-picker-container')
   })
+
+  it('no-leak: fixture sensitive values never in /operator redirect response', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect([302, 303]).toContain(res.status)
+    const body = await res.text()
+    expect(body).not.toContain('[Fixture prompt — not rendered in UI]')
+    expect(body).not.toContain('fixture-csrf-placeholder')
+    expect(body).not.toContain('fixture-idempotency-key-001')
+    expect(body).not.toContain('fixture-idempotency-key-002')
+  })
 })
 
 // ---------------------------------------------------------------------------
-// Inline approval prompt UI — SSR hooks and no-dashboard-proxy invariant
+// Inline approval prompt UI — no-dashboard-proxy invariant
 // ---------------------------------------------------------------------------
 
-describe('operator UI — approval region SSR hooks (flag ON)', () => {
-  it('run cards contain a data-role="run-approvals" region (flag ON)', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    // Each run card must have an approval region hook for the browser client to fill
-    expect(body).toContain('data-role="run-approvals"')
-  })
-
-  it('approval region starts hidden (browser fills it on stream data)', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    // The approval region must ship hidden — the browser reveals it when prompts arrive
-    expect(body).toMatch(/data-role="run-approvals"[^>]*hidden/)
-  })
-
-  it('approval region does NOT contain fixture command/filepath text (inert SSR)', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    // The SSR must not render any fixture command or filepath text in the approval region
-    // (the browser fills this via safe DOM, not SSR interpolation)
-    expect(body).not.toContain('echo hello')
-    expect(body).not.toContain('/workspace/')
-  })
-
-  it('no "approval unavailable" fixture copy in the rendered page (misleading copy removed)', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    // The old fixture-only "approval unavailable" copy must be gone
-    expect(body).not.toContain('Approval actions are disabled: the operator UI is not yet enabled')
-    expect(body).not.toContain('Live approval actions will be available once the operator UI is enabled')
-  })
-
-  it('no raw fixture approval requestID in rendered HTML', async () => {
-    const app = await buildTestApp(true)
-    const res = await authedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    // The fixture requestID must not appear in the rendered HTML
-    // (approval prompts are rendered by the browser client, not SSR)
-    expect(body).not.toContain('req-fixture-001')
-  })
-
+describe('operator UI — approval region: no-dashboard-proxy invariant (flag ON)', () => {
   it('flag OFF → no approval region in rendered HTML', async () => {
     const app = await buildTestApp(false)
     const res = await authedGet(app, '/operator')
@@ -814,24 +550,26 @@ describe('operator UI — no-dashboard-proxy 404 invariant for approval routes',
 
   it('SSR render does not call listRunApprovals or decideRunApproval', async () => {
     // The throwing fake surfaces any accidental SSR call to these methods.
+    // /operator redirects before any SSR, so none of these should be called.
     const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
     const app = await buildTestApp({
       operatorUiEnabled: true,
       gatewayOperatorSessionEnabled: true,
       operatorClient,
     })
-    // If listRunApprovals/decideRunApproval were called, they would throw and the request would fail.
+    // /operator redirects to / — no SSR, no approval calls
     const res = await gatewayAuthedGet(app, '/operator')
-    expect(res.status).toBe(200)
+    expect([302, 303]).toContain(res.status)
   })
 })
 
-describe('operator UI — credential-domain copy when gateway session governs (gateway flag ON)', () => {
-  // In gateway mode the auth middleware validates via the injected operatorClient.
-  // We inject a fake that returns a valid session so the page renders.
-  // The request carries a gateway cookie header (no Arctic session cookie).
+describe('operator UI — credential-domain: /operator redirect contains no backend state (gateway flag ON)', () => {
+  // /operator now redirects to / unconditionally. The old SSR copy tests
+  // (converged wording, separate-domains wording) are removed because the SSR
+  // operator page no longer exists. These tests verify the redirect response
+  // itself does not leak backend state.
 
-  it('renders the converged single-authority wording when gateway session governs', async () => {
+  it('/operator → 302 redirect (no SSR, no operator client calls)', async () => {
     const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
     const app = await buildTestApp({
       operatorUiEnabled: true,
@@ -839,15 +577,11 @@ describe('operator UI — credential-domain copy when gateway session governs (g
       operatorClient,
     })
     const res = await gatewayAuthedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-
-    // The converged wording must appear when the gateway session is the authority.
-    // This phrase is introduced by this implementation — pin it here.
-    expect(body).toContain('gateway session governs operator access')
+    expect([302, 303]).toContain(res.status)
+    expect(res.headers.get('location')).toBe('/')
   })
 
-  it('does NOT contain the separate-domains wording when gateway session governs', async () => {
+  it('/operator redirect contains no raw backend state (flag-on render)', async () => {
     const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
     const app = await buildTestApp({
       operatorUiEnabled: true,
@@ -855,38 +589,7 @@ describe('operator UI — credential-domain copy when gateway session governs (g
       operatorClient,
     })
     const res = await gatewayAuthedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-
-    // The separate-domains phrase must not appear when the gateway flag is on
-    expect(body).not.toContain('separate from Gateway sign-in')
-  })
-
-  it('converged copy does not imply dashboard sign-in authorizes gateway actions', async () => {
-    const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
-    const app = await buildTestApp({
-      operatorUiEnabled: true,
-      gatewayOperatorSessionEnabled: true,
-      operatorClient,
-    })
-    const res = await gatewayAuthedGet(app, '/operator')
-    expect(res.status).toBe(200)
-    const body = await res.text()
-
-    // The page must make clear that dashboard sign-in alone does not authorize
-    // gateway actions — the gateway session is the authority.
-    expect(body).toMatch(/dashboard.*does not.*authoriz|signing in to the dashboard does not authoriz/i)
-  })
-
-  it('no raw backend state leaks in flag-on render', async () => {
-    const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
-    const app = await buildTestApp({
-      operatorUiEnabled: true,
-      gatewayOperatorSessionEnabled: true,
-      operatorClient,
-    })
-    const res = await gatewayAuthedGet(app, '/operator')
-    expect(res.status).toBe(200)
+    expect([302, 303]).toContain(res.status)
     const body = await res.text()
 
     expect(body).not.toContain('[Fixture prompt — not rendered in UI]')
