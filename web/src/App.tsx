@@ -1,10 +1,10 @@
 import {AppShell} from './shell/AppShell.tsx'
-import {Monitoring} from './views/Monitoring.tsx'
+import {Operator} from './views/Operator.tsx'
 
 export default function App() {
   return (
     <AppShell>
-      <Monitoring />
+      <Operator />
     </AppShell>
   )
 }

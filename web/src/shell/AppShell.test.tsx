@@ -1,5 +1,6 @@
 import {fireEvent, render, screen} from '@testing-library/react'
-import {afterEach, beforeEach, describe, expect, it} from 'vitest'
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
+import * as logoutPurgeModule from '../pwa/logout-purge.ts'
 import {AppShell} from './AppShell.tsx'
 
 // jsdom doesn't implement matchMedia — stub it
@@ -147,5 +148,41 @@ describe('AppShell', () => {
       'aria-label',
       'Switch to dark theme',
     )
+  })
+
+  // ── Logout purge regression ────────────────────────────────────────────────
+
+  it('logout calls purgeOperatorCache, not purgeMonitoringCache', () => {
+    // AppShell must call the generalized operator purge on logout,
+    // not the monitoring-named cache purge.
+    const purgeSpy = vi.spyOn(logoutPurgeModule, 'purgeOperatorCache').mockReturnValue(undefined)
+
+    // Stub fetch so logout doesn't make real network calls
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network')))
+
+    render(<AppShell>content</AppShell>)
+    fireEvent.click(screen.getByTestId('logout-button'))
+
+    expect(purgeSpy).toHaveBeenCalledTimes(1)
+
+    vi.unstubAllGlobals()
+    purgeSpy.mockRestore()
+  })
+
+  it('logout does not call purgeMonitoringCache', () => {
+    // Ensure the monitoring-named purge is not called from AppShell logout.
+    const monitoringPurgeSpy = vi
+      .spyOn(logoutPurgeModule, 'purgeMonitoringCache')
+      .mockReturnValue(undefined)
+
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network')))
+
+    render(<AppShell>content</AppShell>)
+    fireEvent.click(screen.getByTestId('logout-button'))
+
+    expect(monitoringPurgeSpy).not.toHaveBeenCalled()
+
+    vi.unstubAllGlobals()
+    monitoringPurgeSpy.mockRestore()
   })
 })

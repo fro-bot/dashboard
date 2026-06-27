@@ -1,8 +1,9 @@
 {
-  "name": "Fro Bot Dashboard",
+  "name": "Fro Bot Operator",
   "short_name": "Fro Bot",
-  "description": "Read-only monitoring dashboard for Fro Bot's cross-repo footprint.",
+  "description": "Operator control surface for Fro Bot — launch runs, stream output, and manage approvals.",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "theme_color": "#0d0216",
   "background_color": "#0d0216",
