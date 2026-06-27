@@ -8,7 +8,7 @@
  *
  * Theme: dark by default ([data-theme] on <html>). Toggle button flips
  * between "dark" and "light" without any Radix primitive — a plain <button>
- * is sufficient for this single-operator monitoring surface.
+ * is sufficient for this single-operator app surface.
  *
  * All colors come from CSS vars (tokens.css). No inline hex.
  */
@@ -16,7 +16,7 @@
 import {type ReactNode, useCallback, useEffect, useState} from 'react'
 import {InstallPrompt} from '../pwa/InstallPrompt.tsx'
 import {ReloadPrompt} from '../pwa/ReloadPrompt.tsx'
-import {purgeMonitoringCache} from '../pwa/logout-purge.ts'
+import {purgeOperatorCache} from '../pwa/logout-purge.ts'
 
 type Theme = 'dark' | 'light'
 
@@ -38,7 +38,6 @@ interface AppShellProps {
 export function AppShell({children}: AppShellProps) {
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
 
-  // Sync data-theme attribute on mount and on change
   useEffect(() => {
     applyTheme(theme)
     window.localStorage.setItem('fro-bot-theme', theme)
@@ -49,14 +48,14 @@ export function AppShell({children}: AppShellProps) {
   }, [])
 
   /**
-   * Logout: purge the SW runtime cache then submit the logout form POST.
+   * Logout: purge operator runtime caches then submit the logout form POST.
    * The CSRF token is fetched from /auth/logout-csrf (authenticated endpoint)
    * immediately before submission so it is always fresh.
    */
   const handleLogout = useCallback(async () => {
-    // Purge the /api/monitoring SW cache before navigating away so a
-    // logged-out user cannot see cached monitoring data offline.
-    purgeMonitoringCache()
+    // Purge operator runtime caches before navigating away so a
+    // logged-out user cannot see cached operator data offline.
+    purgeOperatorCache()
 
     try {
       const res = await fetch('/auth/logout-csrf', {credentials: 'same-origin'})
@@ -96,7 +95,6 @@ export function AppShell({children}: AppShellProps) {
         fontFamily: 'var(--font-body)',
       }}
     >
-      {/* ── Nav / Header ─────────────────────────────────────────────────── */}
       <header
         data-testid="app-nav"
         style={{
@@ -118,11 +116,8 @@ export function AppShell({children}: AppShellProps) {
             justifyContent: 'space-between',
             gap: 'var(--space-4)',
           }}
-          /* Responsive padding: sm → md → lg via inline style is limited;
-             Tailwind classes handle the breakpoint steps below. */
-          className="sm:px-6 md:px-8 lg:px-10"
+            className="sm:px-6 md:px-8 lg:px-10"
         >
-          {/* Brand mark */}
           <a
             href="/"
             aria-label="Fro Bot Dashboard home"
@@ -167,15 +162,12 @@ export function AppShell({children}: AppShellProps) {
             </span>
           </a>
 
-          {/* Nav actions */}
           <nav
             aria-label="Primary navigation"
             style={{display: 'flex', alignItems: 'center', gap: 'var(--space-2)'}}
           >
-            {/* PWA install affordance — only visible when the app is installable */}
             <InstallPrompt />
 
-            {/* Theme toggle — plain button, no Radix needed */}
             <button
               type="button"
               aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
@@ -184,7 +176,6 @@ export function AppShell({children}: AppShellProps) {
               className="flex items-center justify-center w-8 h-8 rounded-md border border-border bg-transparent text-muted cursor-pointer transition-colors duration-fast ease-standard hover:border-accent hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             >
               {theme === 'dark' ? (
-                /* Sun icon */
                 <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
                   <circle cx="8" cy="8" r="3" stroke="currentColor" strokeWidth="1.5" />
                   <line x1="8" y1="1" x2="8" y2="3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
@@ -197,7 +188,6 @@ export function AppShell({children}: AppShellProps) {
                   <line x1="11.66" y1="4.34" x2="13.07" y2="2.93" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
                 </svg>
               ) : (
-                /* Moon icon */
                 <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
                   <path
                     d="M13.5 9.5A6 6 0 0 1 6.5 2.5a6 6 0 1 0 7 7z"
@@ -210,7 +200,6 @@ export function AppShell({children}: AppShellProps) {
               )}
             </button>
 
-            {/* Logout */}
             <button
               type="button"
               aria-label="Log out"
@@ -218,7 +207,6 @@ export function AppShell({children}: AppShellProps) {
               onClick={handleLogout}
               className="flex items-center justify-center w-8 h-8 rounded-md border border-border bg-transparent text-muted cursor-pointer transition-colors duration-fast ease-standard hover:border-accent hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             >
-              {/* Exit/logout icon */}
               <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
                 <path d="M6 2H3a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
                 <path d="M10 11l3-3-3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
@@ -229,7 +217,6 @@ export function AppShell({children}: AppShellProps) {
         </div>
       </header>
 
-      {/* ── Main content slot ─────────────────────────────────────────────── */}
       <main
         data-testid="app-content"
         style={{
@@ -244,7 +231,6 @@ export function AppShell({children}: AppShellProps) {
         {children}
       </main>
 
-      {/* ── PWA update prompt — fixed toast, renders when a new build is waiting */}
       <ReloadPrompt />
     </div>
   )

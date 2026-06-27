@@ -1,5 +1,6 @@
 import {fireEvent, render, screen} from '@testing-library/react'
-import {afterEach, beforeEach, describe, expect, it} from 'vitest'
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
+import * as logoutPurgeModule from '../pwa/logout-purge.ts'
 import {AppShell} from './AppShell.tsx'
 
 // jsdom doesn't implement matchMedia — stub it
@@ -31,8 +32,6 @@ describe('AppShell', () => {
     document.documentElement.removeAttribute('data-theme')
   })
 
-  // ── Happy path ────────────────────────────────────────────────────────────
-
   it('renders a nav/header', () => {
     render(<AppShell>content</AppShell>)
     expect(screen.getByTestId('app-nav')).toBeInTheDocument()
@@ -61,19 +60,15 @@ describe('AppShell', () => {
     expect(screen.getByRole('navigation', {name: /primary navigation/i})).toBeInTheDocument()
   })
 
-  // ── Responsive structure ──────────────────────────────────────────────────
-
   it('header has sticky positioning style', () => {
     render(<AppShell>content</AppShell>)
     const header = screen.getByTestId('app-nav')
-    // Inline style sets position: sticky
     expect(header).toHaveStyle({position: 'sticky'})
   })
 
   it('content slot has responsive padding classes', () => {
     render(<AppShell>content</AppShell>)
     const main = screen.getByTestId('app-content')
-    // Tailwind breakpoint classes are present in className
     expect(main.className).toMatch(/sm:px-6/)
     expect(main.className).toMatch(/md:px-8/)
     expect(main.className).toMatch(/lg:px-10/)
@@ -85,8 +80,6 @@ describe('AppShell', () => {
     const inner = nav.querySelector('[class*="sm:px-6"]')
     expect(inner).not.toBeNull()
   })
-
-  // ── Theme toggle ──────────────────────────────────────────────────────────
 
   it('renders a theme toggle button', () => {
     render(<AppShell>content</AppShell>)
@@ -147,5 +140,22 @@ describe('AppShell', () => {
       'aria-label',
       'Switch to dark theme',
     )
+  })
+
+  it('logout calls purgeOperatorCache, not purgeMonitoringCache', () => {
+    // AppShell must call the generalized operator purge on logout,
+    // not the monitoring-named cache purge.
+    const purgeSpy = vi.spyOn(logoutPurgeModule, 'purgeOperatorCache').mockReturnValue(undefined)
+
+    // Stub fetch so logout doesn't make real network calls
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network')))
+
+    render(<AppShell>content</AppShell>)
+    fireEvent.click(screen.getByTestId('logout-button'))
+
+    expect(purgeSpy).toHaveBeenCalledTimes(1)
+
+    vi.unstubAllGlobals()
+    purgeSpy.mockRestore()
   })
 })

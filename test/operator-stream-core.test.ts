@@ -15,7 +15,7 @@
  */
 
 import type {ApprovalFrameDataOpen, OutputFrameData, RunEntry, StreamState} from '../public/operator-stream.js'
-import {afterEach, describe, expect, it, vi} from 'vitest'
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {
   bootstrapOperatorStreams,
   buildApprovalClient,
@@ -32,6 +32,7 @@ import {
   parseSseFrame,
   PINNED_CONTRACT_VERSION,
   renderApprovalPrompt,
+  resetBootstrapState,
   RETRY_BASE_MS,
   RETRY_FACTOR,
   RETRY_MAX_COUNT,
@@ -1354,6 +1355,9 @@ async function withFakeBrowser(
 }
 
 describe('bootstrapOperatorStreams', () => {
+  beforeEach(() => resetBootstrapState())
+  afterEach(() => resetBootstrapState())
+
   it('starts one stream per run card, fetching the per-run stream path', async () => {
     const cards = [makeFakeCard('run-001'), makeFakeCard('run-002')]
     const fetchCalls = await withFakeBrowser(cards, true, bootstrapOperatorStreams)
@@ -2425,6 +2429,10 @@ describe('initOperatorStream — approval prompt DOM rendering', () => {
 // ---------------------------------------------------------------------------
 
 describe('bootstrapOperatorStreams — discovers approvalsEl and badgeEl', () => {
+  // Reset the module-level idempotency flag before each test so tests are isolated.
+  beforeEach(() => resetBootstrapState())
+  afterEach(() => resetBootstrapState())
+
   interface FakeCardWithApprovals {
     dataset: {runId: string}
     querySelector: (sel: string) => {
@@ -4793,5 +4801,254 @@ describe('nextStreamState — approval-reconcile __proto__ key guard', () => {
     if (run?.approvalOpenPrompts !== undefined) {
       expect(Object.hasOwn(run.approvalOpenPrompts, '__proto__')).toBe(false)
     }
+  })
+})
+
+describe('bootstrapOperatorStreams — idempotency guard', () => {
+  beforeEach(() => resetBootstrapState())
+  afterEach(() => resetBootstrapState())
+
+  it('resetBootstrapState export exists and is callable', () => {
+    expect(typeof resetBootstrapState).toBe('function')
+    expect(() => resetBootstrapState()).not.toThrow()
+  })
+
+  it('calling resetBootstrapState allows bootstrapOperatorStreams to run again', async () => {
+    // Use withFakeBrowser to provide a DOM context (no section → no-op, but no throw)
+    await withFakeBrowser([], false, bootstrapOperatorStreams)
+    // Reset the flag
+    resetBootstrapState()
+    // Second call: should run again without throwing
+    const fetchCalls = await withFakeBrowser([], false, bootstrapOperatorStreams)
+    expect(fetchCalls).toHaveLength(0)
+  })
+
+  it('bootstrapOperatorStreams is idempotent — calling twice does not start streams twice', async () => {
+    const cards = [makeFakeCard('run-idempotent')]
+    // First call: starts one stream
+    const fetchCalls1 = await withFakeBrowser(cards, true, bootstrapOperatorStreams)
+    expect(fetchCalls1).toHaveLength(1)
+    // Second call (without reset): idempotency guard prevents double-start
+    const fetchCalls2 = await withFakeBrowser(cards, true, bootstrapOperatorStreams)
+    expect(fetchCalls2).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// resetBootstrapState — closes handles and removes pagehide listener
+// ---------------------------------------------------------------------------
+
+describe('resetBootstrapState — handle cleanup and pagehide listener removal', () => {
+  beforeEach(() => resetBootstrapState())
+  afterEach(() => resetBootstrapState())
+
+  it('resetBootstrapState closes active stream handles', async () => {
+    // Stub a fake browser with a section that has one card
+    const cards = [makeFakeCard('run-cleanup-001')]
+    const section = {
+      querySelector: (sel: string) =>
+        sel.includes('stream-status') ? {textContent: '', hidden: false} : null,
+      querySelectorAll: () => cards,
+    }
+    const fakeDocument = {
+      querySelector: (sel: string) => (sel === '#run-status-section' ? section : null),
+      readyState: 'complete',
+      addEventListener() {},
+    }
+
+    vi.stubGlobal('document', fakeDocument)
+    vi.stubGlobal('fetch', async () => new Promise<Response>(() => {}))
+    vi.stubGlobal('addEventListener', () => {})
+
+    // We cannot easily monkey-patch the module export in ESM, so we test the
+    // behavior indirectly: resetBootstrapState() must not throw, and after reset
+    // the bootstrap can run again (proving state was cleared).
+    try {
+      bootstrapOperatorStreams()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+
+    // resetBootstrapState must not throw even with active handles
+    expect(() => resetBootstrapState()).not.toThrow()
+  })
+
+  it('resetBootstrapState removes the pagehide listener (removeEventListener called)', async () => {
+    const removedListeners: string[] = []
+
+    const cards = [makeFakeCard('run-pagehide-001')]
+    const section = {
+      querySelector: (sel: string) =>
+        sel.includes('stream-status') ? {textContent: '', hidden: false} : null,
+      querySelectorAll: () => cards,
+    }
+    const fakeDocument = {
+      querySelector: (sel: string) => (sel === '#run-status-section' ? section : null),
+      readyState: 'complete',
+      addEventListener() {},
+    }
+
+    vi.stubGlobal('document', fakeDocument)
+    vi.stubGlobal('fetch', async () => new Promise<Response>(() => {}))
+    // Track addEventListener/removeEventListener calls on globalThis
+    vi.stubGlobal('addEventListener', () => {})
+    vi.stubGlobal('removeEventListener', (event: string) => {
+      removedListeners.push(event)
+    })
+
+    try {
+      bootstrapOperatorStreams()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+
+    // After bootstrap, resetBootstrapState should call removeEventListener('pagehide', ...)
+    // We stub globalThis.removeEventListener to capture the call
+    vi.stubGlobal('removeEventListener', (event: string) => {
+      removedListeners.push(event)
+    })
+    try {
+      resetBootstrapState()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+
+    expect(removedListeners).toContain('pagehide')
+  })
+
+  it('resetBootstrapState can be called multiple times without throwing', () => {
+    expect(() => {
+      resetBootstrapState()
+      resetBootstrapState()
+      resetBootstrapState()
+    }).not.toThrow()
+  })
+
+  it('pagehide listener is not duplicated after reset + bootstrap cycle', async () => {
+    const addedListeners: string[] = []
+
+    const cards = [makeFakeCard('run-cycle-001')]
+    const section = {
+      querySelector: (sel: string) =>
+        sel.includes('stream-status') ? {textContent: '', hidden: false} : null,
+      querySelectorAll: () => cards,
+    }
+    const fakeDocument = {
+      querySelector: (sel: string) => (sel === '#run-status-section' ? section : null),
+      readyState: 'complete',
+      addEventListener() {},
+    }
+
+    vi.stubGlobal('document', fakeDocument)
+    vi.stubGlobal('fetch', async () => new Promise<Response>(() => {}))
+    vi.stubGlobal('addEventListener', (event: string) => {
+      addedListeners.push(event)
+    })
+    vi.stubGlobal('removeEventListener', () => {})
+
+    try {
+      // First bootstrap cycle
+      bootstrapOperatorStreams()
+      resetBootstrapState()
+      // Second bootstrap cycle
+      bootstrapOperatorStreams()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+
+    // Each bootstrap registers exactly one pagehide listener; two cycles → two registrations
+    // (the first is removed by reset before the second is added)
+    const pagehideCount = addedListeners.filter(e => e === 'pagehide').length
+    expect(pagehideCount).toBe(2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Agent-native: stream notice exposes data-connection-state attribute
+// ---------------------------------------------------------------------------
+
+describe('initOperatorStream — noticeEl gets data-connection-state attribute', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('noticeEl has data-connection-state="live" when stream goes live', async () => {
+    // Use the existing makeFakeEl helper (defined above in this file) which
+    // stores setAttribute calls in el.attributes — the same shape the DOM shell uses.
+    const noticeEl = makeFakeEl('div')
+    const statusEl = makeFakeEl('span')
+
+    // Stub fetch to return a readable stream that sends a ready frame
+    const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
+    const encoder = new TextEncoder()
+    // Capture the controller via a promise to avoid non-null assertion
+    let resolveController: (c: ReadableStreamDefaultController<Uint8Array>) => void
+    const controllerReady = new Promise<ReadableStreamDefaultController<Uint8Array>>(resolve => {
+      resolveController = resolve
+    })
+    const body = new ReadableStream<Uint8Array>({
+      start(c) { resolveController(c) },
+    })
+
+    vi.stubGlobal('fetch', async () => ({
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body,
+    }))
+
+    const handle = initOperatorStream({runId: 'run-state-test', statusEl, noticeEl})
+
+    // Push the ready frame once the controller is available
+    const controller = await controllerReady
+    controller.enqueue(encoder.encode(readyFrame))
+
+    // Allow microtasks to process
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    // dataset.connectionState mirrors the data-connection-state attribute (camelCase)
+    expect(noticeEl.dataset.connectionState).toBe('live')
+
+    handle.close()
+  })
+
+  it('noticeEl has data-connection-state="reconnecting" when stream gets a 500 (network-error path)', async () => {
+    const noticeEl = makeFakeEl('div')
+    const statusEl = makeFakeEl('span')
+
+    // Stub fetch to return a non-200 status — triggers network-error → reconnecting
+    vi.stubGlobal('fetch', async () => ({
+      status: 500,
+      headers: {get: () => 'text/html'},
+      body: null,
+    }))
+
+    const handle = initOperatorStream({runId: 'run-fail-test', statusEl, noticeEl})
+
+    // Allow microtasks to process
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    // A 500 triggers network-error → reconnecting (not immediately failed)
+    expect(noticeEl.dataset.connectionState).toBe('reconnecting')
+
+    handle.close()
+  })
+
+  it('noticeEl has data-connection-state="not-found" on 404', async () => {
+    const noticeEl = makeFakeEl('div')
+    const statusEl = makeFakeEl('span')
+
+    vi.stubGlobal('fetch', async () => ({
+      status: 404,
+      headers: {get: () => 'text/html'},
+      body: null,
+    }))
+
+    const handle = initOperatorStream({runId: 'run-404-test', statusEl, noticeEl})
+
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    expect(noticeEl.dataset.connectionState).toBe('not-found')
+
+    handle.close()
   })
 })

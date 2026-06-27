@@ -282,6 +282,13 @@ export declare function initOperatorStream(opts: InitOptions): StreamHandle
 
 export declare function bootstrapOperatorStreams(): void
 
+/**
+ * Reset the bootstrap-called flag.
+ * Called by the React runtime seam cleanup to allow remount after auth expiry.
+ * Internal to the runtime seam contract — not part of the public operator API.
+ */
+export declare function resetBootstrapState(): void
+
 // ---------------------------------------------------------------------------
 // Exported for direct testing (approval client + prompt renderer)
 // ---------------------------------------------------------------------------

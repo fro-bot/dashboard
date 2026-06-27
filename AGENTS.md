@@ -45,10 +45,7 @@ cross-repo footprint.
 Read-only dependency source repositories are available under
 `.slim/clonedeps/repos/` for inspection. Do not edit these clones.
 
-- `.slim/clonedeps/repos/fro-bot__agent/` — `fro-bot/agent` at `main`; the
-  gateway's `packages/gateway/src/github/app-client.ts` (installAuth read-only
-  permissions pattern), `packages/gateway/src/config.ts` (`readSecret`/
-  `readMultilineSecret` + `O_NOFOLLOW`), the Hono build/serve split, and
-  `packages/runtime/src/shared/logger.ts` (`Logger` + `redactSensitiveFields` +
-  `Result<T,E>`) that this app's primitives mirror for the future
-  `@fro.bot/runtime` extraction.
+- `.slim/clonedeps/repos/fro-bot__agent/` — `fro-bot/agent` at `v0.78.0`; the
+  gateway's operator OAuth return path contract, GitHub App client, secret
+  readers, Hono build/serve split, and runtime logger/Result primitives that
+  this app mirrors.

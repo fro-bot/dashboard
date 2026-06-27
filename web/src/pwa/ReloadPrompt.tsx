@@ -61,8 +61,8 @@ export function ReloadPrompt() {
         type="button"
         data-testid="reload-prompt-refresh"
         onClick={() => {
-          // No args — the bool arg is a deprecated no-op in vite-plugin-pwa v1.
-          updateServiceWorker()
+          // Required by vite-plugin-pwa's React update flow; no-arg leaves waiting SWs installed.
+          updateServiceWorker(true)
         }}
         className="px-3 py-1 rounded-md border border-accent bg-accent text-bg text-label font-semibold cursor-pointer whitespace-nowrap transition-colors duration-fast ease-standard hover:bg-accent-hover hover:border-accent-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
       >

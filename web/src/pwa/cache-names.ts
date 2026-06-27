@@ -2,10 +2,11 @@
  * Shared cache name constants — imported by both the service worker and the
  * page-side logout purge. This module is intentionally Workbox-free so it can
  * be bundled into the page without pulling in Workbox.
- *
- * The service worker imports this and re-exports MONITORING_CACHE so existing
- * imports from sw.ts continue to work.
  */
 
-/** Runtime cache name for the /api/monitoring NetworkFirst route. */
-export const MONITORING_CACHE = 'monitoring-v1'
+/**
+ * Runtime cache name for operator-sensitive data.
+ * Purged on logout, auth change, and app-version change.
+ * Only shell/static assets survive purge (managed by Workbox precache).
+ */
+export const OPERATOR_RUNTIME_CACHE = 'operator-runtime-v1'

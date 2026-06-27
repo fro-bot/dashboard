@@ -6,10 +6,10 @@
  */
 
 import {beforeEach, describe, expect, it, vi} from 'vitest'
-import {purgeMonitoringCache} from './logout-purge.ts'
-import {MONITORING_CACHE} from './cache-names.ts'
+import {purgeOperatorCache} from './logout-purge.ts'
+import {OPERATOR_RUNTIME_CACHE} from './cache-names.ts'
 
-describe('purgeMonitoringCache', () => {
+describe('purgeOperatorCache', () => {
   const mockCachesDelete = vi.fn().mockResolvedValue(true)
   const mockPostMessage = vi.fn()
 
@@ -33,20 +33,24 @@ describe('purgeMonitoringCache', () => {
     })
   })
 
-  it('calls caches.delete with the monitoring cache name', () => {
-    purgeMonitoringCache()
-    expect(mockCachesDelete).toHaveBeenCalledWith(MONITORING_CACHE)
+  it('calls caches.delete with the operator runtime cache name', () => {
+    purgeOperatorCache()
+    expect(mockCachesDelete).toHaveBeenCalledWith(OPERATOR_RUNTIME_CACHE)
+  })
+
+  it('LEGACY PURGE: also calls caches.delete with the old monitoring-v1 cache name', () => {
+    purgeOperatorCache()
     expect(mockCachesDelete).toHaveBeenCalledWith('monitoring-v1')
   })
 
   it('posts PURGE_RUNTIME to the SW controller', () => {
-    purgeMonitoringCache()
+    purgeOperatorCache()
     expect(mockPostMessage).toHaveBeenCalledWith({type: 'PURGE_RUNTIME'})
   })
 
-  it('calls both purge paths in a single invocation', () => {
-    purgeMonitoringCache()
-    expect(mockCachesDelete).toHaveBeenCalledTimes(1)
+  it('calls caches.delete twice (operator-runtime-v1 + legacy monitoring-v1) in a single invocation', () => {
+    purgeOperatorCache()
+    expect(mockCachesDelete).toHaveBeenCalledTimes(2)
     expect(mockPostMessage).toHaveBeenCalledTimes(1)
   })
 
@@ -56,7 +60,7 @@ describe('purgeMonitoringCache', () => {
       configurable: true,
       value: undefined,
     })
-    expect(() => purgeMonitoringCache()).not.toThrow()
+    expect(() => purgeOperatorCache()).not.toThrow()
   })
 
   it('does not throw when navigator.serviceWorker is undefined', () => {
@@ -65,7 +69,7 @@ describe('purgeMonitoringCache', () => {
       configurable: true,
       value: undefined,
     })
-    expect(() => purgeMonitoringCache()).not.toThrow()
+    expect(() => purgeOperatorCache()).not.toThrow()
   })
 
   it('does not throw when navigator.serviceWorker.controller is null', () => {
@@ -74,6 +78,6 @@ describe('purgeMonitoringCache', () => {
       configurable: true,
       value: {controller: null},
     })
-    expect(() => purgeMonitoringCache()).not.toThrow()
+    expect(() => purgeOperatorCache()).not.toThrow()
   })
 })

@@ -8,9 +8,6 @@
  * `createDashboardServer()` — binds the app to `DASHBOARD_HOST:DASHBOARD_PORT`
  * (default `0.0.0.0:3000`) so a sibling reverse-proxy container can reach it.
  *
- * Mirrors the gateway's buildAnnounceApp/createAnnounceServer split for future
- * @fro.bot/runtime extraction.
- *
  * Auth middleware protects every route EXCEPT:
  * - `/api/healthz` (public health check)
  * - `/auth/*` (login/callback/logout)
@@ -81,8 +78,7 @@ const EVICT_INTERVAL = 500 // sweep every 500 calls
 const EVICT_STALE_AGE = 2 * RATE_LIMIT_WINDOW_MS
 
 /**
- * Reset the rate limiter state. For use in tests only — clears all tracked
- * IP windows so tests that share the module-level map don't bleed into each other.
+ * Reset the rate limiter state. Tests only — prevents bleed between test cases.
  * @internal
  */
 export function resetRateLimitForTesting(): void {
@@ -90,14 +86,16 @@ export function resetRateLimitForTesting(): void {
   rateLimitCallCount = 0
 }
 
-// In gateway operator-session mode, an unauthenticated/invalid request must recover
-// through the GATEWAY operator login (which mints the __Host-session the gateway
-// authority requires), never the dashboard's own Arctic flow (which mints a
-// dashboard `session` cookie the gateway rejects, causing a re-auth loop on gateway
-// restart — see issue #70). return_to is fixed to /operator: the gateway validates
-// it against an exact allowlist (default ['/operator']) and rejects anything else.
-// The value is a fixed same-origin relative literal — no request-derived component,
-// so it introduces no open redirect.
+// Gateway operator-session mode: unauthenticated/invalid requests must recover through
+// the GATEWAY operator login (which mints the __Host-session the gateway requires),
+// never the dashboard's Arctic flow (which mints a `session` cookie the gateway
+// rejects, causing a re-auth loop on gateway restart — see issue #70).
+//
+// INVARIANT: return_to MUST be /operator — Gateway validates return_to against an
+// exact allowlist and rejects any other value. Do NOT derive from the request.
+// After gateway returns to /operator, the dashboard redirects to / server-side
+// (see app.get('/operator', c => c.redirect('/', 302)) below), so the user lands
+// on / as intended. return_to=/ is NOT on the Gateway allowlist.
 const GATEWAY_LOGIN_REDIRECT = '/operator/auth/github/start?return_to=/operator'
 
 function sweepRateLimitMap(now: number): void {
@@ -136,8 +134,7 @@ export function checkRateLimit(ip: string, now: number = Date.now()): boolean {
 
 /**
  * Injectable config for `buildDashboardApp`.
- * All fields are optional — production reads from env.
- * Tests inject fakes to avoid network/env dependencies.
+ * All fields optional — production reads from env; tests inject fakes.
  */
 export interface DashboardAppConfig {
   /**
@@ -176,28 +173,19 @@ export interface DashboardAppConfig {
   /**
    * Whether to mount the operator UI skeleton at /operator.
    * If undefined, reads from DASHBOARD_OPERATOR_UI_ENABLED env (default: false).
-   * When false (default), /operator is NOT mounted — zero operator objects are
-   * constructed in-process. The route falls through to the auth middleware which
-   * returns the standard deny/redirect for protected unknown paths.
-   * Tests inject this directly to avoid env dependencies.
+   * When false, /operator is not mounted — zero operator objects are constructed.
    */
   operatorUiEnabled?: boolean | undefined
   /**
    * Whether to use the gateway operator session for auth instead of Arctic.
    * If undefined, reads from DASHBOARD_GATEWAY_OPERATOR_SESSION_ENABLED env (default: false).
-   * When false (default), the existing Arctic OAuth + signed-cookie session is used.
-   * When true, the gateway operator session governs auth.
-   * Tests inject this directly to avoid env dependencies.
-   * Independent of operatorUiEnabled: separate env var, separate reader.
+   * Independent of operatorUiEnabled.
    */
   gatewayOperatorSessionEnabled?: boolean | undefined
   /**
    * Injectable OperatorClient for the gateway auth branch.
-   * If undefined and gatewayOperatorSessionEnabled is true, a real client is built
-   * per-request from the server-side fetch adapter (bound to the configured origin
-   * and inbound cookie). Tests inject a fake to avoid network calls.
-   * Never constructed when gatewayOperatorSessionEnabled is false, so the flag-off
-   * path builds zero gateway objects.
+   * If undefined, a real client is built per-request from the server-side fetch adapter.
+   * Never constructed when gatewayOperatorSessionEnabled is false.
    */
   operatorClient?: OperatorClient | undefined
   /**
@@ -214,32 +202,21 @@ export interface DashboardAppConfig {
   gatewayOperatorOrigin?: string | undefined
   /**
    * Injectable fetch implementation for the production gateway client path.
-   * Only used when operatorClient is undefined (the production branch that builds
-   * a real client from createOperatorServerFetch). Inject a recording/fake fetch
-   * in tests to exercise the production client-construction path without network.
-   * Ignored when operatorClient is injected directly.
+   * Only used when operatorClient is undefined. Ignored when operatorClient is injected.
    */
   gatewayFetchImpl?: ((url: string, init?: RequestInit) => Promise<Response>) | undefined
   /**
-   * DEV-ONLY auto-login bypass. When true AND guards pass, skips OAuth and mints
-   * a real signed session for the configured operatorLogin on every unauthenticated
-   * request to a protected route (Arctic branch only).
+   * DEV-ONLY auto-login bypass. Skips OAuth and mints a real signed session for
+   * the configured operatorLogin (Arctic branch only).
    *
    * SECURITY INVARIANTS (load-bearing):
    * - THROWS at startup if NODE_ENV === 'production' (fail loud, never silent).
    * - ENV-driven path (DASHBOARD_DEV_AUTOLOGIN) ALSO throws if DASHBOARD_HOST is
    *   not a loopback address (127.0.0.1/localhost/::1). Default host 0.0.0.0 fails.
-   * - Injected opts.devAutoLogin (test seam) bypasses the host check but still
-   *   throws on NODE_ENV=production. Document this in tests.
-   * - NEVER mints a session when operatorLogin is undefined (deny-all stays deny-all).
+   * - NEVER mints a session when operatorLogin is undefined.
    * - Only active in the Arctic branch (not gateway-session mode).
-   * - Minted session is a genuine signed session via SessionManager — not a fake identity.
    *
-   * If undefined, reads from DASHBOARD_DEV_AUTOLOGIN env.
-   * Only the exact string 'true' (case-insensitive, trimmed) enables the bypass.
-   * Default: OFF.
-   *
-   * Tests inject this directly to avoid env dependencies.
+   * If undefined, reads from DASHBOARD_DEV_AUTOLOGIN env. Default: OFF.
    */
   devAutoLogin?: boolean | undefined
 }
@@ -263,8 +240,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
 
   // Resolve cookie key — only construct SessionManager when auth is active.
   // When operatorLogin is set, a real key is MANDATORY (fail-closed).
-  // When operatorLogin is unset (deny-all mode), no session is ever issued so
-  // no SessionManager is needed; skip construction to avoid a zero-key footgun.
+  // When operatorLogin is unset (deny-all mode), no SessionManager is needed.
   let sessionManager: SessionManager | undefined
   if (operatorLogin !== undefined) {
     if (opts?.cookieKey === undefined) {
@@ -287,19 +263,15 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
 
   const fetchUserLogin = opts?.fetchUserLogin ?? fetchGitHubUserLogin
 
-  // Resolve snapshot provider — both the SPA monitoring view and /api/status share the same source.
-  // Default: empty snapshot (no aggregator wired yet; production wires the real one).
+  // Resolve snapshot provider — default empty; production wires the real aggregator.
   const EMPTY_SNAPSHOT = {repos: [], staleBanner: false, driftCount: 0, refreshedAt: null} as const
   const getSnapshot = opts?.getSnapshot ?? (() => EMPTY_SNAPSHOT)
 
   // Resolve operator UI flag — default OFF (fail-closed).
-  // When undefined, reads from env. Tests inject directly via opts.operatorUiEnabled.
   const operatorUiEnabled =
     opts?.operatorUiEnabled === undefined ? readOperatorUiConfig().enabled : opts.operatorUiEnabled
 
   // Resolve gateway operator session flag — default OFF (fail-closed).
-  // When undefined, reads from env. Tests inject directly via opts.gatewayOperatorSessionEnabled.
-  // Independent of operatorUiEnabled: separate env var, separate reader.
   const gatewayOperatorSessionEnabled =
     opts?.gatewayOperatorSessionEnabled === undefined
       ? readGatewayOperatorSessionConfig().enabled
@@ -308,24 +280,12 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // Resolve devAutoLogin — DEV-ONLY auth bypass. Default OFF (fail-closed).
   //
   // SECURITY: Two independent guards must BOTH pass for the bypass to be effective.
-  // If the bypass is REQUESTED but either guard fails, we THROW at startup (fail loud,
-  // not silent) so misconfiguration is caught immediately rather than silently disabled.
+  // If requested but either guard fails, THROW at startup (fail loud, never silent).
   //
-  // Guard A — NODE_ENV: must NOT be 'production'.
-  //   The runtime Dockerfile sets ENV NODE_ENV=production, so the production container
-  //   always satisfies this guard. The previous silent-disable was insufficient because
-  //   NODE_ENV was undefined in prod (not set in Dockerfile/compose/deploy .env).
-  //
-  // Guard B — bind host (ENV path only): DASHBOARD_HOST must be a loopback address.
-  //   The default bind host is 0.0.0.0 (non-loopback), so the bypass requires an
-  //   explicit DASHBOARD_HOST=127.0.0.1/localhost/::1. This prevents the bypass from
-  //   engaging on any network-accessible bind address.
-  //   NOTE: Guard B applies only to the ENV-driven path (DASHBOARD_DEV_AUTOLOGIN).
-  //   The injected opts.devAutoLogin path is a test seam — it bypasses the host check
-  //   but still honors Guard A (NODE_ENV production throw). This is intentional: tests
-  //   inject devAutoLogin directly and do not set DASHBOARD_HOST.
-  //
-  // Both paths: if requested but unsafe → THROW (never silently disable).
+  // Guard A — NODE_ENV must NOT be 'production' (applies to both paths).
+  // Guard B — DASHBOARD_HOST must be a loopback address (ENV-driven path only).
+  //   The injected opts.devAutoLogin path (test seam) bypasses the host check
+  //   but still honors Guard A.
   const devAutoLoginRequested: boolean =
     opts?.devAutoLogin === undefined
       ? process.env.DASHBOARD_DEV_AUTOLOGIN?.trim().toLowerCase() === 'true'
@@ -334,7 +294,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   const isEnvDrivenPath = opts?.devAutoLogin === undefined
 
   if (devAutoLoginRequested) {
-    // Guard A: NODE_ENV production check (applies to BOTH paths)
+    // Guard A: NODE_ENV production check
     if (process.env.NODE_ENV === 'production') {
       throw new Error(
         'DASHBOARD_DEV_AUTOLOGIN refused: requires NODE_ENV!=production and DASHBOARD_HOST=127.0.0.1/localhost/::1 (dev-only auth bypass must never run in production)',
@@ -360,15 +320,12 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
 
   // Resolve the trusted gateway operator origin — SECURITY CRITICAL.
   // Must be a configured, trusted value; never derived from the inbound request Host.
-  // When opts.gatewayOperatorOrigin is provided (tests), use it directly after
-  // validation. When undefined, read from env (with default fallback).
   // null means the configured value is invalid → fail closed at middleware time.
   let resolvedGatewayOrigin: string | null = null
   if (gatewayOperatorSessionEnabled) {
     if (opts?.gatewayOperatorOrigin === undefined) {
       resolvedGatewayOrigin = readGatewayOperatorOrigin()
     } else {
-      // Validate the injected origin (same rules as readGatewayOperatorOrigin).
       try {
         const parsed = new URL(opts.gatewayOperatorOrigin)
         if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
@@ -384,50 +341,25 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   const app = new Hono<{Variables: Variables}>()
 
   // ── PWA service worker CSP bypass (registered BEFORE secureHeaders) ──────────
-  // secureHeaders is a post-next() middleware: it sets headers AFTER calling next().
-  // To remove the CSP from /sw.js responses, this middleware must be registered
-  // BEFORE secureHeaders so it is the outer layer — its post-next() code runs
-  // AFTER secureHeaders has set the CSP, allowing the delete to take effect.
-  //
-  // Workers do not inherit the page CSP (they have their own execution context).
-  // A too-restrictive page CSP on the SW response can block Workbox importScripts().
-  // The existing worker-src 'self' + manifest-src 'self' in the page CSP already
-  // cover SW registration and manifest fetch — no widening needed.
+  // Must be registered before secureHeaders (which runs post-next()) so this
+  // middleware wraps it and can delete the CSP after secureHeaders sets it.
+  // Workers do not inherit the page CSP; a too-restrictive CSP can block Workbox.
   app.use('/sw.js', async (c, next) => {
     await next()
-    // secureHeaders has now set the CSP — remove it from the SW response.
     c.res.headers.delete('content-security-policy')
     // No-cache so the browser re-fetches on every load and detects SW updates.
     c.res.headers.set('cache-control', 'no-cache, no-store, must-revalidate')
   })
 
   // ── Security headers + CSP (applied to all responses) ──────────────────────
-  // Placed first so every response — including error responses — carries the
-  // security headers. The tight CSP (script-src 'self', no unsafe-inline)
-  // requires all scripts to be external files, satisfying the SPA build output
-  // (Vite emits <script type="module" src="..."> with hashed filenames — no inline).
-  //
-  // Pinned directives for the SPA PWA shell:
-  //   script-src 'self'     — no inline scripts, no eval; Vite hashed chunks satisfy this
-  //   worker-src 'self'     — service worker registration from same origin
-  //   manifest-src 'self'   — web app manifest fetch from same origin
-  //   connect-src 'self'    — fetch/XHR/SSE to same origin only
-  //   img-src 'self' data:  — data: URIs for inline SVG/icon use cases
-  //   font-src 'self'       — self-hosted fonts only
-  //   base-uri 'self'       — prevent base tag injection
-  //   object-src 'none'     — no plugins
-  //   style-src 'self' 'unsafe-inline' — SSR pages use inline style attributes
-  //     throughout; inline styles are low risk vs inline scripts (the XSS vector).
-  //     Do NOT add 'unsafe-eval' — no eval in production.
+  // style-src allows 'unsafe-inline' because SSR pages use inline style attributes.
+  // script-src stays strict ('self', no inline) — inline script is the XSS vector.
   app.use(
     '*',
     secureHeaders({
       contentSecurityPolicy: {
         defaultSrc: ["'self'"],
         scriptSrc: ["'self'"],
-        // The SSR pages use inline style attributes throughout, so style-src
-        // permits inline styles. Scripts stay strict ('self', no inline) since
-        // inline script is the meaningful XSS vector here.
         styleSrc: ["'self'", "'unsafe-inline'"],
         workerSrc: ["'self'"],
         manifestSrc: ["'self'"],
@@ -442,20 +374,15 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     }),
   )
 
-  // ── Rate limiting middleware (applied to sensitive routes) ──────────────────
-  // NOTE: Real per-client rate limiting belongs at Caddy (the reverse proxy).
-  // This is defense-in-depth only. We key on the direct connection remote address
-  // (not X-Forwarded-For) because the app only sees loopback connections from Caddy
-  // and XFF is client-controlled — trusting it would allow spoofing the throttle key.
+  // ── Rate limiting middleware (defense-in-depth; real limiting belongs at Caddy) ──
+  // Keyed on the direct connection remote address, not X-Forwarded-For (client-spoofable).
   app.use('*', async (c: Context, next) => {
     const path = new URL(c.req.url).pathname
     const sensitiveRoutes = ['/', '/auth/login', '/auth/callback', '/operator']
     const isSensitive = sensitiveRoutes.includes(path) || path.startsWith('/api/') || path.startsWith('/operator/')
 
     if (isSensitive) {
-      // Use the direct connection remote address — not XFF (client-spoofable).
-      // getConnInfo is only available in the real Node.js server context; in tests
-      // (app.request()) it throws, so we fall back to 'unknown' gracefully.
+      // getConnInfo throws in test context (app.request()); fall back to 'unknown'.
       let ip: string
       try {
         ip = getConnInfo(c).remote.address ?? 'unknown'
@@ -473,37 +400,30 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   })
 
   // ── Auth middleware (deny-by-default, fail-closed) ──────────────────────────
-  // Public routes (always reachable without a session):
-  //   - /api/healthz  (health check)
-  //   - /auth/*       (login/callback/logout — themselves deny when unconfigured)
-  // Every other route REQUIRES a valid operator session. When operatorLogin is
-  // unset, the app fails CLOSED: every protected route is denied (401), and a
-  // session can never be issued (the /auth flow is replaced by a denied router).
-  // Deny-by-default beats 404 here — an unauthenticated caller must not be able
-  // to probe which routes exist.
+  // Public routes: /api/healthz, /auth/*, SPA static assets (see isPublicPath).
+  // Every other route requires a valid operator session.
+  // When operatorLogin is unset, the app fails closed: every protected route is
+  // denied (401) and no session can ever be issued.
   //
-  // Strategy branch: the flag selects exactly ONE branch at the top. The two
-  // branches NEVER union and NEVER fall back to each other. Each branch runs its
-  // OWN isPublicPath check — a path added to one mode's allowlist cannot silently
-  // bypass the other.
+  // Strategy branch: the flag selects exactly ONE branch. The two branches never
+  // union and never fall back to each other. Each branch runs its OWN isPublicPath
+  // check — a path added to one mode's allowlist cannot silently bypass the other.
   const isPublicPath = (path: string): boolean =>
     path === '/api/healthz' ||
     path === '/auth/login' ||
     path === '/auth/callback' ||
     path === '/auth/logout' ||
-    // SPA static assets — reachable pre-auth so the PWA shell loads before the
-    // auth redirect. The JS/CSS/manifest/icons carry no sensitive data.
-    // /assets/* — hashed JS/CSS chunks from web/dist/assets/
-    // /manifest.webmanifest — PWA manifest
-    // /icon-*.svg — PWA icons
-    // /sw.js — service worker script (must be public so the browser can register
-    //   it before the auth redirect; the SW itself carries no sensitive data)
-    // /registerSW.js — vite-plugin-pwa inline registration helper (also public)
+    // SPA static assets — public pre-auth so the PWA shell loads before the auth
+    // redirect. JS/CSS/manifest/icons carry no sensitive data.
     path.startsWith('/assets/') ||
     path === '/manifest.webmanifest' ||
     path.startsWith('/icon-') ||
     path === '/sw.js' ||
     path === '/registerSW.js' ||
+    // Operator runtime JS modules — always public because root / owns the operator
+    // shell and always depends on these assets, regardless of operatorUiEnabled.
+    path === '/static/operator-stream.js' ||
+    path === '/static/operator-launch.js' ||
     (operatorUiEnabled && path.startsWith('/static/'))
 
   app.use('*', async (c: Context, next) => {
@@ -511,48 +431,32 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
 
     if (gatewayOperatorSessionEnabled) {
       // ── GATEWAY BRANCH ────────────────────────────────────────────────────
-      // Authorizes purely on a valid gateway operator session. There is no
-      // DASHBOARD_OPERATOR_LOGIN check here, and no fallback to Arctic on failure.
-
-      // Own public-path check — duplicated intentionally (see strategy-branch note).
       if (isPublicPath(path)) {
         return next()
       }
 
-      // Require an inbound cookie to forward as the end-user principal. If absent
-      // or whitespace-only, deny immediately — do NOT call getCurrentSession.
+      // Require an inbound cookie to forward as the end-user principal.
       const inboundCookie = c.req.header('cookie')
       if (inboundCookie === undefined || inboundCookie.trim() === '') {
-        // Deny: no principal to forward. Recover through the gateway operator login so
-        // the operator mints the __Host-session the gateway requires (see issue #70).
         return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
       }
 
       // Fail closed if the configured gateway origin is invalid or unparseable.
-      // This protects against a misconfigured DASHBOARD_GATEWAY_OPERATOR_ORIGIN
-      // causing the middleware to silently fall back to an unsafe origin.
       if (resolvedGatewayOrigin === null) {
         logger.warning('gateway-auth: configured gateway origin is invalid or missing', {path})
         return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
       }
 
-      // Obtain the OperatorClient: use injected client (tests) or build per-request (production).
-      // Per-request construction is correct: the cookie comes from the request.
-      // The origin is ALWAYS the configured trusted value — never from the request Host.
-      // Flag-OFF never reaches this branch, so zero gateway objects are constructed when off.
+      // Build the OperatorClient: use injected client (tests) or build per-request (production).
+      // SECURITY: origin is always resolvedGatewayOrigin (configured), never from the request Host.
       let client: OperatorClient
       if (opts?.operatorClient === undefined) {
-        // Production path: build a real client bound to the CONFIGURED origin and inbound cookie.
-        // SECURITY: origin is resolvedGatewayOrigin (configured), NOT new URL(c.req.url).origin.
-        // The inbound Host header is attacker-influenceable; using it would allow a spoofed
-        // Host to redirect the forwarded cookie to an attacker-controlled server.
         const serverFetch = createOperatorServerFetch({
           origin: resolvedGatewayOrigin,
           cookie: inboundCookie,
           fetchImpl: opts?.gatewayFetchImpl,
         })
-        // Minimal no-op createEventStream stub — getCurrentSession does not use SSE.
-        // Throws if called to surface any accidental SSE usage loudly.
+        // No-op SSE stub — getCurrentSession does not use SSE; throws if called.
         const noopEventStream = (_streamPath: string) => ({
           start: () => {
             throw new Error('SSE transport not available in server-side auth middleware')
@@ -569,26 +473,20 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
       }
 
       // Call the gateway session endpoint. Fail closed on every non-success path.
-      // Coarse logging only — never log the cookie value or session body.
+      // Log only the path — never the cookie value or error detail (may contain identity info).
       const result = await client.getCurrentSession()
       if (!isOk(result)) {
-        // Every error kind (http/network/protocol/validation) → deny.
-        // Log only the path — never the error detail which may contain identity info.
         logger.warning('gateway-auth: session validation failed', {path})
         return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
       }
 
       // Expired-session defense — even on a 2xx, a non-future expiresAt → deny.
-      // The gateway is the authority but we do not rely solely on it never returning expired.
       if (result.data.expiresAt <= Date.now()) {
         logger.warning('gateway-auth: session expired', {path})
         return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
       }
 
-      // Nonsensical identity defense — deny sessions with a non-positive operatorId
-      // or a blank login. These are structurally valid per the parse contract but
-      // semantically impossible for a real operator account. Fail closed rather than
-      // propagate a garbage identity downstream.
+      // Nonsensical identity defense — non-positive operatorId or blank login → deny.
       if (result.data.operatorId <= 0) {
         logger.warning('gateway-auth: session has non-positive operatorId', {path})
         return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
@@ -598,50 +496,34 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
         return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
       }
 
-      // Valid gateway session: attach to context. Do NOT set sessionLogin —
-      // gatewaySession is the only identity signal in gateway mode.
+      // Valid gateway session: attach to context.
       c.set('gatewaySession', result.data)
       return next()
     } else {
       // ── ARCTIC BRANCH ────────────────────────────────────────────────────
-      // Own public-path check — duplicated intentionally (see strategy-branch note).
-
       if (isPublicPath(path)) {
         return next()
       }
 
       // Fail closed: with no configured operator, no protected route is served.
-      // devAutoLogin NEVER mints a session when operatorLogin is undefined.
       if (operatorLogin === undefined) {
         return c.text('Unauthorized', 401)
       }
 
-      // Validate session cookie.
-      // The middleware context type is slightly wider than getCookie's declared param type;
-      // this cast is safe — getCookie only reads headers from the context.
       const cookieValue = getCookie(c, 'session')
       const sm = sessionManager as SessionManager
 
-      // Attempt to verify the existing session cookie (if present).
       const session =
         typeof cookieValue === 'string' && cookieValue.length > 0 ? sm.verify(cookieValue) : null
 
-      // FIX #4: Reject sessions minted for a different operator login.
-      // A stale session from a previously-configured login must not grant access
-      // after the operator changes.
+      // Reject sessions minted for a different operator login (stale session guard).
       const validSession = session !== null && session.login === operatorLogin ? session : null
 
       if (validSession === null) {
-        // No valid session. devAutoLogin (DEV-ONLY, never in production) mints a real
-        // signed session for the configured operator, skipping OAuth entirely.
-        // Preconditions: devAutoLogin=true, operatorLogin set (checked above), sessionManager set.
         if (devAutoLogin) {
           const sessionValue = sm.sign(operatorLogin)
-          // Matches /auth/callback's cookie attributes EXCEPT secure: this dev-only
-          // path runs over http://localhost, where a Secure cookie is dropped by the
-          // browser (causing a re-mint loop). secure:false is correct and safe here
-          // precisely because devAutoLogin is dev-only and prod-impossible (NODE_ENV
-          // guard above). The production session cookie is still set Secure by /auth/callback.
+          // secure:false — dev-only path runs over http://localhost; a Secure cookie
+          // would be dropped by the browser. Production /auth/callback still sets Secure.
           setCookie(c, 'session', sessionValue, {
             httpOnly: true,
             secure: false,
@@ -656,25 +538,20 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
         return c.redirect('/auth/login', 302)
       }
 
-      // Attach session login to context for downstream handlers (typed, no `as never`)
       c.set('sessionLogin', validSession.login)
       return next()
     }
   })
 
   if (gatewayOperatorSessionEnabled) {
-    // Gateway operator-session mode: the gateway is the session authority. The
-    // dashboard Arctic flow must NOT be reachable here — minting a dashboard
-    // `session` cookie cannot satisfy the gateway and causes the re-auth loop on
-    // gateway restart (issue #70). Mount a minimal router that sends /auth/login to
-    // the gateway operator login; deliberately do NOT mount /auth/callback or any
-    // other Arctic path, so the dashboard session-minting flow returns 404.
+    // Gateway mode: /auth/login → gateway operator login. Do NOT mount /auth/callback
+    // or any Arctic path — the dashboard session-minting flow must not be reachable
+    // (a dashboard `session` cookie cannot satisfy the gateway; see issue #70).
     const gatewayAuthRouter = new Hono()
     gatewayAuthRouter.get('/login', c => c.redirect(GATEWAY_LOGIN_REDIRECT, 302))
     app.route('/auth', gatewayAuthRouter)
   } else if (operatorLogin === undefined) {
-    // Fail-closed: no operator login → the auth flow itself denies all requests,
-    // so no session can ever be minted.
+    // Fail-closed: no operator login → deny all auth routes; no session can be minted.
     const deniedRouter = new Hono()
     deniedRouter.all('*', c => c.text('Unauthorized', 401))
     app.route('/auth', deniedRouter)
@@ -690,58 +567,49 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   }
 
   // ── API routes ───────────────────────────────────────────────────────────────
-  // /api/healthz is public (exempted in isPublicPath above).
-  // /api/status is protected — the auth middleware above already denies unauthenticated
-  // requests to any path not in isPublicPath, so no extra guard is needed here.
   app.route('/api', buildApiRouter(getSnapshot))
 
-  // Serve the React SPA at /. The shell assets (JS/CSS/manifest/icons) are public via
-  // isPublicPath, but index.html itself requires a session, so the SPA bootstraps only
-  // for authenticated operators. Deep-link fallback (/some/client-route → index.html)
-  // needs a Caddy try_files rule; only `/` is served here since the SPA has no
-  // client-side routing yet.
+  // Serve the React SPA at /. index.html requires a session; shell assets are public.
   app.get('/', serveStatic({root: './web/dist', path: 'index.html'}))
+
+  // ── /operator → / redirect (unconditional, flag-independent) ────────────────
+  // / is the canonical operator launch route. Old /operator links redirect here.
+  // Mounted before the operatorUiEnabled-gated handler so the flag has no effect.
+  app.get('/operator', c => c.redirect('/', 302))
+
+  // ── Operator runtime JS assets — always served (flag-independent) ────────────
+  // Root / owns the operator shell and always depends on these two modules.
+  // Mounted unconditionally so they are available regardless of operatorUiEnabled.
+  // isPublicPath already allows these paths so auth middleware passes them through.
+  app.use(
+    '/static/operator-stream.js',
+    serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}),
+  )
+  app.use(
+    '/static/operator-launch.js',
+    serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}),
+  )
 
   // ── Operator UI skeleton route ────────────────────────────────────────────────
   // Only mounted when operatorUiEnabled is true (default: false).
-  // When disabled, /operator is NOT mounted — zero operator objects are constructed.
-  // The route falls through to the auth middleware which returns the standard
-  // deny/redirect for protected unknown paths (Marcus's explicit decision).
-  // MUST be inside the auth boundary (protected) — NOT added to isPublicPath.
   if (operatorUiEnabled) {
     const {buildOperatorRouter} = await import('./routes/operator.ts')
     app.route('/operator', buildOperatorRouter(gatewayOperatorSessionEnabled))
 
-    // ── Static asset serving ────────────────────────────────────────────────
     // Serves public/ at /static/* — flag-gated alongside the operator route.
-    // The /static/ prefix is added to isPublicPath above so unauthenticated
-    // browsers can load CSS/JS assets without being 302'd to /auth/login.
-    // root is relative to WORKDIR (/app) in the container, matching Dockerfile.
+    // /static/ is in isPublicPath so unauthenticated browsers can load assets.
+    // Note: operator-stream.js and operator-launch.js are already mounted above;
+    // this catch-all additionally serves operator.css and any other static assets.
     app.use('/static/*', serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}))
   }
 
   // ── SPA static asset serving ─────────────────────────────────────────────
-  // Serves the prebuilt SPA (web/dist/) under specific public paths.
-  // These paths are added to isPublicPath above so the PWA shell loads before
-  // the auth redirect — the JS/CSS/manifest/icons carry no sensitive data.
-  //
-  // /assets/* — hashed JS/CSS chunks (Vite content-addressed, safe to cache)
-  // /manifest.webmanifest — PWA manifest
-  // /icon-*.svg — PWA icons
-  // /sw.js — service worker script (root scope, no-cache so updates are detected)
-  // /registerSW.js — vite-plugin-pwa registration helper (no-cache)
-  //
-  // root is relative to WORKDIR (/app) in the container, matching Dockerfile.
-  // The builder stage copies web/dist/ to /app/web/dist/ in the runtime image.
   app.use('/assets/*', serveStatic({root: './web/dist'}))
-  // PWA icons: icon-192.svg, icon-512.svg (and any future icon-*.svg)
   app.use('/icon-*', serveStatic({root: './web/dist'}))
 
   // ── PWA manifest ─────────────────────────────────────────────────────────
-  // serveStatic serves .webmanifest files as application/octet-stream by default
-  // (the extension is not in the standard MIME map). The header middleware must
-  // be registered BEFORE serveStatic so it wraps the static handler and can
-  // override the Content-Type after serveStatic sets it.
+  // serveStatic serves .webmanifest as application/octet-stream by default.
+  // This middleware must be registered BEFORE serveStatic to override Content-Type.
   // application/manifest+json is required for PWA installability.
   app.use('/manifest.webmanifest', async (c, next) => {
     await next()
@@ -750,37 +618,17 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   app.use('/manifest.webmanifest', serveStatic({root: './web/dist'}))
 
   // ── PWA service worker + registration helper ──────────────────────────────
-  // /sw.js and /registerSW.js must be served at root scope (not under /assets/)
-  // so the SW's scope covers the entire origin. Both are emitted by vite-plugin-pwa
-  // into web/dist/ at build time.
-  //
-  // Header contract (load-bearing):
-  //   Content-Type: text/javascript (set by serveStatic from the .js extension) —
-  //     a wrong MIME (e.g. text/html) causes the browser to reject SW registration.
-  //   Cache-Control: no-cache, no-store, must-revalidate — set by the /sw.js
-  //     middleware registered before secureHeaders (see above).
-  //
-  // CSP: removed from /sw.js by the pre-secureHeaders middleware (see above).
-  //   Workers do not inherit the page CSP; a too-restrictive CSP can break Workbox.
-  //   The existing worker-src 'self' + manifest-src 'self' in the page CSP already
-  //   cover SW registration and manifest fetch — no widening needed.
-  //
-  // /registerSW.js Cache-Control: set by the middleware registered here (after
-  //   secureHeaders), which is sufficient since we only need to set Cache-Control
-  //   (not remove CSP — the page CSP is harmless on the registration helper).
+  // /sw.js and /registerSW.js must be served at root scope so the SW covers the
+  // entire origin. CSP is removed from /sw.js by the pre-secureHeaders middleware.
   app.use('/sw.js', serveStatic({root: './web/dist'}))
 
   app.use('/registerSW.js', async (c, next) => {
     await next()
-    // No-cache so the registration helper is always fresh alongside sw.js.
     c.res.headers.set('cache-control', 'no-cache, no-store, must-revalidate')
   })
   app.use('/registerSW.js', serveStatic({root: './web/dist'}))
 
-  // ── web/dist presence check ───────────────────────────────────────────────
-  // Warn early if the SPA build artifact is missing. GET / will 404 silently
-  // without this. Does NOT throw — the server still starts (useful for backend-
-  // only dev), but the operator needs to know to run `pnpm build:web` first.
+  // Warn early if the SPA build artifact is missing (GET / will 404 silently).
   if (!existsSync('./web/dist/index.html')) {
     logger.warning(
       'web/dist/index.html not found — GET / will return 404. Run `pnpm build:web` to build the SPA.',

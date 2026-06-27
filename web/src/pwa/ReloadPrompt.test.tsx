@@ -40,7 +40,7 @@ describe('ReloadPrompt', () => {
     expect(screen.getByText('New version available')).toBeInTheDocument()
   })
 
-  it('calls updateServiceWorker with no args when Refresh is clicked', () => {
+  it('calls updateServiceWorker(true) when Refresh is clicked — activates waiting SW and reloads', () => {
     vi.mocked(pwaRegister.useRegisterSW).mockReturnValue({
       needRefresh: [true, mockSetNeedRefresh],
       offlineReady: [false, vi.fn()],
@@ -49,8 +49,8 @@ describe('ReloadPrompt', () => {
     render(<ReloadPrompt />)
     fireEvent.click(screen.getByTestId('reload-prompt-refresh'))
     expect(mockUpdateServiceWorker).toHaveBeenCalledTimes(1)
-    // No args — the bool arg is a deprecated no-op in vite-plugin-pwa v1.
-    expect(mockUpdateServiceWorker).toHaveBeenCalledWith()
+    // Must pass true so vite-plugin-pwa skips waiting, activates the new SW, and reloads.
+    expect(mockUpdateServiceWorker).toHaveBeenCalledWith(true)
   })
 
   it('calls setNeedRefresh(false) when dismiss is clicked', () => {

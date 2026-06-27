@@ -9,8 +9,8 @@ export default defineConfig({
     react(),
     tailwindcss(),
     VitePWA({
-      // Use injectManifest so we can ship a custom SW with the deny-by-default
-      // fetch router (required for the stale-signal Workbox plugin in Unit 3).
+      // Use injectManifest so we can ship a custom SW with deny-by-default
+      // fetch routing.
       strategies: 'injectManifest',
       srcDir: 'src',
       filename: 'sw.ts',

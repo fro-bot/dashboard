@@ -128,7 +128,7 @@ describe('dashboard SPA root — GET /', () => {
       const body = await res.text()
       // SPA shell contains the root div and script tag
       expect(body).toContain('<div id="root">')
-      expect(body).toContain('Fro Bot Dashboard')
+      expect(body).toContain('Fro Bot Operator')
     })
 
     it('SPA shell does NOT contain SSR repo data (data is fetched client-side)', async () => {
