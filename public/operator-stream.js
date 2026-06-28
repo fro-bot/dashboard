@@ -1382,7 +1382,7 @@ export function initOperatorStream(opts) {
 
     if (statusEl) {
       const runEntry = state.runs[runId]
-      if (runEntry && state.connection === 'live') {
+      if (runEntry && (state.connection === 'live' || runEntry.terminal)) {
         const view = toSafeRunView(runEntry)
         // Render label from local map, never the raw wire string into textContent
         const label = STATUS_LABELS[view.status] ?? ''

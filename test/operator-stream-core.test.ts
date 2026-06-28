@@ -5096,3 +5096,138 @@ describe('initOperatorStream — noticeEl gets data-connection-state attribute',
     handle.close()
   })
 })
+
+describe('initOperatorStream — terminal status updates statusEl when connection closes atomically', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('statusEl shows "Failed" label and status-failed class after a terminal failed status closes the stream', async () => {
+    const statusEl = makeFakeEl('span')
+    const addedClasses: string[] = []
+    statusEl.classList = {
+      add(cls: string) { addedClasses.push(cls) },
+      remove(_cls: string) { /* no-op */ },
+      contains(_cls: string) { return false },
+    }
+
+    const noticeEl = makeFakeEl('div')
+
+    const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
+    const failedStatusFrame = `event: status\ndata: ${JSON.stringify({
+      runId: 'run-fail',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'FAILED',
+      status: 'failed',
+      startedAt: '2026-06-27T10:00:00Z',
+      stale: false,
+    })}\n\n`
+
+    const encoder = new TextEncoder()
+    const sseBody = readyFrame + failedStatusFrame
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(sseBody))
+        controller.close()
+      },
+    })
+
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      headers: {get: (h: string) => (h === 'content-type' ? 'text/event-stream' : null)},
+      body: stream,
+    }))
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    const handle = initOperatorStream({runId: 'run-fail', statusEl, noticeEl})
+
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    expect(statusEl.textContent).toBe('Failed')
+    expect(addedClasses).toContain('status-failed')
+
+    handle.close()
+  })
+
+  it('statusEl shows "Succeeded" label after a terminal succeeded status closes the stream', async () => {
+    const statusEl = makeFakeEl('span')
+    const addedClasses: string[] = []
+    statusEl.classList = {
+      add(cls: string) { addedClasses.push(cls) },
+      remove(_cls: string) { /* no-op */ },
+      contains(_cls: string) { return false },
+    }
+
+    const noticeEl = makeFakeEl('div')
+
+    const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
+    const succeededStatusFrame = `event: status\ndata: ${JSON.stringify({
+      runId: 'run-ok',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'COMPLETED',
+      status: 'succeeded',
+      startedAt: '2026-06-27T10:00:00Z',
+      stale: false,
+    })}\n\n`
+
+    const encoder = new TextEncoder()
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(readyFrame + succeededStatusFrame))
+        controller.close()
+      },
+    })
+
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      headers: {get: (h: string) => (h === 'content-type' ? 'text/event-stream' : null)},
+      body: stream,
+    }))
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    const handle = initOperatorStream({runId: 'run-ok', statusEl, noticeEl})
+
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    expect(statusEl.textContent).toBe('Succeeded')
+    expect(addedClasses).toContain('status-succeeded')
+
+    handle.close()
+  })
+
+  it('statusEl is NOT updated for a pre-ready status (connection stays connecting)', () => {
+    const statusEl = makeFakeEl('span')
+    const noticeEl = makeFakeEl('div')
+
+    vi.stubGlobal('fetch', async () => new Promise<Response>(() => {})) // never settles
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    const handle = initOperatorStream({runId: 'run-pre-ready', statusEl, noticeEl})
+
+    expect(statusEl.textContent).toBe('')
+
+    handle.close()
+  })
+})
