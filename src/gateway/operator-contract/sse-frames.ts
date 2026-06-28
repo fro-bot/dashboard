@@ -3,13 +3,13 @@
  *
  * These mirror the named SSE events emitted by the gateway's web/sse/ surface
  * (a parallel surface to the operator-contract barrel — not part of the contract
- * barrel itself). Vendored from fro-bot/agent v0.72.0 (PRs #961/#962).
+ * barrel itself). Vendored from fro-bot/agent v0.78.0.
  *
  * Named events on the wire:
  *   event: ready  → data: ReadyFrame
  *   event: status → data: StatusFrameData  (same shape as OperatorRunStatus)
  *   event: reset  → data: ResetFrameData
- *   event: output → data: OperatorOutputFrame (contract 1.3.0)
+ *   event: output → data: OperatorOutputFrame (contract 1.5.0)
  *
  * Heartbeat is an SSE comment (": heartbeat") — it is NOT a named event and
  * has no corresponding frame type here.
@@ -29,7 +29,7 @@ import type {OperatorRunStatus} from './run-status.ts'
 /**
  * Reasons the gateway may reset the run stream.
  *
- * Vendored from fro-bot/agent v0.72.0 web/sse/ surface.
+ * Vendored from fro-bot/agent v0.78.0 web/sse/ surface.
  */
 export type ResetReason =
   | 'no-snapshot'

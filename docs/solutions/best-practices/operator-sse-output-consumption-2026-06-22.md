@@ -39,17 +39,17 @@ finding caught in review on this change — the transport was safe but the
 
 ## Guidance
 
-### Treat "no output" as the absence of a frame, never a terminal frame
+### Drive completion off the terminal status frame, not output presence
 
-The decisive design fact: **a run that produces no output does not reliably emit a
-terminal output frame.** The contract permits an empty-text `final:true` frame, but
-the producer only emits one if output was actually observed. A consumer that waits
-for a terminal output frame to decide "done with no output" hangs forever on every
-silent run. Drive completion off the terminal *status* frame and treat output as
-absent when no output frame ever arrived:
+As of contract 1.5.0, **a run that produces no output still emits an empty terminal
+output frame** (`text: ''`, `final: true`). This lets consumers distinguish "no
+output" from "missing output". However, the terminal *status* frame remains the
+authoritative completion signal — consumers must not block awaiting an output frame,
+because the status frame is what marks a run done. Drive completion off status;
+treat output as a side-channel that may arrive empty:
 
 ```js
-// render: output only appears when the stream wrote it; absence = no output
+// render: show output only when non-empty; an empty final clears any stale text
 const outputText = runEntry?.outputText
 if (typeof outputText === 'string' && outputText !== '') {
   outputEl.textContent = outputText
@@ -60,8 +60,9 @@ if (typeof outputText === 'string' && outputText !== '') {
 }
 ```
 
-Verify this against the *producer*, not just the contract type — a type that permits
-a frame is not a guarantee the frame is sent.
+The empty-final guarantee means the reducer's authoritative-final path (`final:true`
+replaces accumulated text) now runs for every run, including silent ones. Ensure the
+reducer handles `text: ''` without treating it as a no-op.
 
 ### Accumulate with authoritative-final precedence, not seq precedence
 
@@ -131,20 +132,22 @@ non-echoing error strings. Pin parity with tests in both suites.
 
 Pin the contract version on the client; the first `ready` frame's version must match
 or the consumer enters an absorbing drift state and renders nothing. When the
-provider bumps the contract (here 1.2.0 → 1.3.0), bump the pin in *every* consumer —
-a stale pin fails closed against the live provider, which looks like "output never
-renders."
+provider bumps the contract, bump the pin in *every* consumer — a stale pin fails
+closed against the live provider, which looks like "output never renders." The
+dashboard maintains two independent pins (TypeScript vendored constant and browser
+runtime literal); both must move together.
 
 ## Prevention
 
-- Test the no-output path explicitly: terminal status with no output frame → no
-  hang, no output surface.
+- Test the no-output path explicitly: terminal status with an empty final output
+  frame (`text: ''`, `final: true`) → no hang, no output surface.
 - Test authoritative-final-replaces-regardless-of-seq and late-subscriber-final-only.
 - Test that a status update preserves accumulated output fields.
 - Test the cumulative-growth cap and the empty-final-clears-the-DOM path.
 - Test parser parity: every malformed/edge input rejected by one parser is rejected
   by the other.
-- When bumping the vendored contract version, grep every consumer for the old pin.
+- When bumping the vendored contract version, update both the TypeScript pin and the
+  browser runtime literal together; a parity test should catch any one-sided bump.
 
 ## Related
 
