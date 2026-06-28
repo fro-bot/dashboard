@@ -1,12 +1,12 @@
 /**
  * Operator contract conformance tests.
  *
- * Verifies the vendored operator contract v1.4.0 is correctly pinned and
+ * Verifies the vendored operator contract v1.5.0 is correctly pinned and
  * that parse helpers behave per spec. Also verifies the SSE frame types
  * vendored from fro-bot/agent (including the run-output and approval channels)
  * are structurally correct.
  *
- * Source: fro-bot/agent | Tag: v0.76.0
+ * Source: fro-bot/agent | Tag: v0.78.0
  */
 import type {ApprovalDecisionState, RunStatus} from '../src/gateway/operator-client.ts'
 import type {
@@ -63,7 +63,7 @@ export {checkRunStatusBidirectional}
 // Using satisfies/export to avoid unused-variable lint while keeping the type constraint.
 
 // ReadyFrame: must accept a literal with contractVersion string
-const checkReadyFrameLiteral: ReadyFrame = {contractVersion: '1.4.0'}
+const checkReadyFrameLiteral: ReadyFrame = {contractVersion: '1.5.0'}
 export {checkReadyFrameLiteral}
 
 // ResetFrameData: must accept a literal with runId + ResetReason
@@ -129,7 +129,7 @@ const checkApprovalFrameSettle: OperatorApprovalFrame = {
 export {checkApprovalFrameSettle}
 
 // RunStreamFrame discriminated union: each variant must be constructable
-const checkReadyFrame: RunStreamFrame = {type: 'ready', data: {contractVersion: '1.4.0'}}
+const checkReadyFrame: RunStreamFrame = {type: 'ready', data: {contractVersion: '1.5.0'}}
 const checkOutputFrame: RunStreamFrame = {
   type: 'output',
   data: {runId: 'run-001', text: 'partial', final: false, seq: 0},
@@ -166,8 +166,8 @@ export {checkApprovalRunStreamFrame, checkReadyFrame, checkResetFrame, checkStat
 // ---------------------------------------------------------------------------
 
 describe('OPERATOR_CONTRACT_VERSION', () => {
-  it('is pinned to 1.4.0', () => {
-    expect(OPERATOR_CONTRACT_VERSION).toBe('1.4.0')
+  it('is pinned to 1.5.0', () => {
+    expect(OPERATOR_CONTRACT_VERSION).toBe('1.5.0')
   })
 })
 

@@ -38,6 +38,7 @@ import {
   RETRY_MAX_COUNT,
   toSafeRunView,
 } from '../public/operator-stream.js'
+import {OPERATOR_CONTRACT_VERSION} from '../src/gateway/operator-contract/index.ts'
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -76,14 +77,14 @@ const INITIAL_STATE: StreamState = {
 
 describe('parseSseFrame — pure parser', () => {
   it('parses a ready frame', () => {
-    const text = `event: ready\ndata: {"contractVersion":"1.4.0"}\n\n`
+    const text = `event: ready\ndata: {"contractVersion":"1.5.0"}\n\n`
     const result = parseSseFrame(text)
     expect(result).not.toBeNull()
     expect(result?.success).toBe(true)
     if (result !== null && result.success) {
       expect(result.frame.type).toBe('ready')
       if (result.frame.type === 'ready') {
-        expect(result.frame.data.contractVersion).toBe('1.4.0')
+        expect(result.frame.data.contractVersion).toBe('1.5.0')
       }
     }
   })
@@ -172,7 +173,7 @@ describe('parseSseFrame — pure parser', () => {
   })
 
   it('returns a failure for a data-only record (no event name)', () => {
-    const text = 'data: {"contractVersion":"1.4.0"}\n\n'
+    const text = 'data: {"contractVersion":"1.5.0"}\n\n'
     const result = parseSseFrame(text)
     expect(result?.success).toBe(false)
   })
@@ -980,8 +981,14 @@ describe('backoff constants', () => {
     expect(Number.isInteger(RETRY_MAX_COUNT)).toBe(true)
   })
 
-  it('PINNED_CONTRACT_VERSION is 1.4.0', () => {
-    expect(PINNED_CONTRACT_VERSION).toBe('1.4.0')
+  it('PINNED_CONTRACT_VERSION is 1.5.0', () => {
+    expect(PINNED_CONTRACT_VERSION).toBe('1.5.0')
+  })
+})
+
+describe('contract pin lockstep parity', () => {
+  it('browser PINNED_CONTRACT_VERSION equals vendored TypeScript OPERATOR_CONTRACT_VERSION', () => {
+    expect(PINNED_CONTRACT_VERSION).toBe(OPERATOR_CONTRACT_VERSION)
   })
 })
 
@@ -1149,6 +1156,25 @@ describe('nextStreamState — drift is absorbing', () => {
     })
     expect(state.connection).toBe('drift')
     expect(Object.keys(state.runs)).toHaveLength(0)
+  })
+
+  it('future unknown version (2.0.0) drifts and subsequent status+output frames are not applied', () => {
+    const drifted = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: '2.0.0'},
+    })
+    expect(drifted.connection).toBe('drift')
+
+    const afterStatus = nextStreamState(drifted, {type: 'status', data: ACTIVE_STATUS})
+    expect(afterStatus.connection).toBe('drift')
+    expect(Object.keys(afterStatus.runs)).toHaveLength(0)
+
+    const afterOutput = nextStreamState(afterStatus, {
+      type: 'output',
+      data: {runId: 'run-abc', text: 'leaked output', final: false, seq: 0},
+    })
+    expect(afterOutput.connection).toBe('drift')
+    expect(Object.keys(afterOutput.runs)).toHaveLength(0)
   })
 })
 
@@ -1566,6 +1592,24 @@ describe('nextStreamState — output accumulation edge cases', () => {
     // Must not block or error — terminal state is still reached
     expect(run.terminal).toBe(true)
     expect(run.status).toBe('succeeded')
+  })
+
+  it('empty final output frame (text:"") is applied as authoritative no-output state', () => {
+    let state = live()
+    state = applyOutput(state, {runId: 'run-abc', text: '', final: true, seq: 0})
+    const run = runOf(state, 'run-abc')
+    expect(run.outputText).toBe('')
+    expect(run.outputFinal).toBe(true)
+  })
+
+  it('running status after non-final output preserves accumulated output', () => {
+    let state = live()
+    state = applyOutput(state, {runId: 'run-abc', text: 'partial', final: false, seq: 0})
+    state = nextStreamState(state, {type: 'status', data: ACTIVE_STATUS})
+    const run = runOf(state, 'run-abc')
+    expect(run.outputText).toBe('partial')
+    expect(run.outputFinal).toBe(false)
+    expect(run.status).toBe('running')
   })
 
   // Gap 3: late-subscriber final-only — only a final:true frame, no deltas

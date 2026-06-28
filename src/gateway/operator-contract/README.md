@@ -1,6 +1,6 @@
-Source: fro-bot/agent  | Tag: v0.73.0 | PRs: #952, #961, #962, #968 | Commit: 92b621e1 (base)
+Source: fro-bot/agent  | Tag: v0.78.0
 Path: packages/gateway/src/operator-contract/ (contract barrel) + packages/gateway/src/web/sse/ (SSE surface)
-Contract: OPERATOR_CONTRACT_VERSION = 1.2.0
+Contract: OPERATOR_CONTRACT_VERSION = 1.5.0
 Vendored copy — do not hand-edit behavior. Refresh by re-copying upstream and
 re-applying the documented import rewrites (@fro-bot/runtime → ../../result.ts;
 inlined boundary types for RunPhase/Surface/RunState).
@@ -9,13 +9,13 @@ inlined boundary types for RunPhase/Surface/RunState).
 
 - `run-status.ts`, `approval.ts`, `identity.ts`, `parse.ts`, `redaction.ts`,
   `responses.ts`, `version.ts` — vendored from the operator-contract barrel
-  (packages/gateway/src/operator-contract/) at v0.73.0.
+  (packages/gateway/src/operator-contract/) at v0.78.0.
 - `sse-frames.ts` — vendored from the gateway's web/sse/ surface
-  (packages/gateway/src/web/sse/) at v0.72.0 (PRs #961/#962). This is a
-  parallel surface to the contract barrel; it is NOT part of the upstream
-  operator-contract barrel export. The SSE frame types (ReadyFrame,
-  StatusFrameData, ResetFrameData, RunStreamFrame, ResetReason) are re-exported
-  from the dashboard's contract barrel for convenience.
+  (packages/gateway/src/web/sse/) at v0.78.0. This is a parallel surface to
+  the contract barrel; it is NOT part of the upstream operator-contract barrel
+  export. The SSE frame types (ReadyFrame, StatusFrameData, ResetFrameData,
+  RunStreamFrame, ResetReason) are re-exported from the dashboard's contract
+  barrel for convenience.
 - `repo-summary.ts` — locally authored (PR #968 adds RepoSummary to the upstream
   contract at v0.73.0, but no upstream parse helper exists). The type definition
   is faithful to the upstream interface; the parse guards follow the same
