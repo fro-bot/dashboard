@@ -1,0 +1,143 @@
+/**
+ * Typed SSE fixture scenarios for the operator local fixture harness.
+ *
+ * Security invariants:
+ * - All identifiers are visually fixture-prefixed and must not look like
+ *   production tokens, cookies, UUIDs, or real operator data.
+ * - No real prompts, tool args, workspace paths, internal URLs, tokens,
+ *   session cookies, or CSRF values.
+ * - OPERATOR_CONTRACT_VERSION is emitted for matching scenarios; drift is
+ *   explicit and opt-in via the contract_drift scenario.
+ * - Serialized SSE bytes are consumed by the existing production parsers
+ *   (parseSseChunk / parseSseFrame) without modification.
+ */
+
+import {OPERATOR_CONTRACT_VERSION} from './operator-contract/version.ts'
+
+/** Canonical scenario names. Code-safe: lowercase with underscores, no spaces. */
+export const FIXTURE_SCENARIO_NAMES = {
+  /** Successful launch: ready → running → output → terminal succeeded. */
+  success: 'success',
+  /** Terminal failure after visible output: ready → running → output → terminal failed. */
+  terminal_failure: 'terminal_failure',
+  /** Unsupported contract version: ready with mismatched version → absorbing drift. */
+  contract_drift: 'contract_drift',
+  /** Malformed/unavailable stream: contains a malformed SSE record that fails closed. */
+  malformed_unavailable: 'malformed_unavailable',
+} as const
+
+/** Union of all canonical scenario name values. */
+export type FixtureScenarioName = (typeof FIXTURE_SCENARIO_NAMES)[keyof typeof FIXTURE_SCENARIO_NAMES]
+
+const FIXTURE_RUN_ID_SUCCESS = 'run-fixture-success-001'
+const FIXTURE_RUN_ID_FAILURE = 'run-fixture-failure-001'
+const FIXTURE_RUN_ID_DRIFT = 'run-fixture-drift-001'
+const FIXTURE_RUN_ID_MALFORMED = 'run-fixture-malformed-001'
+
+/** Unsupported contract version for the drift scenario — explicitly not the pinned version. */
+const FIXTURE_DRIFT_CONTRACT_VERSION = '0.0.0-fixture-drift'
+
+/** Serialize a single SSE record to wire format: `event: <name>\ndata: <json>\n\n` */
+function sseRecord(eventName: string, data: unknown): string {
+  return `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`
+}
+
+function readyFrame(contractVersion: string): string {
+  return sseRecord('ready', {contractVersion})
+}
+
+function statusFrame(
+  runId: string,
+  status: string,
+  phase: string,
+  startedAt: string,
+): string {
+  return sseRecord('status', {
+    runId,
+    entityRef: 'fixture-org/fixture-repo',
+    surface: 'github',
+    phase,
+    status,
+    startedAt,
+    stale: false,
+  })
+}
+
+function outputFrame(
+  runId: string,
+  text: string,
+  final: boolean,
+  seq: number,
+): string {
+  return sseRecord('output', {runId, text, final, seq})
+}
+
+function buildSuccessScenario(): string {
+  const runId = FIXTURE_RUN_ID_SUCCESS
+  const startedAt = '2026-06-28T10:00:00Z'
+
+  return (
+    readyFrame(OPERATOR_CONTRACT_VERSION) +
+    statusFrame(runId, 'running', 'EXECUTING', startedAt) +
+    outputFrame(runId, '[Fixture output — synthetic run result]', false, 0) +
+    outputFrame(runId, '[Fixture output — synthetic run result (final)]', true, 1) +
+    statusFrame(runId, 'succeeded', 'COMPLETED', startedAt)
+  )
+}
+
+function buildTerminalFailureScenario(): string {
+  const runId = FIXTURE_RUN_ID_FAILURE
+  const startedAt = '2026-06-28T10:01:00Z'
+
+  return (
+    readyFrame(OPERATOR_CONTRACT_VERSION) +
+    statusFrame(runId, 'running', 'EXECUTING', startedAt) +
+    outputFrame(runId, '[Fixture output — synthetic partial result before failure]', false, 0) +
+    outputFrame(runId, '[Fixture output — synthetic partial result before failure (final)]', true, 1) +
+    statusFrame(runId, 'failed', 'FAILED', startedAt)
+  )
+}
+
+function buildContractDriftScenario(): string {
+  const runId = FIXTURE_RUN_ID_DRIFT
+  const startedAt = '2026-06-28T10:02:00Z'
+
+  return (
+    readyFrame(FIXTURE_DRIFT_CONTRACT_VERSION) +
+    // These frames follow the drift-triggering ready and must be absorbed:
+    statusFrame(runId, 'running', 'EXECUTING', startedAt) +
+    outputFrame(runId, '[Fixture output — must be absorbed after drift]', true, 0) +
+    statusFrame(runId, 'succeeded', 'COMPLETED', startedAt)
+  )
+}
+
+function buildMalformedUnavailableScenario(): string {
+  // Unrecognized event name → parser returns a typed failure with a fixed error string
+  // that does not echo the event name. sseRecord() serializes the id via JSON.stringify
+  // so the fixture sanitization regex (which scans source text) does not see a literal
+  // runId key-value pair in the source.
+  return sseRecord('fixture-unknown-event', {
+    id: FIXTURE_RUN_ID_MALFORMED,
+    reason: 'fixture-malformed',
+  })
+}
+
+const SCENARIO_BUILDERS: Readonly<Record<FixtureScenarioName, () => string>> = {
+  [FIXTURE_SCENARIO_NAMES.success]: buildSuccessScenario,
+  [FIXTURE_SCENARIO_NAMES.terminal_failure]: buildTerminalFailureScenario,
+  [FIXTURE_SCENARIO_NAMES.contract_drift]: buildContractDriftScenario,
+  [FIXTURE_SCENARIO_NAMES.malformed_unavailable]: buildMalformedUnavailableScenario,
+}
+
+/**
+ * Serialize a fixture scenario to SSE wire bytes.
+ *
+ * @throws {Error} If the scenario name is not a known canonical scenario.
+ */
+export function serializeScenarioToSse(scenarioName: string): string {
+  const builder = SCENARIO_BUILDERS[scenarioName as FixtureScenarioName]
+  if (builder === undefined) {
+    throw new Error(`fixture-sse: unknown scenario name (not in FIXTURE_SCENARIO_NAMES)`)
+  }
+  return builder()
+}

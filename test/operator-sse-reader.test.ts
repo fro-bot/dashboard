@@ -15,11 +15,8 @@
 import type {RunStreamFrame} from '../src/gateway/operator-contract/sse-frames.ts'
 import type {Logger} from '../src/logger.ts'
 import {describe, expect, it, vi} from 'vitest'
+import {FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../src/gateway/operator-fixture-sse.ts'
 import {createOperatorSseReader, MAX_SSE_BUFFER_BYTES, parseSseChunk} from '../src/gateway/operator-sse-reader.ts'
-
-// ---------------------------------------------------------------------------
-// Helpers: build a fake ReadableStream from text chunks
-// ---------------------------------------------------------------------------
 
 function makeStreamBody(chunks: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
@@ -43,10 +40,6 @@ function makeResponse(status: number, chunks: string[]): Response {
 function makeEmptyResponse(status: number): Response {
   return new Response(null, {status})
 }
-
-// ---------------------------------------------------------------------------
-// Recording fake fetch
-// ---------------------------------------------------------------------------
 
 interface RecordedFetchCall {
   path: string
@@ -77,10 +70,6 @@ function makeThrowingFetch(error: unknown): {
   return {fetchImpl, calls}
 }
 
-// ---------------------------------------------------------------------------
-// Capture logger
-// ---------------------------------------------------------------------------
-
 function makeCapturingLogger(): {logger: Logger; messages: string[]} {
   const messages: string[] = []
   const logger: Logger = {
@@ -91,10 +80,6 @@ function makeCapturingLogger(): {logger: Logger; messages: string[]} {
   }
   return {logger, messages}
 }
-
-// ---------------------------------------------------------------------------
-// Pure parser: parseSseChunk
-// ---------------------------------------------------------------------------
 
 describe('parseSseChunk — pure parser', () => {
   it('parses a ready frame', () => {
@@ -372,10 +357,6 @@ describe('parseSseChunk — pure parser', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// open() — 200 happy path
-// ---------------------------------------------------------------------------
-
 describe('createOperatorSseReader — 200 happy path', () => {
   it('dispatches ready then status frames in order', async () => {
     const readyPayload = {contractVersion: '1.5.0'}
@@ -456,7 +437,6 @@ describe('createOperatorSseReader — 200 happy path', () => {
       onClose: () => {},
     })
 
-    // Only the ready frame; heartbeat produces no event
     expect(events).toHaveLength(1)
     expect(events[0]?.type).toBe('ready')
   })
@@ -534,10 +514,6 @@ describe('createOperatorSseReader — 200 happy path', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// Contract-version gate
-// ---------------------------------------------------------------------------
-
 describe('createOperatorSseReader — contract-version gate', () => {
   it('dispatches ready and status when contractVersion matches', async () => {
     const statusPayload = {
@@ -575,7 +551,6 @@ describe('createOperatorSseReader — contract-version gate', () => {
       startedAt: '2026-06-18T20:00:00Z',
       stale: false,
     }
-    // Version 1.0.0 does not match pinned 1.5.0
     const sseText = `event: ready\ndata: {"contractVersion":"1.0.0"}\n\nevent: status\ndata: ${JSON.stringify(statusPayload)}\n\n`
     const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseText]))
     const reader = createOperatorSseReader({fetchImpl})
@@ -589,13 +564,10 @@ describe('createOperatorSseReader — contract-version gate', () => {
       onClose: () => { closed = true },
     })
 
-    // Must signal drift error
     expect(errors).toHaveLength(1)
     expect(errors[0]?.message).toContain('contract-drift')
-    // Must NOT dispatch any status frames after drift
     const statusFrames = events.filter(e => e.type === 'status')
     expect(statusFrames).toHaveLength(0)
-    // Must call onClose
     expect(closed).toBe(true)
   })
 
@@ -612,7 +584,6 @@ describe('createOperatorSseReader — contract-version gate', () => {
     })
 
     expect(errors).toHaveLength(1)
-    // Must not echo the version value from the wire
     expect(errors[0]?.message).not.toContain('9.9.9')
   })
 
@@ -651,10 +622,6 @@ describe('createOperatorSseReader — contract-version gate', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// HTTP error status codes
-// ---------------------------------------------------------------------------
-
 describe('createOperatorSseReader — 404 not found', () => {
   it('calls onError with a not-found error and then onClose', async () => {
     const {fetchImpl} = makeFakeFetch(makeEmptyResponse(404))
@@ -674,7 +641,6 @@ describe('createOperatorSseReader — 404 not found', () => {
   })
 
   it('does not parse the 404 response body for cause', async () => {
-    // Body contains a cause string — must NOT appear in the error
     const bodyWithCause = JSON.stringify({error: 'run_not_found', cause: 'secret-internal-detail'})
     const response = new Response(bodyWithCause, {
       status: 404,
@@ -749,10 +715,6 @@ describe('createOperatorSseReader — other HTTP error statuses', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// Network throw / abort
-// ---------------------------------------------------------------------------
-
 describe('createOperatorSseReader — network throw', () => {
   it('calls onError with a network-style error when fetch throws', async () => {
     const {fetchImpl} = makeThrowingFetch(new Error('connection refused'))
@@ -767,7 +729,6 @@ describe('createOperatorSseReader — network throw', () => {
     })
 
     expect(errors).toHaveLength(1)
-    // Must not echo the raw error message (no-oracle)
     expect(errors[0]?.message).not.toContain('connection refused')
     expect(closed).toBe(true)
   })
@@ -791,10 +752,6 @@ describe('createOperatorSseReader — network throw', () => {
     expect(closed).toBe(true)
   })
 })
-
-// ---------------------------------------------------------------------------
-// Fetch args: credentials:'include', correct path, no repo param
-// ---------------------------------------------------------------------------
 
 describe('createOperatorSseReader — fetch args', () => {
   it('sends credentials:include on the outgoing fetch', async () => {
@@ -823,7 +780,6 @@ describe('createOperatorSseReader — fetch args', () => {
     })
 
     expect(calls[0]?.path).toBe(path)
-    // Must not append any query params
     expect(calls[0]?.path).not.toContain('?')
   })
 
@@ -842,10 +798,6 @@ describe('createOperatorSseReader — fetch args', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// Logger: route template only, no runId in logs
-// ---------------------------------------------------------------------------
-
 describe('createOperatorSseReader — logger discipline', () => {
   it('logs only the route template, never the dynamic runId', async () => {
     const {logger, messages} = makeCapturingLogger()
@@ -858,7 +810,6 @@ describe('createOperatorSseReader — logger discipline', () => {
       onClose: () => {},
     })
 
-    // No log message should contain the actual runId
     for (const msg of messages) {
       expect(msg).not.toContain('run-secret-id-xyz')
     }
@@ -875,7 +826,6 @@ describe('createOperatorSseReader — logger discipline', () => {
       onClose: () => {},
     })
 
-    // At least one log message should reference the route template
     const hasTemplate = messages.some(m => m.includes('/operator/runs/:runId/stream'))
     expect(hasTemplate).toBe(true)
   })
@@ -898,14 +848,9 @@ describe('createOperatorSseReader — logger discipline', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// Partial-chunk reassembly
-// ---------------------------------------------------------------------------
-
 describe('createOperatorSseReader — partial-chunk reassembly', () => {
   it('reassembles a frame split across two chunks', async () => {
     const fullFrame = 'event: ready\ndata: {"contractVersion":"1.5.0"}\n\n'
-    // Split in the middle of the data line
     const chunk1 = fullFrame.slice(0, 20)
     const chunk2 = fullFrame.slice(20)
 
@@ -927,7 +872,6 @@ describe('createOperatorSseReader — partial-chunk reassembly', () => {
 
   it('reassembles a frame split at the blank-line boundary', async () => {
     const fullFrame = 'event: ready\ndata: {"contractVersion":"1.5.0"}\n\n'
-    // Split just before the final \n\n
     const splitAt = fullFrame.length - 2
     const chunk1 = fullFrame.slice(0, splitAt)
     const chunk2 = fullFrame.slice(splitAt)
@@ -958,7 +902,6 @@ describe('createOperatorSseReader — partial-chunk reassembly', () => {
     }
     const frame1 = 'event: ready\ndata: {"contractVersion":"1.5.0"}\n\n'
     const frame2 = `event: status\ndata: ${JSON.stringify(statusPayload)}\n\n`
-    // Deliver as 3 chunks with arbitrary split points
     const combined = frame1 + frame2
     const chunk1 = combined.slice(0, 15)
     const chunk2 = combined.slice(15, 50)
@@ -982,20 +925,12 @@ describe('createOperatorSseReader — partial-chunk reassembly', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// EventStreamHandle compatibility
-// ---------------------------------------------------------------------------
-
 describe('createOperatorSseReader — EventStreamHandle shape', () => {
   it('the reader object has an open method', () => {
     const reader = createOperatorSseReader({fetchImpl: async () => makeEmptyResponse(404)})
     expect(typeof reader.open).toBe('function')
   })
 })
-
-// ---------------------------------------------------------------------------
-// vi.fn() spy: no extra calls
-// ---------------------------------------------------------------------------
 
 describe('createOperatorSseReader — callback discipline', () => {
   it('calls onError exactly once and onClose exactly once on 404', async () => {
@@ -1043,10 +978,6 @@ describe('createOperatorSseReader — callback discipline', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 })
-
-// ---------------------------------------------------------------------------
-// CRLF line-ending normalization (pure parser)
-// ---------------------------------------------------------------------------
 
 describe('parseSseChunk — CRLF normalization', () => {
   it('parses a ready frame delimited by CRLF record separators', () => {
@@ -1108,10 +1039,6 @@ describe('parseSseChunk — CRLF normalization', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// CRLF normalization in the streaming reader
-// ---------------------------------------------------------------------------
-
 describe('createOperatorSseReader — CRLF normalization in stream', () => {
   it('parses ready+status frames delivered with CRLF delimiters', async () => {
     const statusPayload = {
@@ -1144,13 +1071,8 @@ describe('createOperatorSseReader — CRLF normalization in stream', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// Bounded incremental buffer (reader)
-// ---------------------------------------------------------------------------
-
 describe('createOperatorSseReader — buffer overflow', () => {
   it('fails closed with onError+onClose when buffer exceeds MAX_SSE_BUFFER_BYTES without a boundary', async () => {
-    // A chunk larger than the cap with no \n\n boundary
     const oversizedChunk = 'x'.repeat(MAX_SSE_BUFFER_BYTES + 1)
     const {fetchImpl} = makeFakeFetch(makeResponse(200, [oversizedChunk]))
     const reader = createOperatorSseReader({fetchImpl})
@@ -1164,19 +1086,13 @@ describe('createOperatorSseReader — buffer overflow', () => {
     })
 
     expect(errors).toHaveLength(1)
-    // Error must not echo buffer contents (no-oracle)
     expect(errors[0]?.message).not.toContain('x'.repeat(10))
     expect(closed).toBe(true)
   })
 })
 
-// ---------------------------------------------------------------------------
-// first-frame-must-be-ready: flush path goes through handleFrame
-// ---------------------------------------------------------------------------
-
 describe('createOperatorSseReader — flush path contract gate', () => {
   it('flush of a status-only buffer with no prior ready dispatches nothing', async () => {
-    // Stream ends without \n\n — the flush path must enforce the contract gate
     const statusPayload = {
       runId: 'run-001',
       entityRef: 'fro-bot/agent',
@@ -1186,7 +1102,7 @@ describe('createOperatorSseReader — flush path contract gate', () => {
       startedAt: '2026-06-18T20:00:00Z',
       stale: false,
     }
-    // No trailing \n\n — triggers the flush path; no ready frame precedes it
+    // No trailing \n\n triggers the flush path; no ready frame precedes it
     const sseText = `event: status\ndata: ${JSON.stringify(statusPayload)}`
     const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseText]))
     const reader = createOperatorSseReader({fetchImpl})
@@ -1199,7 +1115,6 @@ describe('createOperatorSseReader — flush path contract gate', () => {
       onClose: () => {},
     })
 
-    // First frame is not ready → drift → no status dispatched
     expect(errors).toHaveLength(1)
     expect(errors[0]?.message).toContain('contract-drift')
     const statusFrames = events.filter(e => e.type === 'status')
@@ -1207,7 +1122,6 @@ describe('createOperatorSseReader — flush path contract gate', () => {
   })
 
   it('flush of a complete frame without trailing blank line dispatches the frame', async () => {
-    // Stream ends without \n\n but has a complete ready frame
     const sseText = 'event: ready\ndata: {"contractVersion":"1.5.0"}'
     const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseText]))
     const reader = createOperatorSseReader({fetchImpl})
@@ -1225,10 +1139,6 @@ describe('createOperatorSseReader — flush path contract gate', () => {
     expect(events[0]?.type).toBe('ready')
   })
 })
-
-// ---------------------------------------------------------------------------
-// parseSseChunk — approval frame parsing
-// ---------------------------------------------------------------------------
 
 describe('parseSseChunk — approval frame (open variant)', () => {
   it('parses an open approval frame with command', () => {
@@ -1474,7 +1384,6 @@ describe('parseSseChunk — approval frame (error cases, fail-closed, no wire ec
     }
   })
 
-  // Fix 2: empty-string rejections
   it('rejects approval frame with empty-string runId (open)', () => {
     const payload = {runId: '', requestID: 'req-001', permission: 'shell', settled: false}
     const frame = parseSseChunk(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)[0]
@@ -1505,7 +1414,6 @@ describe('parseSseChunk — approval frame (error cases, fail-closed, no wire ec
     expect(frame?.success).toBe(false)
   })
 
-  // Fix 3: no-echo assertions on non-string requestID and non-string filepath
   it('non-string requestID rejection does not echo the bad value', () => {
     const payload = {runId: 'run-001', requestID: true, permission: 'shell', settled: false}
     const frame = parseSseChunk(`event: approval\ndata: ${JSON.stringify(payload)}\n\n`)[0]
@@ -1609,10 +1517,6 @@ describe('parseSseChunk — approval frame integration (open then settle in one 
   })
 })
 
-// ---------------------------------------------------------------------------
-// Value-allowlist for status/phase/surface (reader)
-// ---------------------------------------------------------------------------
-
 describe('createOperatorSseReader — allowlist gate for status/phase/surface', () => {
   it('rejects a status frame with an out-of-allowlist status value — not dispatched', async () => {
     const payload = {
@@ -1638,11 +1542,9 @@ describe('createOperatorSseReader — allowlist gate for status/phase/surface', 
       onClose: () => {},
     })
 
-    // ready dispatched, status rejected
     expect(errors).toHaveLength(0)
     const statusFrames = events.filter(e => e.type === 'status')
     expect(statusFrames).toHaveLength(0)
-    // The hostile value must not appear in any error
     for (const err of errors) {
       expect(err.message).not.toContain('private-repo')
     }
@@ -1703,10 +1605,6 @@ describe('createOperatorSseReader — allowlist gate for status/phase/surface', 
   })
 })
 
-// ---------------------------------------------------------------------------
-// Value-allowlist in parseSseChunk
-// ---------------------------------------------------------------------------
-
 describe('parseSseChunk — allowlist gate for status/phase/surface', () => {
   it('returns a parse failure for a status frame with out-of-allowlist status', () => {
     const payload = {
@@ -1722,7 +1620,6 @@ describe('parseSseChunk — allowlist gate for status/phase/surface', () => {
     const results = parseSseChunk(text)
     expect(results).toHaveLength(1)
     expect(results[0]?.success).toBe(false)
-    // Must not echo the hostile value
     if (results[0] !== undefined && !results[0].success) {
       expect(results[0].error.message).not.toContain('private-repo')
     }
@@ -1760,10 +1657,6 @@ describe('parseSseChunk — allowlist gate for status/phase/surface', () => {
     expect(results[0]?.success).toBe(false)
   })
 })
-
-// ---------------------------------------------------------------------------
-// redirect:'error' + content-type check (reader)
-// ---------------------------------------------------------------------------
 
 describe('createOperatorSseReader — redirect and content-type', () => {
   it('sets redirect:error on the outgoing fetch init', async () => {
@@ -1819,10 +1712,6 @@ describe('createOperatorSseReader — redirect and content-type', () => {
     expect(closed).toBe(true)
   })
 })
-
-// ---------------------------------------------------------------------------
-// open() path-prefix validation
-// ---------------------------------------------------------------------------
 
 describe('createOperatorSseReader — path validation', () => {
   it('rejects an absolute URL — no fetch issued, fails closed', async () => {
@@ -1887,5 +1776,236 @@ describe('createOperatorSseReader — path validation', () => {
     })
 
     expect(calls).toHaveLength(1)
+  })
+})
+
+describe('fixture SSE scenarios — scenario names', () => {
+  it('exports canonical scenario names as a readonly object', () => {
+    expect(typeof FIXTURE_SCENARIO_NAMES).toBe('object')
+    expect(FIXTURE_SCENARIO_NAMES).not.toBeNull()
+  })
+
+  it('exports success scenario name', () => {
+    expect(typeof FIXTURE_SCENARIO_NAMES.success).toBe('string')
+    expect(FIXTURE_SCENARIO_NAMES.success.length).toBeGreaterThan(0)
+  })
+
+  it('exports terminal_failure scenario name', () => {
+    expect(typeof FIXTURE_SCENARIO_NAMES.terminal_failure).toBe('string')
+    expect(FIXTURE_SCENARIO_NAMES.terminal_failure.length).toBeGreaterThan(0)
+  })
+
+  it('exports contract_drift scenario name', () => {
+    expect(typeof FIXTURE_SCENARIO_NAMES.contract_drift).toBe('string')
+    expect(FIXTURE_SCENARIO_NAMES.contract_drift.length).toBeGreaterThan(0)
+  })
+
+  it('exports malformed_unavailable scenario name', () => {
+    expect(typeof FIXTURE_SCENARIO_NAMES.malformed_unavailable).toBe('string')
+    expect(FIXTURE_SCENARIO_NAMES.malformed_unavailable.length).toBeGreaterThan(0)
+  })
+
+  it('scenario names are code-safe (no spaces, lowercase with underscores)', () => {
+    for (const name of Object.values(FIXTURE_SCENARIO_NAMES)) {
+      expect(/^[a-z][a-z0-9_]*$/.test(name)).toBe(true)
+    }
+  })
+})
+
+describe('fixture SSE scenarios — success scenario parses in server reader', () => {
+  it('success scenario SSE bytes parse as ready + running status + output + terminal succeeded', async () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success)
+    const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseBytes]))
+    const reader = createOperatorSseReader({fetchImpl})
+
+    const events: RunStreamFrame[] = []
+    const errors: Error[] = []
+    let closed = false
+
+    await reader.open('/operator/runs/run-fixture-success-001/stream', {
+      onEvent: frame => events.push(frame),
+      onError: err => errors.push(err),
+      onClose: () => { closed = true },
+    })
+
+    expect(errors).toHaveLength(0)
+    expect(closed).toBe(true)
+    expect(events.length).toBeGreaterThanOrEqual(4)
+
+    const readyFrames = events.filter(e => e.type === 'ready')
+    expect(readyFrames).toHaveLength(1)
+
+    const statusFrames = events.filter(e => e.type === 'status')
+    expect(statusFrames.length).toBeGreaterThanOrEqual(2)
+
+    const outputFrames = events.filter(e => e.type === 'output')
+    expect(outputFrames.length).toBeGreaterThanOrEqual(1)
+
+    const terminalStatus = statusFrames.at(-1)
+    expect(terminalStatus?.type).toBe('status')
+    if (terminalStatus?.type === 'status') {
+      expect(terminalStatus.data.status).toBe('succeeded')
+    }
+  })
+
+  it('success scenario ready frame carries OPERATOR_CONTRACT_VERSION', async () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success)
+    const results = parseSseChunk(sseBytes)
+    const readyResult = results.find(r => r.success && r.frame.type === 'ready')
+    expect(readyResult).toBeDefined()
+    if (readyResult?.success && readyResult.frame.type === 'ready') {
+      const {OPERATOR_CONTRACT_VERSION} = await import('../src/gateway/operator-contract/version.ts')
+      expect(readyResult.frame.data.contractVersion).toBe(OPERATOR_CONTRACT_VERSION)
+    }
+  })
+
+  it('success scenario output frame has non-empty text and final:true', async () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success)
+    const results = parseSseChunk(sseBytes)
+    const outputResults = results.filter(r => r.success && r.frame.type === 'output')
+    expect(outputResults.length).toBeGreaterThanOrEqual(1)
+    const finalOutput = outputResults.find(r => r.success && r.frame.type === 'output' && r.frame.data.final)
+    expect(finalOutput).toBeDefined()
+    if (finalOutput?.success && finalOutput.frame.type === 'output') {
+      expect(finalOutput.frame.data.final).toBe(true)
+    }
+  })
+})
+
+describe('fixture SSE scenarios — terminal_failure scenario parses in server reader', () => {
+  it('terminal_failure scenario SSE bytes parse with failed terminal status after output', async () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.terminal_failure)
+    const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseBytes]))
+    const reader = createOperatorSseReader({fetchImpl})
+
+    const events: RunStreamFrame[] = []
+    const errors: Error[] = []
+    let closed = false
+
+    await reader.open('/operator/runs/run-fixture-failure-001/stream', {
+      onEvent: frame => events.push(frame),
+      onError: err => errors.push(err),
+      onClose: () => { closed = true },
+    })
+
+    expect(errors).toHaveLength(0)
+    expect(closed).toBe(true)
+
+    const statusFrames = events.filter(e => e.type === 'status')
+    expect(statusFrames.length).toBeGreaterThanOrEqual(1)
+
+    // Terminal status must be failed
+    const terminalStatus = statusFrames.at(-1)
+    if (terminalStatus?.type === 'status') {
+      expect(terminalStatus.data.status).toBe('failed')
+    }
+
+    // Output must appear before terminal status
+    const outputFrames = events.filter(e => e.type === 'output')
+    expect(outputFrames.length).toBeGreaterThanOrEqual(1)
+
+    const outputIdx = events.findLastIndex(e => e.type === 'output')
+    const terminalIdx = events.findLastIndex(e => e.type === 'status' && e.data.status === 'failed')
+    // Output must come before terminal failed status
+    expect(outputIdx).toBeLessThan(terminalIdx)
+  })
+
+  it('terminal_failure scenario SSE bytes are valid (parseable by server parser)', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.terminal_failure)
+    const results = parseSseChunk(sseBytes)
+    const successes = results.filter(r => r.success)
+    expect(successes.length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe('fixture SSE scenarios — contract_drift scenario enters absorbing drift', () => {
+  it('contract_drift scenario ready frame carries a non-matching version', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.contract_drift)
+    const results = parseSseChunk(sseBytes)
+    const readyResult = results.find(r => r.success && r.frame.type === 'ready')
+    expect(readyResult).toBeDefined()
+    if (readyResult?.success && readyResult.frame.type === 'ready') {
+      // Must NOT match the pinned contract version
+      expect(readyResult.frame.data.contractVersion).not.toBe('1.5.0')
+    }
+  })
+
+  it('contract_drift scenario triggers drift error in server reader and ignores later frames', async () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.contract_drift)
+    const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseBytes]))
+    const reader = createOperatorSseReader({fetchImpl})
+
+    const events: RunStreamFrame[] = []
+    const errors: Error[] = []
+    let closed = false
+
+    await reader.open('/operator/runs/run-fixture-drift-001/stream', {
+      onEvent: frame => events.push(frame),
+      onError: err => errors.push(err),
+      onClose: () => { closed = true },
+    })
+
+    // Must signal drift error
+    expect(errors).toHaveLength(1)
+    expect(errors[0]?.message).toContain('contract-drift')
+    expect(closed).toBe(true)
+
+    // Must NOT dispatch any status frames after drift
+    const statusFrames = events.filter(e => e.type === 'status')
+    expect(statusFrames).toHaveLength(0)
+  })
+
+  it('contract_drift scenario SSE bytes are parseable (ready frame parses successfully)', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.contract_drift)
+    const results = parseSseChunk(sseBytes)
+    const readyResult = results.find(r => r.success && r.frame.type === 'ready')
+    expect(readyResult).toBeDefined()
+  })
+})
+
+describe('fixture SSE scenarios — malformed_unavailable scenario fails closed', () => {
+  it('malformed_unavailable scenario SSE bytes contain at least one parse failure', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.malformed_unavailable)
+    const results = parseSseChunk(sseBytes)
+    const failures = results.filter(r => !r.success)
+    expect(failures.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('malformed_unavailable scenario parse failure error does not echo wire content', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.malformed_unavailable)
+    const results = parseSseChunk(sseBytes)
+    const failures = results.filter(r => !r.success)
+    for (const failure of failures) {
+      if (!failure.success) {
+        expect(failure.error.message.length).toBeGreaterThan(0)
+        expect(failure.error.message).not.toContain('{not valid json}')
+        expect(failure.error.message).not.toContain('malformed')
+      }
+    }
+  })
+})
+
+describe('fixture SSE scenarios — serializeScenarioToSse output format', () => {
+  it('serialized SSE bytes are a non-empty string', () => {
+    for (const name of Object.values(FIXTURE_SCENARIO_NAMES)) {
+      const sseBytes = serializeScenarioToSse(name)
+      expect(typeof sseBytes).toBe('string')
+      expect(sseBytes.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('serialized SSE bytes contain event: and data: lines', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success)
+    expect(sseBytes).toContain('event:')
+    expect(sseBytes).toContain('data:')
+  })
+
+  it('serialized SSE bytes use double-newline record separators', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success)
+    expect(sseBytes).toContain('\n\n')
+  })
+
+  it('unknown scenario name throws a clear error', () => {
+    expect(() => serializeScenarioToSse('not-a-real-scenario')).toThrow()
   })
 })
