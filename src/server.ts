@@ -31,6 +31,8 @@ import {secureHeaders} from 'hono/secure-headers'
 import {fetchGitHubUserLogin, makeGitHubOAuthClient} from './auth/oauth.ts'
 import {createOperatorClient} from './gateway/operator-client.ts'
 import {readGatewayOperatorOrigin, readGatewayOperatorSessionConfig, readOperatorUiConfig} from './gateway/operator-config.ts'
+import {readFixtureHarnessConfig} from './gateway/operator-fixture-config.ts'
+import {FIXTURE_OPERATOR_PREFIX} from './gateway/operator-fixture-routes.ts'
 import {createOperatorServerFetch} from './gateway/operator-server-fetch.ts'
 import {createAggregator} from './github/aggregator.ts'
 import {createDashboardAppClient} from './github/app-client.ts'
@@ -219,6 +221,28 @@ export interface DashboardAppConfig {
    * If undefined, reads from DASHBOARD_DEV_AUTOLOGIN env. Default: OFF.
    */
   devAutoLogin?: boolean | undefined
+  /**
+   * DEV-ONLY fixture harness. Mounts synthetic operator routes under
+   * /__fixture/operator/* for local development without a live Gateway.
+   *
+   * SECURITY INVARIANTS (load-bearing):
+   * - THROWS at startup if NODE_ENV === 'production' (fail loud, never silent).
+   * - THROWS if fixtureBindHost is not a loopback address (127.0.0.1/localhost/::1).
+   *   Default host 0.0.0.0 fails — fixture mode must never be reachable on a
+   *   network-accessible address.
+   * - Fixture routes are public-before-auth ONLY when this flag is active.
+   * - Independent of devAutoLogin, operatorUiEnabled, and gatewayOperatorSessionEnabled.
+   *
+   * If undefined, reads from DASHBOARD_FIXTURE_HARNESS_ENABLED env. Default: OFF.
+   */
+  fixtureHarnessEnabled?: boolean | undefined
+  /**
+   * The bind host to validate for fixture harness safety.
+   * Only used when fixtureHarnessEnabled is true (or env-driven path).
+   * Must be a loopback address (127.0.0.1, localhost, ::1) for fixture mode to engage.
+   * If undefined (injected path), reads from DASHBOARD_HOST env.
+   */
+  fixtureBindHost?: string | undefined
 }
 
 /**
@@ -316,6 +340,46 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
 
   if (devAutoLogin) {
     logger.warning('DEV AUTO-LOGIN ENABLED — auth is bypassed; never use in production')
+  }
+
+  // Resolve fixture harness flag — DEV-ONLY fixture route mount. Default OFF (fail-closed).
+  //
+  // SECURITY: Two independent guards must BOTH pass for fixture routes to be mounted.
+  // If requested but either guard fails, THROW at startup (fail loud, never silent).
+  //
+  // Guard A — NODE_ENV must NOT be 'production' (applies to both paths).
+  // Guard B — bind host must be a loopback address (both injected and ENV-driven paths).
+  const fixtureHarnessRequested: boolean =
+    opts?.fixtureHarnessEnabled === undefined
+      ? readFixtureHarnessConfig().enabled
+      : opts.fixtureHarnessEnabled
+
+  let fixtureHarnessActive = false
+
+  if (fixtureHarnessRequested) {
+    // Guard A: NODE_ENV production check
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'DASHBOARD_FIXTURE_HARNESS_ENABLED refused: requires NODE_ENV!=production and a loopback bind host (fixture harness must never run in production)',
+      )
+    }
+
+    // Guard B: loopback bind host check (both injected and ENV-driven paths)
+    const configuredHost =
+      opts?.fixtureBindHost === undefined
+        ? process.env.DASHBOARD_HOST?.trim()
+        : opts.fixtureBindHost.trim()
+
+    const isLoopback = isLoopbackBindHost(configuredHost)
+    if (!isLoopback) {
+      throw new Error(
+        'DASHBOARD_FIXTURE_HARNESS_ENABLED refused: requires a loopback bind host (127.0.0.1, localhost, or ::1). ' +
+        'Set DASHBOARD_HOST=127.0.0.1 to enable fixture mode on a loopback address.',
+      )
+    }
+
+    fixtureHarnessActive = true
+    logger.warning('FIXTURE HARNESS ENABLED — synthetic operator routes mounted; never use in production')
   }
 
   // Resolve the trusted gateway operator origin — SECURITY CRITICAL.
@@ -424,7 +488,10 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     // shell and always depends on these assets, regardless of operatorUiEnabled.
     path === '/static/operator-stream.js' ||
     path === '/static/operator-launch.js' ||
-    (operatorUiEnabled && path.startsWith('/static/'))
+    (operatorUiEnabled && path.startsWith('/static/')) ||
+    // Fixture harness routes — public ONLY when the full fixture gate is active
+    // (non-production + loopback bind + flag enabled). Otherwise not in public list.
+    (fixtureHarnessActive && path.startsWith(FIXTURE_OPERATOR_PREFIX))
 
   app.use('*', async (c: Context, next) => {
     const path = new URL(c.req.url).pathname
@@ -601,6 +668,15 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     // Note: operator-stream.js and operator-launch.js are already mounted above;
     // this catch-all additionally serves operator.css and any other static assets.
     app.use('/static/*', serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}))
+  }
+
+  // ── Fixture harness routes (DEV-ONLY) ─────────────────────────────────────
+  // Only mounted when fixtureHarnessActive is true (non-production + loopback + flag).
+  // isPublicPath already allows FIXTURE_OPERATOR_PREFIX/* when active, so auth
+  // middleware passes these requests through before they reach these handlers.
+  if (fixtureHarnessActive) {
+    const {buildFixtureHarnessRouter} = await import('./routes/operator-fixture-harness.ts')
+    app.route(FIXTURE_OPERATOR_PREFIX, buildFixtureHarnessRouter())
   }
 
   // ── SPA static asset serving ─────────────────────────────────────────────

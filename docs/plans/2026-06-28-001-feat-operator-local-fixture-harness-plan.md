@@ -192,7 +192,7 @@ flowchart TB
 - Fixture scenarios are typed, synthetic, and parsed by existing production parser paths.
 - No live capture, secret, or real operator identifier is required.
 
-- [ ] **Unit 2: Dev-only fixture router and route absence gates**
+- [x] **Unit 2: Dev-only fixture router and route absence gates**
 
 **Goal:** Serve synthetic operator behavior from a reserved dev route prefix while proving production absence.
 
