@@ -318,11 +318,14 @@ export function buildLaunchClient(opts) {
 // call captures its own generation at entry; resetLaunchState() increments the counter
 // to invalidate all pending inits without clearing it to null (which would cause a
 // fresh init resuming after reset to see a null mismatch and bail incorrectly).
-// _launchListenerController is the AbortController passed to the active submit listener;
-// resetLaunchState() aborts it to remove the listener. It is separate from the per-init
-// guard controller so stale cleanup cannot abort the active listener.
+// _launchListenerController is the AbortController passed to the active submit listener.
+// _launchListenerGeneration is the generation value at the time the controller was set.
+// resetLaunchState() only aborts the controller if _launchListenerGeneration matches
+// the pre-increment generation — this prevents stale cleanup from aborting a listener
+// registered by a newer init that started after the stale reset.
 let _launchGeneration = 0
 let _launchListenerController = null
+let _launchListenerGeneration = -1
 // Tracks the stream handle returned by initOperatorStream for launch-created runs.
 // resetLaunchState() closes this handle to prevent leaked connections/timers.
 let _launchStreamHandle = null
@@ -365,6 +368,24 @@ export function isInitStale(controller, generation) {
  */
 export function setLaunchGeneration(gen) {
   _launchGeneration = gen
+}
+
+/**
+ * Test-only seam: directly set _launchListenerController and its owning generation.
+ *
+ * Allows tests to simulate the listener registration step of initOperatorLaunch
+ * without calling the DOM-touching function. The generation parameter must match
+ * the generation that "owns" this controller — resetLaunchState() will only abort
+ * the controller if _launchListenerGeneration matches the pre-increment generation.
+ *
+ * Never call this in production code.
+ *
+ * @param {AbortController} controller - The controller to set as the active listener controller.
+ * @param {number} generation - The generation that owns this controller.
+ */
+export function setLaunchListenerController(controller, generation) {
+  _launchListenerController = controller
+  _launchListenerGeneration = generation
 }
 
 /**
@@ -494,8 +515,11 @@ export async function initOperatorLaunch(opts) {
     // from the per-init abortController used for staleness guards above, so that
     // resetLaunchState() can abort only the active listener without interfering with
     // the init-guard controller of a concurrently-running newer init.
+    // Record the generation that owns this controller so resetLaunchState() can
+    // verify ownership before aborting — stale cleanup must not abort a newer listener.
     const listenerController = new AbortController()
     _launchListenerController = listenerController
+    _launchListenerGeneration = myGeneration
 
     // In-flight submit mutex: prevents double-launch even when requestSubmit()
     // bypasses the disabled button (e.g. DevTools or browser extensions).
@@ -585,7 +609,7 @@ export async function initOperatorLaunch(opts) {
           // Wire the SSE stream directly — do NOT re-run bootstrapOperatorStreams.
           // Store the returned handle so resetLaunchState() can close it on cleanup.
           const statusEl = card.querySelector('[data-role="run-status"]')
-          const streamHandle = initOperatorStream({runId, statusEl, noticeEl: sharedNoticeEl, endpointBase: opts?.endpointBase})
+          const streamHandle = initOperatorStream({runId, statusEl, noticeEl: sharedNoticeEl, endpointBase: opts?.endpointBase, fixtureSessionId: opts?.fixtureSessionId})
           setLaunchStreamHandle(streamHandle)
         }
 
@@ -623,12 +647,17 @@ export async function initOperatorLaunch(opts) {
  * even if stale cleanup from an older init runs concurrently.
  */
 export function resetLaunchState() {
+  // Capture the pre-increment generation to check listener ownership.
+  const preIncrementGeneration = _launchGeneration
   // Increment generation to invalidate all pending inits.
   _launchGeneration++
-  // Abort and clear the active listener controller (removes the submit listener).
-  if (_launchListenerController !== null) {
+  // Abort and clear the active listener controller only if it was set during the
+  // pre-increment generation. This prevents stale cleanup from aborting a listener
+  // registered by a newer init that started after the stale reset fired.
+  if (_launchListenerController !== null && _launchListenerGeneration === preIncrementGeneration) {
     _launchListenerController.abort()
     _launchListenerController = null
+    _launchListenerGeneration = -1
   }
   // Close the launch-created stream handle to prevent leaked connections/timers.
   if (_launchStreamHandle !== null) {

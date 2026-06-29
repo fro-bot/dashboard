@@ -632,6 +632,65 @@ describe('DASHBOARD_WEB_DIST — static root override', () => {
   })
 })
 
+describe('DASHBOARD_WEB_DIST — production guard: dist-fixture must not be used in production', () => {
+  it('buildDashboardApp throws when webDistRoot is ./web/dist-fixture and NODE_ENV=production', async () => {
+    const originalNodeEnv = process.env.NODE_ENV
+    process.env.NODE_ENV = 'production'
+    try {
+      await expect(
+        buildDashboardApp({
+          operatorLogin: TEST_OPERATOR,
+          cookieKey: TEST_KEY,
+          oauthClient: makeFakeOAuthClient(),
+          fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+          getSnapshot: () => ({repos: [], staleBanner: false, driftCount: 0, refreshedAt: null}),
+          webDistRoot: './web/dist-fixture',
+        }),
+      ).rejects.toThrow(/dist-fixture.*production|production.*dist-fixture/i)
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv
+    }
+  })
+
+  it('buildDashboardApp does NOT throw when webDistRoot is ./web/dist-fixture and NODE_ENV=development', async () => {
+    const originalNodeEnv = process.env.NODE_ENV
+    process.env.NODE_ENV = 'development'
+    try {
+      await expect(
+        buildDashboardApp({
+          operatorLogin: TEST_OPERATOR,
+          cookieKey: TEST_KEY,
+          oauthClient: makeFakeOAuthClient(),
+          fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+          getSnapshot: () => ({repos: [], staleBanner: false, driftCount: 0, refreshedAt: null}),
+          webDistRoot: './web/dist-fixture',
+        }),
+      ).resolves.toBeDefined()
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv
+    }
+  })
+
+  it('buildDashboardApp does NOT throw when webDistRoot is ./web/dist (production-safe root)', async () => {
+    const originalNodeEnv = process.env.NODE_ENV
+    process.env.NODE_ENV = 'production'
+    try {
+      await expect(
+        buildDashboardApp({
+          operatorLogin: TEST_OPERATOR,
+          cookieKey: TEST_KEY,
+          oauthClient: makeFakeOAuthClient(),
+          fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+          getSnapshot: () => ({repos: [], staleBanner: false, driftCount: 0, refreshedAt: null}),
+          webDistRoot: './web/dist',
+        }),
+      ).resolves.toBeDefined()
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv
+    }
+  })
+})
+
 describe('dev:fixture script — package.json content', () => {
   it('dev:fixture script sets DASHBOARD_WEB_DIST=./web/dist-fixture', async () => {
     const fs = await import('node:fs/promises')
@@ -674,6 +733,13 @@ describe('dev:fixture script — package.json content', () => {
     const script = pkg.scripts['dev:fixture'] ?? ''
     expect(script).not.toContain('FIXTURE_HARNESS=true')
     expect(script).not.toContain('DEV_AUTO_LOGIN=true')
+  })
+
+  it('dev:fixture script sets NODE_ENV=development (fixture guard requires explicit development or test)', async () => {
+    const fs = await import('node:fs/promises')
+    const pkg = JSON.parse(await fs.readFile('package.json', 'utf8')) as {scripts: Record<string, string>}
+    const script = pkg.scripts['dev:fixture'] ?? ''
+    expect(script).toContain('NODE_ENV=development')
   })
 })
 

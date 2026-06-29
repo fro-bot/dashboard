@@ -109,7 +109,7 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
   }, [state, fixtureMode, fixtureEndpointBase, fixtureSessionId])
 
   return (
-      <div data-testid="operator-shell" data-state={state}>
+      <div data-testid="operator-shell" data-state={state} {...(fixtureMode === true ? {'data-fixture-mode': 'true'} : {})}>
       {fixtureMode === true && (
         <div
           data-testid="fixture-mode-indicator"

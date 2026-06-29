@@ -18,7 +18,8 @@
  */
 import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
 import {Buffer} from 'node:buffer'
-import {beforeEach, describe, expect, it} from 'vitest'
+import process from 'node:process'
+import {afterEach, beforeEach, describe, expect, it} from 'vitest'
 import {FIXTURE_OPERATOR_PREFIX} from '../src/gateway/operator-fixture-routes.ts'
 import {FIXTURE_SCENARIO_NAMES} from '../src/gateway/operator-fixture-sse.ts'
 import {resetFixtureHarnessForTesting} from '../src/routes/operator-fixture-harness.ts'
@@ -430,7 +431,7 @@ describe('fixture mode — happy path synthetic responses', () => {
     expect(launchRes.status).toBe(200)
     const {runId} = await launchRes.json() as {runId: string}
 
-    const streamRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream`)
+    const streamRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream?fixtureSessionId=${fixtureSessionId}`)
     expect(streamRes.status).toBe(200)
     expect(streamRes.headers.get('content-type') ?? '').toMatch(/text\/event-stream/)
     const body = await streamRes.text()
@@ -459,7 +460,7 @@ describe('fixture mode — happy path synthetic responses', () => {
     expect(launchRes.status).toBe(200)
     const {runId} = await launchRes.json() as {runId: string}
 
-    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/approvals`)
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/approvals?fixtureSessionId=${fixtureSessionId}`)
     expect(res.status).toBe(200)
     const body = await res.json() as {approvals: unknown[]}
     expect(Array.isArray(body.approvals)).toBe(true)
@@ -673,7 +674,7 @@ describe('fixture launch — scenario isolation', () => {
     expect(launchRes.status).toBe(200)
     const {runId} = await launchRes.json() as {runId: string}
 
-    const streamRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream`)
+    const streamRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream?fixtureSessionId=${fixtureSessionId}`)
     expect(streamRes.status).toBe(200)
     expect(await streamRes.text()).toContain('succeeded')
   })
@@ -699,7 +700,7 @@ describe('fixture launch — scenario isolation', () => {
     expect(launchRes.status).toBe(200)
     const {runId} = await launchRes.json() as {runId: string}
 
-    const streamRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream`)
+    const streamRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream?fixtureSessionId=${fixtureSessionId}`)
     expect(streamRes.status).toBe(200)
     expect(await streamRes.text()).toContain('failed')
   })
@@ -816,7 +817,7 @@ describe('fixture stream — run ID binding', () => {
     expect(launchRes.status).toBe(200)
     const {runId} = await launchRes.json() as {runId: string}
 
-    const streamRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream`)
+    const streamRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream?fixtureSessionId=${fixtureSessionId}`)
     expect(streamRes.status).toBe(200)
     const sseText = await streamRes.text()
 
@@ -863,7 +864,7 @@ describe('fixture stream — run ID binding', () => {
     expect(launchRes.status).toBe(200)
     const {runId} = await launchRes.json() as {runId: string}
 
-    const streamRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream`)
+    const streamRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream?fixtureSessionId=${fixtureSessionId}`)
     expect(streamRes.status).toBe(200)
     const sseText = await streamRes.text()
 
@@ -907,7 +908,7 @@ describe('fixture stream — run ID binding', () => {
     expect(launchRes.status).toBe(200)
     const {runId} = await launchRes.json() as {runId: string}
 
-    const streamRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream`)
+    const streamRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream?fixtureSessionId=${fixtureSessionId}`)
     expect(streamRes.status).toBe(200)
     const sseText = await streamRes.text()
 
@@ -951,5 +952,417 @@ describe('fixture repos — browser-compatible shape {owner, repo}', () => {
       // name field must not be the primary repo identifier (repo field must exist)
       expect(typeof (item as {repo?: unknown}).repo).toBe('string')
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// NODE_ENV guard — fail closed unless explicitly development or test
+// ---------------------------------------------------------------------------
+
+describe('fixture NODE_ENV guard — fail closed unless development or test', () => {
+  const ORIGINAL_NODE_ENV = process.env.NODE_ENV
+
+  afterEach(() => {
+    if (ORIGINAL_NODE_ENV === undefined) {
+      delete process.env.NODE_ENV
+    } else {
+      process.env.NODE_ENV = ORIGINAL_NODE_ENV
+    }
+  })
+
+  it('throws when NODE_ENV is undefined (not explicitly development or test)', async () => {
+    delete process.env.NODE_ENV
+    await expect(
+      buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'}),
+    ).rejects.toThrow()
+  })
+
+  it('throws when NODE_ENV=staging (not explicitly development or test)', async () => {
+    process.env.NODE_ENV = 'staging'
+    await expect(
+      buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'}),
+    ).rejects.toThrow()
+  })
+
+  it('throws when NODE_ENV=production', async () => {
+    process.env.NODE_ENV = 'production'
+    await expect(
+      buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'}),
+    ).rejects.toThrow()
+  })
+
+  it('does NOT throw when NODE_ENV=development', async () => {
+    process.env.NODE_ENV = 'development'
+    await expect(
+      buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'}),
+    ).resolves.toBeDefined()
+  })
+
+  it('does NOT throw when NODE_ENV=test', async () => {
+    process.env.NODE_ENV = 'test'
+    await expect(
+      buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'}),
+    ).resolves.toBeDefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Session ownership — stream/approvals/decision require matching fixtureSessionId
+// ---------------------------------------------------------------------------
+
+describe('fixture session ownership — stream requires matching fixtureSessionId', () => {
+  it('GET /runs/:runId/stream without fixtureSessionId returns 400 or 404', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const launchRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({
+        scenario: FIXTURE_SCENARIO_NAMES.success,
+        idempotencyKey: 'fixture-idem-key-ownership-stream-001',
+        fixtureSessionId,
+        csrfToken: 'fixture-csrf-placeholder',
+        repo: 'fixture-org/fixture-repo',
+        prompt: '[Fixture prompt]',
+      }),
+    })
+    expect(launchRes.status).toBe(200)
+    const {runId} = await launchRes.json() as {runId: string}
+
+    // No fixtureSessionId in request — must be rejected
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream`)
+    expect([400, 404]).toContain(res.status)
+  })
+
+  it('GET /runs/:runId/stream with wrong fixtureSessionId returns 400 or 404 (non-echoing)', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const launchRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({
+        scenario: FIXTURE_SCENARIO_NAMES.success,
+        idempotencyKey: 'fixture-idem-key-ownership-stream-002',
+        fixtureSessionId,
+        csrfToken: 'fixture-csrf-placeholder',
+        repo: 'fixture-org/fixture-repo',
+        prompt: '[Fixture prompt]',
+      }),
+    })
+    expect(launchRes.status).toBe(200)
+    const {runId} = await launchRes.json() as {runId: string}
+
+    // Wrong session — must be rejected without echoing the wrong session ID
+    const wrongSession = 'fixture-session-WRONG-9999'
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream?fixtureSessionId=${wrongSession}`)
+    expect([400, 404]).toContain(res.status)
+    expect(await res.text()).not.toContain(wrongSession)
+  })
+
+  it('GET /runs/:runId/stream with correct fixtureSessionId returns 200', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const launchRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({
+        scenario: FIXTURE_SCENARIO_NAMES.success,
+        idempotencyKey: 'fixture-idem-key-ownership-stream-003',
+        fixtureSessionId,
+        csrfToken: 'fixture-csrf-placeholder',
+        repo: 'fixture-org/fixture-repo',
+        prompt: '[Fixture prompt]',
+      }),
+    })
+    expect(launchRes.status).toBe(200)
+    const {runId} = await launchRes.json() as {runId: string}
+
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream?fixtureSessionId=${fixtureSessionId}`)
+    expect(res.status).toBe(200)
+  })
+})
+
+describe('fixture session ownership — approvals requires matching fixtureSessionId', () => {
+  it('GET /runs/:runId/approvals without fixtureSessionId returns 400 or 404', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const launchRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({
+        scenario: FIXTURE_SCENARIO_NAMES.success,
+        idempotencyKey: 'fixture-idem-key-ownership-approvals-001',
+        fixtureSessionId,
+        csrfToken: 'fixture-csrf-placeholder',
+        repo: 'fixture-org/fixture-repo',
+        prompt: '[Fixture prompt]',
+      }),
+    })
+    expect(launchRes.status).toBe(200)
+    const {runId} = await launchRes.json() as {runId: string}
+
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/approvals`)
+    expect([400, 404]).toContain(res.status)
+  })
+
+  it('GET /runs/:runId/approvals with wrong fixtureSessionId returns 400 or 404 (non-echoing)', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const launchRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({
+        scenario: FIXTURE_SCENARIO_NAMES.success,
+        idempotencyKey: 'fixture-idem-key-ownership-approvals-002',
+        fixtureSessionId,
+        csrfToken: 'fixture-csrf-placeholder',
+        repo: 'fixture-org/fixture-repo',
+        prompt: '[Fixture prompt]',
+      }),
+    })
+    expect(launchRes.status).toBe(200)
+    const {runId} = await launchRes.json() as {runId: string}
+
+    const wrongSession = 'fixture-session-WRONG-8888'
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/approvals?fixtureSessionId=${wrongSession}`)
+    expect([400, 404]).toContain(res.status)
+    expect(await res.text()).not.toContain(wrongSession)
+  })
+
+  it('GET /runs/:runId/approvals with correct fixtureSessionId returns 200', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const launchRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({
+        scenario: FIXTURE_SCENARIO_NAMES.success,
+        idempotencyKey: 'fixture-idem-key-ownership-approvals-003',
+        fixtureSessionId,
+        csrfToken: 'fixture-csrf-placeholder',
+        repo: 'fixture-org/fixture-repo',
+        prompt: '[Fixture prompt]',
+      }),
+    })
+    expect(launchRes.status).toBe(200)
+    const {runId} = await launchRes.json() as {runId: string}
+
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/approvals?fixtureSessionId=${fixtureSessionId}`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as {approvals: unknown[]}
+    expect(Array.isArray(body.approvals)).toBe(true)
+  })
+})
+
+describe('fixture session ownership — decision requires matching fixtureSessionId', () => {
+  it('POST /runs/:runId/approvals/:reqId/decision without fixtureSessionId returns 400 or 404', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const launchRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({
+        scenario: FIXTURE_SCENARIO_NAMES.success,
+        idempotencyKey: 'fixture-idem-key-ownership-decision-001',
+        fixtureSessionId,
+        csrfToken: 'fixture-csrf-placeholder',
+        repo: 'fixture-org/fixture-repo',
+        prompt: '[Fixture prompt]',
+      }),
+    })
+    expect(launchRes.status).toBe(200)
+    const {runId} = await launchRes.json() as {runId: string}
+
+    const res = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/approvals/req-fixture-harness-001/decision`,
+      {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({decision: 'once'})},
+    )
+    expect([400, 404]).toContain(res.status)
+  })
+
+  it('POST /runs/:runId/approvals/:reqId/decision with wrong fixtureSessionId returns 400 or 404 (non-echoing)', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const launchRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({
+        scenario: FIXTURE_SCENARIO_NAMES.success,
+        idempotencyKey: 'fixture-idem-key-ownership-decision-002',
+        fixtureSessionId,
+        csrfToken: 'fixture-csrf-placeholder',
+        repo: 'fixture-org/fixture-repo',
+        prompt: '[Fixture prompt]',
+      }),
+    })
+    expect(launchRes.status).toBe(200)
+    const {runId} = await launchRes.json() as {runId: string}
+
+    const wrongSession = 'fixture-session-WRONG-7777'
+    const res = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/approvals/req-fixture-harness-001/decision?fixtureSessionId=${wrongSession}`,
+      {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({decision: 'once'})},
+    )
+    expect([400, 404]).toContain(res.status)
+    expect(await res.text()).not.toContain(wrongSession)
+  })
+
+  it('POST /runs/:runId/approvals/:reqId/decision with correct fixtureSessionId returns 200 (happy path)', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const launchRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({
+        scenario: FIXTURE_SCENARIO_NAMES.success,
+        idempotencyKey: 'fixture-idem-key-ownership-decision-003',
+        fixtureSessionId,
+        csrfToken: 'fixture-csrf-placeholder',
+        repo: 'fixture-org/fixture-repo',
+        prompt: '[Fixture prompt]',
+      }),
+    })
+    expect(launchRes.status).toBe(200)
+    const {runId} = await launchRes.json() as {runId: string}
+
+    const res = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/approvals/req-fixture-harness-001/decision?fixtureSessionId=${fixtureSessionId}`,
+      {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({decision: 'once'})},
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json() as {state: string}
+    expect(body.state).toBe('claimed')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Cheap hardening: malformed JSON and non-object JSON for POST /runs
+// ---------------------------------------------------------------------------
+
+describe('fixture launch — malformed and non-object JSON body', () => {
+  it('POST /runs with malformed JSON body returns 400', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: '{not valid json',
+    })
+    expect(res.status).toBe(400)
+    const body = await res.text()
+    expect(body).not.toContain('not valid json')
+  })
+
+  it('POST /runs with JSON null body returns 400', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: 'null',
+    })
+    expect(res.status).toBe(400)
+  })
+
+  it('POST /runs with JSON array body returns 400', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: '["scenario","success"]',
+    })
+    expect(res.status).toBe(400)
+  })
+
+  it('POST /runs with JSON string body returns 400', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: '"just a string"',
+    })
+    expect(res.status).toBe(400)
+  })
+
+  it('POST /runs with JSON number body returns 400', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: '42',
+    })
+    expect(res.status).toBe(400)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Cheap hardening: root GET / manifest
+// ---------------------------------------------------------------------------
+
+describe('fixture harness — GET / manifest', () => {
+  it('GET /__fixture/operator returns 200 with fixtureMode:true', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as {fixtureMode: boolean}
+    expect(body.fixtureMode).toBe(true)
+  })
+
+  it('GET /__fixture/operator returns prefix field', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as {prefix: string}
+    expect(body.prefix).toBe(FIXTURE_OPERATOR_PREFIX)
+  })
+
+  it('GET /__fixture/operator returns scenarios array', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as {scenarios: string[]}
+    expect(Array.isArray(body.scenarios)).toBe(true)
+    expect(body.scenarios.length).toBeGreaterThan(0)
+  })
+
+  it('GET /__fixture/operator manifest contains no secrets (no token, no cookie, no key)', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}`)
+    expect(res.status).toBe(200)
+    const text = await res.text()
+    expect(text).not.toMatch(/Bearer\s+\w/i)
+    expect(text).not.toMatch(/__Host-/)
+    expect(text).not.toMatch(/ghp_|gho_|ghs_/)
+  })
+
+  it('GET /__fixture/operator is absent when fixture flag is off', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: false})
+    const res = await authedGet(app, `${FIXTURE_OPERATOR_PREFIX}`)
+    expect(res.status).toBe(404)
   })
 })

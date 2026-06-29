@@ -449,3 +449,29 @@ describe('Operator — fixture scenario and sessionId wired to runtime', () => {
     createSpy.mockRestore()
   })
 })
+
+describe('Operator — data-fixture-mode attribute for agent detection', () => {
+  it('operator-shell has data-fixture-mode="true" when fixtureMode=true', () => {
+    render(<Operator state="ready" fixtureMode={true} />)
+    const shell = document.querySelector('[data-testid="operator-shell"]')
+    expect(shell?.getAttribute('data-fixture-mode')).toBe('true')
+  })
+
+  it('operator-shell does NOT have data-fixture-mode attribute when fixtureMode is not set', () => {
+    render(<Operator state="ready" />)
+    const shell = document.querySelector('[data-testid="operator-shell"]')
+    expect(shell?.hasAttribute('data-fixture-mode')).toBe(false)
+  })
+
+  it('operator-shell does NOT have data-fixture-mode attribute when fixtureMode=false', () => {
+    render(<Operator state="ready" fixtureMode={false} />)
+    const shell = document.querySelector('[data-testid="operator-shell"]')
+    expect(shell?.hasAttribute('data-fixture-mode')).toBe(false)
+  })
+
+  it('data-fixture-mode is present in loading state too (not just ready)', () => {
+    render(<Operator state="loading" fixtureMode={true} />)
+    const shell = document.querySelector('[data-testid="operator-shell"]')
+    expect(shell?.getAttribute('data-fixture-mode')).toBe('true')
+  })
+})

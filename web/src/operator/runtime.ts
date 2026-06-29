@@ -134,14 +134,17 @@ async function defaultRuntimeLoader(opts?: {
   getScenario?: () => string
 }): Promise<() => void> {
   const streamMod = await import(/* @vite-ignore */ _streamSpecifier) as {
-    bootstrapOperatorStreams?: (opts?: {endpointBase?: string}) => void
+    bootstrapOperatorStreams?: (opts?: {endpointBase?: string; fixtureSessionId?: string}) => void
     resetBootstrapState?: () => void
   }
   if (typeof streamMod.resetBootstrapState === 'function') {
     streamMod.resetBootstrapState()
   }
   if (typeof streamMod.bootstrapOperatorStreams === 'function') {
-    streamMod.bootstrapOperatorStreams(opts?.endpointBase !== undefined ? {endpointBase: opts.endpointBase} : undefined)
+    const streamOpts = opts?.endpointBase !== undefined || opts?.fixtureSessionId !== undefined
+      ? {endpointBase: opts.endpointBase, fixtureSessionId: opts.fixtureSessionId}
+      : undefined
+    streamMod.bootstrapOperatorStreams(streamOpts)
   }
 
   const launchMod = await import(/* @vite-ignore */ _launchSpecifier) as {

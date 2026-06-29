@@ -178,3 +178,15 @@ export declare function isInitStale(controller: AbortController, generation: num
  * DOM-touching initOperatorLaunch. Never call this in production code.
  */
 export declare function setLaunchGeneration(gen: number): void
+
+/**
+ * Test-only seam: directly set _launchListenerController and its owning generation.
+ *
+ * Allows tests to simulate the listener registration step of initOperatorLaunch
+ * without calling the DOM-touching function. The generation parameter must match
+ * the generation that "owns" this controller — resetLaunchState() will only abort
+ * the controller if _launchListenerGeneration matches the pre-increment generation.
+ *
+ * Never call this in production code.
+ */
+export declare function setLaunchListenerController(controller: AbortController, generation: number): void

@@ -15,6 +15,7 @@ import {describe, expect, it} from 'vitest'
 const FIXTURE_FILES = [
   'src/gateway/operator-fixtures.ts',
   'src/gateway/operator-fixture-sse.ts',
+  'src/routes/operator-fixture-harness.ts',
 ]
 
 /**

@@ -313,7 +313,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // SECURITY: Two independent guards must BOTH pass for the bypass to be effective.
   // If requested but either guard fails, THROW at startup (fail loud, never silent).
   //
-  // Guard A — NODE_ENV must NOT be 'production' (applies to both paths).
+  // Guard A — NODE_ENV must be explicitly 'development' or 'test' (applies to both paths).
   // Guard B — DASHBOARD_HOST must be a loopback address (ENV-driven path only).
   //   The injected opts.devAutoLogin path (test seam) bypasses the host check
   //   but still honors Guard A.
@@ -364,10 +364,13 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   let fixtureHarnessActive = false
 
   if (fixtureHarnessRequested) {
-    // Guard A: NODE_ENV production check
-    if (process.env.NODE_ENV === 'production') {
+    // Guard A: NODE_ENV must be explicitly 'development' or 'test' (fail closed).
+    // Rejecting anything other than these two known-safe values prevents accidental
+    // fixture exposure in staging, CI, or any other non-dev environment.
+    const nodeEnv = process.env.NODE_ENV
+    if (nodeEnv !== 'development' && nodeEnv !== 'test') {
       throw new Error(
-        'DASHBOARD_FIXTURE_HARNESS_ENABLED refused: requires NODE_ENV!=production and a loopback bind host (fixture harness must never run in production)',
+        'DASHBOARD_FIXTURE_HARNESS_ENABLED refused: requires NODE_ENV=development or NODE_ENV=test and a loopback bind host (fixture harness must never run in production or unknown environments)',
       )
     }
 
@@ -391,6 +394,14 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
 
   // Resolve SPA static asset root — defaults to ./web/dist; override via DASHBOARD_WEB_DIST or opts.
   const webDistRoot = opts?.webDistRoot ?? process.env.DASHBOARD_WEB_DIST?.trim() ?? './web/dist'
+
+  // Guard: dist-fixture must never be served in production. Fail loudly at construction.
+  // dist-fixture contains fixture-mode JS that bypasses real auth flows.
+  if (webDistRoot.includes('dist-fixture') && process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'DASHBOARD_WEB_DIST=./web/dist-fixture is not allowed in production (dist-fixture is a dev-only build artifact)',
+    )
+  }
 
   // Resolve the trusted gateway operator origin — SECURITY CRITICAL.
   // Must be a configured, trusted value; never derived from the inbound request Host.
@@ -681,7 +692,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   }
 
   // ── Fixture harness routes (DEV-ONLY) ─────────────────────────────────────
-  // Only mounted when fixtureHarnessActive is true (non-production + loopback + flag).
+  // Only mounted when fixtureHarnessActive is true (development/test + loopback + flag).
   // isPublicPath already allows FIXTURE_OPERATOR_PREFIX/* when active, so auth
   // middleware passes these requests through before they reach these handlers.
   if (fixtureHarnessActive) {

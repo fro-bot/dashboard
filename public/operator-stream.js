@@ -907,6 +907,10 @@ function backoffDelay(attempt) {
  * seam can configure a different endpoint base in dev mode without modifying
  * production behavior.
  *
+ * Accepts an optional fixtureSessionId. When provided (fixture mode only), it is
+ * appended as a query param to all requests so the fixture harness can route them
+ * to the correct session. Never included in production mode (no fixtureSessionId).
+ *
  * Security:
  * - Never logs runId, requestId, decision, csrf, or idempotency key.
  * - All 404s collapse to one denial-class signal (no cause inference).
@@ -915,10 +919,19 @@ function backoffDelay(attempt) {
  *
  * @param {object} [opts] - Optional configuration.
  * @param {string} [opts.endpointBase] - The endpoint base path. Defaults to '/operator'.
+ * @param {string} [opts.fixtureSessionId] - Fixture session ID (fixture mode only).
  * @returns {object} An object with refreshCsrf(), decideRunApproval(), and listRunApprovals() methods.
  */
 export function buildApprovalClient(opts) {
   const endpointBase = opts?.endpointBase ?? '/operator'
+  const fixtureSessionId = opts?.fixtureSessionId
+
+  // Append fixtureSessionId as a query param when in fixture mode.
+  // Only appended when fixtureSessionId is provided — never in production.
+  const withFixtureParam = url =>
+    fixtureSessionId === undefined
+      ? url
+      : `${url}${url.includes('?') ? '&' : '?'}fixtureSessionId=${encodeURIComponent(fixtureSessionId)}`
 
   const browserFetch = (input, init) =>
     globalThis.fetch(input, {
@@ -929,7 +942,7 @@ export function buildApprovalClient(opts) {
 
   async function refreshCsrf() {
     try {
-      const res = await browserFetch(`${endpointBase}/session/csrf`, {
+      const res = await browserFetch(withFixtureParam(`${endpointBase}/session/csrf`), {
         headers: {'content-type': 'application/json'},
       })
       if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
@@ -966,7 +979,7 @@ export function buildApprovalClient(opts) {
     }
     const csrfToken = csrfResult.data.csrfToken
 
-    const path = `${endpointBase}/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(requestId)}/decision`
+    const path = withFixtureParam(`${endpointBase}/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(requestId)}/decision`)
     const body = JSON.stringify({decision})
     const makeInit = csrf => ({
       method: 'POST',
@@ -1030,7 +1043,7 @@ export function buildApprovalClient(opts) {
   async function listRunApprovals(runId) {
     try {
       const res = await browserFetch(
-        `${endpointBase}/runs/${encodeURIComponent(runId)}/approvals`,
+        withFixtureParam(`${endpointBase}/runs/${encodeURIComponent(runId)}/approvals`),
         {headers: {'content-type': 'application/json'}},
       )
       if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
@@ -1330,12 +1343,20 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
  * - Read-only: GET only for stream; approval decisions are operator-forwarded writes.
  */
 export function initOperatorStream(opts) {
-  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, approvalClient: injectedApprovalClient, endpointBase} = opts
+  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, approvalClient: injectedApprovalClient, endpointBase, fixtureSessionId} = opts
 
   // Build the approval client lazily (only if approvalsEl is present).
-  // Pass endpointBase so fixture mode uses the fixture approval routes.
+  // Pass endpointBase and fixtureSessionId so fixture mode uses the fixture approval routes
+  // and includes the session ID in all approval requests.
   const approvalClient = approvalsEl !== undefined && approvalsEl !== null
-    ? (injectedApprovalClient ?? buildApprovalClient(endpointBase === undefined ? undefined : {endpointBase}))
+    ? (injectedApprovalClient ?? buildApprovalClient(
+        endpointBase === undefined && fixtureSessionId === undefined
+          ? undefined
+          : {
+              ...(endpointBase === undefined ? {} : {endpointBase}),
+              ...(fixtureSessionId === undefined ? {} : {fixtureSessionId}),
+            },
+      ))
     : null
 
   // Track rendered prompt elements by requestID so we can remove them on settle
@@ -1624,8 +1645,12 @@ export function initOperatorStream(opts) {
 
     // Build the stream URL — runId is used only here, never logged.
     // endpointBase defaults to '/operator'; dev mode may pass a different base.
+    // fixtureSessionId is appended as a query param in fixture mode only.
     const _streamEndpointBase = endpointBase ?? '/operator'
-    const path = `${_streamEndpointBase}/runs/${encodeURIComponent(runId)}/stream`
+    const _streamPath = `${_streamEndpointBase}/runs/${encodeURIComponent(runId)}/stream`
+    const path = fixtureSessionId === undefined
+      ? _streamPath
+      : `${_streamPath}?fixtureSessionId=${encodeURIComponent(fixtureSessionId)}`
 
     fetch(path, {
       credentials: 'include',
@@ -1808,6 +1833,7 @@ export function bootstrapOperatorStreams(opts) {
   _bootstrapCalled = true
 
   const endpointBase = opts?.endpointBase
+  const fixtureSessionId = opts?.fixtureSessionId
 
   const section = document.querySelector('#run-status-section')
   if (section === null) return
@@ -1825,7 +1851,7 @@ export function bootstrapOperatorStreams(opts) {
     // Discover the approval region and badge elements
     const approvalsEl = card.querySelector('[data-role="run-approvals"]')
     const badgeEl = card.querySelector('[data-role="approval-badge"]')
-    handles.push(initOperatorStream({runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, endpointBase}))
+    handles.push(initOperatorStream({runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, endpointBase, fixtureSessionId}))
   }
 
   _bootstrapHandles = handles

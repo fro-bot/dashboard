@@ -4872,3 +4872,198 @@ describe('initOperatorStream — malformed/closed-before-terminal: stream unavai
     handle.close()
   })
 })
+
+// ---------------------------------------------------------------------------
+// fixtureSessionId propagation to stream URL and approval client
+// ---------------------------------------------------------------------------
+
+describe('initOperatorStream — fixtureSessionId propagated to stream URL', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('stream URL includes fixtureSessionId as query param when provided', async () => {
+    let capturedUrl: string | undefined
+
+    vi.stubGlobal('fetch', async (url: string) => {
+      capturedUrl = url
+      return {
+        ok: true,
+        status: 200,
+        headers: {get: (h: string) => (h === 'content-type' ? 'text/event-stream' : null)},
+        body: new ReadableStream({start(c) { c.close() }}),
+      }
+    })
+    vi.stubGlobal('document', {
+      createElement: () => ({style: {}, className: '', textContent: '', hidden: false, dataset: {}, setAttribute: () => {}, append: () => {}, remove: () => {}, querySelector: () => null, querySelectorAll: () => [], classList: {add: () => {}, remove: () => {}}, replaceAll: () => ''}),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    const statusEl = {textContent: '', className: '', classList: {add: () => {}}, dataset: {}, hidden: false, style: {}}
+    const noticeEl = {textContent: '', hidden: false, dataset: {connectionState: ''}, setAttribute: () => {}}
+
+    initOperatorStream({
+      runId: 'run-fixture-001',
+      statusEl,
+      noticeEl,
+      endpointBase: '/__fixture/operator',
+      fixtureSessionId: 'fixture-session-0001',
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    expect(capturedUrl).toBeDefined()
+    expect(capturedUrl).toContain('fixtureSessionId=fixture-session-0001')
+  })
+
+  it('stream URL does NOT include fixtureSessionId when not provided (production path)', async () => {
+    let capturedUrl: string | undefined
+
+    vi.stubGlobal('fetch', async (url: string) => {
+      capturedUrl = url
+      return {
+        ok: true,
+        status: 200,
+        headers: {get: (h: string) => (h === 'content-type' ? 'text/event-stream' : null)},
+        body: new ReadableStream({start(c) { c.close() }}),
+      }
+    })
+    vi.stubGlobal('document', {
+      createElement: () => ({style: {}, className: '', textContent: '', hidden: false, dataset: {}, setAttribute: () => {}, append: () => {}, remove: () => {}, querySelector: () => null, querySelectorAll: () => [], classList: {add: () => {}, remove: () => {}}, replaceAll: () => ''}),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    const statusEl = {textContent: '', className: '', classList: {add: () => {}}, dataset: {}, hidden: false, style: {}}
+    const noticeEl = {textContent: '', hidden: false, dataset: {connectionState: ''}, setAttribute: () => {}}
+
+    initOperatorStream({
+      runId: 'run-prod-001',
+      statusEl,
+      noticeEl,
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    expect(capturedUrl).toBeDefined()
+    expect(capturedUrl).not.toContain('fixtureSessionId')
+  })
+})
+
+describe('buildApprovalClient — fixtureSessionId propagated to approval requests', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('decideRunApproval URL includes fixtureSessionId as query param when provided', async () => {
+    let capturedUrl: string | undefined
+
+    vi.stubGlobal('fetch', async (url: string) => {
+      capturedUrl = url
+      return {ok: true, status: 200, json: async () => ({state: 'claimed'})}
+    })
+
+    const client = buildApprovalClient({
+      endpointBase: '/__fixture/operator',
+      fixtureSessionId: 'fixture-session-0001',
+    })
+
+    await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-001')
+
+    expect(capturedUrl).toBeDefined()
+    expect(capturedUrl).toContain('fixtureSessionId=fixture-session-0001')
+  })
+
+  it('decideRunApproval URL does NOT include fixtureSessionId in production mode', async () => {
+    let capturedUrl: string | undefined
+
+    vi.stubGlobal('fetch', async (url: string) => {
+      capturedUrl = url
+      return {ok: true, status: 200, json: async () => ({state: 'claimed'})}
+    })
+
+    const client = buildApprovalClient({endpointBase: '/operator'})
+
+    await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-001')
+
+    expect(capturedUrl).toBeDefined()
+    expect(capturedUrl).not.toContain('fixtureSessionId')
+  })
+
+  it('listRunApprovals URL includes fixtureSessionId as query param when provided', async () => {
+    let capturedUrl: string | undefined
+
+    vi.stubGlobal('fetch', async (url: string) => {
+      capturedUrl = url
+      return {ok: true, status: 200, json: async () => ({approvals: []})}
+    })
+
+    const client = buildApprovalClient({
+      endpointBase: '/__fixture/operator',
+      fixtureSessionId: 'fixture-session-0002',
+    })
+
+    await client.listRunApprovals('run-002')
+
+    expect(capturedUrl).toBeDefined()
+    expect(capturedUrl).toContain('fixtureSessionId=fixture-session-0002')
+  })
+
+  it('listRunApprovals URL does NOT include fixtureSessionId in production mode', async () => {
+    let capturedUrl: string | undefined
+
+    vi.stubGlobal('fetch', async (url: string) => {
+      capturedUrl = url
+      return {ok: true, status: 200, json: async () => ({approvals: []})}
+    })
+
+    const client = buildApprovalClient({endpointBase: '/operator'})
+
+    await client.listRunApprovals('run-002')
+
+    expect(capturedUrl).toBeDefined()
+    expect(capturedUrl).not.toContain('fixtureSessionId')
+  })
+
+  it('refreshCsrf URL includes fixtureSessionId as query param when provided', async () => {
+    let capturedUrl: string | undefined
+
+    vi.stubGlobal('fetch', async (url: string) => {
+      capturedUrl = url
+      return {ok: true, status: 200, json: async () => ({csrfToken: 'tok'})}
+    })
+
+    const client = buildApprovalClient({
+      endpointBase: '/__fixture/operator',
+      fixtureSessionId: 'fixture-session-0003',
+    })
+
+    await client.refreshCsrf()
+
+    expect(capturedUrl).toBeDefined()
+    expect(capturedUrl).toContain('fixtureSessionId=fixture-session-0003')
+  })
+
+  it('refreshCsrf URL does NOT include fixtureSessionId in production mode', async () => {
+    let capturedUrl: string | undefined
+
+    vi.stubGlobal('fetch', async (url: string) => {
+      capturedUrl = url
+      return {ok: true, status: 200, json: async () => ({csrfToken: 'tok'})}
+    })
+
+    const client = buildApprovalClient({endpointBase: '/operator'})
+
+    await client.refreshCsrf()
+
+    expect(capturedUrl).toBeDefined()
+    expect(capturedUrl).not.toContain('fixtureSessionId')
+  })
+})
