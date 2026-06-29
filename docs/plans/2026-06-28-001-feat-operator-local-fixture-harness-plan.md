@@ -103,7 +103,7 @@ The harness must create a fast local loop without weakening production safety. P
 - **Visible fixture-mode indicator:** The assembled UI must show a local-only fixture-mode indicator so developers do not mistake synthetic success for live Gateway validation.
 - **Typed fixtures over raw captures:** MVP stream scenarios are typed fixtures serialized into SSE bytes; raw logs and pulled live captures are out of scope.
 - **No-store and no-cache fixture boundary:** Fixture responses must use no-store headers, and the service worker must not precache, runtime-cache, or synthesize production-equivalent cache keys for fixture responses.
-+- **Scoped in-memory state:** Idempotency and run replay state must be scoped by synthetic fixture session/run identifiers, not process-global key-only state.
+- **Scoped in-memory state:** Idempotency and run replay state must be scoped by synthetic fixture session/run identifiers, not process-global key-only state.
 
 ---
 
@@ -249,7 +249,7 @@ flowchart TB
 - Auth middleware ordering and public-path policy are explicitly covered by tests.
 - Production route absence is proven for both fixture routes and real operator data routes.
 
-- [ ] **Unit 3: Fixture-aware browser entry and visible mode state**
+- [x] **Unit 3: Fixture-aware browser entry and visible mode state**
 
 **Goal:** Let the assembled operator PWA use fixture routes in dev mode without changing production runtime modules or broadening network behavior.
 

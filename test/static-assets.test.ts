@@ -431,6 +431,50 @@ describe('auth boundary — SW assets public, protected routes still gated', () 
   })
 })
 
+describe('production static JS assets — no fixture strings', () => {
+  it('operator-stream.js source does not contain /__fixture string', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-stream.js', 'utf8')
+    expect(src).not.toContain('/__fixture')
+  })
+
+  it('operator-launch.js source does not contain /__fixture string', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).not.toContain('/__fixture')
+  })
+
+  it('operator-stream.js source does not contain fixture-mode flag strings', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-stream.js', 'utf8')
+    expect(src).not.toContain('fixtureMode')
+    expect(src).not.toContain('fixture-runtime-loader')
+  })
+
+  it('operator-launch.js source does not contain fixture-mode flag strings', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).not.toContain('fixtureMode')
+    expect(src).not.toContain('fixture-runtime-loader')
+  })
+
+  it('operator-stream.js default endpoint base is /operator (not fixture prefix)', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-stream.js', 'utf8')
+    // The default endpoint base must be /operator, not /__fixture/operator
+    // The file may contain /operator as part of paths like /operator/session/csrf
+    expect(src).toContain('/operator')
+    expect(src).not.toContain('/__fixture/operator')
+  })
+
+  it('operator-launch.js default endpoint base is /operator (not fixture prefix)', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).toContain('/operator')
+    expect(src).not.toContain('/__fixture/operator')
+  })
+})
+
 // ---------------------------------------------------------------------------
 // CSP invariant: existing worker-src/manifest-src 'self' already covers SW+manifest
 // ---------------------------------------------------------------------------

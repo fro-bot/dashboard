@@ -163,7 +163,7 @@ export async function submitLaunch(client, params, idempotencyKey) {
  * and the shared stream-status notice element after the card is inserted.
  *
  * @param {string} runId
- * @returns {PendingCardHooks} The hook descriptor with runId and element selectors.
+ * @returns {{runId: string, statusElSelector: string, noticeElSelector: string}} The hook descriptor.
  */
 export function buildPendingCardHooks(runId) {
   return {
@@ -191,6 +191,122 @@ export function buildPendingCardHooks(runId) {
  */
 export function streamModuleSpecifier() {
   return '/static/operator-stream.js?manual=1'
+}
+
+// ---------------------------------------------------------------------------
+// Pure: browser launch client builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a browser-direct launch client.
+ *
+ * Accepts an optional endpointBase (default: '/operator') so the runtime-loader
+ * seam can configure a different endpoint base in dev mode without modifying
+ * production behavior. The default is always '/operator'.
+ *
+ * Also accepts optional getScenario and fixtureSessionId for dev-mode launches.
+ * These are included in the launch request body only when provided.
+ *
+ * Security:
+ * - Never logs prompt, csrf, idempotency key, runId, or endpoint base.
+ * - All 400s → one generic failure; 404 → one uniform unavailable.
+ * - credentials:'include', redirect:'error' on all fetch calls.
+ *
+ * @param {object} [opts] - Optional configuration.
+ * @param {string} [opts.endpointBase] - The endpoint base path. Defaults to '/operator'.
+ * @param {() => string} [opts.getScenario] - Fixture scenario source (fixture mode only).
+ * @param {string} [opts.fixtureSessionId] - Fixture session ID (fixture mode only).
+ * @returns {object} A client with refreshCsrf, listRepos, and launchRun methods.
+ */
+export function buildLaunchClient(opts) {
+  const endpointBase = opts?.endpointBase ?? '/operator'
+  const getScenario = opts?.getScenario
+  const fixtureSessionId = opts?.fixtureSessionId
+
+  const browserFetch = (input, init) =>
+    globalThis.fetch(input, {
+      ...init,
+      credentials: 'include',
+      redirect: 'error',
+    })
+
+  return {
+    async refreshCsrf() {
+      try {
+        const res = await browserFetch(`${endpointBase}/session/csrf`, {
+          headers: {'content-type': 'application/json'},
+        })
+        if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
+        const data = await res.json()
+        if (data === null || typeof data !== 'object' || typeof data.csrfToken !== 'string') {
+          return {success: false, error: {kind: 'protocol', message: 'invalid csrf response'}}
+        }
+        return {success: true, data: {csrfToken: data.csrfToken}}
+      } catch {
+        return {success: false, error: {kind: 'network', message: 'network error'}}
+      }
+    },
+
+    async listRepos() {
+      try {
+        const res = await browserFetch(`${endpointBase}/repos`, {
+          headers: {'content-type': 'application/json'},
+        })
+        if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
+        const data = await res.json()
+        if (!Array.isArray(data)) {
+          return {success: false, error: {kind: 'protocol', message: 'invalid repos response'}}
+        }
+        for (const item of data) {
+          if (!validateRepoItem(item)) {
+            return {success: false, error: {kind: 'protocol', message: 'invalid repos response'}}
+          }
+        }
+        return {success: true, data}
+      } catch {
+        return {success: false, error: {kind: 'network', message: 'network error'}}
+      }
+    },
+
+    async launchRun(req) {
+      if (!req.csrfToken || req.csrfToken.trim() === '') {
+        return {success: false, error: {kind: 'validation', code: 'missing_csrf', message: 'CSRF token required'}}
+      }
+      if (!req.idempotencyKey || req.idempotencyKey.trim() === '') {
+        return {success: false, error: {kind: 'validation', code: 'missing_idempotency_key', message: 'Idempotency key required'}}
+      }
+      try {
+        // Build the request body — include fixture fields only when provided.
+        // getScenario() is called at submit time so scenario changes after init are reflected.
+        const bodyObj = {repo: req.repo, prompt: req.prompt}
+        const currentScenario = typeof getScenario === 'function' ? getScenario() : undefined
+        if (currentScenario !== undefined) bodyObj.scenario = currentScenario
+        if (fixtureSessionId !== undefined) bodyObj.fixtureSessionId = fixtureSessionId
+        if (req.idempotencyKey !== undefined) bodyObj.idempotencyKey = req.idempotencyKey
+
+        const res = await browserFetch(`${endpointBase}/runs`, {
+          method: 'POST',
+          redirect: 'error',
+          headers: {
+            'content-type': 'application/json',
+            'x-csrf-token': req.csrfToken,
+            'idempotency-key': req.idempotencyKey,
+          },
+          body: JSON.stringify(bodyObj),
+        })
+        if (res.status === 200 || res.status === 202) {
+          const data = await res.json()
+          if (typeof data.runId !== 'string' || data.runId === '') {
+            return {success: false, error: {kind: 'protocol', message: 'invalid runId in launch response'}}
+          }
+          return {success: true, data: {runId: data.runId}}
+        }
+        return {success: false, error: {kind: 'http', status: res.status}}
+      } catch {
+        return {success: false, error: {kind: 'network', message: 'network error'}}
+      }
+    },
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +352,7 @@ export function setLaunchStreamHandle(handle) {
  * - runId appears only in data-run-id attribute and the stream URL (via initOperatorStream).
  * - All 400s → one generic failure message; 404 → one uniform unavailable message.
  */
-export async function initOperatorLaunch() {
+export async function initOperatorLaunch(opts) {
   // Create an AbortController for this init session. The controller's signal is
   // passed to the submit event listener so that resetLaunchState() can abort it,
   // removing the listener without needing a reference to the handler function.
@@ -246,92 +362,14 @@ export async function initOperatorLaunch() {
 
   const {initOperatorStream} = await import(streamModuleSpecifier())
 
-  // Browser fetch adapter: credentials:'include', redirect:'error'
-  const browserFetch = (input, init) =>
-    globalThis.fetch(input, {
-      ...init,
-      credentials: 'include',
-      redirect: 'error',
-    })
-
-  // These same-origin relative /operator/* paths (session/csrf, repos, runs) are
-  // owned by the public reverse proxy, which routes them to the gateway. The
-  // dashboard app deliberately does NOT mount or proxy them — serving them here
-  // would make this read-only app a credential-forwarding component. The browser
-  // calls them same-origin so the cookie, Origin, and Sec-Fetch metadata ride
-  // automatically and the gateway enforces its own auth/CSRF/origin checks.
-  const client = {
-    async refreshCsrf() {
-      try {
-        const res = await browserFetch('/operator/session/csrf', {
-          headers: {'content-type': 'application/json'},
-        })
-        if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
-        const data = await res.json()
-        if (data === null || typeof data !== 'object' || typeof data.csrfToken !== 'string') {
-          return {success: false, error: {kind: 'protocol', message: 'invalid csrf response'}}
-        }
-        return {success: true, data: {csrfToken: data.csrfToken}}
-      } catch {
-        return {success: false, error: {kind: 'network', message: 'network error'}}
-      }
-    },
-
-    async listRepos() {
-      try {
-        const res = await browserFetch('/operator/repos', {
-          headers: {'content-type': 'application/json'},
-        })
-        if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
-        const data = await res.json()
-        if (!Array.isArray(data)) {
-          return {success: false, error: {kind: 'protocol', message: 'invalid repos response'}}
-        }
-        // Validate each item — fail closed if any item is malformed.
-        // A null or missing-field item would crash the picker render loop.
-        for (const item of data) {
-          if (!validateRepoItem(item)) {
-            return {success: false, error: {kind: 'protocol', message: 'invalid repos response'}}
-          }
-        }
-        return {success: true, data}
-      } catch {
-        return {success: false, error: {kind: 'network', message: 'network error'}}
-      }
-    },
-
-    async launchRun(req) {
-      if (!req.csrfToken || req.csrfToken.trim() === '') {
-        return {success: false, error: {kind: 'validation', code: 'missing_csrf', message: 'CSRF token required'}}
-      }
-      if (!req.idempotencyKey || req.idempotencyKey.trim() === '') {
-        return {success: false, error: {kind: 'validation', code: 'missing_idempotency_key', message: 'Idempotency key required'}}
-      }
-      try {
-        const res = await browserFetch('/operator/runs', {
-          method: 'POST',
-          redirect: 'error',
-          headers: {
-            'content-type': 'application/json',
-            'x-csrf-token': req.csrfToken,
-            'idempotency-key': req.idempotencyKey,
-          },
-          body: JSON.stringify({repo: req.repo, prompt: req.prompt}),
-        })
-        if (res.status === 202) {
-          const data = await res.json()
-          // Validate runId — a missing or non-string runId would produce a bogus stream URL
-          if (typeof data.runId !== 'string' || data.runId === '') {
-            return {success: false, error: {kind: 'protocol', message: 'invalid runId in 202 response'}}
-          }
-          return {success: true, data: {runId: data.runId}}
-        }
-        return {success: false, error: {kind: 'http', status: res.status}}
-      } catch {
-        return {success: false, error: {kind: 'network', message: 'network error'}}
-      }
-    },
-  }
+  // Build the client using the optional endpointBase from opts.
+  // Default is '/operator' (production path). Dev mode may pass a different base
+  // through the runtime-loader seam.
+  // These same-origin relative paths are owned by the public reverse proxy
+  // (production) or the dev harness. The dashboard app deliberately
+  // does NOT mount or proxy them — serving them here would make this read-only
+  // app a credential-forwarding component.
+  const client = buildLaunchClient(opts)
 
   // -------------------------------------------------------------------------
   // Render repo picker
@@ -487,7 +525,7 @@ export async function initOperatorLaunch() {
           // Wire the SSE stream directly — do NOT re-run bootstrapOperatorStreams.
           // Store the returned handle so resetLaunchState() can close it on cleanup.
           const statusEl = card.querySelector('[data-role="run-status"]')
-          const streamHandle = initOperatorStream({runId, statusEl, noticeEl: sharedNoticeEl})
+          const streamHandle = initOperatorStream({runId, statusEl, noticeEl: sharedNoticeEl, endpointBase: opts?.endpointBase})
           setLaunchStreamHandle(streamHandle)
         }
 

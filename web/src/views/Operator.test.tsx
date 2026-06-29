@@ -222,10 +222,6 @@ describe('Operator — copy security', () => {
   }
 })
 
-// ---------------------------------------------------------------------------
-// TDD: New lifecycle tests (RED phase)
-// ---------------------------------------------------------------------------
-
 describe('Operator — callback identity stability (ref guard)', () => {
   it('re-render with new inline callback while ready does not cleanup/recreate runtime', async () => {
     const {vi} = await import('vitest')
@@ -258,6 +254,107 @@ describe('Operator — callback identity stability (ref guard)', () => {
   })
 })
 
+describe('Operator — fixture mode indicator', () => {
+  it('renders a fixture-mode indicator when fixtureMode=true', () => {
+    render(<Operator state="ready" fixtureMode={true} />)
+    const indicator = document.querySelector('[data-testid="fixture-mode-indicator"]')
+    expect(indicator).not.toBeNull()
+  })
+
+  it('fixture-mode indicator contains text indicating synthetic/local data', () => {
+    render(<Operator state="ready" fixtureMode={true} />)
+    const indicator = document.querySelector('[data-testid="fixture-mode-indicator"]')
+    const text = indicator?.textContent ?? ''
+    // Must say something about fixture/synthetic/local mode
+    expect(text.toLowerCase()).toMatch(/fixture|synthetic|local/)
+  })
+
+  it('does NOT render fixture-mode indicator when fixtureMode is not set', () => {
+    render(<Operator state="ready" />)
+    const indicator = document.querySelector('[data-testid="fixture-mode-indicator"]')
+    expect(indicator).toBeNull()
+  })
+
+  it('does NOT render fixture-mode indicator when fixtureMode=false', () => {
+    render(<Operator state="ready" fixtureMode={false} />)
+    const indicator = document.querySelector('[data-testid="fixture-mode-indicator"]')
+    expect(indicator).toBeNull()
+  })
+
+  it('fixture-mode indicator is visible in loading state too', () => {
+    render(<Operator state="loading" fixtureMode={true} />)
+    const indicator = document.querySelector('[data-testid="fixture-mode-indicator"]')
+    expect(indicator).not.toBeNull()
+  })
+})
+
+describe('Operator — fixture scenario selector', () => {
+  it('renders a scenario selector when fixtureMode=true and state=ready', () => {
+    render(<Operator state="ready" fixtureMode={true} />)
+    const selector = document.querySelector('[data-testid="fixture-scenario-select"]')
+    expect(selector).not.toBeNull()
+  })
+
+  it('scenario selector has options for success, terminal_failure, contract_drift, malformed_unavailable', () => {
+    render(<Operator state="ready" fixtureMode={true} />)
+    const selector = document.querySelector('[data-testid="fixture-scenario-select"]') as HTMLSelectElement | null
+    expect(selector).not.toBeNull()
+    const values = Array.from(selector?.options ?? []).map(o => o.value)
+    expect(values).toContain('success')
+    expect(values).toContain('terminal_failure')
+    expect(values).toContain('contract_drift')
+    expect(values).toContain('malformed_unavailable')
+  })
+
+  it('does NOT render scenario selector when fixtureMode is not set', () => {
+    render(<Operator state="ready" />)
+    const selector = document.querySelector('[data-testid="fixture-scenario-select"]')
+    expect(selector).toBeNull()
+  })
+
+  it('does NOT render scenario selector when state is not ready', () => {
+    render(<Operator state="loading" fixtureMode={true} />)
+    const selector = document.querySelector('[data-testid="fixture-scenario-select"]')
+    expect(selector).toBeNull()
+  })
+})
+
+describe('Operator — fixture mode passes endpointBase to runtime', () => {
+  it('createOperatorRuntime is called with fixtureMode=true and fixtureEndpointBase when fixtureMode prop is set', async () => {
+    const {vi} = await import('vitest')
+    const runtimeModule = await import('../operator/runtime.ts')
+
+    const createSpy = vi.spyOn(runtimeModule, 'createOperatorRuntime')
+    createSpy.mockImplementation(() => ({isMounted: true, cleanup: vi.fn()}))
+
+    render(<Operator state="ready" fixtureMode={true} fixtureEndpointBase="/__fixture/operator" />)
+
+    expect(createSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fixtureMode: true,
+        fixtureEndpointBase: '/__fixture/operator',
+      })
+    )
+
+    createSpy.mockRestore()
+  })
+
+  it('createOperatorRuntime is called without fixtureMode when prop is not set', async () => {
+    const {vi} = await import('vitest')
+    const runtimeModule = await import('../operator/runtime.ts')
+
+    const createSpy = vi.spyOn(runtimeModule, 'createOperatorRuntime')
+    createSpy.mockImplementation(() => ({isMounted: true, cleanup: vi.fn()}))
+
+    render(<Operator state="ready" />)
+
+    const callArgs = createSpy.mock.calls[0]?.[0]
+    expect(callArgs?.fixtureMode).toBeFalsy()
+
+    createSpy.mockRestore()
+  })
+})
+
 describe('Operator — runtime state wiring', () => {
   it('runtime reporting unavailable triggers onRuntimeStateChange', async () => {
     const {vi} = await import('vitest')
@@ -278,6 +375,76 @@ describe('Operator — runtime state wiring', () => {
     capturedOnStateChange?.('unavailable')
 
     expect(onRuntimeStateChange).toHaveBeenCalledWith('unavailable')
+
+    createSpy.mockRestore()
+  })
+})
+
+describe('Operator — fixture scenario and sessionId wired to runtime', () => {
+  it('createOperatorRuntime is called with fixtureSessionId when fixtureMode=true', async () => {
+    const {vi} = await import('vitest')
+    const runtimeModule = await import('../operator/runtime.ts')
+
+    const createSpy = vi.spyOn(runtimeModule, 'createOperatorRuntime')
+    createSpy.mockImplementation(() => ({isMounted: true, cleanup: vi.fn()}))
+
+    render(<Operator state="ready" fixtureMode={true} fixtureEndpointBase="/__fixture/operator" fixtureSessionId="fixture-session-0001" />)
+
+    expect(createSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fixtureSessionId: 'fixture-session-0001',
+      })
+    )
+
+    createSpy.mockRestore()
+  })
+
+  it('createOperatorRuntime is called with a getScenario function when fixtureMode=true', async () => {
+    const {vi} = await import('vitest')
+    const runtimeModule = await import('../operator/runtime.ts')
+
+    const createSpy = vi.spyOn(runtimeModule, 'createOperatorRuntime')
+    createSpy.mockImplementation(() => ({isMounted: true, cleanup: vi.fn()}))
+
+    render(<Operator state="ready" fixtureMode={true} fixtureEndpointBase="/__fixture/operator" fixtureSessionId="fixture-session-0001" />)
+
+    const callArgs = createSpy.mock.calls[0]?.[0]
+    expect(typeof callArgs?.getScenario).toBe('function')
+
+    createSpy.mockRestore()
+  })
+
+  it('getScenario returns the currently selected scenario value', async () => {
+    const {vi} = await import('vitest')
+    const runtimeModule = await import('../operator/runtime.ts')
+
+    let capturedGetScenario: (() => string) | undefined
+    const createSpy = vi.spyOn(runtimeModule, 'createOperatorRuntime')
+    createSpy.mockImplementation((opts) => {
+      capturedGetScenario = opts.getScenario
+      return {isMounted: true, cleanup: vi.fn()}
+    })
+
+    render(<Operator state="ready" fixtureMode={true} fixtureEndpointBase="/__fixture/operator" fixtureSessionId="fixture-session-0001" />)
+
+    // Default scenario is 'success'
+    expect(capturedGetScenario?.()).toBe('success')
+
+    createSpy.mockRestore()
+  })
+
+  it('createOperatorRuntime is NOT called with fixtureSessionId or getScenario when fixtureMode is not set', async () => {
+    const {vi} = await import('vitest')
+    const runtimeModule = await import('../operator/runtime.ts')
+
+    const createSpy = vi.spyOn(runtimeModule, 'createOperatorRuntime')
+    createSpy.mockImplementation(() => ({isMounted: true, cleanup: vi.fn()}))
+
+    render(<Operator state="ready" />)
+
+    const callArgs = createSpy.mock.calls[0]?.[0]
+    expect(callArgs?.fixtureSessionId).toBeUndefined()
+    expect(callArgs?.getScenario).toBeUndefined()
 
     createSpy.mockRestore()
   })

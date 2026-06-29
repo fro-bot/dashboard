@@ -899,9 +899,13 @@ function backoffDelay(attempt) {
 /**
  * Build a browser-direct approval client for the inline approval prompt UI.
  *
- * Uses same-origin relative /operator/* paths (owned by the public reverse proxy,
- * not the dashboard app). credentials:'include' and redirect:'error' are set on
- * all fetch calls so the cookie, Origin, and Sec-Fetch metadata ride automatically.
+ * Uses same-origin relative paths (owned by the public reverse proxy in production,
+ * or the fixture harness in dev). credentials:'include' and redirect:'error' are set
+ * on all fetch calls so the cookie, Origin, and Sec-Fetch metadata ride automatically.
+ *
+ * Accepts an optional endpointBase (default: '/operator') so the runtime-loader
+ * seam can configure a different endpoint base in dev mode without modifying
+ * production behavior.
  *
  * Security:
  * - Never logs runId, requestId, decision, csrf, or idempotency key.
@@ -909,9 +913,13 @@ function backoffDelay(attempt) {
  * - Transport errors are distinct from denial (approval decision failure handling).
  * - CSRF-400 retried once with the same idempotency key (mirrors launch pattern).
  *
- * @returns {object} An object with refreshCsrf() and decideRunApproval() methods.
+ * @param {object} [opts] - Optional configuration.
+ * @param {string} [opts.endpointBase] - The endpoint base path. Defaults to '/operator'.
+ * @returns {object} An object with refreshCsrf(), decideRunApproval(), and listRunApprovals() methods.
  */
-export function buildApprovalClient() {
+export function buildApprovalClient(opts) {
+  const endpointBase = opts?.endpointBase ?? '/operator'
+
   const browserFetch = (input, init) =>
     globalThis.fetch(input, {
       ...init,
@@ -921,7 +929,7 @@ export function buildApprovalClient() {
 
   async function refreshCsrf() {
     try {
-      const res = await browserFetch('/operator/session/csrf', {
+      const res = await browserFetch(`${endpointBase}/session/csrf`, {
         headers: {'content-type': 'application/json'},
       })
       if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
@@ -958,7 +966,7 @@ export function buildApprovalClient() {
     }
     const csrfToken = csrfResult.data.csrfToken
 
-    const path = `/operator/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(requestId)}/decision`
+    const path = `${endpointBase}/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(requestId)}/decision`
     const body = JSON.stringify({decision})
     const makeInit = csrf => ({
       method: 'POST',
@@ -1022,7 +1030,7 @@ export function buildApprovalClient() {
   async function listRunApprovals(runId) {
     try {
       const res = await browserFetch(
-        `/operator/runs/${encodeURIComponent(runId)}/approvals`,
+        `${endpointBase}/runs/${encodeURIComponent(runId)}/approvals`,
         {headers: {'content-type': 'application/json'}},
       )
       if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
@@ -1322,11 +1330,12 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
  * - Read-only: GET only for stream; approval decisions are operator-forwarded writes.
  */
 export function initOperatorStream(opts) {
-  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, approvalClient: injectedApprovalClient} = opts
+  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, approvalClient: injectedApprovalClient, endpointBase} = opts
 
-  // Build the approval client lazily (only if approvalsEl is present)
+  // Build the approval client lazily (only if approvalsEl is present).
+  // Pass endpointBase so fixture mode uses the fixture approval routes.
   const approvalClient = approvalsEl !== undefined && approvalsEl !== null
-    ? (injectedApprovalClient ?? buildApprovalClient())
+    ? (injectedApprovalClient ?? buildApprovalClient(endpointBase === undefined ? undefined : {endpointBase}))
     : null
 
   // Track rendered prompt elements by requestID so we can remove them on settle
@@ -1603,8 +1612,10 @@ export function initOperatorStream(opts) {
       dispatch({type: 'first-frame-timeout'})
     }, FIRST_FRAME_TIMEOUT_MS)
 
-    // Build the stream URL — runId is used only here, never logged
-    const path = `/operator/runs/${encodeURIComponent(runId)}/stream`
+    // Build the stream URL — runId is used only here, never logged.
+    // endpointBase defaults to '/operator'; dev mode may pass a different base.
+    const _streamEndpointBase = endpointBase ?? '/operator'
+    const path = `${_streamEndpointBase}/runs/${encodeURIComponent(runId)}/stream`
 
     fetch(path, {
       credentials: 'include',
@@ -1777,7 +1788,7 @@ let _bootstrapCalled = false
 let _bootstrapHandles = []
 let _pagehideListener = null
 
-export function bootstrapOperatorStreams() {
+export function bootstrapOperatorStreams(opts) {
   // Idempotency guard: only bootstrap once per page load.
   // The React runtime seam calls this explicitly after the DOM skeleton is
   // rendered; the auto-start guard below also fires on DOMContentLoaded.
@@ -1785,6 +1796,8 @@ export function bootstrapOperatorStreams() {
   // listeners and duplicate stream handles.
   if (_bootstrapCalled) return
   _bootstrapCalled = true
+
+  const endpointBase = opts?.endpointBase
 
   const section = document.querySelector('#run-status-section')
   if (section === null) return
@@ -1802,7 +1815,7 @@ export function bootstrapOperatorStreams() {
     // Discover the approval region and badge elements
     const approvalsEl = card.querySelector('[data-role="run-approvals"]')
     const badgeEl = card.querySelector('[data-role="approval-badge"]')
-    handles.push(initOperatorStream({runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl}))
+    handles.push(initOperatorStream({runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, endpointBase}))
   }
 
   _bootstrapHandles = handles

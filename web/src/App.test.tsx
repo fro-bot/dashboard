@@ -100,10 +100,6 @@ describe('App', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// TDD: App/Operator wiring — runtime state propagation (RED phase)
-// ---------------------------------------------------------------------------
-
 describe('App — runtime state wiring', () => {
   beforeEach(() => {
     stubMatchMedia()
@@ -151,6 +147,66 @@ describe('App — runtime state wiring', () => {
     const callOpts = createSpy.mock.calls[0]?.[0]
     expect(typeof callOpts?.onStateChange).toBe('function')
 
+    createSpy.mockRestore()
+  })
+})
+
+describe('App — fixture mode detection', () => {
+  beforeEach(() => {
+    stubMatchMedia()
+    window.localStorage.clear()
+    document.documentElement.removeAttribute('data-theme')
+  })
+
+  afterEach(async () => {
+    const {vi} = await import('vitest')
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('does NOT render fixture-mode indicator in non-fixture mode (default)', () => {
+    render(<App />)
+    expect(document.querySelector('[data-testid="fixture-mode-indicator"]')).toBeNull()
+  })
+
+  it('Operator renders fixture-mode indicator when fixtureMode prop is true', async () => {
+    const {Operator} = await import('./views/Operator.tsx')
+    render(<Operator state="ready" fixtureMode={true} fixtureEndpointBase="/__fixture/operator" fixtureSessionId="fixture-session-0001" />)
+    expect(document.querySelector('[data-testid="fixture-mode-indicator"]')).not.toBeNull()
+  })
+
+  it('Operator does NOT render fixture-mode indicator when fixtureMode is not set', async () => {
+    const {Operator} = await import('./views/Operator.tsx')
+    render(<Operator state="ready" />)
+    expect(document.querySelector('[data-testid="fixture-mode-indicator"]')).toBeNull()
+  })
+
+  it('App renders fixture-mode indicator when fixture session fetch succeeds in dev env', async () => {
+    const {vi} = await import('vitest')
+    const {act, waitFor} = await import('@testing-library/react')
+
+    // Mock createOperatorRuntime to prevent real dynamic imports
+    const runtimeModule = await import('./operator/runtime.ts')
+    const createSpy = vi.spyOn(runtimeModule, 'createOperatorRuntime')
+    createSpy.mockImplementation(() => ({isMounted: true, cleanup: vi.fn()}))
+
+    // Mock fetchFixtureSession to return a valid session
+    const fixtureLoader = await import('./operator/fixture-runtime-loader.ts')
+    const fetchSpy = vi.spyOn(fixtureLoader, 'fetchFixtureSession').mockResolvedValue({
+      fixtureMode: true,
+      fixtureSessionId: 'fixture-session-0001',
+    })
+
+    await act(async () => {
+      render(<App />)
+    })
+
+    // Wait for the async fixture detection to complete and re-render
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="fixture-mode-indicator"]')).not.toBeNull()
+    })
+
+    fetchSpy.mockRestore()
     createSpy.mockRestore()
   })
 })

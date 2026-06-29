@@ -91,13 +91,57 @@ export declare function buildPendingCardHooks(runId: string): PendingCardHooks
 // ---------------------------------------------------------------------------
 
 /**
+ * Returns the module specifier for operator-stream that includes ?manual=1.
+ * Exported so tests can assert the correct specifier without intercepting dynamic imports.
+ */
+export declare function streamModuleSpecifier(): string
+
+/**
+ * Build a browser-direct launch client.
+ *
+ * Accepts an optional endpointBase (default: '/operator') so the runtime-loader
+ * seam can configure a different endpoint base in dev mode without modifying
+ * production behavior. Also accepts optional scenario and fixtureSessionId for
+ * dev-mode launches.
+ */
+export declare function buildLaunchClient(opts?: {
+  readonly endpointBase?: string
+  /** Called at submit time to get the current scenario; not frozen at init. */
+  readonly getScenario?: () => string
+  readonly fixtureSessionId?: string
+}): {
+  readonly refreshCsrf: () => Promise<
+    | {readonly success: true; readonly data: {readonly csrfToken: string}}
+    | {readonly success: false; readonly error: {readonly kind: string; readonly status?: number; readonly message?: string}}
+  >
+  readonly listRepos: () => Promise<
+    | {readonly success: true; readonly data: readonly {readonly owner: string; readonly repo: string; readonly channelName?: string}[]}
+    | {readonly success: false; readonly error: {readonly kind: string; readonly status?: number; readonly message?: string}}
+  >
+  readonly launchRun: (req: {
+    readonly repo: string
+    readonly prompt: string
+    readonly csrfToken: string
+    readonly idempotencyKey: string
+  }) => Promise<
+    | {readonly success: true; readonly data: {readonly runId: string}}
+    | {readonly success: false; readonly error: {readonly kind: string; readonly status?: number; readonly message?: string}}
+  >
+}
+
+/**
  * Initialize the operator launch UI.
  * Builds a browser OperatorClient, renders the repo picker, wires the launch
  * form, and on success inserts an optimistic pending card + calls initOperatorStream.
  *
  * Must only be called from a browser context.
  */
-export declare function initOperatorLaunch(): Promise<void>
+export declare function initOperatorLaunch(opts?: {
+  readonly endpointBase?: string
+  /** Called at submit time to get the current scenario; not frozen at init. */
+  readonly getScenario?: () => string
+  readonly fixtureSessionId?: string
+}): Promise<void>
 
 /**
  * Set the launch-created stream handle.

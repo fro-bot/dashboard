@@ -379,10 +379,11 @@ describe('fixture mode — happy path synthetic responses', () => {
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
     const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/repos`)
     expect(res.status).toBe(200)
-    const body = await res.json() as {full_name?: string; name?: string}[]
+    const body = await res.json() as {owner?: string; repo?: string}[]
     expect(body.length).toBeGreaterThan(0)
     const first = body[0] ?? {}
-    expect(String(first.full_name ?? first.name ?? '')).toMatch(/fixture/)
+    expect(String(first.owner ?? '')).toMatch(/fixture/)
+    expect(String(first.repo ?? '')).toMatch(/fixture/)
   })
 
   it('POST /runs returns 200 with fixture-prefixed run ID', async () => {
@@ -790,5 +791,30 @@ describe('fixture routes — public when flag is on', () => {
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
     const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/repos`)
     expect(res.status).toBe(200)
+  })
+})
+
+describe('fixture repos — browser-compatible shape {owner, repo}', () => {
+  it('GET /repos returns items with owner and repo string fields', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/repos`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as {owner?: unknown; repo?: unknown}[]
+    expect(body.length).toBeGreaterThan(0)
+    for (const item of body) {
+      expect(typeof item.owner).toBe('string')
+      expect(typeof item.repo).toBe('string')
+    }
+  })
+
+  it('GET /repos items do NOT use name field instead of repo', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/repos`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as {name?: unknown}[]
+    for (const item of body) {
+      // name field must not be the primary repo identifier (repo field must exist)
+      expect(typeof (item as {repo?: unknown}).repo).toBe('string')
+    }
   })
 })

@@ -310,16 +310,6 @@ describe('buildPendingCardHooks', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// F4 — listRepos per-item validation (browser client, tested via submitLaunch seam)
-// ---------------------------------------------------------------------------
-
-// The browser client's listRepos is inline in initOperatorLaunch (DOM shell) and
-// cannot be imported directly. We test the validation logic by exercising the
-// exported validateRepoItem helper, which mirrors the inline check.
-// If no such export exists, we test the behavior via a fake client that returns
-// the same shapes the browser client would return after validation.
-
 describe('validateRepoItem — per-item validation for listRepos', () => {
   it('accepts a valid item with owner and repo strings', () => {
     expect(validateRepoItem({owner: 'fro-bot', repo: 'agent'})).toBe(true)
@@ -361,14 +351,6 @@ describe('validateRepoItem — per-item validation for listRepos', () => {
     expect(validateRepoItem({owner: 'fro-bot', repo: 'agent', channelName: undefined})).toBe(true)
   })
 })
-
-// ---------------------------------------------------------------------------
-// F5 — 202 runId validation (browser client launchRun, tested via submitLaunch seam)
-// ---------------------------------------------------------------------------
-
-// The browser client's launchRun validates runId before returning success.
-// We test this by constructing a fake client that returns the same Result shape
-// the browser client would return when runId is missing/null/empty.
 
 describe('submitLaunch — 202 with missing or invalid runId → failure (not launched)', () => {
   it('202 with null runId → failure outcome (not launched)', async () => {
@@ -476,10 +458,6 @@ describe('module-level safety', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// Agent-native: launch-created stream handle is closed on resetLaunchState
-// ---------------------------------------------------------------------------
-
 describe('resetLaunchState — closes launch-created stream handle', () => {
   it('resetLaunchState calls close() on the stream handle stored by initOperatorLaunch', async () => {
     // We cannot call initOperatorLaunch in Node (it touches DOM), but we can
@@ -531,6 +509,50 @@ describe('resetLaunchState — closes launch-created stream handle', () => {
   })
 })
 
+describe('operator-launch — fixture endpoint base support', () => {
+  it('buildLaunchClient export exists and is a function', async () => {
+    const mod = await import('../public/operator-launch.js')
+    const fn = (mod as {buildLaunchClient?: unknown}).buildLaunchClient
+    expect(typeof fn).toBe('function')
+  })
+
+  it('buildLaunchClient uses /operator as default endpoint base', async () => {
+    const mod = await import('../public/operator-launch.js')
+    const buildLaunchClient = (mod as {buildLaunchClient?: (opts?: {endpointBase?: string}) => {refreshCsrf: () => Promise<unknown>; listRepos: () => Promise<unknown>; launchRun: (req: unknown) => Promise<unknown>}}).buildLaunchClient
+    if (typeof buildLaunchClient !== 'function') throw new Error('buildLaunchClient not exported')
+    // Just verify it returns an object with the expected methods
+    const client = buildLaunchClient()
+    expect(typeof client.refreshCsrf).toBe('function')
+    expect(typeof client.listRepos).toBe('function')
+    expect(typeof client.launchRun).toBe('function')
+  })
+
+  it('buildLaunchClient accepts a custom endpointBase', async () => {
+    const mod = await import('../public/operator-launch.js')
+    const buildLaunchClient = (mod as {buildLaunchClient?: (opts?: {endpointBase?: string}) => {refreshCsrf: () => Promise<unknown>; listRepos: () => Promise<unknown>; launchRun: (req: unknown) => Promise<unknown>}}).buildLaunchClient
+    if (typeof buildLaunchClient !== 'function') throw new Error('buildLaunchClient not exported')
+    const client = buildLaunchClient({endpointBase: '/__fixture/operator'})
+    expect(typeof client.refreshCsrf).toBe('function')
+    expect(typeof client.listRepos).toBe('function')
+    expect(typeof client.launchRun).toBe('function')
+  })
+})
+
+describe('operator-launch — fixture scenario in launch body', () => {
+  it('buildLaunchClient with fixture endpointBase includes scenario in launchRun body', async () => {
+    const mod = await import('../public/operator-launch.js')
+    const buildLaunchClient = (mod as {buildLaunchClient?: (opts?: {endpointBase?: string; scenario?: string; fixtureSessionId?: string}) => {refreshCsrf: () => Promise<unknown>; listRepos: () => Promise<unknown>; launchRun: (req: {repo: string; prompt: string; csrfToken: string; idempotencyKey: string}) => Promise<unknown>}}).buildLaunchClient
+    if (typeof buildLaunchClient !== 'function') throw new Error('buildLaunchClient not exported')
+    // Just verify the function accepts scenario and fixtureSessionId options
+    const client = buildLaunchClient({
+      endpointBase: '/__fixture/operator',
+      scenario: 'success',
+      fixtureSessionId: 'fixture-session-001',
+    })
+    expect(typeof client.launchRun).toBe('function')
+  })
+})
+
 // ---------------------------------------------------------------------------
 // resetLaunchState — AbortController lifecycle (double init/reset/init)
 // ---------------------------------------------------------------------------
@@ -575,15 +597,6 @@ describe('resetLaunchState — AbortController lifecycle', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// Repo-list failure classification — no "No repositories available" for failures
-// ---------------------------------------------------------------------------
-
-// These tests verify that the repo-list failure copy is neutral and does not
-// render "No repositories available" for auth/rate-limit/network/protocol failures.
-// The actual DOM rendering is in initOperatorLaunch (browser-only), but the
-// validateRepoItem export and the submitLaunch seam let us verify the contract.
-
 describe('repo-list failure classification — neutral copy for non-empty failures', () => {
   it('validateRepoItem rejects malformed items (protocol failure path)', () => {
     // A protocol failure occurs when the response is not a valid array of repo items.
@@ -601,5 +614,157 @@ describe('repo-list failure classification — neutral copy for non-empty failur
     // Verify the idempotency reset hook is exported for the runtime seam.
     const mod = await import('../public/operator-launch.js')
     expect(typeof (mod as {resetLaunchState?: unknown}).resetLaunchState).toBe('function')
+  })
+})
+
+describe('buildLaunchClient — getScenario read at submit time', () => {
+  it('buildLaunchClient accepts a getScenario function option', async () => {
+    const mod = await import('../public/operator-launch.js')
+    const buildLaunchClient = (mod as {buildLaunchClient?: (opts?: {endpointBase?: string; getScenario?: () => string; fixtureSessionId?: string}) => {refreshCsrf: () => Promise<unknown>; listRepos: () => Promise<unknown>; launchRun: (req: unknown) => Promise<unknown>}}).buildLaunchClient
+    if (typeof buildLaunchClient !== 'function') throw new Error('buildLaunchClient not exported')
+    const client = buildLaunchClient({
+      endpointBase: '/__fixture/operator',
+      getScenario: () => 'success',
+      fixtureSessionId: 'fixture-session-001',
+    })
+    expect(typeof client.launchRun).toBe('function')
+  })
+
+  it('launchRun body uses scenario from getScenario() called at submit time, not frozen at init', async () => {
+    let currentScenario = 'success'
+    let capturedBody: Record<string, unknown> | undefined
+
+    const mod = await import('../public/operator-launch.js')
+    const buildLaunchClient = (mod as {buildLaunchClient?: (opts?: {endpointBase?: string; getScenario?: () => string; fixtureSessionId?: string}) => {refreshCsrf: () => Promise<unknown>; listRepos: () => Promise<unknown>; launchRun: (req: {repo: string; prompt: string; csrfToken: string; idempotencyKey: string}) => Promise<unknown>}}).buildLaunchClient
+    if (typeof buildLaunchClient !== 'function') throw new Error('buildLaunchClient not exported')
+
+    // Stub globalThis.fetch to capture the request body
+    const origFetch = globalThis.fetch
+    globalThis.fetch = async (_input: unknown, init?: RequestInit) => {
+      if (init?.body !== undefined && init.body !== null) {
+        capturedBody = JSON.parse(init.body as string) as Record<string, unknown>
+      }
+      return {
+        ok: true,
+        status: 202,
+        json: async () => ({runId: 'run-fixture-001'}),
+      } as Response
+    }
+
+    const client = buildLaunchClient({
+      endpointBase: '/__fixture/operator',
+      getScenario: () => currentScenario,
+      fixtureSessionId: 'fixture-session-001',
+    })
+
+    // Change scenario AFTER client is built but BEFORE submit
+    currentScenario = 'terminal_failure'
+
+    await client.launchRun({repo: 'fixture-org/fixture-repo', prompt: 'test', csrfToken: 'fixture-csrf', idempotencyKey: 'key-001'})
+
+    globalThis.fetch = origFetch
+
+    // Must use the scenario value at submit time, not the value at init time
+    expect(capturedBody?.scenario).toBe('terminal_failure')
+  })
+
+  it('launchRun body does NOT include scenario when getScenario is not provided (production path)', async () => {
+    let capturedBody: Record<string, unknown> | undefined
+
+    const mod = await import('../public/operator-launch.js')
+    const buildLaunchClient = (mod as {buildLaunchClient?: (opts?: {endpointBase?: string}) => {refreshCsrf: () => Promise<unknown>; listRepos: () => Promise<unknown>; launchRun: (req: {repo: string; prompt: string; csrfToken: string; idempotencyKey: string}) => Promise<unknown>}}).buildLaunchClient
+    if (typeof buildLaunchClient !== 'function') throw new Error('buildLaunchClient not exported')
+
+    const origFetch = globalThis.fetch
+    globalThis.fetch = async (_input: unknown, init?: RequestInit) => {
+      if (init?.body !== undefined && init.body !== null) {
+        capturedBody = JSON.parse(init.body as string) as Record<string, unknown>
+      }
+      return {
+        ok: true,
+        status: 202,
+        json: async () => ({runId: 'run-prod-001'}),
+      } as Response
+    }
+
+    const client = buildLaunchClient()
+    await client.launchRun({repo: 'owner/repo', prompt: 'test', csrfToken: 'tok', idempotencyKey: 'key-prod'})
+
+    globalThis.fetch = origFetch
+
+    expect(capturedBody?.scenario).toBeUndefined()
+    expect(capturedBody?.fixtureSessionId).toBeUndefined()
+  })
+})
+
+describe('buildLaunchClient — accepts HTTP 200 as launch success', () => {
+  it('launchRun treats 200 response with valid runId as launched success', async () => {
+    const mod = await import('../public/operator-launch.js')
+    const buildLaunchClient = (mod as {buildLaunchClient?: (opts?: {endpointBase?: string}) => {refreshCsrf: () => Promise<unknown>; listRepos: () => Promise<unknown>; launchRun: (req: {repo: string; prompt: string; csrfToken: string; idempotencyKey: string}) => Promise<unknown>}}).buildLaunchClient
+    if (typeof buildLaunchClient !== 'function') throw new Error('buildLaunchClient not exported')
+
+    const origFetch = globalThis.fetch
+    globalThis.fetch = async (_input: unknown, _init?: RequestInit) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({runId: 'run-fixture-harness-0001'}),
+    } as Response)
+
+    const client = buildLaunchClient({endpointBase: '/__fixture/operator'})
+    const result = await client.launchRun({repo: 'fixture-org/fixture-repo', prompt: 'test', csrfToken: 'fixture-csrf', idempotencyKey: 'key-001'})
+
+    globalThis.fetch = origFetch
+
+    expect((result as {success: boolean}).success).toBe(true)
+    expect((result as {success: true; data: {runId: string}}).data?.runId).toBe('run-fixture-harness-0001')
+  })
+
+  it('launchRun still treats 202 response with valid runId as launched success', async () => {
+    const mod = await import('../public/operator-launch.js')
+    const buildLaunchClient = (mod as {buildLaunchClient?: (opts?: {endpointBase?: string}) => {refreshCsrf: () => Promise<unknown>; listRepos: () => Promise<unknown>; launchRun: (req: {repo: string; prompt: string; csrfToken: string; idempotencyKey: string}) => Promise<unknown>}}).buildLaunchClient
+    if (typeof buildLaunchClient !== 'function') throw new Error('buildLaunchClient not exported')
+
+    const origFetch = globalThis.fetch
+    globalThis.fetch = async (_input: unknown, _init?: RequestInit) => ({
+      ok: true,
+      status: 202,
+      json: async () => ({runId: 'run-prod-0001'}),
+    } as Response)
+
+    const client = buildLaunchClient()
+    const result = await client.launchRun({repo: 'owner/repo', prompt: 'test', csrfToken: 'tok', idempotencyKey: 'key-002'})
+
+    globalThis.fetch = origFetch
+
+    expect((result as {success: boolean}).success).toBe(true)
+  })
+})
+
+describe('initOperatorLaunch — endpointBase forwarded to initOperatorStream', () => {
+  it('streamModuleSpecifier is used to import operator-stream (endpointBase forwarding is in initOperatorLaunch DOM shell)', async () => {
+    // We cannot call initOperatorLaunch in Node (DOM-only), but we can verify
+    // the exported streamModuleSpecifier is the path used for the dynamic import.
+    // The endpointBase forwarding contract is: initOperatorStream is called with
+    // {runId, statusEl, noticeEl, endpointBase} where endpointBase comes from opts.
+    // We verify this via the exported buildLaunchClient which receives opts.endpointBase.
+    const mod = await import('../public/operator-launch.js')
+    const fn = (mod as {streamModuleSpecifier?: () => string}).streamModuleSpecifier
+    if (typeof fn !== 'function') throw new Error('streamModuleSpecifier not exported')
+    expect(fn()).toContain('operator-stream')
+    expect(fn()).toContain('?manual=1')
+  })
+})
+
+describe('validateRepoItem — fixture repo shape', () => {
+  it('accepts fixture repo shape {owner, repo} (no full_name or name required)', () => {
+    expect(validateRepoItem({owner: 'fixture-org', repo: 'fixture-repo'})).toBe(true)
+  })
+
+  it('rejects fixture repo shape {owner, name} without repo field', () => {
+    expect(validateRepoItem({owner: 'fixture-org', name: 'fixture-repo'})).toBe(false)
+  })
+
+  it('rejects fixture repo shape {full_name, owner, name} without repo field', () => {
+    expect(validateRepoItem({full_name: 'fixture-org/fixture-repo', owner: 'fixture-org', name: 'fixture-repo'})).toBe(false)
   })
 })

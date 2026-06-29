@@ -35,8 +35,39 @@ export interface OperatorRuntimeOptions {
    * In production, this dynamically imports the operator runtime modules.
    * May return a cleanup function that is called when the runtime is cleaned up.
    * If absent, the default loader is used.
+   *
+   * In fixture mode the loader receives {endpointBase, fixtureSessionId, getScenario}
+   * so it can configure the public browser modules to use the fixture route prefix
+   * and include fixture context in launch requests.
    */
-  readonly _runtimeLoader?: () => Promise<void | (() => void)>
+  readonly _runtimeLoader?: (opts?: {
+    endpointBase?: string
+    fixtureSessionId?: string
+    getScenario?: () => string
+  }) => Promise<void | (() => void)>
+  /**
+   * When true, the runtime uses fixture routes instead of production routes.
+   * Only active in development builds (import.meta.env.DEV).
+   * Production browser bundles must not contain fixture route strings.
+   */
+  readonly fixtureMode?: boolean
+  /**
+   * The fixture endpoint base to pass to the runtime loader when fixtureMode is true.
+   * Must be provided by the caller (App/fixture loader); no fallback is applied here.
+   */
+  readonly fixtureEndpointBase?: string
+  /**
+   * The fixture session ID from the fixture session response.
+   * Passed to initOperatorLaunch so launch requests include it in the body.
+   * Only used when fixtureMode is true.
+   */
+  readonly fixtureSessionId?: string
+  /**
+   * Returns the currently selected fixture scenario at call time.
+   * Called at submit time so scenario changes after init are reflected.
+   * Only used when fixtureMode is true.
+   */
+  readonly getScenario?: () => string
 }
 
 export interface OperatorRuntimeHandle {
@@ -85,23 +116,6 @@ export function classifyRepoListError(error: RepoListError): OperatorState {
   return error.kind === 'network' ? 'offline' : 'unavailable'
 }
 
-/**
- * Default runtime loader: dynamically imports the operator runtime modules.
- *
- * In the React shell, the operator runtime scripts are served as static assets.
- * This loader is async so that a missing module transitions the shell to
- * unavailable without crashing.
- *
- * The loader imports with `?manual=1` so the public modules skip their
- * auto-bootstrap on evaluation. The runtime seam then calls the start hooks
- * explicitly, giving it deterministic lifecycle control.
- *
- * Returns a cleanup function that calls the public modules' reset functions,
- * closing handles and removing listeners registered during this load.
- *
- * Uses `@vite-ignore` to prevent Vite from trying to resolve the browser-only
- * /static/* paths at build time. This is CSP-safe (no eval/Function constructor).
- */
 // CSP-safe dynamic import helper.
 //
 // Vite's import-analysis plugin statically resolves string literals in import()
@@ -114,27 +128,34 @@ export function classifyRepoListError(error: RepoListError): OperatorState {
 const _streamSpecifier = '/static/operator-stream.js' + '?manual=1'
 const _launchSpecifier = '/static/operator-launch.js' + '?manual=1'
 
-async function defaultRuntimeLoader(): Promise<() => void> {
+async function defaultRuntimeLoader(opts?: {
+  endpointBase?: string
+  fixtureSessionId?: string
+  getScenario?: () => string
+}): Promise<() => void> {
   const streamMod = await import(/* @vite-ignore */ _streamSpecifier) as {
-    bootstrapOperatorStreams?: () => void
+    bootstrapOperatorStreams?: (opts?: {endpointBase?: string}) => void
     resetBootstrapState?: () => void
   }
   if (typeof streamMod.resetBootstrapState === 'function') {
     streamMod.resetBootstrapState()
   }
   if (typeof streamMod.bootstrapOperatorStreams === 'function') {
-    streamMod.bootstrapOperatorStreams()
+    streamMod.bootstrapOperatorStreams(opts?.endpointBase !== undefined ? {endpointBase: opts.endpointBase} : undefined)
   }
 
   const launchMod = await import(/* @vite-ignore */ _launchSpecifier) as {
-    initOperatorLaunch?: () => Promise<void>
+    initOperatorLaunch?: (opts?: {endpointBase?: string; getScenario?: () => string; fixtureSessionId?: string}) => Promise<void>
     resetLaunchState?: () => void
   }
   if (typeof launchMod.resetLaunchState === 'function') {
     launchMod.resetLaunchState()
   }
   if (typeof launchMod.initOperatorLaunch === 'function') {
-    await launchMod.initOperatorLaunch()
+    const launchOpts = opts?.endpointBase !== undefined
+      ? {endpointBase: opts.endpointBase, getScenario: opts.getScenario, fixtureSessionId: opts.fixtureSessionId}
+      : undefined
+    await launchMod.initOperatorLaunch(launchOpts)
   }
 
   return () => {
@@ -163,7 +184,7 @@ async function defaultRuntimeLoader(): Promise<() => void> {
  * @returns A handle with isMounted and cleanup().
  */
 export function createOperatorRuntime(opts: OperatorRuntimeOptions): OperatorRuntimeHandle {
-  const {container: _container, onStateChange, _runtimeLoader} = opts
+  const {container: _container, onStateChange, _runtimeLoader, fixtureMode, fixtureEndpointBase, fixtureSessionId, getScenario} = opts
 
   let mounted = true
   let cleanupFns: Array<() => void> = []
@@ -187,7 +208,19 @@ export function createOperatorRuntime(opts: OperatorRuntimeOptions): OperatorRun
   }
 
   const loader = _runtimeLoader ?? defaultRuntimeLoader
-  loader().then(maybeCleanup => {
+
+  // Build loader options: only pass fixture context in fixture mode (dev builds only).
+  // Production bundles must not contain fixture route strings.
+  const loaderOpts =
+    fixtureMode === true
+      ? {
+          endpointBase: fixtureEndpointBase,
+          fixtureSessionId,
+          getScenario,
+        }
+      : undefined
+
+  loader(loaderOpts).then(maybeCleanup => {
     if (typeof maybeCleanup !== 'function') return
     if (mounted) {
       cleanupFns.push(maybeCleanup)

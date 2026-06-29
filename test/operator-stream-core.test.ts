@@ -4542,7 +4542,7 @@ describe('initOperatorStream — terminal status updates statusEl when connectio
 })
 
 // ---------------------------------------------------------------------------
-// Fixture SSE scenario integration — Unit 1 (browser reducer path)
+// Fixture SSE scenario integration (browser reducer path)
 // ---------------------------------------------------------------------------
 // These tests verify that the typed fixture scenarios serialize to SSE bytes
 // that the browser-side parseSseFrame + nextStreamState reducer can consume.
@@ -4736,5 +4736,28 @@ describe('fixture SSE scenarios — browser reducer: malformed_unavailable scena
         expect(result.error).not.toContain('{not valid json}')
       }
     }
+  })
+})
+
+describe('buildApprovalClient — endpoint base support', () => {
+  it('buildApprovalClient accepts an optional endpointBase option', () => {
+    // Should not throw when called with an endpointBase
+    expect(() => buildApprovalClient({endpointBase: '/__fixture/operator'})).not.toThrow()
+  })
+
+  it('buildApprovalClient with no options uses /operator as default', () => {
+    // Should not throw when called with no options
+    expect(() => buildApprovalClient()).not.toThrow()
+    const client = buildApprovalClient()
+    expect(typeof client.refreshCsrf).toBe('function')
+    expect(typeof client.decideRunApproval).toBe('function')
+    expect(typeof client.listRunApprovals).toBe('function')
+  })
+
+  it('buildApprovalClient with fixture endpointBase returns a client with the same interface', () => {
+    const client = buildApprovalClient({endpointBase: '/__fixture/operator'})
+    expect(typeof client.refreshCsrf).toBe('function')
+    expect(typeof client.decideRunApproval).toBe('function')
+    expect(typeof client.listRunApprovals).toBe('function')
   })
 })

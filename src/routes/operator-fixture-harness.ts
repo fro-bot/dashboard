@@ -22,9 +22,10 @@ import {FIXTURE_CSRF, FIXTURE_SESSION} from '../gateway/operator-fixtures.ts'
 import {logger} from '../logger.ts'
 
 // Synthetic fixture repo list — fixture-prefixed, never real repos.
+// Shape matches validateRepoItem: {owner, repo} required; channelName optional.
 const FIXTURE_REPOS = [
-  {full_name: 'fixture-org/fixture-repo', owner: 'fixture-org', name: 'fixture-repo'},
-  {full_name: 'fixture-org/fixture-repo-2', owner: 'fixture-org', name: 'fixture-repo-2'},
+  {owner: 'fixture-org', repo: 'fixture-repo'},
+  {owner: 'fixture-org', repo: 'fixture-repo-2'},
 ]
 
 const FIXTURE_APPROVAL = {requestID: 'req-fixture-harness-001', permission: 'tool_use', command: 'bash'}

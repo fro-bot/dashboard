@@ -21,7 +21,7 @@
  * - Dynamic Gateway data flows through safe text paths only (operator-*.js).
  */
 
-import {useEffect, useRef} from 'react'
+import {useEffect, useRef, useState} from 'react'
 import {getStateActionReason, getStateDetail, getStateHeadline, getStateRecoveryHint} from '../operator/copy.ts'
 import {createOperatorRuntime} from '../operator/runtime.ts'
 import type {OperatorRuntimeHandle} from '../operator/runtime.ts'
@@ -36,14 +36,36 @@ interface OperatorProps {
    * when the runtime module is absent). Allows the parent to update its state.
    */
   readonly onRuntimeStateChange?: (state: OperatorState) => void
+  /**
+   * When true, the operator shell is in fixture mode. Renders a visible
+   * fixture-mode indicator and a scenario selector. Only active in dev builds.
+   */
+  readonly fixtureMode?: boolean
+  /**
+   * The fixture endpoint base to use when fixtureMode is true.
+   * Passed through to the runtime seam.
+   */
+  readonly fixtureEndpointBase?: string
+  /**
+   * The fixture session ID from the fixture session response.
+   * Passed through to the runtime seam for inclusion in launch requests.
+   */
+  readonly fixtureSessionId?: string
 }
 
-export function Operator({state = 'loading', onRuntimeStateChange}: OperatorProps) {
+export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, fixtureEndpointBase, fixtureSessionId}: OperatorProps) {
   const headline = getStateHeadline(state)
   const detail = getStateDetail(state)
   const actionReason = getStateActionReason(state)
   const recoveryHint = getStateRecoveryHint(state)
   const actionsDisabled = isActionDisabled(state)
+
+  // Controlled scenario state so getScenario() reads the current value at submit time.
+  const [scenario, setScenario] = useState('success')
+  // Stable ref so getScenario closure always reads the latest value without
+  // causing the runtime effect to re-run on every scenario change.
+  const scenarioRef = useRef(scenario)
+  scenarioRef.current = scenario
 
   const contentRef = useRef<HTMLDivElement>(null)
   const runtimeHandleRef = useRef<OperatorRuntimeHandle | null>(null)
@@ -72,6 +94,10 @@ export function Operator({state = 'loading', onRuntimeStateChange}: OperatorProp
       onStateChange: (newState) => {
         onRuntimeStateChangeRef.current?.(newState)
       },
+      fixtureMode,
+      fixtureEndpointBase,
+      fixtureSessionId,
+      getScenario: fixtureMode === true ? () => scenarioRef.current : undefined,
     })
 
     runtimeHandleRef.current = handle
@@ -80,10 +106,35 @@ export function Operator({state = 'loading', onRuntimeStateChange}: OperatorProp
       handle.cleanup()
       runtimeHandleRef.current = null
     }
-  }, [state])
+  }, [state, fixtureMode, fixtureEndpointBase, fixtureSessionId])
 
   return (
       <div data-testid="operator-shell" data-state={state}>
+      {fixtureMode === true && (
+        <div
+          data-testid="fixture-mode-indicator"
+          role="status"
+          aria-label="Fixture mode active"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 'var(--space-2)',
+            padding: 'var(--space-2) var(--space-3)',
+            marginBottom: 'var(--space-4)',
+            background: 'var(--color-surface-overlay)',
+            border: '1px solid var(--color-warning)',
+            borderRadius: 'var(--radius-md)',
+            fontSize: 'var(--text-label)',
+            fontWeight: 600,
+            letterSpacing: 'var(--tracking-label)',
+            color: 'var(--color-warning)',
+            textTransform: 'uppercase',
+          }}
+        >
+          <span aria-hidden="true">⚠</span>
+          <span>Local fixture mode — all data is synthetic</span>
+        </div>
+      )}
       <div style={{ marginBottom: 'var(--space-6)' }}>
         <h1
           style={{
@@ -140,6 +191,36 @@ export function Operator({state = 'loading', onRuntimeStateChange}: OperatorProp
             >
               Launch
             </h2>
+
+            {fixtureMode === true && (
+              <div style={{marginBottom: 'var(--space-4)'}}>
+                <label
+                  htmlFor="fixture-scenario-select"
+                  style={{
+                    display: 'block',
+                    fontSize: 'var(--text-body-sm)',
+                    fontWeight: 500,
+                    color: 'var(--color-text-muted)',
+                    marginBottom: 'var(--space-1)',
+                  }}
+                >
+                  Fixture scenario
+                </label>
+                <select
+                  id="fixture-scenario-select"
+                  data-testid="fixture-scenario-select"
+                  className="operator-input"
+                  style={{width: 'auto', minWidth: '220px'}}
+                  value={scenario}
+                  onChange={e => { setScenario(e.target.value) }}
+                >
+                  <option value="success">Success</option>
+                  <option value="terminal_failure">Terminal failure</option>
+                  <option value="contract_drift">Contract drift</option>
+                  <option value="malformed_unavailable">Malformed / unavailable</option>
+                </select>
+              </div>
+            )}
 
             <div
               id="repo-picker-container"
