@@ -243,6 +243,13 @@ export interface DashboardAppConfig {
    * If undefined (injected path), reads from DASHBOARD_HOST env.
    */
   fixtureBindHost?: string | undefined
+  /**
+   * Root directory for SPA static assets (index.html, /assets/*, /icon-*,
+   * /manifest.webmanifest, /sw.js, /registerSW.js).
+   * If undefined, reads from DASHBOARD_WEB_DIST env, defaulting to './web/dist'.
+   * Set to './web/dist-fixture' for local fixture verification.
+   */
+  webDistRoot?: string | undefined
 }
 
 /**
@@ -381,6 +388,9 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     fixtureHarnessActive = true
     logger.warning('FIXTURE HARNESS ENABLED — synthetic operator routes mounted; never use in production')
   }
+
+  // Resolve SPA static asset root — defaults to ./web/dist; override via DASHBOARD_WEB_DIST or opts.
+  const webDistRoot = opts?.webDistRoot ?? process.env.DASHBOARD_WEB_DIST?.trim() ?? './web/dist'
 
   // Resolve the trusted gateway operator origin — SECURITY CRITICAL.
   // Must be a configured, trusted value; never derived from the inbound request Host.
@@ -637,7 +647,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   app.route('/api', buildApiRouter(getSnapshot))
 
   // Serve the React SPA at /. index.html requires a session; shell assets are public.
-  app.get('/', serveStatic({root: './web/dist', path: 'index.html'}))
+  app.get('/', serveStatic({root: webDistRoot, path: 'index.html'}))
 
   // ── /operator → / redirect (unconditional, flag-independent) ────────────────
   // / is the canonical operator launch route. Old /operator links redirect here.
@@ -680,8 +690,8 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   }
 
   // ── SPA static asset serving ─────────────────────────────────────────────
-  app.use('/assets/*', serveStatic({root: './web/dist'}))
-  app.use('/icon-*', serveStatic({root: './web/dist'}))
+  app.use('/assets/*', serveStatic({root: webDistRoot}))
+  app.use('/icon-*', serveStatic({root: webDistRoot}))
 
   // ── PWA manifest ─────────────────────────────────────────────────────────
   // serveStatic serves .webmanifest as application/octet-stream by default.
@@ -691,23 +701,23 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     await next()
     c.res.headers.set('content-type', 'application/manifest+json; charset=UTF-8')
   })
-  app.use('/manifest.webmanifest', serveStatic({root: './web/dist'}))
+  app.use('/manifest.webmanifest', serveStatic({root: webDistRoot}))
 
   // ── PWA service worker + registration helper ──────────────────────────────
   // /sw.js and /registerSW.js must be served at root scope so the SW covers the
   // entire origin. CSP is removed from /sw.js by the pre-secureHeaders middleware.
-  app.use('/sw.js', serveStatic({root: './web/dist'}))
+  app.use('/sw.js', serveStatic({root: webDistRoot}))
 
   app.use('/registerSW.js', async (c, next) => {
     await next()
     c.res.headers.set('cache-control', 'no-cache, no-store, must-revalidate')
   })
-  app.use('/registerSW.js', serveStatic({root: './web/dist'}))
+  app.use('/registerSW.js', serveStatic({root: webDistRoot}))
 
   // Warn early if the SPA build artifact is missing (GET / will 404 silently).
-  if (!existsSync('./web/dist/index.html')) {
+  if (!existsSync(`${webDistRoot}/index.html`)) {
     logger.warning(
-      'web/dist/index.html not found — GET / will return 404. Run `pnpm build:web` to build the SPA.',
+      `${webDistRoot}/index.html not found — GET / will return 404. Run \`pnpm build:web\` to build the SPA.`,
     )
   }
 

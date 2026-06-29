@@ -12,6 +12,11 @@ interface FixtureState {
 export default function App() {
   const [operatorState, setOperatorState] = useState<OperatorState>('ready')
   const [fixtureState, setFixtureState] = useState<FixtureState | null>(null)
+  // In dev builds, hold the operator runtime in 'loading' until fixture detection
+  // settles. This prevents the race where the non-fixture runtime starts with
+  // /operator endpoints before /__fixture/operator is known.
+  // In production, detection never runs so we start settled immediately.
+  const [fixtureDetectionSettled, setFixtureDetectionSettled] = useState(!import.meta.env.DEV)
 
   useEffect(() => {
     // Fixture detection is dev-only. The import.meta.env.DEV guard ensures
@@ -31,6 +36,7 @@ export default function App() {
           fixtureSessionId: session.fixtureSessionId,
         })
       }
+      setFixtureDetectionSettled(true)
     })()
 
     return () => {
@@ -41,7 +47,7 @@ export default function App() {
   return (
     <AppShell>
       <Operator
-        state={operatorState}
+        state={fixtureDetectionSettled ? operatorState : 'loading'}
         onRuntimeStateChange={setOperatorState}
         fixtureMode={fixtureState?.fixtureMode}
         fixtureEndpointBase={fixtureState?.fixtureEndpointBase}

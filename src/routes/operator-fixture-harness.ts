@@ -177,7 +177,7 @@ export function buildFixtureHarnessRouter(): Hono {
 
     let sseBytes: string
     try {
-      sseBytes = serializeScenarioToSse(scenario)
+      sseBytes = serializeScenarioToSse(scenario, runId)
     } catch {
       logger.debug('fixture-harness: GET /runs/:runId/stream', {status: 500, errorClass: 'serialize'})
       const res = c.json({error: 'internal-error'}, 500)

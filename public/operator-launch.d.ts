@@ -158,3 +158,23 @@ export declare function setLaunchStreamHandle(handle: {close: () => void}): void
  * Internal to the runtime seam contract — not part of the public operator API.
  */
 export declare function resetLaunchState(): void
+
+/**
+ * Returns true if the given init is no longer the active init.
+ *
+ * An init is stale when its AbortController signal is aborted or its captured
+ * generation no longer matches the current generation counter. Called after every
+ * await in initOperatorLaunch to bail out of stale inits before they register
+ * listeners or mutate the DOM.
+ *
+ * Exported for testing.
+ */
+export declare function isInitStale(controller: AbortController, generation: number): boolean
+
+/**
+ * Test-only seam: directly set _launchGeneration.
+ *
+ * Allows tests to simulate the Strict Mode race condition without calling the
+ * DOM-touching initOperatorLaunch. Never call this in production code.
+ */
+export declare function setLaunchGeneration(gen: number): void

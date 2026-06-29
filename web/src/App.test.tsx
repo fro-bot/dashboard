@@ -1,5 +1,5 @@
-import {render, screen} from '@testing-library/react'
-import {beforeEach, describe, expect, it} from 'vitest'
+import {render, screen, waitFor} from '@testing-library/react'
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import App from './App.tsx'
 
 // jsdom doesn't implement matchMedia — stub it (same pattern as AppShell.test.tsx)
@@ -20,10 +20,19 @@ function stubMatchMedia() {
 }
 
 describe('App', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     stubMatchMedia()
     window.localStorage.clear()
     document.documentElement.removeAttribute('data-theme')
+    // In dev builds, fixture detection must settle before the runtime mounts.
+    // Stub fetchFixtureSession to resolve null immediately so tests that check
+    // ready-state DOM don't have to wait for a real async fetch.
+    const fixtureLoader = await import('./operator/fixture-runtime-loader.ts')
+    vi.spyOn(fixtureLoader, 'fetchFixtureSession').mockResolvedValue(null)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
   })
 
   it('renders the brand name', () => {
@@ -68,25 +77,29 @@ describe('App', () => {
 
   // ── Regression: operator runtime shell mounts by default ──────────────────
 
-  it('renders operator runtime shell by default (not indefinite connecting state)', () => {
-    render(<App />)
+  it('renders operator runtime shell by default (not indefinite connecting state)', async () => {
+    const {act} = await import('react')
+    await act(async () => { render(<App />) })
     // The assembled app must enter ready state so the runtime DOM skeleton is present.
-    // A browser-direct operator has no Gateway session-check wiring, so it should
-    // start ready and let the runtime classify failures itself.
-    expect(document.querySelector('#launch-form')).not.toBeNull()
-    expect(document.querySelector('#repo-picker-container')).not.toBeNull()
-    expect(document.querySelector('#run-status-section')).not.toBeNull()
+    // Detection settles (null session) then operatorState='ready' takes effect.
+    // All three elements are inside operator-content which only renders in ready state.
+    await waitFor(() => {
+      expect(document.querySelector('#launch-form')).not.toBeNull()
+      expect(document.querySelector('#repo-picker-container')).not.toBeNull()
+      expect(document.querySelector('#run-status-section')).not.toBeNull()
+    })
   })
 
-  it('does not render indefinite connecting state as primary UI', () => {
-    render(<App />)
+  it('does not render indefinite connecting state as primary UI', async () => {
+    const {act} = await import('react')
+    await act(async () => { render(<App />) })
     // "Connecting…" / "Establishing operator session." must not be the only visible state.
     // If the runtime shell is present, the connecting copy is superseded.
-    const launchForm = document.querySelector('#launch-form')
-    expect(launchForm).not.toBeNull()
-    // Connecting text may still exist in the DOM (aria-live region) but the
-    // runtime shell must also be present — not stuck behind a loading gate.
-    expect(document.querySelector('[data-testid="operator-content"]')).not.toBeNull()
+    // Wait for both operator-content and launch-form to appear after detection settles.
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="operator-content"]')).not.toBeNull()
+      expect(document.querySelector('#launch-form')).not.toBeNull()
+    })
   })
 
   // ── Regression: SW prompts remain reachable ────────────────────────────────
@@ -101,15 +114,21 @@ describe('App', () => {
 })
 
 describe('App — runtime state wiring', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     stubMatchMedia()
     window.localStorage.clear()
     document.documentElement.removeAttribute('data-theme')
+    // Settle fixture detection immediately so runtime mounts in ready state.
+    const fixtureLoader = await import('./operator/fixture-runtime-loader.ts')
+    vi.spyOn(fixtureLoader, 'fetchFixtureSession').mockResolvedValue(null)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
   })
 
   it('runtime reporting unavailable transitions shell to unavailable state', async () => {
-    const {vi} = await import('vitest')
-    const {act} = await import('react')
+    const {act, waitFor: wf} = await import('@testing-library/react')
     const runtimeModule = await import('./operator/runtime.ts')
 
     let capturedOnStateChange: ((state: import('./operator/state.ts').OperatorState) => void) | undefined
@@ -120,7 +139,10 @@ describe('App — runtime state wiring', () => {
       return {isMounted: true, cleanup: vi.fn()}
     })
 
-    render(<App />)
+    await act(async () => { render(<App />) })
+
+    // Wait for detection to settle and runtime to mount
+    await wf(() => { expect(createSpy).toHaveBeenCalled() })
 
     // Simulate runtime reporting unavailable
     await act(async () => {
@@ -134,16 +156,19 @@ describe('App — runtime state wiring', () => {
   })
 
   it('App passes onRuntimeStateChange to Operator', async () => {
-    const {vi} = await import('vitest')
+    const {act, waitFor: wf} = await import('@testing-library/react')
     const runtimeModule = await import('./operator/runtime.ts')
 
     const createSpy = vi.spyOn(runtimeModule, 'createOperatorRuntime')
     createSpy.mockImplementation(() => ({isMounted: true, cleanup: vi.fn()}))
 
-    render(<App />)
+    await act(async () => { render(<App />) })
 
-    // createOperatorRuntime should have been called (Operator is in ready state and wired)
-    expect(createSpy).toHaveBeenCalled()
+    // Wait for detection to settle and runtime to mount
+    await wf(() => {
+      // createOperatorRuntime should have been called (Operator is in ready state and wired)
+      expect(createSpy).toHaveBeenCalled()
+    })
     const callOpts = createSpy.mock.calls[0]?.[0]
     expect(typeof callOpts?.onStateChange).toBe('function')
 
@@ -158,8 +183,7 @@ describe('App — fixture mode detection', () => {
     document.documentElement.removeAttribute('data-theme')
   })
 
-  afterEach(async () => {
-    const {vi} = await import('vitest')
+  afterEach(() => {
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
@@ -182,7 +206,6 @@ describe('App — fixture mode detection', () => {
   })
 
   it('App renders fixture-mode indicator when fixture session fetch succeeds in dev env', async () => {
-    const {vi} = await import('vitest')
     const {act, waitFor} = await import('@testing-library/react')
 
     // Mock createOperatorRuntime to prevent real dynamic imports
@@ -205,6 +228,117 @@ describe('App — fixture mode detection', () => {
     await waitFor(() => {
       expect(document.querySelector('[data-testid="fixture-mode-indicator"]')).not.toBeNull()
     })
+
+    fetchSpy.mockRestore()
+    createSpy.mockRestore()
+  })
+})
+
+// ── Fixture detection race fix ─────────────────────────────────────────────
+// These tests verify that in dev builds, createOperatorRuntime is NOT called
+// before fixture detection settles, preventing the race where the non-fixture
+// runtime starts with /operator endpoints before /__fixture/operator is known.
+
+describe('App — fixture detection race: runtime must not mount before detection settles', () => {
+  beforeEach(() => {
+    stubMatchMedia()
+    window.localStorage.clear()
+    document.documentElement.removeAttribute('data-theme')
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('createOperatorRuntime is NOT called before fixture detection resolves (dev build)', async () => {
+    const {act} = await import('react')
+
+    const runtimeModule = await import('./operator/runtime.ts')
+    const createSpy = vi.spyOn(runtimeModule, 'createOperatorRuntime')
+    createSpy.mockImplementation(() => ({isMounted: true, cleanup: vi.fn()}))
+
+    // fetchFixtureSession that never resolves during this test
+    const fixtureLoader = await import('./operator/fixture-runtime-loader.ts')
+    let resolveFixture!: (v: null) => void
+    const pendingFixture = new Promise<null>(resolve => { resolveFixture = resolve })
+    const fetchSpy = vi.spyOn(fixtureLoader, 'fetchFixtureSession').mockReturnValue(pendingFixture)
+
+    await act(async () => {
+      render(<App />)
+    })
+
+    // Detection is still pending — runtime must NOT have been called yet
+    expect(createSpy).not.toHaveBeenCalled()
+
+    // Resolve detection so cleanup is clean (wrapped in act to avoid act() warning)
+    const {act: actWrap} = await import('@testing-library/react')
+    await actWrap(async () => { resolveFixture(null) })
+
+    fetchSpy.mockRestore()
+    createSpy.mockRestore()
+  })
+
+  it('createOperatorRuntime receives fixture endpoint base when fixture session resolves', async () => {
+    const {act, waitFor} = await import('@testing-library/react')
+
+    const runtimeModule = await import('./operator/runtime.ts')
+    const createSpy = vi.spyOn(runtimeModule, 'createOperatorRuntime')
+    createSpy.mockImplementation(() => ({isMounted: true, cleanup: vi.fn()}))
+
+    const fixtureLoader = await import('./operator/fixture-runtime-loader.ts')
+    const fetchSpy = vi.spyOn(fixtureLoader, 'fetchFixtureSession').mockResolvedValue({
+      fixtureMode: true,
+      fixtureSessionId: 'fixture-session-0001',
+    })
+
+    await act(async () => {
+      render(<App />)
+    })
+
+    // Wait for detection to settle and runtime to mount
+    await waitFor(() => {
+      expect(createSpy).toHaveBeenCalled()
+    })
+
+    // Runtime must have been called with the fixture endpoint base
+    const callOpts = createSpy.mock.calls[0]?.[0]
+    expect(callOpts?.fixtureMode).toBe(true)
+    expect(callOpts?.fixtureEndpointBase).toBe('/__fixture/operator')
+
+    // Page must show fixture indicator
+    expect(document.querySelector('[data-testid="fixture-mode-indicator"]')).not.toBeNull()
+
+    fetchSpy.mockRestore()
+    createSpy.mockRestore()
+  })
+
+  it('createOperatorRuntime mounts normally (no fixture props) when fixture session returns null', async () => {
+    const {act, waitFor} = await import('@testing-library/react')
+
+    const runtimeModule = await import('./operator/runtime.ts')
+    const createSpy = vi.spyOn(runtimeModule, 'createOperatorRuntime')
+    createSpy.mockImplementation(() => ({isMounted: true, cleanup: vi.fn()}))
+
+    const fixtureLoader = await import('./operator/fixture-runtime-loader.ts')
+    const fetchSpy = vi.spyOn(fixtureLoader, 'fetchFixtureSession').mockResolvedValue(null)
+
+    await act(async () => {
+      render(<App />)
+    })
+
+    // Wait for detection to settle and runtime to mount
+    await waitFor(() => {
+      expect(createSpy).toHaveBeenCalled()
+    })
+
+    // Runtime must have been called without fixture props
+    const callOpts = createSpy.mock.calls[0]?.[0]
+    expect(callOpts?.fixtureMode).toBeFalsy()
+    expect(callOpts?.fixtureEndpointBase).toBeUndefined()
+
+    // No fixture indicator
+    expect(document.querySelector('[data-testid="fixture-mode-indicator"]')).toBeNull()
 
     fetchSpy.mockRestore()
     createSpy.mockRestore()

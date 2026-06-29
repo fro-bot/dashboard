@@ -3,6 +3,12 @@ import react from '@vitejs/plugin-react-swc'
 import {defineConfig} from 'vite'
 import {VitePWA} from 'vite-plugin-pwa'
 
+// Fixture build mode: VITE_FIXTURE_MODE=true enables a local-only build that
+// includes fixture-gated browser code (import.meta.env.DEV = true). Output goes
+// to web/dist-fixture so it never overwrites the production web/dist artifacts.
+// Production builds (build:web) always use the default mode with DEV = false.
+const isFixtureBuild = process.env['VITE_FIXTURE_MODE'] === 'true'
+
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [
@@ -44,8 +50,13 @@ export default defineConfig({
     }),
   ],
   root: '.',
+  // Fixture builds set DEV = true so import.meta.env.DEV-gated fixture code is
+  // included. Production builds leave DEV = false (the Vite default for build mode).
+  define: isFixtureBuild
+    ? {'import.meta.env.DEV': 'true', 'import.meta.env.PROD': 'false'}
+    : {},
   build: {
-    outDir: 'dist',
+    outDir: isFixtureBuild ? 'dist-fixture' : 'dist',
     // Vite's default output uses hashed filenames for assets.
     // No inline scripts are emitted by default — all JS is external chunks
     // referenced via <script type="module" src="..."> tags, satisfying CSP.

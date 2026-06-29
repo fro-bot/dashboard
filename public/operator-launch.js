@@ -313,15 +313,59 @@ export function buildLaunchClient(opts) {
 // DOM shell — only runs in a browser (document must exist)
 // ---------------------------------------------------------------------------
 
-// Module-level state: tracks whether initOperatorLaunch has been called and
-// the AbortController used to remove the submit listener on reset.
-// resetLaunchState() aborts the prior listener before clearing state.
-// Declared here (before initOperatorLaunch) to satisfy no-use-before-define.
-let _launchInitialized = false
-let _launchAbortController = null
+// Module-level state for the DOM shell lifecycle.
+// _launchGeneration is a monotonically increasing counter. Each initOperatorLaunch()
+// call captures its own generation at entry; resetLaunchState() increments the counter
+// to invalidate all pending inits without clearing it to null (which would cause a
+// fresh init resuming after reset to see a null mismatch and bail incorrectly).
+// _launchListenerController is the AbortController passed to the active submit listener;
+// resetLaunchState() aborts it to remove the listener. It is separate from the per-init
+// guard controller so stale cleanup cannot abort the active listener.
+let _launchGeneration = 0
+let _launchListenerController = null
 // Tracks the stream handle returned by initOperatorStream for launch-created runs.
 // resetLaunchState() closes this handle to prevent leaked connections/timers.
 let _launchStreamHandle = null
+// Idempotency flag: prevents double-init when auto-start fires before DOMContentLoaded.
+let _launchInitialized = false
+
+/**
+ * Returns true if the given init is no longer the active init.
+ *
+ * An init is stale when either:
+ * - Its AbortController signal has been aborted (resetLaunchState() was called
+ *   and the controller was the active listener controller at that time), or
+ * - Its captured generation no longer matches the current generation (a newer
+ *   init has started, or resetLaunchState() incremented the counter).
+ *
+ * Call this after every await in initOperatorLaunch to bail out of stale inits
+ * before they register listeners or mutate the DOM.
+ *
+ * Using a generation counter (rather than controller identity) means that
+ * resetLaunchState() can increment the counter without setting it to null,
+ * so a fresh init that starts after reset gets a new generation and its
+ * isInitStale checks pass correctly even if stale cleanup runs concurrently.
+ *
+ * Exported for testing.
+ *
+ * @param {AbortController} controller - The AbortController created at init entry.
+ * @param {number} generation - The generation captured at init entry.
+ */
+export function isInitStale(controller, generation) {
+  return controller.signal.aborted || generation !== _launchGeneration
+}
+
+/**
+ * Test-only seam: directly set _launchGeneration.
+ *
+ * Allows tests to simulate the race condition (reset mid-async) without
+ * calling the DOM-touching initOperatorLaunch. Never call this in production code.
+ *
+ * @param {number} gen - The generation value to set.
+ */
+export function setLaunchGeneration(gen) {
+  _launchGeneration = gen
+}
 
 /**
  * Set the launch-created stream handle.
@@ -353,14 +397,20 @@ export function setLaunchStreamHandle(handle) {
  * - All 400s → one generic failure message; 404 → one uniform unavailable message.
  */
 export async function initOperatorLaunch(opts) {
-  // Create an AbortController for this init session. The controller's signal is
-  // passed to the submit event listener so that resetLaunchState() can abort it,
-  // removing the listener without needing a reference to the handler function.
-  // This prevents double-registration under React Strict Mode.
+  // Capture this init's generation at entry. Each call increments the counter so
+  // that any concurrent or prior init with a different generation is considered stale.
+  // resetLaunchState() also increments the counter, invalidating pending inits without
+  // setting it to null (which would cause a fresh post-reset init to fail its own guard).
+  const myGeneration = ++_launchGeneration
+  // Create a per-init AbortController used only as a staleness signal for this init's
+  // async steps. The listener controller (_launchListenerController) is separate and
+  // is only set once this init wins the generation race and registers its listener.
   const abortController = new AbortController()
-  _launchAbortController = abortController
 
   const {initOperatorStream} = await import(streamModuleSpecifier())
+
+  // Guard: bail if a reset or newer init has superseded this one while we awaited.
+  if (isInitStale(abortController, myGeneration)) return
 
   // Build the client using the optional endpointBase from opts.
   // Default is '/operator' (production path). Dev mode may pass a different base
@@ -379,6 +429,9 @@ export async function initOperatorLaunch(opts) {
 
   if (pickerContainer !== null) {
     const reposResult = await client.listRepos()
+
+    // Guard: bail if reset/replaced while awaiting listRepos.
+    if (isInitStale(abortController, myGeneration)) return
 
     if (!reposResult.success) {
       // Failure — classify into a neutral operator failure state.
@@ -437,6 +490,13 @@ export async function initOperatorLaunch(opts) {
   const sharedNoticeEl = runStatusSection?.querySelector('[data-role="stream-status"]') ?? null
 
   if (launchForm !== null) {
+    // Create a dedicated AbortController for the submit listener. This is separate
+    // from the per-init abortController used for staleness guards above, so that
+    // resetLaunchState() can abort only the active listener without interfering with
+    // the init-guard controller of a concurrently-running newer init.
+    const listenerController = new AbortController()
+    _launchListenerController = listenerController
+
     // In-flight submit mutex: prevents double-launch even when requestSubmit()
     // bypasses the disabled button (e.g. DevTools or browser extensions).
     let launching = false
@@ -546,22 +606,29 @@ export async function initOperatorLaunch(opts) {
         launchError.textContent = 'Launch failed. Please try again.'
         launchError.hidden = false
       }
-    }, {signal: abortController.signal})
+    }, {signal: listenerController.signal})
   }
 }
 
 /**
  * Reset the launch state.
  *
- * Aborts the AbortController that was passed to the submit event listener,
- * removing it from the form. Called by the React runtime seam cleanup so that
- * a remount (e.g. after auth expiry and re-login) can re-initialize the launch
- * UI without double-registering submit handlers. Also used in tests.
+ * Increments the generation counter to invalidate all pending inits, then aborts
+ * the active submit listener controller (removing the listener from the form).
+ * Called by the React runtime seam cleanup so that a remount can re-initialize
+ * the launch UI without double-registering submit handlers. Also used in tests.
+ *
+ * Incrementing (not nulling) the generation means a fresh init that starts after
+ * this reset will capture a new generation and pass its own staleness guards,
+ * even if stale cleanup from an older init runs concurrently.
  */
 export function resetLaunchState() {
-  if (_launchAbortController !== null) {
-    _launchAbortController.abort()
-    _launchAbortController = null
+  // Increment generation to invalidate all pending inits.
+  _launchGeneration++
+  // Abort and clear the active listener controller (removes the submit listener).
+  if (_launchListenerController !== null) {
+    _launchListenerController.abort()
+    _launchListenerController = null
   }
   // Close the launch-created stream handle to prevent leaked connections/timers.
   if (_launchStreamHandle !== null) {

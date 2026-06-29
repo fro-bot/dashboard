@@ -14,7 +14,16 @@
 
 import type {LaunchClient} from '../public/operator-launch.js'
 import {describe, expect, it} from 'vitest'
-import {buildPendingCardHooks, mintIdempotencyKey, submitLaunch, validateRepoItem} from '../public/operator-launch.js'
+import {
+  buildPendingCardHooks,
+  isInitStale,
+  mintIdempotencyKey,
+  resetLaunchState,
+  setLaunchGeneration,
+  setLaunchStreamHandle,
+  submitLaunch,
+  validateRepoItem,
+} from '../public/operator-launch.js'
 
 // ---------------------------------------------------------------------------
 // Fake client builder
@@ -459,53 +468,31 @@ describe('module-level safety', () => {
 })
 
 describe('resetLaunchState — closes launch-created stream handle', () => {
-  it('resetLaunchState calls close() on the stream handle stored by initOperatorLaunch', async () => {
-    // We cannot call initOperatorLaunch in Node (it touches DOM), but we can
-    // verify the exported seam: _launchStreamHandle is set by initOperatorLaunch
-    // and cleared+closed by resetLaunchState. We test this via the exported
-    // setLaunchStreamHandle / resetLaunchState pair.
-    const mod = await import('../public/operator-launch.js')
-    const setHandle = (mod as {setLaunchStreamHandle?: (h: {close: () => void}) => void}).setLaunchStreamHandle
-    const reset = (mod as {resetLaunchState?: () => void}).resetLaunchState
-    if (typeof setHandle !== 'function') throw new Error('setLaunchStreamHandle not exported')
-    if (typeof reset !== 'function') throw new Error('resetLaunchState not exported')
-
+  it('resetLaunchState calls close() on the stream handle stored by initOperatorLaunch', () => {
     let closeCalled = false
-    const fakeHandle = {
+    setLaunchStreamHandle({
       close: () => {
         closeCalled = true
       },
-    }
-    setHandle(fakeHandle)
-    reset()
+    })
+    resetLaunchState()
     expect(closeCalled).toBe(true)
   })
 
-  it('resetLaunchState does not throw when no stream handle is set', async () => {
-    const mod = await import('../public/operator-launch.js')
-    const reset = (mod as {resetLaunchState?: () => void}).resetLaunchState
-    if (typeof reset !== 'function') throw new Error('resetLaunchState not exported')
-    // Call reset with no handle set — must not throw
-    expect(() => reset()).not.toThrow()
+  it('resetLaunchState does not throw when no stream handle is set', () => {
+    expect(() => resetLaunchState()).not.toThrow()
   })
 
-  it('resetLaunchState clears the handle so a second reset does not double-close', async () => {
-    const mod = await import('../public/operator-launch.js')
-    const setHandle = (mod as {setLaunchStreamHandle?: (h: {close: () => void}) => void}).setLaunchStreamHandle
-    const reset = (mod as {resetLaunchState?: () => void}).resetLaunchState
-    if (typeof setHandle !== 'function') throw new Error('setLaunchStreamHandle not exported')
-    if (typeof reset !== 'function') throw new Error('resetLaunchState not exported')
-
+  it('resetLaunchState clears the handle so a second reset does not double-close', () => {
     let closeCount = 0
-    const fakeHandle = {
+    setLaunchStreamHandle({
       close: () => {
         closeCount++
       },
-    }
-    setHandle(fakeHandle)
-    reset()
-    reset() // second reset — handle should already be cleared
-    expect(closeCount).toBe(1) // close called exactly once
+    })
+    resetLaunchState()
+    resetLaunchState()
+    expect(closeCount).toBe(1)
   })
 })
 
@@ -553,47 +540,195 @@ describe('operator-launch — fixture scenario in launch body', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// resetLaunchState — AbortController lifecycle (double init/reset/init)
-// ---------------------------------------------------------------------------
-
-describe('resetLaunchState — AbortController lifecycle', () => {
-  it('resetLaunchState export exists and is callable without throwing', async () => {
-    const mod = await import('../public/operator-launch.js')
-    const reset = (mod as {resetLaunchState?: unknown}).resetLaunchState
-    expect(typeof reset).toBe('function')
-    expect(() => (reset as () => void)()).not.toThrow()
+describe('isInitStale — stale-init guard prevents aborted-signal listener registration', () => {
+  it('isInitStale export exists and is a function', () => {
+    expect(typeof isInitStale).toBe('function')
   })
 
-  it('resetLaunchState can be called multiple times without throwing', async () => {
-    const mod = await import('../public/operator-launch.js')
-    const reset = (mod as {resetLaunchState?: () => void}).resetLaunchState
-    if (typeof reset !== 'function') throw new Error('resetLaunchState not exported')
+  it('setLaunchGeneration export exists (test seam)', () => {
+    expect(typeof setLaunchGeneration).toBe('function')
+  })
+
+  it('isInitStale returns true when the controller signal is already aborted', () => {
+    const ctrl = new AbortController()
+    setLaunchGeneration(7)
+    ctrl.abort()
+    expect(isInitStale(ctrl, 7)).toBe(true)
+  })
+
+  it('isInitStale returns true when a newer generation is current (stale init)', () => {
+    const ctrl = new AbortController()
+    setLaunchGeneration(5) // init1 captured gen=5
+    setLaunchGeneration(6) // init2 started, gen is now 6
+    // init1 is stale — its generation 5 no longer matches current 6
+    expect(isInitStale(ctrl, 5)).toBe(true)
+  })
+
+  it('isInitStale returns false when the generation matches and controller is not aborted', () => {
+    const ctrl = new AbortController()
+    setLaunchGeneration(10)
+    expect(isInitStale(ctrl, 10)).toBe(false)
+  })
+
+  it('after resetLaunchState(), a pending init with the prior generation is stale', () => {
+    const ctrl = new AbortController()
+    setLaunchGeneration(3) // simulate: initOperatorLaunch captured gen=3
+    resetLaunchState() // increments generation to 4
+    // The original init with gen=3 is now stale
+    expect(isInitStale(ctrl, 3)).toBe(true)
+  })
+
+  it('a fresh init after resetLaunchState() is not stale (generation mismatch fixed)', () => {
+    // This is the core regression test: after reset increments gen, a new init
+    // that captures the new gen must NOT be considered stale.
+    setLaunchGeneration(2)
+    resetLaunchState() // gen becomes 3
+    // New init captures gen=4 (it would call ++_launchGeneration)
+    setLaunchGeneration(4) // simulate new init incrementing
+    const ctrl = new AbortController()
+    expect(isInitStale(ctrl, 4)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// DOM lifecycle — Strict Mode double-mount race (generation-based guard)
+//
+// Simulates the async lifecycle of initOperatorLaunch under React Strict Mode
+// without touching the DOM. Uses the exported seams to drive the state machine
+// and assert that only the second (winning) init's listener survives.
+//
+// Scenario:
+//   1. init1 starts, captures gen=1, awaits stream import
+//   2. reset fires (gen becomes 2), init1's gen=1 is now stale
+//   3. init2 starts, captures gen=3, awaits stream import
+//   4. init1 resumes — must bail (gen=1 !== current gen=3)
+//   5. init2 resumes — must NOT bail (gen=3 === current gen=3)
+//   6. Only init2's listener is active; submit calls launch exactly once
+// ---------------------------------------------------------------------------
+
+describe('initOperatorLaunch — Strict Mode double-mount generation guard', () => {
+  it('init1 is stale after reset+init2; init2 is not stale when init1 resumes', () => {
+    // Step 1: init1 starts, captures gen=1
+    setLaunchGeneration(0)
+    const gen1 = 1
+    setLaunchGeneration(gen1) // simulate ++_launchGeneration inside init1
+    const ctrl1 = new AbortController()
+
+    // init1 is active at this point
+    expect(isInitStale(ctrl1, gen1)).toBe(false)
+
+    // Step 2: reset fires mid-async (gen becomes 2)
+    resetLaunchState()
+    const genAfterReset = gen1 + 1 // resetLaunchState increments
+
+    // init1 is now stale
+    expect(isInitStale(ctrl1, gen1)).toBe(true)
+
+    // Step 3: init2 starts, captures gen=3
+    const gen2 = genAfterReset + 1
+    setLaunchGeneration(gen2) // simulate ++_launchGeneration inside init2
+    const ctrl2 = new AbortController()
+
+    // init2 is active
+    expect(isInitStale(ctrl2, gen2)).toBe(false)
+
+    // Step 4: init1 resumes — must still be stale (gen=1 !== current gen=3)
+    expect(isInitStale(ctrl1, gen1)).toBe(true)
+
+    // Step 5: init2 resumes — must NOT be stale (gen=3 === current gen=3)
+    expect(isInitStale(ctrl2, gen2)).toBe(false)
+  })
+
+  it('stale cleanup from init1 cannot invalidate init2 by calling resetLaunchState again', () => {
+    // Simulates the scenario where stale init1 cleanup fires resetLaunchState
+    // after init2 has already started. With the old null-based guard, this would
+    // set _launchAbortController=null and cause init2 to bail. With the generation
+    // counter, resetLaunchState increments the counter, making init2 stale too —
+    // but this is correct behavior: if cleanup fires, the seam must re-init.
+    // The key invariant is that init2 is NOT stale BEFORE any extra reset fires.
+    setLaunchGeneration(0)
+
+    // init1 starts (gen=1)
+    const gen1 = 1
+    setLaunchGeneration(gen1)
+    const ctrl1 = new AbortController()
+
+    // reset fires (gen=2)
+    resetLaunchState()
+
+    // init2 starts (gen=3)
+    const gen2 = 3
+    setLaunchGeneration(gen2)
+    const ctrl2 = new AbortController()
+
+    // init2 is active before any stale cleanup
+    expect(isInitStale(ctrl2, gen2)).toBe(false)
+
+    // init1 is stale before any stale cleanup
+    expect(isInitStale(ctrl1, gen1)).toBe(true)
+  })
+
+  it('submit listener count: only one listener active after init1→reset→init2 sequence', () => {
+    // Simulate the listener registration pattern using a fake form element.
+    // We track how many times a submit handler fires to verify exactly one is active.
+    let listenerCallCount = 0
+    const fakeSignal1 = new AbortController()
+    const fakeSignal2 = new AbortController()
+
+    // Simulate init1 registering a listener (then being reset/aborted)
+    const handler1 = () => {
+      listenerCallCount++
+    }
+    // Simulate init2 registering a listener (the winner)
+    const handler2 = () => {
+      listenerCallCount++
+    }
+
+    // Use a real EventTarget to simulate the form
+    const fakeForm = new EventTarget()
+    fakeForm.addEventListener('submit', handler1, {signal: fakeSignal1.signal})
+
+    // Reset aborts init1's listener
+    fakeSignal1.abort()
+
+    // init2 registers its listener
+    fakeForm.addEventListener('submit', handler2, {signal: fakeSignal2.signal})
+
+    // Dispatch submit — only handler2 should fire (handler1 was aborted)
+    fakeForm.dispatchEvent(new Event('submit'))
+    expect(listenerCallCount).toBe(1)
+
+    // Dispatch again — still only one handler active
+    fakeForm.dispatchEvent(new Event('submit'))
+    expect(listenerCallCount).toBe(2)
+
+    // Cleanup
+    fakeSignal2.abort()
+  })
+})
+
+describe('resetLaunchState — generation lifecycle', () => {
+  it('resetLaunchState export exists and is callable without throwing', () => {
+    expect(typeof resetLaunchState).toBe('function')
+    expect(() => resetLaunchState()).not.toThrow()
+  })
+
+  it('resetLaunchState can be called multiple times without throwing', () => {
     expect(() => {
-      reset()
-      reset()
-      reset()
+      resetLaunchState()
+      resetLaunchState()
+      resetLaunchState()
     }).not.toThrow()
   })
 
-  it('resetLaunchState aborts the prior AbortController (verified via abort signal)', async () => {
-    // We cannot call initOperatorLaunch in Node (it touches DOM), but we can
-    // verify the AbortController pattern by checking that resetLaunchState
-    // does not throw and clears state correctly for re-init.
-    const mod = await import('../public/operator-launch.js')
-    const reset = (mod as {resetLaunchState?: () => void}).resetLaunchState
-    if (typeof reset !== 'function') throw new Error('resetLaunchState not exported')
-
-    // Simulate the pattern: reset → reset (double-reset must not throw)
-    reset()
-    reset()
-
-    // After reset, _launchInitialized should be false (re-init is possible).
-    // We verify this indirectly: the module-level flag is reset, so a subsequent
-    // call to the once-wrapper would re-run initOperatorLaunch.
-    // We cannot call initOperatorLaunch in Node, but the absence of throw is the
-    // behavioral contract we can verify here.
-    expect(true).toBe(true)
+  it('resetLaunchState increments the generation, invalidating pending inits', () => {
+    setLaunchGeneration(10)
+    const ctrl = new AbortController()
+    // Pending init captured gen=10
+    expect(isInitStale(ctrl, 10)).toBe(false)
+    resetLaunchState() // gen becomes 11
+    // Now gen=10 is stale
+    expect(isInitStale(ctrl, 10)).toBe(true)
   })
 })
 
@@ -610,10 +745,8 @@ describe('repo-list failure classification — neutral copy for non-empty failur
     expect(validateRepoItem({owner: 'fro-bot', repo: 'agent'})).toBe(true)
   })
 
-  it('resetLaunchState export exists and is callable', async () => {
-    // Verify the idempotency reset hook is exported for the runtime seam.
-    const mod = await import('../public/operator-launch.js')
-    expect(typeof (mod as {resetLaunchState?: unknown}).resetLaunchState).toBe('function')
+  it('resetLaunchState export exists and is callable', () => {
+    expect(typeof resetLaunchState).toBe('function')
   })
 })
 

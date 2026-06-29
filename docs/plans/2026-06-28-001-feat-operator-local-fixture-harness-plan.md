@@ -306,7 +306,7 @@ flowchart TB
 - Production runtime imports, CSP posture, and browser bundles remain fixture-free.
 - Developers can tell from the UI that the run is synthetic.
 
-- [ ] **Unit 4: Assembled browser verification and cache boundaries**
+- [x] **Unit 4: Assembled browser verification and cache boundaries**
 
 **Goal:** Prove the local fixture harness works in the assembled PWA without turning documentation and long-term policy work into core implementation scope.
 

@@ -29,10 +29,14 @@ export const FIXTURE_SCENARIO_NAMES = {
 /** Union of all canonical scenario name values. */
 export type FixtureScenarioName = (typeof FIXTURE_SCENARIO_NAMES)[keyof typeof FIXTURE_SCENARIO_NAMES]
 
-const FIXTURE_RUN_ID_SUCCESS = 'run-fixture-success-001'
-const FIXTURE_RUN_ID_FAILURE = 'run-fixture-failure-001'
-const FIXTURE_RUN_ID_DRIFT = 'run-fixture-drift-001'
 const FIXTURE_RUN_ID_MALFORMED = 'run-fixture-malformed-001'
+
+/**
+ * Canonical fixture run ID for use in tests that call serializeScenarioToSse
+ * directly (parser/reducer tests that don't go through the launch route).
+ * Must be fixture-prefixed per the synthetic-only ID policy.
+ */
+export const FIXTURE_RUN_ID_FOR_TESTS = 'run-fixture-test-001'
 
 /** Unsupported contract version for the drift scenario — explicitly not the pinned version. */
 const FIXTURE_DRIFT_CONTRACT_VERSION = '0.0.0-fixture-drift'
@@ -72,46 +76,43 @@ function outputFrame(
   return sseRecord('output', {runId, text, final, seq})
 }
 
-function buildSuccessScenario(): string {
-  const runId = FIXTURE_RUN_ID_SUCCESS
+function buildSuccessScenario(activeRunId: string): string {
   const startedAt = '2026-06-28T10:00:00Z'
 
   return (
     readyFrame(OPERATOR_CONTRACT_VERSION) +
-    statusFrame(runId, 'running', 'EXECUTING', startedAt) +
-    outputFrame(runId, '[Fixture output — synthetic run result]', false, 0) +
-    outputFrame(runId, '[Fixture output — synthetic run result (final)]', true, 1) +
-    statusFrame(runId, 'succeeded', 'COMPLETED', startedAt)
+    statusFrame(activeRunId, 'running', 'EXECUTING', startedAt) +
+    outputFrame(activeRunId, '[Fixture output — synthetic run result]', false, 0) +
+    outputFrame(activeRunId, '[Fixture output — synthetic run result (final)]', true, 1) +
+    statusFrame(activeRunId, 'succeeded', 'COMPLETED', startedAt)
   )
 }
 
-function buildTerminalFailureScenario(): string {
-  const runId = FIXTURE_RUN_ID_FAILURE
+function buildTerminalFailureScenario(activeRunId: string): string {
   const startedAt = '2026-06-28T10:01:00Z'
 
   return (
     readyFrame(OPERATOR_CONTRACT_VERSION) +
-    statusFrame(runId, 'running', 'EXECUTING', startedAt) +
-    outputFrame(runId, '[Fixture output — synthetic partial result before failure]', false, 0) +
-    outputFrame(runId, '[Fixture output — synthetic partial result before failure (final)]', true, 1) +
-    statusFrame(runId, 'failed', 'FAILED', startedAt)
+    statusFrame(activeRunId, 'running', 'EXECUTING', startedAt) +
+    outputFrame(activeRunId, '[Fixture output — synthetic partial result before failure]', false, 0) +
+    outputFrame(activeRunId, '[Fixture output — synthetic partial result before failure (final)]', true, 1) +
+    statusFrame(activeRunId, 'failed', 'FAILED', startedAt)
   )
 }
 
-function buildContractDriftScenario(): string {
-  const runId = FIXTURE_RUN_ID_DRIFT
+function buildContractDriftScenario(activeRunId: string): string {
   const startedAt = '2026-06-28T10:02:00Z'
 
   return (
     readyFrame(FIXTURE_DRIFT_CONTRACT_VERSION) +
     // These frames follow the drift-triggering ready and must be absorbed:
-    statusFrame(runId, 'running', 'EXECUTING', startedAt) +
-    outputFrame(runId, '[Fixture output — must be absorbed after drift]', true, 0) +
-    statusFrame(runId, 'succeeded', 'COMPLETED', startedAt)
+    statusFrame(activeRunId, 'running', 'EXECUTING', startedAt) +
+    outputFrame(activeRunId, '[Fixture output — must be absorbed after drift]', true, 0) +
+    statusFrame(activeRunId, 'succeeded', 'COMPLETED', startedAt)
   )
 }
 
-function buildMalformedUnavailableScenario(): string {
+function buildMalformedUnavailableScenario(_activeRunId: string): string {
   // Unrecognized event name → parser returns a typed failure with a fixed error string
   // that does not echo the event name. sseRecord() serializes the id via JSON.stringify
   // so the fixture sanitization regex (which scans source text) does not see a literal
@@ -122,7 +123,7 @@ function buildMalformedUnavailableScenario(): string {
   })
 }
 
-const SCENARIO_BUILDERS: Readonly<Record<FixtureScenarioName, () => string>> = {
+const SCENARIO_BUILDERS: Readonly<Record<FixtureScenarioName, (activeRunId: string) => string>> = {
   [FIXTURE_SCENARIO_NAMES.success]: buildSuccessScenario,
   [FIXTURE_SCENARIO_NAMES.terminal_failure]: buildTerminalFailureScenario,
   [FIXTURE_SCENARIO_NAMES.contract_drift]: buildContractDriftScenario,
@@ -130,14 +131,16 @@ const SCENARIO_BUILDERS: Readonly<Record<FixtureScenarioName, () => string>> = {
 }
 
 /**
- * Serialize a fixture scenario to SSE wire bytes.
+ * Serialize a fixture scenario to SSE wire bytes, binding the active run ID into
+ * all run-scoped frames (status, output). The ready frame is contract-only and
+ * carries no run ID. The malformed scenario uses a non-runId field.
  *
  * @throws {Error} If the scenario name is not a known canonical scenario.
  */
-export function serializeScenarioToSse(scenarioName: string): string {
+export function serializeScenarioToSse(scenarioName: string, activeRunId: string): string {
   const builder = SCENARIO_BUILDERS[scenarioName as FixtureScenarioName]
   if (builder === undefined) {
     throw new Error(`fixture-sse: unknown scenario name (not in FIXTURE_SCENARIO_NAMES)`)
   }
-  return builder()
+  return builder(activeRunId)
 }

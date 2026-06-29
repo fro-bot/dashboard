@@ -15,7 +15,7 @@
 import type {RunStreamFrame} from '../src/gateway/operator-contract/sse-frames.ts'
 import type {Logger} from '../src/logger.ts'
 import {describe, expect, it, vi} from 'vitest'
-import {FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../src/gateway/operator-fixture-sse.ts'
+import {FIXTURE_RUN_ID_FOR_TESTS, FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../src/gateway/operator-fixture-sse.ts'
 import {createOperatorSseReader, MAX_SSE_BUFFER_BYTES, parseSseChunk} from '../src/gateway/operator-sse-reader.ts'
 
 function makeStreamBody(chunks: string[]): ReadableStream<Uint8Array> {
@@ -1814,7 +1814,7 @@ describe('fixture SSE scenarios — scenario names', () => {
 
 describe('fixture SSE scenarios — success scenario parses in server reader', () => {
   it('success scenario SSE bytes parse as ready + running status + output + terminal succeeded', async () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success, FIXTURE_RUN_ID_FOR_TESTS)
     const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseBytes]))
     const reader = createOperatorSseReader({fetchImpl})
 
@@ -1849,7 +1849,7 @@ describe('fixture SSE scenarios — success scenario parses in server reader', (
   })
 
   it('success scenario ready frame carries OPERATOR_CONTRACT_VERSION', async () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success, FIXTURE_RUN_ID_FOR_TESTS)
     const results = parseSseChunk(sseBytes)
     const readyResult = results.find(r => r.success && r.frame.type === 'ready')
     expect(readyResult).toBeDefined()
@@ -1860,7 +1860,7 @@ describe('fixture SSE scenarios — success scenario parses in server reader', (
   })
 
   it('success scenario output frame has non-empty text and final:true', async () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success, FIXTURE_RUN_ID_FOR_TESTS)
     const results = parseSseChunk(sseBytes)
     const outputResults = results.filter(r => r.success && r.frame.type === 'output')
     expect(outputResults.length).toBeGreaterThanOrEqual(1)
@@ -1874,7 +1874,7 @@ describe('fixture SSE scenarios — success scenario parses in server reader', (
 
 describe('fixture SSE scenarios — terminal_failure scenario parses in server reader', () => {
   it('terminal_failure scenario SSE bytes parse with failed terminal status after output', async () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.terminal_failure)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.terminal_failure, FIXTURE_RUN_ID_FOR_TESTS)
     const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseBytes]))
     const reader = createOperatorSseReader({fetchImpl})
 
@@ -1911,7 +1911,7 @@ describe('fixture SSE scenarios — terminal_failure scenario parses in server r
   })
 
   it('terminal_failure scenario SSE bytes are valid (parseable by server parser)', () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.terminal_failure)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.terminal_failure, FIXTURE_RUN_ID_FOR_TESTS)
     const results = parseSseChunk(sseBytes)
     const successes = results.filter(r => r.success)
     expect(successes.length).toBeGreaterThanOrEqual(1)
@@ -1920,7 +1920,7 @@ describe('fixture SSE scenarios — terminal_failure scenario parses in server r
 
 describe('fixture SSE scenarios — contract_drift scenario enters absorbing drift', () => {
   it('contract_drift scenario ready frame carries a non-matching version', () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.contract_drift)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.contract_drift, FIXTURE_RUN_ID_FOR_TESTS)
     const results = parseSseChunk(sseBytes)
     const readyResult = results.find(r => r.success && r.frame.type === 'ready')
     expect(readyResult).toBeDefined()
@@ -1931,7 +1931,7 @@ describe('fixture SSE scenarios — contract_drift scenario enters absorbing dri
   })
 
   it('contract_drift scenario triggers drift error in server reader and ignores later frames', async () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.contract_drift)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.contract_drift, FIXTURE_RUN_ID_FOR_TESTS)
     const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseBytes]))
     const reader = createOperatorSseReader({fetchImpl})
 
@@ -1956,7 +1956,7 @@ describe('fixture SSE scenarios — contract_drift scenario enters absorbing dri
   })
 
   it('contract_drift scenario SSE bytes are parseable (ready frame parses successfully)', () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.contract_drift)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.contract_drift, FIXTURE_RUN_ID_FOR_TESTS)
     const results = parseSseChunk(sseBytes)
     const readyResult = results.find(r => r.success && r.frame.type === 'ready')
     expect(readyResult).toBeDefined()
@@ -1965,14 +1965,14 @@ describe('fixture SSE scenarios — contract_drift scenario enters absorbing dri
 
 describe('fixture SSE scenarios — malformed_unavailable scenario fails closed', () => {
   it('malformed_unavailable scenario SSE bytes contain at least one parse failure', () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.malformed_unavailable)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.malformed_unavailable, FIXTURE_RUN_ID_FOR_TESTS)
     const results = parseSseChunk(sseBytes)
     const failures = results.filter(r => !r.success)
     expect(failures.length).toBeGreaterThanOrEqual(1)
   })
 
   it('malformed_unavailable scenario parse failure error does not echo wire content', () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.malformed_unavailable)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.malformed_unavailable, FIXTURE_RUN_ID_FOR_TESTS)
     const results = parseSseChunk(sseBytes)
     const failures = results.filter(r => !r.success)
     for (const failure of failures) {
@@ -1988,24 +1988,24 @@ describe('fixture SSE scenarios — malformed_unavailable scenario fails closed'
 describe('fixture SSE scenarios — serializeScenarioToSse output format', () => {
   it('serialized SSE bytes are a non-empty string', () => {
     for (const name of Object.values(FIXTURE_SCENARIO_NAMES)) {
-      const sseBytes = serializeScenarioToSse(name)
+      const sseBytes = serializeScenarioToSse(name, FIXTURE_RUN_ID_FOR_TESTS)
       expect(typeof sseBytes).toBe('string')
       expect(sseBytes.length).toBeGreaterThan(0)
     }
   })
 
   it('serialized SSE bytes contain event: and data: lines', () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success, FIXTURE_RUN_ID_FOR_TESTS)
     expect(sseBytes).toContain('event:')
     expect(sseBytes).toContain('data:')
   })
 
   it('serialized SSE bytes use double-newline record separators', () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success, FIXTURE_RUN_ID_FOR_TESTS)
     expect(sseBytes).toContain('\n\n')
   })
 
   it('unknown scenario name throws a clear error', () => {
-    expect(() => serializeScenarioToSse('not-a-real-scenario')).toThrow()
+    expect(() => serializeScenarioToSse('not-a-real-scenario', FIXTURE_RUN_ID_FOR_TESTS)).toThrow()
   })
 })

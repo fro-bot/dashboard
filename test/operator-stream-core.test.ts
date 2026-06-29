@@ -36,7 +36,7 @@ import {
   toSafeRunView,
 } from '../public/operator-stream.js'
 import {OPERATOR_CONTRACT_VERSION} from '../src/gateway/operator-contract/index.ts'
-import {FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../src/gateway/operator-fixture-sse.ts'
+import {FIXTURE_RUN_ID_FOR_TESTS, FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../src/gateway/operator-fixture-sse.ts'
 
 const ACTIVE_STATUS = {
   runId: 'run-abc',
@@ -4550,7 +4550,7 @@ describe('initOperatorStream — terminal status updates statusEl when connectio
 
 describe('fixture SSE scenarios — browser reducer: success scenario', () => {
   it('success scenario frames drive the browser reducer to closed with succeeded run', () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success, FIXTURE_RUN_ID_FOR_TESTS)
     // Split into individual records and parse each
     const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
 
@@ -4573,7 +4573,7 @@ describe('fixture SSE scenarios — browser reducer: success scenario', () => {
   })
 
   it('success scenario output accumulation: final output replaces accumulated text', () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success, FIXTURE_RUN_ID_FOR_TESTS)
     const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
 
     const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
@@ -4596,7 +4596,7 @@ describe('fixture SSE scenarios — browser reducer: success scenario', () => {
   })
 
   it('success scenario: terminal status after output preserves output fields', () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success, FIXTURE_RUN_ID_FOR_TESTS)
     const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
 
     const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
@@ -4623,7 +4623,7 @@ describe('fixture SSE scenarios — browser reducer: success scenario', () => {
 
 describe('fixture SSE scenarios — browser reducer: terminal_failure scenario', () => {
   it('terminal_failure scenario drives the browser reducer to closed with failed run', () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.terminal_failure)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.terminal_failure, FIXTURE_RUN_ID_FOR_TESTS)
     const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
 
     const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
@@ -4643,7 +4643,7 @@ describe('fixture SSE scenarios — browser reducer: terminal_failure scenario',
   })
 
   it('terminal_failure scenario: failed run remains renderable (has status and terminal flag)', () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.terminal_failure)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.terminal_failure, FIXTURE_RUN_ID_FOR_TESTS)
     const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
 
     const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
@@ -4670,7 +4670,7 @@ describe('fixture SSE scenarios — browser reducer: terminal_failure scenario',
 
 describe('fixture SSE scenarios — browser reducer: contract_drift scenario', () => {
   it('contract_drift scenario drives the browser reducer to drift state', () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.contract_drift)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.contract_drift, FIXTURE_RUN_ID_FOR_TESTS)
     const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
 
     const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
@@ -4688,7 +4688,7 @@ describe('fixture SSE scenarios — browser reducer: contract_drift scenario', (
   })
 
   it('contract_drift scenario: later frames after drift are absorbed (no runs populated)', () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.contract_drift)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.contract_drift, FIXTURE_RUN_ID_FOR_TESTS)
     const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
 
     const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
@@ -4709,7 +4709,7 @@ describe('fixture SSE scenarios — browser reducer: contract_drift scenario', (
 
 describe('fixture SSE scenarios — browser reducer: malformed_unavailable scenario', () => {
   it('malformed_unavailable scenario: at least one parseSseFrame call returns a failure', () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.malformed_unavailable)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.malformed_unavailable, FIXTURE_RUN_ID_FOR_TESTS)
     const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
 
     let hasFailure = false
@@ -4725,7 +4725,7 @@ describe('fixture SSE scenarios — browser reducer: malformed_unavailable scena
   })
 
   it('malformed_unavailable scenario: parse failure error string does not echo wire content', () => {
-    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.malformed_unavailable)
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.malformed_unavailable, FIXTURE_RUN_ID_FOR_TESTS)
     const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
 
     for (const record of records) {
@@ -4759,5 +4759,116 @@ describe('buildApprovalClient — endpoint base support', () => {
     expect(typeof client.refreshCsrf).toBe('function')
     expect(typeof client.decideRunApproval).toBe('function')
     expect(typeof client.listRunApprovals).toBe('function')
+  })
+})
+
+describe('initOperatorStream — malformed/closed-before-terminal: stream unavailable notice', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('noticeEl shows a visible generic unavailable notice when stream closes before any terminal status for the run', async () => {
+    // Simulate the malformed_unavailable scenario: stream sends a malformed frame
+    // (unrecognized event name) then closes. The run card was inserted before the
+    // stream started, so runId is known but no status frame was ever received.
+    // The UI must surface a path-unaware unavailable notice — not silent Pending.
+    const noticeEl = makeFakeEl('div')
+    const statusEl = makeFakeEl('span')
+
+    // Malformed SSE frame: unrecognized event name → parser returns failure → silently dropped
+    const malformedFrame = `event: fixture-unknown-event\ndata: {"id":"run-fixture-malformed-001","reason":"fixture-malformed"}\n\n`
+    const encoder = new TextEncoder()
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(malformedFrame))
+        controller.close()
+      },
+    })
+
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      headers: {get: (h: string) => (h === 'content-type' ? 'text/event-stream' : null)},
+      body: stream,
+    }))
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    const handle = initOperatorStream({runId: 'run-fixture-malformed-001', statusEl, noticeEl})
+
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    // The stream closed before any terminal status — the notice must be visible
+    // and contain a generic unavailable message (no raw error, URL, or scenario name).
+    expect(noticeEl.hidden).toBe(false)
+    expect(noticeEl.textContent.length).toBeGreaterThan(0)
+    // Must not echo raw parse error, URL, status code, or scenario name
+    expect(noticeEl.textContent).not.toContain('fixture-unknown-event')
+    expect(noticeEl.textContent).not.toContain('fixture-malformed')
+    expect(noticeEl.textContent).not.toContain('malformed_unavailable')
+    expect(noticeEl.textContent).not.toContain('/stream')
+    expect(noticeEl.textContent).not.toContain('200')
+
+    handle.close()
+  })
+
+  it('noticeEl is hidden (silent) when stream closes after a terminal status for the run', async () => {
+    // Contrast: when the stream closes normally after a terminal status, no notice.
+    const noticeEl = makeFakeEl('div')
+    const statusEl = makeFakeEl('span')
+    statusEl.classList = {
+      add(_cls: string) {},
+      remove(_cls: string) {},
+      contains(_cls: string) { return false },
+    }
+
+    const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
+    const succeededStatusFrame = `event: status\ndata: ${JSON.stringify({
+      runId: 'run-ok-terminal',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'COMPLETED',
+      status: 'succeeded',
+      startedAt: '2026-06-27T10:00:00Z',
+      stale: false,
+    })}\n\n`
+
+    const encoder = new TextEncoder()
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(readyFrame + succeededStatusFrame))
+        controller.close()
+      },
+    })
+
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      headers: {get: (h: string) => (h === 'content-type' ? 'text/event-stream' : null)},
+      body: stream,
+    }))
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    const handle = initOperatorStream({runId: 'run-ok-terminal', statusEl, noticeEl})
+
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    // Terminal status received before close — notice must be silent
+    expect(noticeEl.hidden).toBe(true)
+    expect(noticeEl.textContent).toBe('')
+
+    handle.close()
   })
 })

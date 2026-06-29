@@ -794,6 +794,141 @@ describe('fixture routes — public when flag is on', () => {
   })
 })
 
+describe('fixture stream — run ID binding', () => {
+  it('success scenario: all runId fields in SSE frames match the launched run ID', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const launchRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({
+        scenario: FIXTURE_SCENARIO_NAMES.success,
+        idempotencyKey: 'fixture-idem-key-runid-binding-001',
+        fixtureSessionId,
+        csrfToken: 'fixture-csrf-placeholder',
+        repo: 'fixture-org/fixture-repo',
+        prompt: '[Fixture prompt]',
+      }),
+    })
+    expect(launchRes.status).toBe(200)
+    const {runId} = await launchRes.json() as {runId: string}
+
+    const streamRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream`)
+    expect(streamRes.status).toBe(200)
+    const sseText = await streamRes.text()
+
+    // Extract all runId values from SSE data payloads
+    const dataLines = sseText.split('\n').filter(line => line.startsWith('data:'))
+    const runIdsInFrames: string[] = []
+    for (const line of dataLines) {
+      try {
+        const payload = JSON.parse(line.slice('data:'.length).trim()) as Record<string, unknown>
+        if (typeof payload.runId === 'string') {
+          runIdsInFrames.push(payload.runId)
+        }
+      } catch {
+        // skip non-JSON lines
+      }
+    }
+
+    // Must have at least one run-scoped frame
+    expect(runIdsInFrames.length).toBeGreaterThan(0)
+    // Every run-scoped frame must use the launched run ID, not a template ID
+    for (const frameRunId of runIdsInFrames) {
+      expect(frameRunId).toBe(runId)
+    }
+  })
+
+  it('terminal_failure scenario: all runId fields in SSE frames match the launched run ID', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const launchRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({
+        scenario: FIXTURE_SCENARIO_NAMES.terminal_failure,
+        idempotencyKey: 'fixture-idem-key-runid-binding-002',
+        fixtureSessionId,
+        csrfToken: 'fixture-csrf-placeholder',
+        repo: 'fixture-org/fixture-repo',
+        prompt: '[Fixture prompt]',
+      }),
+    })
+    expect(launchRes.status).toBe(200)
+    const {runId} = await launchRes.json() as {runId: string}
+
+    const streamRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream`)
+    expect(streamRes.status).toBe(200)
+    const sseText = await streamRes.text()
+
+    const dataLines = sseText.split('\n').filter(line => line.startsWith('data:'))
+    const runIdsInFrames: string[] = []
+    for (const line of dataLines) {
+      try {
+        const payload = JSON.parse(line.slice('data:'.length).trim()) as Record<string, unknown>
+        if (typeof payload.runId === 'string') {
+          runIdsInFrames.push(payload.runId)
+        }
+      } catch {
+        // skip non-JSON lines
+      }
+    }
+
+    expect(runIdsInFrames.length).toBeGreaterThan(0)
+    for (const frameRunId of runIdsInFrames) {
+      expect(frameRunId).toBe(runId)
+    }
+  })
+
+  it('contract_drift scenario: ready frame has drift version; run-scoped frames (if any) use launched run ID', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const launchRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({
+        scenario: FIXTURE_SCENARIO_NAMES.contract_drift,
+        idempotencyKey: 'fixture-idem-key-runid-binding-003',
+        fixtureSessionId,
+        csrfToken: 'fixture-csrf-placeholder',
+        repo: 'fixture-org/fixture-repo',
+        prompt: '[Fixture prompt]',
+      }),
+    })
+    expect(launchRes.status).toBe(200)
+    const {runId} = await launchRes.json() as {runId: string}
+
+    const streamRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream`)
+    expect(streamRes.status).toBe(200)
+    const sseText = await streamRes.text()
+
+    // Drift scenario must still have a ready frame with a non-matching contract version
+    expect(sseText).toContain('event: ready')
+
+    // Any run-scoped frames must use the launched run ID
+    const dataLines = sseText.split('\n').filter(line => line.startsWith('data:'))
+    for (const line of dataLines) {
+      try {
+        const payload = JSON.parse(line.slice('data:'.length).trim()) as Record<string, unknown>
+        if (typeof payload.runId === 'string') {
+          expect(payload.runId).toBe(runId)
+        }
+      } catch {
+        // skip non-JSON lines
+      }
+    }
+  })
+})
+
 describe('fixture repos — browser-compatible shape {owner, repo}', () => {
   it('GET /repos returns items with owner and repo string fields', async () => {
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})

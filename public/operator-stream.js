@@ -1384,8 +1384,18 @@ export function initOperatorStream(opts) {
           'Run submitted \u2014 not yet observable (it may be queued or still starting).'
         noticeEl.hidden = false
       } else if (conn === 'closed') {
-        noticeEl.textContent = ''
-        noticeEl.hidden = true
+        // If the stream closed before the run reached a terminal status, surface a
+        // generic path-unaware unavailable notice. This covers malformed/truncated
+        // streams that close without emitting a terminal status frame for the run.
+        const runEntry = state.runs[runId]
+        const runIsTerminal = runEntry !== undefined && runEntry.terminal === true
+        if (runIsTerminal) {
+          noticeEl.textContent = ''
+          noticeEl.hidden = true
+        } else {
+          noticeEl.textContent = 'Run stream ended before a result was available.'
+          noticeEl.hidden = false
+        }
       }
     }
 
