@@ -1,7 +1,6 @@
 ---
 title: Operator local fixture harness pattern
 date: 2026-06-30
-last_updated: 2026-06-30
 category: best-practices
 module: operator-fixture-harness
 problem_type: best_practice
@@ -13,7 +12,7 @@ applies_when:
   - Exercising browser runtime modules against synthetic HTTP and SSE fixtures
   - Verifying PWA behavior that unit tests cannot prove
   - Reviewing fixture data for credential or private-repo leakage
-tags: [operator, fixture-harness, dev-only, run-index, pwa, sse, no-proxy, browser-verification]
+tags: [operator, fixture-harness, dev-only, loopback, pwa, sse, no-proxy, browser-verification]
 related_components:
   - src/routes/operator-fixture-harness.ts
   - src/gateway/operator-fixture-config.ts
@@ -23,7 +22,6 @@ related_components:
   - web/src/operator/runtime.ts
   - web/src/views/Operator.tsx
   - public/operator-launch.js
-  - public/operator-run-index.js
   - public/operator-stream.js
   - web/vite.config.ts
   - src/server.ts
@@ -69,7 +67,7 @@ Fixture mode should only activate when all of these are true:
 2. `NODE_ENV` is `development` or `test`
 3. the dashboard binds to loopback (`127.0.0.1`, `localhost`, or `::1`)
 
-If the fixture flag is set outside those conditions, fail loudly at app construction.
+If the fixture flag is set outside those conditions, fail loud at app construction.
 Do not silently skip the routes; silent failure makes operators think they are
 testing fixture mode when they are really testing production paths.
 
@@ -116,8 +114,6 @@ modules:
 
 ```ts
 createOperatorRuntime({
-  container,
-  onStateChange,
   fixtureMode: true,
   fixtureEndpointBase: FIXTURE_OPERATOR_PREFIX,
   fixtureSessionId,
@@ -131,22 +127,6 @@ boring while allowing fixture mode to use the same launch, stream, reducer, and 
 code. Avoid global `fetch` overrides or parallel fixture-only runtime modules; those
 test the shim instead of the behavior that ships.
 
-Initial browser snapshots follow the same rule. A Recent Runs module should fetch
-the Gateway-owned production path directly:
-
-```ts
-await fetch('/operator/runs')
-```
-
-Fixture mode supplies the same contract under the reserved prefix:
-
-```ts
-await fetch('/__fixture/operator/runs')
-```
-
-Do not add a dashboard pass-through proxy for `/operator/runs`. The dashboard owns
-the PWA shell and static modules; Gateway owns operator data routes.
-
 The fixture runtime loader belongs behind an `import.meta.env.DEV` guard so Vite
 tree-shakes it out of production builds. Production build tests should assert that
 `web/dist/**`, `sw.js`, and the public operator modules contain no `/__fixture`,
@@ -158,47 +138,6 @@ The operator shell should expose a visible fixture-mode indicator and a machine
 readable state, for example `data-fixture-mode="true"`. Synthetic data should not
 look like a live Gateway run. If an operator or browser test cannot tell fixture
 mode from production at a glance, the harness is too subtle.
-
-### Treat active streams as a singleton
-
-Snapshot surfaces and live streams must share one active run lifecycle. When
-the user selects a recent run, the runtime should close any previously attached
-stream before opening the new stream. Launching a run and selecting an indexed run
-should share the same active-stream path.
-
-The DOM marker should describe the currently active stream, not historical runs
-that once had a stream:
-
-```js
-let activeRunId = null
-
-function markRunStreamAttached(runId) {
-  if (activeRunId !== null && activeRunId !== runId) unmarkRun(activeRunId)
-  activeRunId = runId
-  markRun(runId)
-}
-```
-
-Avoid a set like `attachedRunIds.add(runId)` for this state. After selecting A then
-B, A must be selectable again. The fixture browser check should cover A → B → A.
-
-### Keep production idempotency in headers
-
-Fixture harnesses may need synthetic body fields for local routing, but production
-launch requests must keep the idempotency key in the `idempotency-key` header, not
-the JSON body:
-
-```js
-await fetch('/operator/runs', {
-  method: 'POST',
-  headers: {'content-type': 'application/json', 'idempotency-key': idempotencyKey},
-  body: JSON.stringify({repo, prompt}),
-})
-```
-
-Tests should assert the production body contains only production contract fields
-while the header still carries the key. Do not make production payloads leakier to
-support fixture routing.
 
 ### Verify the assembled browser surface
 
@@ -212,8 +151,6 @@ pnpm dev:fixture
 The browser pass should cover:
 
 - root shell loads in fixture mode
-- Recent Runs renders synthetic run summaries
-- selecting indexed run A, then B, then A again reattaches the stream to A
 - success scenario renders output and a terminal succeeded state
 - terminal-failure scenario renders a failed state
 - contract-drift scenario fails closed without guessing later frame data
@@ -256,7 +193,7 @@ instead of becoming another footgun.
 ```json
 {
   "scripts": {
-    "build:web:fixture": "VITE_FIXTURE_MODE=true vite build web",
+    "build:web:fixture": "VITE_FIXTURE_MODE=true vite build web --mode dev-fixture",
     "dev:fixture": "pnpm build:web:fixture && NODE_ENV=development DASHBOARD_HOST=127.0.0.1 DASHBOARD_WEB_DIST=./web/dist-fixture DASHBOARD_FIXTURE_HARNESS_ENABLED=true DASHBOARD_DEV_AUTOLOGIN=true node --env-file-if-exists=.env src/server.ts"
   }
 }
@@ -278,8 +215,8 @@ runSessionMap.set(runId, fixtureSessionId)
 return runId
 ```
 
-This prevents cross-tab and cross-test collisions while preserving production
-idempotency semantics.
+This prevents cross-tab and cross-test collisions while preserving the production
+idempotency shape.
 
 ### Production absence test
 
@@ -292,17 +229,6 @@ expect(bundleText).not.toContain('dist-fixture')
 Run this against production build artifacts, not just source files. Source can
 contain fixture code behind dev-only imports; production output must not.
 
-### Active stream regression
-
-```ts
-selectRun('A') // opens A
-selectRun('B') // closes A, opens B
-selectRun('A') // closes B, opens A again
-```
-
-The final selection should not be suppressed by a stale "already attached" marker.
-The active marker should move with the current stream.
-
 ## Related
 
 - `docs/solutions/best-practices/operator-first-pwa-routing-and-fail-states-2026-06-26.md`
@@ -313,4 +239,3 @@ The active marker should move with the current stream.
 - `docs/solutions/best-practices/operator-sse-output-consumption-2026-06-22.md`
 - `docs/solutions/best-practices/authenticated-sse-consumption-fetch-stream-no-leak-2026-06-20.md`
 - PR #132 / release `2026.06.55`
-- PR #137
