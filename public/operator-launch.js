@@ -282,7 +282,11 @@ export function buildLaunchClient(opts) {
         const currentScenario = typeof getScenario === 'function' ? getScenario() : undefined
         if (currentScenario !== undefined) bodyObj.scenario = currentScenario
         if (fixtureSessionId !== undefined) bodyObj.fixtureSessionId = fixtureSessionId
-        if (req.idempotencyKey !== undefined) bodyObj.idempotencyKey = req.idempotencyKey
+        // idempotencyKey goes in the header for all requests (see below).
+        // It is also included in the body only for fixture mode so the fixture
+        // harness can correlate requests without reading headers.
+        const isFixtureMode = currentScenario !== undefined || fixtureSessionId !== undefined
+        if (isFixtureMode && req.idempotencyKey !== undefined) bodyObj.idempotencyKey = req.idempotencyKey
 
         const res = await browserFetch(`${endpointBase}/runs`, {
           method: 'POST',
@@ -427,6 +431,11 @@ export async function initOperatorLaunch(opts) {
   // async steps. The listener controller (_launchListenerController) is separate and
   // is only set once this init wins the generation race and registers its listener.
   const abortController = new AbortController()
+
+  // onRunLaunched: optional callback from the runtime seam. When provided, the runtime
+  // seam owns stream attachment and the launch module delegates to it instead of calling
+  // initOperatorStream directly. This centralizes active-stream ownership in the runtime.
+  const onRunLaunched = opts?.onRunLaunched
 
   const {initOperatorStream} = await import(streamModuleSpecifier())
 
@@ -606,11 +615,16 @@ export async function initOperatorLaunch(opts) {
           card.append(statusSpan)
           runStatusSection.append(card)
 
-          // Wire the SSE stream directly — do NOT re-run bootstrapOperatorStreams.
-          // Store the returned handle so resetLaunchState() can close it on cleanup.
-          const statusEl = card.querySelector('[data-role="run-status"]')
-          const streamHandle = initOperatorStream({runId, statusEl, noticeEl: sharedNoticeEl, endpointBase: opts?.endpointBase, fixtureSessionId: opts?.fixtureSessionId})
-          setLaunchStreamHandle(streamHandle)
+          if (typeof onRunLaunched === 'function') {
+            // Delegate stream attachment to the runtime seam (centralized ownership).
+            // The runtime seam will close any prior stream and attach the new one.
+            onRunLaunched(runId, card)
+          } else {
+            // Legacy path: no runtime callback — attach stream directly and store handle.
+            const statusEl = card.querySelector('[data-role="run-status"]')
+            const streamHandle = initOperatorStream({runId, statusEl, noticeEl: sharedNoticeEl, endpointBase: opts?.endpointBase, fixtureSessionId: opts?.fixtureSessionId})
+            setLaunchStreamHandle(streamHandle)
+          }
         }
 
         // Reset the form

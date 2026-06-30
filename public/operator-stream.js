@@ -1376,7 +1376,10 @@ export function initOperatorStream(opts) {
   let aborted = false // set by close() to prevent late timer from fetching
 
   function updateDOM() {
-    if (noticeEl) {
+    // Late-frame guard: after close(), do not write to the shared noticeEl.
+    // The noticeEl is shared across cards; a closed stream must not overwrite
+    // the active card's stream state notice after a card switch.
+    if (noticeEl && !aborted) {
       const conn = state.connection
       // Expose the connection state as a machine-readable attribute so agents
       // can query state without text parsing. The value mirrors the connection
@@ -1430,6 +1433,22 @@ export function initOperatorStream(opts) {
         // Update status class for styling — use allowlisted status value (no whitespace)
         statusEl.className = statusEl.className.replaceAll(/\bstatus-\S+/g, '')
         statusEl.classList.add(`status-${view.status.replaceAll('_', '-')}`)
+      } else if (!aborted) {
+        const conn = state.connection
+        const runIsTerminal = runEntry !== undefined && runEntry.terminal === true
+        if (
+          !runIsTerminal &&
+          (conn === 'drift' ||
+            conn === 'not-found' ||
+            conn === 'failed' ||
+            conn === 'submitted-unobservable' ||
+            conn === 'closed')
+        ) {
+          statusEl.textContent = 'Unavailable'
+          statusEl.className = `${statusEl.className.replaceAll(/\bstatus-\S+/g, '')} status-unavailable`
+            .replaceAll(/\s+/g, ' ')
+            .trim()
+        }
       }
     }
 

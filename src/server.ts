@@ -509,6 +509,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     // shell and always depends on these assets, regardless of operatorUiEnabled.
     path === '/static/operator-stream.js' ||
     path === '/static/operator-launch.js' ||
+    path === '/static/operator-run-index.js' ||
     (operatorUiEnabled && path.startsWith('/static/')) ||
     // Fixture harness routes — public ONLY when the full fixture gate is active
     // (non-production + loopback bind + flag enabled). Otherwise not in public list.
@@ -660,13 +661,17 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // Serve the React SPA at /. index.html requires a session; shell assets are public.
   app.get('/', serveStatic({root: webDistRoot, path: 'index.html'}))
 
-  // ── /operator → / redirect (unconditional, flag-independent) ────────────────
-  // / is the canonical operator launch route. Old /operator links redirect here.
-  // Mounted before the operatorUiEnabled-gated handler so the flag has no effect.
+  // ── /operator and /operator/ → / redirect (unconditional, flag-independent) ──
+  // / is the canonical operator launch route. Old /operator and /operator/ links
+  // redirect here. Both are mounted before the operatorUiEnabled-gated handler so
+  // the flag has no effect. /operator/ is handled separately because Hono's
+  // app.route('/operator', router) does not strip the trailing slash — router.get('/')
+  // inside the sub-router never fires for /operator/.
   app.get('/operator', c => c.redirect('/', 302))
+  app.get('/operator/', c => c.redirect('/', 302))
 
   // ── Operator runtime JS assets — always served (flag-independent) ────────────
-  // Root / owns the operator shell and always depends on these two modules.
+  // Root / owns the operator shell and always depends on these modules.
   // Mounted unconditionally so they are available regardless of operatorUiEnabled.
   // isPublicPath already allows these paths so auth middleware passes them through.
   app.use(
@@ -675,6 +680,10 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   )
   app.use(
     '/static/operator-launch.js',
+    serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}),
+  )
+  app.use(
+    '/static/operator-run-index.js',
     serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}),
   )
 

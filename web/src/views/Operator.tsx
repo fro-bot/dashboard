@@ -109,7 +109,7 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
   }, [state, fixtureMode, fixtureEndpointBase, fixtureSessionId])
 
   return (
-      <div data-testid="operator-shell" data-state={state} {...(fixtureMode === true ? {'data-fixture-mode': 'true'} : {})}>
+    <div data-testid="operator-shell" data-state={state} {...(fixtureMode === true ? {'data-fixture-mode': 'true'} : {})}>
       {fixtureMode === true && (
         <div
           data-testid="fixture-mode-indicator"
@@ -179,6 +179,59 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
           ref={contentRef}
           data-testid="operator-content"
         >
+          <section
+            data-testid="recent-runs-section"
+            data-role="run-index"
+            className="operator-panel"
+            aria-label="Recent runs"
+          >
+            <h2
+              style={{
+                fontSize: 'var(--text-body-lg)',
+                fontWeight: 600,
+                color: 'var(--color-text)',
+                marginBottom: 'var(--space-4)',
+                letterSpacing: 'var(--tracking-heading)',
+              }}
+            >
+              Recent Runs
+            </h2>
+
+            <div
+              data-role="run-index-loading"
+              aria-live="polite"
+              aria-atomic="true"
+              aria-label="Recent runs loading"
+              style={{
+                fontSize: 'var(--text-body-sm)',
+                color: 'var(--color-text-muted)',
+              }}
+            />
+
+            <div
+              data-role="run-index-list"
+              aria-label="Recent run list"
+            />
+
+            <div
+              data-role="run-index-empty"
+              hidden
+              style={{
+                fontSize: 'var(--text-body-sm)',
+                color: 'var(--color-text-muted)',
+              }}
+            />
+
+            <div
+              data-role="run-index-unavailable"
+              hidden
+              style={{
+                fontSize: 'var(--text-body-sm)',
+                color: 'var(--color-text-muted)',
+              }}
+            />
+          </section>
+
           <section className="operator-panel">
             <h2
               style={{

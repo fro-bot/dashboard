@@ -1,32 +1,25 @@
 /**
  * Dev-only fixture harness router.
  *
- * SECURITY INVARIANTS:
- * - ONLY mounted when NODE_ENV is 'development' or 'test' AND bind host is loopback.
- * - All identifiers are visually fixture-prefixed; must not resemble production
- *   tokens, cookies, UUIDs, or real operator data.
- * - Inbound cookies, authorization headers, and real CSRF values are IGNORED.
- *   They are never accepted as evidence, reflected in responses, or logged.
- * - Non-echoing validation errors: error responses never echo invalid input.
- * - Logs use route templates, status, and coarse error class only — no request
- *   URLs with identifiers, headers, body text, synthetic values, or detail.
- * - No-store headers on every fixture response.
- * - Fixture responses inherit normal app CSP (set by secureHeaders middleware).
- * - Idempotency is scoped by fixtureSessionId + idempotencyKey. Two fixture
- *   sessions with the same idempotency key receive different run IDs.
- * - Session ownership: runId is bound to the launching fixtureSessionId at launch.
- *   stream/approvals/decision require a matching fixtureSessionId (query param or
- *   x-fixture-session-id header). Unknown/missing/mismatched session → non-echoing 400.
- * - State resets with the dev server process.
+ * Security invariants:
+ * - Only mounted when NODE_ENV is 'development'/'test' AND bind host is loopback.
+ * - All identifiers are fixture-prefixed; never resemble production tokens or real data.
+ * - Inbound cookies, auth headers, and CSRF values are ignored — never echoed or logged.
+ * - Error responses never echo invalid input.
+ * - Logs use route templates, status, and coarse error class only.
+ * - No-store on every response. State resets with the process.
+ * - Idempotency scoped by fixtureSessionId + idempotencyKey.
+ * - runId is bound to the launching fixtureSessionId; stream/approvals/decision
+ *   require a matching session (query param or x-fixture-session-id header).
  */
+import type {RunSummary} from '../gateway/operator-contract/run-summary.ts'
 import {Hono} from 'hono'
 import {FIXTURE_OPERATOR_PREFIX} from '../gateway/operator-fixture-routes.ts'
 import {FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../gateway/operator-fixture-sse.ts'
 import {FIXTURE_CSRF, FIXTURE_SESSION} from '../gateway/operator-fixtures.ts'
 import {logger} from '../logger.ts'
 
-// Synthetic fixture repo list — fixture-prefixed, never real repos.
-// Shape matches validateRepoItem: {owner, repo} required; channelName optional.
+// Fixture-prefixed repo list — never real repos.
 const FIXTURE_REPOS = [
   {owner: 'fixture-org', repo: 'fixture-repo'},
   {owner: 'fixture-org', repo: 'fixture-repo-2'},
@@ -34,10 +27,49 @@ const FIXTURE_REPOS = [
 
 const FIXTURE_APPROVAL = {requestID: 'req-fixture-harness-001', permission: 'tool_use', command: 'bash'}
 
+// Sorted newest-first; updatedAt absent on some entries to exercise the optional field.
+const FIXTURE_RUN_SUMMARIES: readonly RunSummary[] = [
+  {
+    runId: 'run-fixture-index-queued-001',
+    repo: 'fixture-org/fixture-repo',
+    status: 'queued',
+    createdAt: '2026-06-28T10:05:00Z',
+  },
+  {
+    runId: 'run-fixture-index-running-002',
+    repo: 'fixture-org/fixture-repo-2',
+    status: 'running',
+    createdAt: '2026-06-28T10:04:00Z',
+    updatedAt: '2026-06-28T10:04:30Z',
+  },
+  {
+    runId: 'run-fixture-index-succeeded-003',
+    repo: 'fixture-org/fixture-repo',
+    status: 'succeeded',
+    createdAt: '2026-06-28T10:03:00Z',
+    updatedAt: '2026-06-28T10:03:45Z',
+  },
+  {
+    runId: 'run-fixture-index-failed-004',
+    repo: 'fixture-org/fixture-repo-2',
+    status: 'failed',
+    createdAt: '2026-06-28T10:02:00Z',
+    updatedAt: '2026-06-28T10:02:20Z',
+  },
+  {
+    runId: 'run-fixture-index-cancelled-005',
+    repo: 'fixture-org/fixture-repo',
+    status: 'cancelled',
+    createdAt: '2026-06-28T10:01:00Z',
+    updatedAt: '2026-06-28T10:01:10Z',
+  },
+]
+
 // In-memory state — scoped by (fixtureSessionId, idempotencyKey). Resets on restart.
 const idempotencyMap = new Map<string, string>() // `${sessionId}:${idemKey}` → runId
 const runScenarioMap = new Map<string, string>() // runId → scenarioName
-const runSessionMap = new Map<string, string>() // runId → fixtureSessionId (ownership)
+const runSessionMap = new Map<string, string>() // runId → owning fixtureSessionId (launched runs only)
+const validFixtureSessionIds = new Set<string>() // all session IDs minted by GET /session
 
 let sessionIdCounter = 0
 let runIdCounter = 0
@@ -45,6 +77,10 @@ let runIdCounter = 0
 function generateFixtureSessionId(): string {
   sessionIdCounter++
   return `fixture-session-${String(sessionIdCounter).padStart(4, '0')}`
+}
+
+function isIndexedRunId(runId: string): boolean {
+  return FIXTURE_RUN_SUMMARIES.some(s => s.runId === runId)
 }
 
 function generateFixtureRunId(): string {
@@ -59,9 +95,7 @@ function isValidScenario(scenario: unknown): scenario is string {
   )
 }
 
-// fixtureSessionId must start with the canonical prefix to be accepted.
-// This rejects real session IDs, UUIDs, and other non-fixture values without
-// echoing the invalid input in the error response.
+// Rejects non-fixture session IDs without echoing the invalid input.
 const FIXTURE_SESSION_ID_PREFIX = 'fixture-session-'
 
 function isValidFixtureSessionId(value: unknown): value is string {
@@ -72,9 +106,7 @@ function setNoStore(headers: Headers): void {
   headers.set('cache-control', 'no-store')
 }
 
-// Extract fixtureSessionId from query param or x-fixture-session-id header.
-// Returns the value if present and fixture-prefixed, otherwise undefined.
-// Never echoes the raw value in error responses.
+// Extract fixtureSessionId from query param or header. Never echoes raw value.
 function extractRequestSessionId(c: {req: {query: (k: string) => string | undefined; header: (k: string) => string | undefined}}): string | undefined {
   const fromQuery = c.req.query('fixtureSessionId')
   const fromHeader = c.req.header('x-fixture-session-id')
@@ -83,10 +115,12 @@ function extractRequestSessionId(c: {req: {query: (k: string) => string | undefi
   return isValidFixtureSessionId(raw) ? raw : undefined
 }
 
-// Verify that the request's fixtureSessionId matches the run's owner.
-// Returns true if ownership is confirmed, false if missing/mismatched/invalid.
+// Indexed runs are shared synthetic fixtures; launched runs stay session-bound.
 function verifyRunOwnership(runId: string, requestSessionId: string | undefined): boolean {
   if (requestSessionId === undefined) return false
+  if (isIndexedRunId(runId)) {
+    return runScenarioMap.has(runId) && validFixtureSessionIds.has(requestSessionId)
+  }
   const ownerSessionId = runSessionMap.get(runId)
   if (ownerSessionId === undefined) return false
   return ownerSessionId === requestSessionId
@@ -95,8 +129,7 @@ function verifyRunOwnership(runId: string, requestSessionId: string | undefined)
 export function buildFixtureHarnessRouter(): Hono {
   const router = new Hono()
 
-  // GET / — fixture harness manifest. Exposes fixtureMode, prefix, and scenario names.
-  // No secrets: no tokens, cookies, keys, or operator data.
+  // GET / — fixture harness manifest.
   router.get('/', c => {
     logger.debug('fixture-harness: GET /', {status: 200})
     const res = c.json({
@@ -108,11 +141,11 @@ export function buildFixtureHarnessRouter(): Hono {
     return res
   })
 
-  // GET /session — synthetic operator session with fixture-mode fields.
-  // Each call mints a fresh fixtureSessionId so two tabs get independent sessions.
+  // GET /session — synthetic session; each call mints a fresh fixtureSessionId.
   router.get('/session', c => {
     logger.debug('fixture-harness: GET /session', {status: 200})
     const fixtureSessionId = generateFixtureSessionId()
+    validFixtureSessionIds.add(fixtureSessionId)
     const res = c.json({...FIXTURE_SESSION, fixtureMode: true, fixtureSessionId})
     setNoStore(res.headers)
     return res
@@ -134,11 +167,28 @@ export function buildFixtureHarnessRouter(): Hono {
     return res
   })
 
-  // POST /runs — synthetic launch.
-  // Requires: scenario (validated), idempotencyKey, fixtureSessionId (fixture-prefixed).
-  // Idempotency key is scoped by fixtureSessionId so two sessions with the same
-  // idempotency key receive different run IDs.
-  // Binds runId to fixtureSessionId for ownership checks on stream/approvals/decision.
+  router.get('/runs', c => {
+    const requestSessionId = extractRequestSessionId(c)
+
+    if (requestSessionId !== undefined) {
+      for (const summary of FIXTURE_RUN_SUMMARIES) {
+        if (!runScenarioMap.has(summary.runId)) {
+          const scenario =
+            summary.status === 'failed' || summary.status === 'cancelled'
+              ? FIXTURE_SCENARIO_NAMES.terminal_failure
+              : FIXTURE_SCENARIO_NAMES.success
+          runScenarioMap.set(summary.runId, scenario)
+        }
+      }
+    }
+
+    logger.debug('fixture-harness: GET /runs', {status: 200})
+    const res = c.json(FIXTURE_RUN_SUMMARIES)
+    setNoStore(res.headers)
+    return res
+  })
+
+  // POST /runs — synthetic launch. Binds runId to fixtureSessionId for ownership checks.
   router.post('/runs', async c => {
     let body: unknown
     try {
@@ -174,7 +224,6 @@ export function buildFixtureHarnessRouter(): Hono {
       return res
     }
 
-    // Require a fixture-prefixed session ID. Rejects real session IDs without echoing them.
     if (!isValidFixtureSessionId(req.fixtureSessionId)) {
       logger.debug('fixture-harness: POST /runs', {status: 400, errorClass: 'invalid-fixture-session'})
       const res = c.json({error: 'invalid-fixture-session'}, 400)
@@ -182,7 +231,6 @@ export function buildFixtureHarnessRouter(): Hono {
       return res
     }
 
-    // isValidFixtureSessionId narrows req.fixtureSessionId to string above.
     const fixtureSessionId = req.fixtureSessionId
     const scenario = req.scenario
     const scopedKey = `${fixtureSessionId}:${idempotencyKey}`
@@ -198,7 +246,6 @@ export function buildFixtureHarnessRouter(): Hono {
     const runId = generateFixtureRunId()
     idempotencyMap.set(scopedKey, runId)
     runScenarioMap.set(runId, scenario)
-    // Bind runId to the launching session for ownership checks on stream/approvals/decision.
     runSessionMap.set(runId, fixtureSessionId)
 
     logger.debug('fixture-harness: POST /runs', {status: 200})
@@ -207,8 +254,7 @@ export function buildFixtureHarnessRouter(): Hono {
     return res
   })
 
-  // GET /runs/:runId/stream — SSE bytes for the scenario bound to the run ID.
-  // Requires fixtureSessionId (query param or x-fixture-session-id header) matching the launch session.
+  // GET /runs/:runId/stream — SSE bytes for the scenario. Requires matching fixtureSessionId.
   router.get('/runs/:runId/stream', c => {
     const runId = c.req.param('runId')
     const scenario = runScenarioMap.get(runId)
@@ -248,8 +294,7 @@ export function buildFixtureHarnessRouter(): Hono {
     })
   })
 
-  // GET /runs/:runId/approvals — synthetic approval list for a known run.
-  // Requires fixtureSessionId (query param or x-fixture-session-id header) matching the launch session.
+  // GET /runs/:runId/approvals — synthetic approval list. Requires matching fixtureSessionId.
   router.get('/runs/:runId/approvals', c => {
     const runId = c.req.param('runId')
     if (!runScenarioMap.has(runId)) {
@@ -273,8 +318,7 @@ export function buildFixtureHarnessRouter(): Hono {
     return res
   })
 
-  // POST /runs/:runId/approvals/:reqId/decision — synthetic decision response.
-  // Requires fixtureSessionId (query param or x-fixture-session-id header) matching the launch session.
+  // POST /runs/:runId/approvals/:reqId/decision — synthetic decision. Requires matching fixtureSessionId.
   router.post('/runs/:runId/approvals/:reqId/decision', async c => {
     const runId = c.req.param('runId')
     if (!runScenarioMap.has(runId)) {
@@ -301,14 +345,12 @@ export function buildFixtureHarnessRouter(): Hono {
   return router
 }
 
-/**
- * Reset fixture harness in-memory state. Tests only.
- * @internal
- */
+/** Reset in-memory state. Tests only. */
 export function resetFixtureHarnessForTesting(): void {
   idempotencyMap.clear()
   runScenarioMap.clear()
   runSessionMap.clear()
+  validFixtureSessionIds.clear()
   sessionIdCounter = 0
   runIdCounter = 0
 }

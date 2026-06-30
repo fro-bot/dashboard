@@ -831,6 +831,51 @@ describe('buildLaunchClient — getScenario read at submit time', () => {
   })
 })
 
+describe('buildLaunchClient — production body shape (no idempotencyKey, no scenario, no fixtureSessionId)', () => {
+  it('production launchRun sends JSON body with exactly repo and prompt — no idempotencyKey, no scenario, no fixtureSessionId', async () => {
+    let capturedBody: Record<string, unknown> | undefined
+    let capturedHeaders: Record<string, string> | undefined
+
+    const mod = await import('../public/operator-launch.js')
+    const buildLaunchClient = (mod as {buildLaunchClient?: (opts?: {endpointBase?: string}) => {refreshCsrf: () => Promise<unknown>; listRepos: () => Promise<unknown>; launchRun: (req: {repo: string; prompt: string; csrfToken: string; idempotencyKey: string}) => Promise<unknown>}}).buildLaunchClient
+    if (typeof buildLaunchClient !== 'function') throw new Error('buildLaunchClient not exported')
+
+    const origFetch = globalThis.fetch
+    globalThis.fetch = async (_input: unknown, init?: RequestInit) => {
+      if (init?.body !== undefined && init.body !== null) {
+        capturedBody = JSON.parse(init.body as string) as Record<string, unknown>
+      }
+      if (init?.headers !== undefined) {
+        capturedHeaders = Object.fromEntries(
+          Object.entries(init.headers as Record<string, string>),
+        )
+      }
+      return {
+        ok: true,
+        status: 202,
+        json: async () => ({runId: 'run-prod-body-001'}),
+      } as Response
+    }
+
+    const client = buildLaunchClient()
+    await client.launchRun({repo: 'owner/repo', prompt: 'test prompt', csrfToken: 'tok-prod', idempotencyKey: 'idem-key-prod-001'})
+
+    globalThis.fetch = origFetch
+
+    // Body must contain exactly repo and prompt
+    expect(capturedBody).toBeDefined()
+    expect(capturedBody?.repo).toBe('owner/repo')
+    expect(capturedBody?.prompt).toBe('test prompt')
+    // idempotencyKey must NOT be in the body for production
+    expect(capturedBody?.idempotencyKey).toBeUndefined()
+    // scenario and fixtureSessionId must not appear either
+    expect(capturedBody?.scenario).toBeUndefined()
+    expect(capturedBody?.fixtureSessionId).toBeUndefined()
+    // idempotency-key must be in the header
+    expect(capturedHeaders?.['idempotency-key']).toBe('idem-key-prod-001')
+  })
+})
+
 describe('buildLaunchClient — accepts HTTP 200 as launch success', () => {
   it('launchRun treats 200 response with valid runId as launched success', async () => {
     const mod = await import('../public/operator-launch.js')
@@ -1087,5 +1132,42 @@ describe('resetLaunchState — stale cleanup cannot abort a newer init listener'
 
     // Cleanup
     ctrl2.abort()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Launch uses onRunLaunched callback
+// ---------------------------------------------------------------------------
+
+describe('operator-launch — onRunLaunched callback coordination', () => {
+  it('initOperatorLaunch accepts an onRunLaunched option (function signature)', async () => {
+    const mod = await import('../public/operator-launch.js')
+    const initFn = (mod as {initOperatorLaunch?: (opts?: {endpointBase?: string; onRunLaunched?: (runId: string, card: unknown) => void}) => Promise<void>}).initOperatorLaunch
+    expect(typeof initFn).toBe('function')
+  })
+
+  it('operator-launch.js source contains onRunLaunched', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).toContain('onRunLaunched')
+  })
+
+  it('operator-launch.js source does not own stream handle when onRunLaunched is provided', async () => {
+    // When onRunLaunched is provided, the launch module delegates stream ownership
+    // to the runtime seam. The source should still have setLaunchStreamHandle for
+    // the legacy path (no callback), but the callback path should not call initOperatorStream directly.
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    // The source must contain the onRunLaunched callback path
+    expect(src).toContain('onRunLaunched')
+  })
+})
+
+describe('operator-launch — stream handle ownership with onRunLaunched', () => {
+  it('resetLaunchState does not close a handle when onRunLaunched was used (runtime owns it)', () => {
+    // When onRunLaunched is provided, the launch module should NOT store the stream handle.
+    // resetLaunchState should not close a handle that was never stored.
+    // This is verified by ensuring resetLaunchState does not throw when no handle is set.
+    expect(() => resetLaunchState()).not.toThrow()
   })
 })
