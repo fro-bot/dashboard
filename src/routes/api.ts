@@ -87,6 +87,7 @@ export function buildApiRouter(getSnapshot?: SnapshotProvider): Hono {
    */
   api.get('/status', c => {
     const snapshot = getSnapshot === undefined ? EMPTY_SNAPSHOT : getSnapshot()
+    c.header('Cache-Control', 'no-store')
     return c.json(snapshot)
   })
 
