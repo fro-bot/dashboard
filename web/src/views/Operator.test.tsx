@@ -516,6 +516,12 @@ describe('Operator — recent-runs section', () => {
     expect(text).not.toMatch(/\d+ run/i)
   })
 
+  it('recent-runs section has data-role="run-index" for the DOM shell hook', () => {
+    render(<Operator state="ready" />)
+    const section = document.querySelector('[data-role="run-index"]')
+    expect(section).not.toBeNull()
+  })
+
   it('recent-runs section has a stable hook for the run list', () => {
     render(<Operator state="ready" />)
     const listHook = document.querySelector('[data-role="run-index-list"]')

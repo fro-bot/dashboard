@@ -281,7 +281,7 @@ All imports use the manual-load pattern that suppresses top-level auto-bootstrap
 **Verification:**
 - Shell tests prove the active PWA is live-ready, fixture-free, and data-empty before browser fetching starts.
 
-- [ ] **Unit 4: Add browser run-index loading and rendering**
+- [x] **Unit 4: Add browser run-index loading and rendering**
 
 **Goal:** Fetch, validate, and render recent run summaries in the browser with safe states and accessible cards.
 
@@ -295,7 +295,7 @@ All imports use the manual-load pattern that suppresses top-level auto-bootstrap
 - Modify: `web/src/operator/runtime.ts`
 - Modify: `web/src/operator/runtime.test.ts`
 - Modify: `src/server.ts`
-- Create: `test/operator-run-index-core.test.ts`
+- Create: `test/operator-run-index-core.test.js`
 - Test: `test/static-assets.test.ts`
 
 **Approach:**
@@ -354,7 +354,7 @@ All imports use the manual-load pattern that suppresses top-level auto-bootstrap
 - Modify: `public/operator-launch.js`
 - Modify: `public/operator-stream.js` if run-scoped late-frame guards need a small seam
 - Test: `web/src/operator/runtime.test.ts`
-- Test: `test/operator-run-index-core.test.ts`
+- Test: `test/operator-run-index-core.test.js`
 - Test: `test/operator-launch-core.test.ts`
 - Test: `test/operator-stream-core.test.ts`
 

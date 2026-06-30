@@ -509,6 +509,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     // shell and always depends on these assets, regardless of operatorUiEnabled.
     path === '/static/operator-stream.js' ||
     path === '/static/operator-launch.js' ||
+    path === '/static/operator-run-index.js' ||
     (operatorUiEnabled && path.startsWith('/static/')) ||
     // Fixture harness routes — public ONLY when the full fixture gate is active
     // (non-production + loopback bind + flag enabled). Otherwise not in public list.
@@ -666,7 +667,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   app.get('/operator', c => c.redirect('/', 302))
 
   // ── Operator runtime JS assets — always served (flag-independent) ────────────
-  // Root / owns the operator shell and always depends on these two modules.
+  // Root / owns the operator shell and always depends on these modules.
   // Mounted unconditionally so they are available regardless of operatorUiEnabled.
   // isPublicPath already allows these paths so auth middleware passes them through.
   app.use(
@@ -675,6 +676,10 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   )
   app.use(
     '/static/operator-launch.js',
+    serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}),
+  )
+  app.use(
+    '/static/operator-run-index.js',
     serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}),
   )
 

@@ -127,6 +127,7 @@ export function classifyRepoListError(error: RepoListError): OperatorState {
 // on evaluation, giving the runtime seam deterministic lifecycle control.
 const _streamSpecifier = '/static/operator-stream.js' + '?manual=1'
 const _launchSpecifier = '/static/operator-launch.js' + '?manual=1'
+const _runIndexSpecifier = '/static/operator-run-index.js' + '?manual=1'
 
 async function defaultRuntimeLoader(opts?: {
   endpointBase?: string
@@ -161,12 +162,29 @@ async function defaultRuntimeLoader(opts?: {
     await launchMod.initOperatorLaunch(launchOpts)
   }
 
+  const runIndexMod = await import(/* @vite-ignore */ _runIndexSpecifier) as {
+    initOperatorRunIndex?: (opts?: {endpointBase?: string; fixtureSessionId?: string}) => Promise<void>
+    resetRunIndexState?: () => void
+  }
+  if (typeof runIndexMod.resetRunIndexState === 'function') {
+    runIndexMod.resetRunIndexState()
+  }
+  if (typeof runIndexMod.initOperatorRunIndex === 'function') {
+    const runIndexOpts = opts?.endpointBase !== undefined
+      ? {endpointBase: opts.endpointBase, fixtureSessionId: opts.fixtureSessionId}
+      : undefined
+    await runIndexMod.initOperatorRunIndex(runIndexOpts)
+  }
+
   return () => {
     if (typeof streamMod.resetBootstrapState === 'function') {
       streamMod.resetBootstrapState()
     }
     if (typeof launchMod.resetLaunchState === 'function') {
       launchMod.resetLaunchState()
+    }
+    if (typeof runIndexMod.resetRunIndexState === 'function') {
+      runIndexMod.resetRunIndexState()
     }
   }
 }

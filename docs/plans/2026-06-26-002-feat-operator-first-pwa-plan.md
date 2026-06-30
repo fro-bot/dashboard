@@ -340,7 +340,7 @@ Runtime loading must preserve module singleton integrity, error isolation, and l
 - Modify: `public/operator.css`
 - Test: `test/operator-stream-core.test.ts`
 - Test: `test/operator-launch.test.ts`
-- Test: `test/operator-run-index-core.test.ts`
+- Test: `test/operator-run-index-core.test.js`
 
 **Approach:**
 - Add one mount seam that loads or initializes existing `public/operator-*.js` modules after the React operator shell reaches ready state.

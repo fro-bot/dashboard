@@ -316,6 +316,40 @@ describe('operator runtime JS assets — served regardless of operatorUiEnabled 
     const ct = res.headers.get('content-type') ?? ''
     expect(ct).toMatch(/(?:text|application)\/javascript/)
   })
+
+  it('GET /static/operator-run-index.js returns 200 when operatorUiEnabled=false', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/static/operator-run-index.js')
+    expect(res.status).toBe(200)
+  })
+
+  it('GET /static/operator-run-index.js?manual=1 returns 200 when operatorUiEnabled=false', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/static/operator-run-index.js?manual=1')
+    expect(res.status).toBe(200)
+  })
+
+  it('GET /static/operator-run-index.js returns 200 when operatorUiEnabled=true', async () => {
+    const app = await buildTestApp(true)
+    const res = await app.request('/static/operator-run-index.js')
+    expect(res.status).toBe(200)
+  })
+
+  it('GET /static/operator-run-index.js is reachable WITHOUT an auth session (public path)', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/static/operator-run-index.js')
+    expect(res.status).toBe(200)
+    expect(res.status).not.toBe(302)
+    expect(res.status).not.toBe(401)
+  })
+
+  it('GET /static/operator-run-index.js returns a JavaScript Content-Type', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/static/operator-run-index.js')
+    expect(res.status).toBe(200)
+    const ct = res.headers.get('content-type') ?? ''
+    expect(ct).toMatch(/(?:text|application)\/javascript/)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -445,6 +479,12 @@ describe('production static JS assets — no fixture strings', () => {
     expect(src).not.toContain('/__fixture')
   })
 
+  it('operator-run-index.js source does not contain /__fixture string', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).not.toContain('/__fixture')
+  })
+
   it('operator-stream.js source does not contain fixture-mode flag strings', async () => {
     const fs = await import('node:fs/promises')
     const src = await fs.readFile('public/operator-stream.js', 'utf8')
@@ -455,6 +495,13 @@ describe('production static JS assets — no fixture strings', () => {
   it('operator-launch.js source does not contain fixture-mode flag strings', async () => {
     const fs = await import('node:fs/promises')
     const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).not.toContain('fixtureMode')
+    expect(src).not.toContain('fixture-runtime-loader')
+  })
+
+  it('operator-run-index.js source does not contain fixture-mode flag strings', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
     expect(src).not.toContain('fixtureMode')
     expect(src).not.toContain('fixture-runtime-loader')
   })
@@ -471,6 +518,13 @@ describe('production static JS assets — no fixture strings', () => {
   it('operator-launch.js default endpoint base is /operator (not fixture prefix)', async () => {
     const fs = await import('node:fs/promises')
     const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).toContain('/operator')
+    expect(src).not.toContain('/__fixture/operator')
+  })
+
+  it('operator-run-index.js default endpoint base is /operator (not fixture prefix)', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
     expect(src).toContain('/operator')
     expect(src).not.toContain('/__fixture/operator')
   })

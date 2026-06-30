@@ -643,6 +643,59 @@ describe('createOperatorRuntime — fixture context forwarded to loader', () => 
   })
 })
 
+describe('createOperatorRuntime — run-index module integration', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('loader receives endpointBase for run-index when fixtureMode is true', async () => {
+    let capturedOpts: {endpointBase?: string; fixtureSessionId?: string; getScenario?: () => string} | undefined
+    const opts = makeOptions({
+      fixtureMode: true,
+      fixtureEndpointBase: '/__fixture/operator',
+      fixtureSessionId: 'fixture-session-0001',
+      _runtimeLoader: async (loaderOpts) => {
+        capturedOpts = loaderOpts
+      },
+    })
+    const handle = createOperatorRuntime(opts)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    // run-index module receives the same endpointBase as launch/stream
+    expect(capturedOpts?.endpointBase).toBe('/__fixture/operator')
+    handle.cleanup()
+  })
+
+  it('loader cleanup resets run-index state', async () => {
+    const cleanupFn = vi.fn()
+    const opts = makeOptions({
+      _runtimeLoader: async () => cleanupFn,
+    })
+    const handle = createOperatorRuntime(opts)
+    await vi.waitFor(() => expect(cleanupFn).not.toHaveBeenCalled())
+    handle.cleanup()
+    expect(cleanupFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('runtime.ts source contains _runIndexSpecifier (run-index module is loaded)', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const url = await import('node:url')
+    const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
+    const src = await fs.readFile(path.join(__dirname, 'runtime.ts'), 'utf8')
+    expect(src).toContain('_runIndexSpecifier')
+    expect(src).toContain('operator-run-index.js')
+  })
+
+  it('runtime.ts source contains resetRunIndexState cleanup call', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const url = await import('node:url')
+    const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
+    const src = await fs.readFile(path.join(__dirname, 'runtime.ts'), 'utf8')
+    expect(src).toContain('resetRunIndexState')
+  })
+})
+
 describe('createOperatorRuntime — no literal fixture fallback in source', () => {
   it('runtime.ts source does not contain a literal /__fixture/operator string', async () => {
     const fs = await import('node:fs/promises')

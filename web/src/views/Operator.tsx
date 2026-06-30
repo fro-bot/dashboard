@@ -181,6 +181,7 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
         >
           <section
             data-testid="recent-runs-section"
+            data-role="run-index"
             className="operator-panel"
             aria-label="Recent runs"
           >

@@ -1,0 +1,591 @@
+/**
+ * Pure core tests for public/operator-run-index.js.
+ * Imports directly from the plain ESM file — no TS syntax, no DOM at module level.
+ */
+
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
+import {
+  buildRunSafeView,
+  fetchRunIndex,
+  initOperatorRunIndex,
+  parseRunSummaryItem,
+  parseRunSummaryList,
+  resetRunIndexState,
+  RUN_INDEX_CAP,
+  VALID_RUN_SUMMARY_STATUSES,
+} from '../public/operator-run-index.js'
+
+function makeValidSummary(overrides = {}) {
+  return {
+    runId: 'run-abc-001',
+    repo: 'fro-bot/agent',
+    status: 'running',
+    createdAt: '2026-06-26T12:00:00.000Z',
+    ...overrides,
+  }
+}
+
+describe('parseRunSummaryItem — happy path', () => {
+  it('parses a minimal valid run summary', () => {
+    const result = parseRunSummaryItem(makeValidSummary())
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.runId).toBe('run-abc-001')
+      expect(result.data.repo).toBe('fro-bot/agent')
+      expect(result.data.status).toBe('running')
+      expect(result.data.createdAt).toBe('2026-06-26T12:00:00.000Z')
+    }
+  })
+
+  it('parses a run summary with optional updatedAt present', () => {
+    const result = parseRunSummaryItem(makeValidSummary({updatedAt: '2026-06-26T13:00:00.000Z'}))
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.updatedAt).toBe('2026-06-26T13:00:00.000Z')
+    }
+  })
+
+  it('parses a run summary without updatedAt — field is absent', () => {
+    const result = parseRunSummaryItem(makeValidSummary())
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect('updatedAt' in result.data).toBe(false)
+    }
+  })
+
+  it('accepts all valid index statuses', () => {
+    const statuses = ['queued', 'running', 'succeeded', 'failed', 'cancelled']
+    for (const status of statuses) {
+      const result = parseRunSummaryItem(makeValidSummary({status}))
+      expect(result.success, `status ${status} should be valid`).toBe(true)
+    }
+  })
+
+  it('ignores extra unknown fields', () => {
+    const result = parseRunSummaryItem(makeValidSummary({unknownField: 'should-be-ignored', anotherField: 42}))
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect('unknownField' in result.data).toBe(false)
+      expect('anotherField' in result.data).toBe(false)
+    }
+  })
+})
+
+describe('parseRunSummaryItem — error paths', () => {
+  it('rejects null', () => {
+    const result = parseRunSummaryItem(null)
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects non-object', () => {
+    const result = parseRunSummaryItem('not-an-object')
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects array', () => {
+    const result = parseRunSummaryItem([])
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects missing runId', () => {
+    const result = parseRunSummaryItem({repo: 'fro-bot/agent', status: 'running', createdAt: '2026-06-26T12:00:00.000Z'})
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects non-string runId', () => {
+    const result = parseRunSummaryItem(makeValidSummary({runId: 42}))
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects missing repo', () => {
+    const result = parseRunSummaryItem({runId: 'run-abc-001', status: 'running', createdAt: '2026-06-26T12:00:00.000Z'})
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects missing status', () => {
+    const result = parseRunSummaryItem({runId: 'run-abc-001', repo: 'fro-bot/agent', createdAt: '2026-06-26T12:00:00.000Z'})
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects unknown status', () => {
+    const result = parseRunSummaryItem(makeValidSummary({status: 'unknown-status'}))
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects stream-only status: waiting_for_approval', () => {
+    const result = parseRunSummaryItem(makeValidSummary({status: 'waiting_for_approval'}))
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects stream-only status: blocked', () => {
+    const result = parseRunSummaryItem(makeValidSummary({status: 'blocked'}))
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects missing createdAt', () => {
+    const result = parseRunSummaryItem({runId: 'run-abc-001', repo: 'fro-bot/agent', status: 'running'})
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects oversized runId (>512 chars)', () => {
+    const result = parseRunSummaryItem(makeValidSummary({runId: 'x'.repeat(513)}))
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects oversized repo (>512 chars)', () => {
+    const result = parseRunSummaryItem(makeValidSummary({repo: 'x'.repeat(513)}))
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects oversized createdAt (>128 chars)', () => {
+    const result = parseRunSummaryItem(makeValidSummary({createdAt: 'x'.repeat(129)}))
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects oversized updatedAt (>128 chars)', () => {
+    const result = parseRunSummaryItem(makeValidSummary({updatedAt: 'x'.repeat(129)}))
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects non-string updatedAt when present', () => {
+    const result = parseRunSummaryItem(makeValidSummary({updatedAt: 12345}))
+    expect(result.success).toBe(false)
+  })
+})
+
+describe('parseRunSummaryList — cap and dedupe', () => {
+  it('returns empty array for empty input', () => {
+    const result = parseRunSummaryList([])
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data).toHaveLength(0)
+  })
+
+  it('returns error for non-array input', () => {
+    const result = parseRunSummaryList({})
+    expect(result.success).toBe(false)
+  })
+
+  it('skips invalid items without failing the whole list', () => {
+    const items = [makeValidSummary(), {invalid: true}, makeValidSummary({runId: 'run-002'})]
+    const result = parseRunSummaryList(items)
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data).toHaveLength(2)
+  })
+
+  it('caps at RUN_INDEX_CAP (100) items', () => {
+    const items = Array.from({length: 150}, (_, i) => makeValidSummary({runId: `run-${i.toString().padStart(3, '0')}`}))
+    const result = parseRunSummaryList(items)
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data).toHaveLength(RUN_INDEX_CAP)
+  })
+
+  it('keeps first valid duplicate runId, suppresses later duplicates', () => {
+    const items = [
+      makeValidSummary({runId: 'run-dup', status: 'running'}),
+      makeValidSummary({runId: 'run-dup', status: 'succeeded'}),
+    ]
+    const result = parseRunSummaryList(items)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toHaveLength(1)
+      expect(result.data[0]?.status).toBe('running')
+    }
+  })
+
+  it('preserves order (newest-first from Gateway)', () => {
+    const items = [
+      makeValidSummary({runId: 'run-001', createdAt: '2026-06-26T13:00:00.000Z'}),
+      makeValidSummary({runId: 'run-002', createdAt: '2026-06-26T12:00:00.000Z'}),
+    ]
+    const result = parseRunSummaryList(items)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data[0]?.runId).toBe('run-001')
+      expect(result.data[1]?.runId).toBe('run-002')
+    }
+  })
+})
+
+describe('VALID_RUN_SUMMARY_STATUSES — exact index-only set', () => {
+  it('contains exactly the five index-only statuses', () => {
+    const expected = new Set(['queued', 'running', 'succeeded', 'failed', 'cancelled'])
+    expect(VALID_RUN_SUMMARY_STATUSES).toEqual(expected)
+  })
+
+  it('does not contain stream-only statuses', () => {
+    expect(VALID_RUN_SUMMARY_STATUSES.has('waiting_for_approval')).toBe(false)
+    expect(VALID_RUN_SUMMARY_STATUSES.has('blocked')).toBe(false)
+  })
+})
+
+describe('buildRunSafeView — closed safe-view boundary', () => {
+  it('returns an object with exactly the allowed display keys', () => {
+    const summary = {
+      runId: 'run-abc-001',
+      repo: 'fro-bot/agent',
+      status: 'running',
+      createdAt: '2026-06-26T12:00:00.000Z',
+    }
+    const view = buildRunSafeView(summary)
+    const keys = Object.keys(view).sort()
+    expect(keys).toContain('runId')
+    expect(keys).toContain('repo')
+    expect(keys).toContain('status')
+    expect(keys).toContain('createdAt')
+    expect(keys).toContain('statusLabel')
+  })
+
+  it('excludes unknown fields from the safe view', () => {
+    const summaryWithExtra = {
+      runId: 'run-abc-001',
+      repo: 'fro-bot/agent',
+      status: 'running',
+      createdAt: '2026-06-26T12:00:00.000Z',
+      unknownField: 'should-not-appear',
+    }
+    const view = buildRunSafeView(summaryWithExtra)
+    expect('unknownField' in view).toBe(false)
+  })
+
+  it('omits updatedAt from safe view when absent in summary', () => {
+    const summary = {
+      runId: 'run-abc-001',
+      repo: 'fro-bot/agent',
+      status: 'running',
+      createdAt: '2026-06-26T12:00:00.000Z',
+    }
+    const view = buildRunSafeView(summary)
+    expect('updatedAt' in view).toBe(false)
+  })
+
+  it('includes updatedAt in safe view when present in summary', () => {
+    const summary = {
+      runId: 'run-abc-001',
+      repo: 'fro-bot/agent',
+      status: 'running',
+      createdAt: '2026-06-26T12:00:00.000Z',
+      updatedAt: '2026-06-26T13:00:00.000Z',
+    }
+    const view = buildRunSafeView(summary)
+    expect(view.updatedAt).toBe('2026-06-26T13:00:00.000Z')
+  })
+
+  it('statusLabel is a human-readable string from a local map, not the raw status', () => {
+    const statuses = ['queued', 'running', 'succeeded', 'failed', 'cancelled']
+    for (const status of statuses) {
+      const summary = {runId: 'run-001', repo: 'fro-bot/agent', status, createdAt: '2026-06-26T12:00:00.000Z'}
+      const view = buildRunSafeView(summary)
+      expect(typeof view.statusLabel).toBe('string')
+      expect(view.statusLabel.length).toBeGreaterThan(0)
+    }
+  })
+})
+
+describe('operator-run-index.js source — no-console invariant', () => {
+  it('source does not contain console.log calls', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).not.toMatch(/console\.log\s*\(/)
+  })
+
+  it('source does not contain console.error calls', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).not.toMatch(/console\.error\s*\(/)
+  })
+
+  it('source does not contain console.warn calls', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).not.toMatch(/console\.warn\s*\(/)
+  })
+
+  it('source does not contain /__fixture string (no hardcoded fixture routes)', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).not.toContain('/__fixture')
+  })
+
+  it('source does not contain fixtureMode flag strings', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).not.toContain('fixtureMode')
+    expect(src).not.toContain('fixture-runtime-loader')
+  })
+})
+
+describe('operator-run-index.js — no-console behavior invariant', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('parseRunSummaryItem does not call console.error or console.warn on valid input', () => {
+    parseRunSummaryItem(makeValidSummary())
+    expect(vi.mocked(console.error).mock.calls).toHaveLength(0)
+    expect(vi.mocked(console.warn).mock.calls).toHaveLength(0)
+  })
+
+  it('parseRunSummaryItem does not call console.error or console.warn on invalid input', () => {
+    parseRunSummaryItem({runId: 'x', status: 'invalid-status', repo: 'r', createdAt: 'c'})
+    expect(vi.mocked(console.error).mock.calls).toHaveLength(0)
+    expect(vi.mocked(console.warn).mock.calls).toHaveLength(0)
+  })
+
+  it('parseRunSummaryList does not call console.error or console.warn on any input', () => {
+    parseRunSummaryList([makeValidSummary(), {invalid: true}])
+    expect(vi.mocked(console.error).mock.calls).toHaveLength(0)
+    expect(vi.mocked(console.warn).mock.calls).toHaveLength(0)
+  })
+})
+
+describe('fetchRunIndex — error paths collapse to neutral unavailable', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('401 response collapses to unavailable', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: async () => ({}),
+    }))
+    const result = await fetchRunIndex({endpointBase: '/operator'})
+    expect(result.kind).toBe('unavailable')
+  })
+
+  it('403 response collapses to unavailable', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({}),
+    }))
+    const result = await fetchRunIndex({endpointBase: '/operator'})
+    expect(result.kind).toBe('unavailable')
+  })
+
+  it('404 response collapses to unavailable', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      json: async () => ({}),
+    }))
+    const result = await fetchRunIndex({endpointBase: '/operator'})
+    expect(result.kind).toBe('unavailable')
+  })
+
+  it('500 response collapses to unavailable', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({}),
+    }))
+    const result = await fetchRunIndex({endpointBase: '/operator'})
+    expect(result.kind).toBe('unavailable')
+  })
+
+  it('network error collapses to unavailable', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network error')))
+    const result = await fetchRunIndex({endpointBase: '/operator'})
+    expect(result.kind).toBe('unavailable')
+  })
+
+  it('non-JSON response collapses to unavailable', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => { throw new SyntaxError('Unexpected token') },
+    }))
+    const result = await fetchRunIndex({endpointBase: '/operator'})
+    expect(result.kind).toBe('unavailable')
+  })
+
+  it('malformed response (non-array) collapses to unavailable', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({not: 'an-array'}),
+    }))
+    const result = await fetchRunIndex({endpointBase: '/operator'})
+    expect(result.kind).toBe('unavailable')
+  })
+
+  it('valid response returns loaded kind with summaries', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => [makeValidSummary()],
+    }))
+    const result = await fetchRunIndex({endpointBase: '/operator'})
+    expect(result.kind).toBe('loaded')
+    if (result.kind === 'loaded') {
+      expect(result.summaries).toHaveLength(1)
+    }
+  })
+
+  it('empty array response returns loaded kind with empty summaries', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => [],
+    }))
+    const result = await fetchRunIndex({endpointBase: '/operator'})
+    expect(result.kind).toBe('loaded')
+    if (result.kind === 'loaded') {
+      expect(result.summaries).toHaveLength(0)
+    }
+  })
+})
+
+describe('fetchRunIndex — fixture endpointBase', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('fetches from /__fixture/operator/runs when endpointBase is /__fixture/operator', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => [],
+    })
+    vi.stubGlobal('fetch', mockFetch)
+    await fetchRunIndex({endpointBase: '/__fixture/operator'})
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/__fixture/operator/runs',
+      expect.objectContaining({credentials: 'include', redirect: 'error'}),
+    )
+  })
+
+  it('fetches from /operator/runs when endpointBase is /operator (default)', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => [],
+    })
+    vi.stubGlobal('fetch', mockFetch)
+    await fetchRunIndex({endpointBase: '/operator'})
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/operator/runs',
+      expect.objectContaining({credentials: 'include', redirect: 'error'}),
+    )
+  })
+})
+
+describe('fetchRunIndex — no-console on error paths', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('does not call console.error or console.warn on 401 error', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ok: false, status: 401, json: async () => ({})}))
+    await fetchRunIndex({endpointBase: '/operator'})
+    expect(vi.mocked(console.error).mock.calls).toHaveLength(0)
+    expect(vi.mocked(console.warn).mock.calls).toHaveLength(0)
+  })
+
+  it('does not call console.error or console.warn on network error', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network error')))
+    await fetchRunIndex({endpointBase: '/operator'})
+    expect(vi.mocked(console.error).mock.calls).toHaveLength(0)
+    expect(vi.mocked(console.warn).mock.calls).toHaveLength(0)
+  })
+
+  it('does not call console.error or console.warn on malformed response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ok: true, status: 200, json: async () => ({not: 'array'})}))
+    await fetchRunIndex({endpointBase: '/operator'})
+    expect(vi.mocked(console.error).mock.calls).toHaveLength(0)
+    expect(vi.mocked(console.warn).mock.calls).toHaveLength(0)
+  })
+})
+
+describe('resetRunIndexState — module lifecycle export', () => {
+  it('is exported as a function', () => {
+    expect(typeof resetRunIndexState).toBe('function')
+  })
+
+  it('does not throw when called', () => {
+    expect(() => resetRunIndexState()).not.toThrow()
+  })
+
+  it('is idempotent — calling twice does not throw', () => {
+    expect(() => {
+      resetRunIndexState()
+      resetRunIndexState()
+    }).not.toThrow()
+  })
+})
+
+describe('initOperatorRunIndex — module lifecycle export', () => {
+  it('is exported as a function', () => {
+    expect(typeof initOperatorRunIndex).toBe('function')
+  })
+
+  it('returns a promise', () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ok: true, status: 200, json: async () => []}))
+    const result = initOperatorRunIndex({endpointBase: '/operator'})
+    expect(result).toBeInstanceOf(Promise)
+    vi.restoreAllMocks()
+  })
+})
+
+describe('parser parity — JS parser mirrors vendored TS parser behavior', () => {
+  it('valid summary: JS parser accepts same shape as TS parser', () => {
+    const input = makeValidSummary()
+    const result = parseRunSummaryItem(input)
+    expect(result.success).toBe(true)
+  })
+
+  it('invalid status: JS parser rejects same invalid statuses as TS parser', () => {
+    const invalidStatuses = ['waiting_for_approval', 'blocked', 'unknown', 'RUNNING', '']
+    for (const status of invalidStatuses) {
+      const result = parseRunSummaryItem(makeValidSummary({status}))
+      expect(result.success, `status "${status}" should be rejected`).toBe(false)
+    }
+  })
+
+  it('oversized field: JS parser rejects same oversized fields as TS parser', () => {
+    expect(parseRunSummaryItem(makeValidSummary({runId: 'x'.repeat(513)})).success).toBe(false)
+    expect(parseRunSummaryItem(makeValidSummary({repo: 'x'.repeat(513)})).success).toBe(false)
+    expect(parseRunSummaryItem(makeValidSummary({createdAt: 'x'.repeat(129)})).success).toBe(false)
+    expect(parseRunSummaryItem(makeValidSummary({updatedAt: 'x'.repeat(129)})).success).toBe(false)
+  })
+
+  it('duplicate runId: JS parser keeps first valid entry like TS parser', () => {
+    const items = [
+      makeValidSummary({runId: 'run-dup', status: 'queued'}),
+      makeValidSummary({runId: 'run-dup', status: 'succeeded'}),
+    ]
+    const result = parseRunSummaryList(items)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toHaveLength(1)
+      expect(result.data[0]?.status).toBe('queued')
+    }
+  })
+
+  it('missing updatedAt: JS parser treats absence as absence (not empty string)', () => {
+    const result = parseRunSummaryItem(makeValidSummary())
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect('updatedAt' in result.data).toBe(false)
+      expect(result.data.updatedAt).toBeUndefined()
+    }
+  })
+
+  it('extra field: JS parser excludes extra fields from parsed output', () => {
+    const result = parseRunSummaryItem(makeValidSummary({extraField: 'extra-value'}))
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect('extraField' in result.data).toBe(false)
+    }
+  })
+})
