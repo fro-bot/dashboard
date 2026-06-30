@@ -282,7 +282,11 @@ export function buildLaunchClient(opts) {
         const currentScenario = typeof getScenario === 'function' ? getScenario() : undefined
         if (currentScenario !== undefined) bodyObj.scenario = currentScenario
         if (fixtureSessionId !== undefined) bodyObj.fixtureSessionId = fixtureSessionId
-        if (req.idempotencyKey !== undefined) bodyObj.idempotencyKey = req.idempotencyKey
+        // idempotencyKey goes in the header for all requests (see below).
+        // It is also included in the body only for fixture mode so the fixture
+        // harness can correlate requests without reading headers.
+        const isFixtureMode = currentScenario !== undefined || fixtureSessionId !== undefined
+        if (isFixtureMode && req.idempotencyKey !== undefined) bodyObj.idempotencyKey = req.idempotencyKey
 
         const res = await browserFetch(`${endpointBase}/runs`, {
           method: 'POST',

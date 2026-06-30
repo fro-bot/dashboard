@@ -831,6 +831,51 @@ describe('buildLaunchClient — getScenario read at submit time', () => {
   })
 })
 
+describe('buildLaunchClient — production body shape (no idempotencyKey, no scenario, no fixtureSessionId)', () => {
+  it('production launchRun sends JSON body with exactly repo and prompt — no idempotencyKey, no scenario, no fixtureSessionId', async () => {
+    let capturedBody: Record<string, unknown> | undefined
+    let capturedHeaders: Record<string, string> | undefined
+
+    const mod = await import('../public/operator-launch.js')
+    const buildLaunchClient = (mod as {buildLaunchClient?: (opts?: {endpointBase?: string}) => {refreshCsrf: () => Promise<unknown>; listRepos: () => Promise<unknown>; launchRun: (req: {repo: string; prompt: string; csrfToken: string; idempotencyKey: string}) => Promise<unknown>}}).buildLaunchClient
+    if (typeof buildLaunchClient !== 'function') throw new Error('buildLaunchClient not exported')
+
+    const origFetch = globalThis.fetch
+    globalThis.fetch = async (_input: unknown, init?: RequestInit) => {
+      if (init?.body !== undefined && init.body !== null) {
+        capturedBody = JSON.parse(init.body as string) as Record<string, unknown>
+      }
+      if (init?.headers !== undefined) {
+        capturedHeaders = Object.fromEntries(
+          Object.entries(init.headers as Record<string, string>),
+        )
+      }
+      return {
+        ok: true,
+        status: 202,
+        json: async () => ({runId: 'run-prod-body-001'}),
+      } as Response
+    }
+
+    const client = buildLaunchClient()
+    await client.launchRun({repo: 'owner/repo', prompt: 'test prompt', csrfToken: 'tok-prod', idempotencyKey: 'idem-key-prod-001'})
+
+    globalThis.fetch = origFetch
+
+    // Body must contain exactly repo and prompt
+    expect(capturedBody).toBeDefined()
+    expect(capturedBody?.repo).toBe('owner/repo')
+    expect(capturedBody?.prompt).toBe('test prompt')
+    // idempotencyKey must NOT be in the body for production
+    expect(capturedBody?.idempotencyKey).toBeUndefined()
+    // scenario and fixtureSessionId must not appear either
+    expect(capturedBody?.scenario).toBeUndefined()
+    expect(capturedBody?.fixtureSessionId).toBeUndefined()
+    // idempotency-key must be in the header
+    expect(capturedHeaders?.['idempotency-key']).toBe('idem-key-prod-001')
+  })
+})
+
 describe('buildLaunchClient — accepts HTTP 200 as launch success', () => {
   it('launchRun treats 200 response with valid runId as launched success', async () => {
     const mod = await import('../public/operator-launch.js')
