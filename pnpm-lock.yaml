@@ -100,28 +100,28 @@ importers:
         specifier: 4.1.9
         version: 4.1.9(@types/node@24.12.0)(jsdom@29.1.1)(vite@8.1.0(@types/node@24.12.0)(jiti@2.7.0)(terser@5.48.0)(yaml@2.9.0))
       workbox-build:
-        specifier: ^7.4.1
+        specifier: 7.4.1
         version: 7.4.1
       workbox-cacheable-response:
-        specifier: ^7.4.1
+        specifier: 7.4.1
         version: 7.4.1
       workbox-core:
-        specifier: ^7.4.1
+        specifier: 7.4.1
         version: 7.4.1
       workbox-expiration:
-        specifier: ^7.4.1
+        specifier: 7.4.1
         version: 7.4.1
       workbox-precaching:
-        specifier: ^7.4.1
+        specifier: 7.4.1
         version: 7.4.1
       workbox-routing:
-        specifier: ^7.4.1
+        specifier: 7.4.1
         version: 7.4.1
       workbox-strategies:
-        specifier: ^7.4.1
+        specifier: 7.4.1
         version: 7.4.1
       workbox-window:
-        specifier: ^7.4.1
+        specifier: 7.4.1
         version: 7.4.1
 
 packages:
