@@ -457,6 +457,16 @@ describe('/api/status', () => {
     })
   })
 
+  describe('Cache-Control: no-store', () => {
+    it('response carries Cache-Control: no-store', async () => {
+      const app = await buildTestApp(makeSnapshot())
+      const res = await authedGet(app, '/api/status')
+
+      expect(res.status).toBe(200)
+      expect(res.headers.get('cache-control')).toBe('no-store')
+    })
+  })
+
   describe('same snapshot source as /api/monitoring', () => {
     it('/api/status and /api/monitoring serve data from the same provider', async () => {
       const repo = makeRepo({full_name: 'fro-bot/shared-source'})
