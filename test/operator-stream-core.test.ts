@@ -5235,3 +5235,236 @@ describe('initOperatorStream — terminal run: immediate close preserves termina
     expect(noticeEl.hidden).toBe(true)
   })
 })
+
+function makeUnavailableTestStatusEl(initial = 'Pending') {
+  return {textContent: initial, className: 'status-queued', classList: {add(_cls: string) {}, remove() {}}, dataset: {}, hidden: false}
+}
+
+function makeUnavailableTestNoticeEl() {
+  return {textContent: '', hidden: false, dataset: {connectionState: ''}}
+}
+
+describe('initOperatorStream — statusEl unavailable on stream failure', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('drift connection → statusEl shows "Unavailable" and gets status-unavailable class', async () => {
+    const noticeEl = makeUnavailableTestNoticeEl()
+    const statusEl = makeUnavailableTestStatusEl('Pending')
+
+    const encoder = new TextEncoder()
+    // Send a ready frame with a mismatched contract version → drift
+    const driftReadyFrame = 'event: ready\ndata: {"contractVersion":"0.0.1"}\n\n'
+
+    let readCount = 0
+    const chunks = [encoder.encode(driftReadyFrame)]
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (readCount < chunks.length) {
+              return {done: false, value: chunks[readCount++]}
+            }
+            return new Promise<{done: boolean}>(() => {}) // hang after chunks
+          },
+        }),
+      },
+    }))
+
+    initOperatorStream({
+      runId: 'run-drift-001',
+      statusEl,
+      noticeEl,
+      endpointBase: '/operator',
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    expect(statusEl.textContent).toBe('Unavailable')
+    expect(statusEl.className).toContain('status-unavailable')
+  })
+
+  it('closed connection (non-terminal run) → statusEl shows "Unavailable" and gets status-unavailable class', async () => {
+    const noticeEl = makeUnavailableTestNoticeEl()
+    const statusEl = makeUnavailableTestStatusEl('Pending')
+
+    const encoder = new TextEncoder()
+    // Send a ready frame then close the stream without a terminal status
+    const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
+
+    let readCount = 0
+    const chunks = [encoder.encode(readyFrame)]
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (readCount < chunks.length) {
+              return {done: false, value: chunks[readCount++]}
+            }
+            return {done: true} // stream closes without terminal status
+          },
+        }),
+      },
+    }))
+
+    initOperatorStream({
+      runId: 'run-closed-001',
+      statusEl,
+      noticeEl,
+      endpointBase: '/operator',
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    expect(statusEl.textContent).toBe('Unavailable')
+    expect(statusEl.className).toContain('status-unavailable')
+  })
+
+  it('terminal succeeded label wins — not overwritten by closed state', async () => {
+    const noticeEl = makeUnavailableTestNoticeEl()
+    const statusEl = makeUnavailableTestStatusEl('Pending')
+
+    const encoder = new TextEncoder()
+    const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
+    const terminalFrame = `event: status\ndata: ${JSON.stringify({
+      runId: 'run-terminal-win-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'COMPLETED',
+      status: 'succeeded',
+      startedAt: '2026-06-29T10:00:00Z',
+      stale: false,
+    })}\n\n`
+
+    let readCount = 0
+    const chunks = [encoder.encode(readyFrame + terminalFrame)]
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (readCount < chunks.length) {
+              return {done: false, value: chunks[readCount++]}
+            }
+            return {done: true} // stream closes after terminal status
+          },
+        }),
+      },
+    }))
+
+    initOperatorStream({
+      runId: 'run-terminal-win-001',
+      statusEl,
+      noticeEl,
+      endpointBase: '/operator',
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    // Terminal succeeded must win — not overwritten by "Unavailable"
+    expect(statusEl.textContent).toBe('Succeeded')
+    expect(statusEl.className).not.toContain('status-unavailable')
+  })
+
+  it('terminal failed label wins — not overwritten by closed state', async () => {
+    const noticeEl = makeUnavailableTestNoticeEl()
+    const statusEl = makeUnavailableTestStatusEl('Pending')
+
+    const encoder = new TextEncoder()
+    const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
+    const terminalFrame = `event: status\ndata: ${JSON.stringify({
+      runId: 'run-terminal-failed-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'FAILED',
+      status: 'failed',
+      startedAt: '2026-06-29T10:00:00Z',
+      stale: false,
+    })}\n\n`
+
+    let readCount = 0
+    const chunks = [encoder.encode(readyFrame + terminalFrame)]
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (readCount < chunks.length) {
+              return {done: false, value: chunks[readCount++]}
+            }
+            return {done: true}
+          },
+        }),
+      },
+    }))
+
+    initOperatorStream({
+      runId: 'run-terminal-failed-001',
+      statusEl,
+      noticeEl,
+      endpointBase: '/operator',
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    expect(statusEl.textContent).toBe('Failed')
+    expect(statusEl.className).not.toContain('status-unavailable')
+  })
+
+  it('after close(), statusEl is not updated to Unavailable by late stream-closed event', async () => {
+    const noticeEl = makeUnavailableTestNoticeEl()
+    const statusEl = makeUnavailableTestStatusEl('Pending')
+
+    let resolveStream: ((value: {done: boolean; value?: Uint8Array}) => void) | undefined
+    const streamPromise = new Promise<{done: boolean; value?: Uint8Array}>(resolve => {
+      resolveStream = resolve
+    })
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {
+        getReader: () => ({
+          read: async () => streamPromise,
+        }),
+      },
+    }))
+
+    const handle = initOperatorStream({
+      runId: 'run-late-frame-001',
+      statusEl,
+      noticeEl,
+      endpointBase: '/operator',
+    })
+
+    // Close the stream (simulating card switch)
+    handle.close()
+
+    const statusBefore = statusEl.textContent
+
+    // Resolve with done — triggers stream-closed dispatch
+    resolveStream?.({done: true})
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    // statusEl must not have been updated to "Unavailable" after close
+    expect(statusEl.textContent).toBe(statusBefore)
+    expect(statusEl.textContent).not.toBe('Unavailable')
+  })
+})

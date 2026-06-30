@@ -1508,3 +1508,224 @@ describe('fixture harness — GET / manifest', () => {
     expect(res.status).toBe(404)
   })
 })
+
+describe('fixture runs index — indexed run stream binding', () => {
+  it('GET /runs with fixtureSessionId binds indexed run IDs to that session', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const runsRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)
+    expect(runsRes.status).toBe(200)
+    const runs = await runsRes.json() as {runId: string}[]
+    expect(runs.length).toBeGreaterThan(0)
+
+    const firstRun = runs[0] ?? {runId: ''}
+    const streamRes = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/runs/${firstRun.runId}/stream?fixtureSessionId=${fixtureSessionId}`,
+    )
+    expect(streamRes.status).toBe(200)
+    expect(streamRes.headers.get('content-type') ?? '').toMatch(/text\/event-stream/)
+  })
+
+  it('indexed run stream returns SSE bytes with event: and data: lines', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const runsRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)
+    const runs = await runsRes.json() as {runId: string}[]
+    const firstRun = runs[0] ?? {runId: ''}
+
+    const streamRes = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/runs/${firstRun.runId}/stream?fixtureSessionId=${fixtureSessionId}`,
+    )
+    expect(streamRes.status).toBe(200)
+    const body = await streamRes.text()
+    expect(body).toContain('event:')
+    expect(body).toContain('data:')
+  })
+
+  it('indexed run stream without fixtureSessionId returns 404 (not bound)', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const runsRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
+    const runs = await runsRes.json() as {runId: string}[]
+    const firstRun = runs[0] ?? {runId: ''}
+
+    const streamRes = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/runs/${firstRun.runId}/stream`,
+    )
+    expect(streamRes.status).toBe(404)
+  })
+
+  it('indexed run stream with wrong fixtureSessionId returns 400 (session mismatch)', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const runsRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)
+    const runs = await runsRes.json() as {runId: string}[]
+    const firstRun = runs[0] ?? {runId: ''}
+
+    const wrongSession = 'fixture-session-WRONG-6666'
+    const streamRes = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/runs/${firstRun.runId}/stream?fixtureSessionId=${wrongSession}`,
+    )
+    expect([400, 404]).toContain(streamRes.status)
+  })
+
+  it('GET /runs without fixtureSessionId still returns the run list (no binding)', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as unknown[]
+    expect(body.length).toBeGreaterThan(0)
+  })
+
+  it('indexed runs are streamable by any minted session', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const s1Res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId: sid1} = await s1Res.json() as {fixtureSessionId: string}
+
+    const s2Res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId: sid2} = await s2Res.json() as {fixtureSessionId: string}
+
+    const runsRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${sid1}`)
+    const runs = await runsRes.json() as {runId: string}[]
+    const firstRun = runs[0] ?? {runId: ''}
+
+    const ok1 = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/runs/${firstRun.runId}/stream?fixtureSessionId=${sid1}`,
+    )
+    expect(ok1.status).toBe(200)
+
+    const ok2 = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/runs/${firstRun.runId}/stream?fixtureSessionId=${sid2}`,
+    )
+    expect(ok2.status).toBe(200)
+  })
+
+  it('queued/running/succeeded indexed runs use success scenario; failed/cancelled use terminal_failure', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const runsRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)
+    const runs = await runsRes.json() as {runId: string; status: string}[]
+
+    const successRun = runs.find(r => ['queued', 'running', 'succeeded'].includes(r.status))
+    expect(successRun).toBeDefined()
+    if (successRun) {
+      const streamRes = await app.request(
+        `${FIXTURE_OPERATOR_PREFIX}/runs/${successRun.runId}/stream?fixtureSessionId=${fixtureSessionId}`,
+      )
+      expect(streamRes.status).toBe(200)
+      const text = await streamRes.text()
+      expect(text).toContain('succeeded')
+    }
+
+    const failRun = runs.find(r => ['failed', 'cancelled'].includes(r.status))
+    expect(failRun).toBeDefined()
+    if (failRun) {
+      const streamRes = await app.request(
+        `${FIXTURE_OPERATOR_PREFIX}/runs/${failRun.runId}/stream?fixtureSessionId=${fixtureSessionId}`,
+      )
+      expect(streamRes.status).toBe(200)
+      const text = await streamRes.text()
+      expect(text).toContain('failed')
+    }
+  })
+
+  it('two sessions that each fetch /runs can both stream the same indexed run with their own fixtureSessionId', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const s1Res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId: sid1} = await s1Res.json() as {fixtureSessionId: string}
+
+    const s2Res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId: sid2} = await s2Res.json() as {fixtureSessionId: string}
+
+    expect(sid1).not.toBe(sid2)
+
+    const runs1Res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${sid1}`)
+    expect(runs1Res.status).toBe(200)
+    const runs1 = await runs1Res.json() as {runId: string}[]
+    const indexedRunId = (runs1[0] ?? {runId: ''}).runId
+    expect(indexedRunId).toMatch(/^run-fixture-index-/)
+
+    const runs2Res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${sid2}`)
+    expect(runs2Res.status).toBe(200)
+
+    const stream1 = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/runs/${indexedRunId}/stream?fixtureSessionId=${sid1}`,
+    )
+    expect(stream1.status).toBe(200)
+    expect(stream1.headers.get('content-type') ?? '').toMatch(/text\/event-stream/)
+
+    const stream2 = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/runs/${indexedRunId}/stream?fixtureSessionId=${sid2}`,
+    )
+    expect(stream2.status).toBe(200)
+    expect(stream2.headers.get('content-type') ?? '').toMatch(/text\/event-stream/)
+  })
+
+  it('an unminted fixture-session-prefixed ID cannot stream an indexed run', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const runsRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)
+    const runs = await runsRes.json() as {runId: string}[]
+    const indexedRunId = (runs[0] ?? {runId: ''}).runId
+
+    const unmintedSession = 'fixture-session-not-minted'
+    const streamRes = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/runs/${indexedRunId}/stream?fixtureSessionId=${unmintedSession}`,
+    )
+    expect([400, 404]).toContain(streamRes.status)
+    expect(await streamRes.text()).not.toContain(unmintedSession)
+  })
+
+  it('a launched run from session A cannot be streamed from session B (launched runs stay session-bound)', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+    const s1Res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId: sid1} = await s1Res.json() as {fixtureSessionId: string}
+
+    const s2Res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId: sid2} = await s2Res.json() as {fixtureSessionId: string}
+
+    const launchRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({
+        scenario: FIXTURE_SCENARIO_NAMES.success,
+        idempotencyKey: 'fixture-idem-key-cross-session-stream-001',
+        fixtureSessionId: sid1,
+        csrfToken: 'fixture-csrf-placeholder',
+        repo: 'fixture-org/fixture-repo',
+        prompt: '[Fixture prompt]',
+      }),
+    })
+    expect(launchRes.status).toBe(200)
+    const {runId} = await launchRes.json() as {runId: string}
+    expect(runId).toMatch(/^run-fixture-harness-/)
+
+    const ok = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream?fixtureSessionId=${sid1}`,
+    )
+    expect(ok.status).toBe(200)
+
+    const denied = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream?fixtureSessionId=${sid2}`,
+    )
+    expect([400, 404]).toContain(denied.status)
+  })
+})

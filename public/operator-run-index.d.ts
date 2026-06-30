@@ -42,7 +42,9 @@ export declare function parseRunSummaryList(
 
 export declare function buildRunSafeView(summary: ParsedRunSummary): RunSafeView
 
-export declare function fetchRunIndex(opts: {endpointBase?: string}): Promise<RunIndexResult>
+export declare const FETCH_TIMEOUT_MS: number
+
+export declare function fetchRunIndex(opts?: {endpointBase?: string; fixtureSessionId?: string}): Promise<RunIndexResult>
 
 /** Increment generation to invalidate pending inits. Called by the React runtime seam cleanup. */
 export declare function resetRunIndexState(): void

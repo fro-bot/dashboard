@@ -6,6 +6,7 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {
   buildRunSafeView,
+  FETCH_TIMEOUT_MS,
   fetchRunIndex,
   initOperatorRunIndex,
   markRunStreamAttached,
@@ -474,6 +475,46 @@ describe('fetchRunIndex — fixture endpointBase', () => {
       expect.objectContaining({credentials: 'include', redirect: 'error'}),
     )
   })
+
+  it('appends fixtureSessionId as query param when provided', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => [],
+    })
+    vi.stubGlobal('fetch', mockFetch)
+    await fetchRunIndex({endpointBase: '/__fixture/operator', fixtureSessionId: 'fixture-session-0001'})
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/__fixture/operator/runs?fixtureSessionId=fixture-session-0001',
+      expect.objectContaining({credentials: 'include', redirect: 'error'}),
+    )
+  })
+
+  it('does NOT append fixtureSessionId when not provided (production path)', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => [],
+    })
+    vi.stubGlobal('fetch', mockFetch)
+    await fetchRunIndex({endpointBase: '/operator'})
+    const calledUrl = mockFetch.mock.calls[0][0]
+    expect(calledUrl).toBe('/operator/runs')
+    expect(calledUrl).not.toContain('fixtureSessionId')
+  })
+
+  it('does NOT append fixtureSessionId when undefined (production path)', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => [],
+    })
+    vi.stubGlobal('fetch', mockFetch)
+    await fetchRunIndex({endpointBase: '/operator', fixtureSessionId: undefined})
+    const calledUrl = mockFetch.mock.calls[0][0]
+    expect(calledUrl).toBe('/operator/runs')
+    expect(calledUrl).not.toContain('fixtureSessionId')
+  })
 })
 
 describe('fetchRunIndex — no-console on error paths', () => {
@@ -693,6 +734,50 @@ describe('initOperatorRunIndex — launched run convergence (no duplicate card)'
 })
 
 // ---------------------------------------------------------------------------
+// markRunStreamAttached — card DOM attribute
+// ---------------------------------------------------------------------------
+
+describe('markRunStreamAttached — sets data-stream-attached on matching card', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('sets data-stream-attached="true" on the card after markRunStreamAttached', async () => {
+    const runId = 'run-stream-attr-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => [makeValidSummary({runId})],
+    }))
+    const cards = []
+    stubDOMWithCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    expect(cards).toHaveLength(1)
+
+    markRunStreamAttached(runId)
+
+    expect(cards[0].dataset.streamAttached).toBe('true')
+  })
+
+  it('resetRunIndexState clears data-stream-attached from cards remaining in DOM', async () => {
+    const runId = 'run-stream-reset-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => [makeValidSummary({runId})],
+    }))
+    const cards = []
+    stubDOMWithCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    markRunStreamAttached(runId)
+    expect(cards[0].dataset.streamAttached).toBe('true')
+
+    resetRunIndexState()
+
+    expect(cards[0].dataset.streamAttached).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Keyboard activation on run cards
 // ---------------------------------------------------------------------------
 
@@ -726,6 +811,8 @@ function stubDOMWithCards(cards) {
     querySelector(sel) {
       if (sel === '[data-role="run-index-list"]') return mockList
       if (sel === '[data-role="run-index"]') return mockSection
+      const runIdMatch = sel.match(/^\[data-run-id="([^"]+)"\]$/)
+      if (runIdMatch) return cards.find(c => c.dataset.runId === runIdMatch[1]) ?? null
       return null
     },
     createElement() { return makeElStub() },
@@ -837,5 +924,190 @@ describe('renderRunCard — keyboard activation (Enter / Space)', () => {
     cards[0].dispatchEvent(spaceEvent)
 
     expect(onSelectRun).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// fetchRunIndex — AbortSignal / timeout
+// ---------------------------------------------------------------------------
+
+describe('fetchRunIndex — passes AbortSignal to fetch', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  it('passes a signal property in fetch options', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => [],
+    })
+    vi.stubGlobal('fetch', mockFetch)
+    await fetchRunIndex({endpointBase: '/operator'})
+    const [, opts] = mockFetch.mock.calls[0]
+    expect(opts).toHaveProperty('signal')
+    expect(opts.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('preserves credentials:include and redirect:error alongside signal', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => [],
+    })
+    vi.stubGlobal('fetch', mockFetch)
+    await fetchRunIndex({endpointBase: '/operator'})
+    const [, opts] = mockFetch.mock.calls[0]
+    expect(opts.credentials).toBe('include')
+    expect(opts.redirect).toBe('error')
+    expect(opts.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('FETCH_TIMEOUT_MS is exported and equals 10_000', () => {
+    expect(FETCH_TIMEOUT_MS).toBe(10_000)
+  })
+
+  it('AbortError from fetch collapses to unavailable', async () => {
+    const abortError = new DOMException('The operation was aborted.', 'AbortError')
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(abortError))
+    const result = await fetchRunIndex({endpointBase: '/operator'})
+    expect(result.kind).toBe('unavailable')
+  })
+
+  it('timeout fires and fetch rejection collapses to unavailable', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((_url, opts) => {
+      return new Promise((_resolve, reject) => {
+        // Simulate abort signal listener
+        opts.signal.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted.', 'AbortError'))
+        })
+      })
+    }))
+
+    const fetchPromise = fetchRunIndex({endpointBase: '/operator'})
+    // Advance past the timeout
+    vi.advanceTimersByTime(FETCH_TIMEOUT_MS + 1)
+    const result = await fetchPromise
+    expect(result.kind).toBe('unavailable')
+  })
+
+  it('does not log on timeout/AbortError', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const abortError = new DOMException('The operation was aborted.', 'AbortError')
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(abortError))
+    await fetchRunIndex({endpointBase: '/operator'})
+    expect(vi.mocked(console.error).mock.calls).toHaveLength(0)
+    expect(vi.mocked(console.warn).mock.calls).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// section data-state transitions
+// ---------------------------------------------------------------------------
+
+/** Stub document with all four run-index roles + section, collect state snapshots. */
+function stubDOMWithSection() {
+  const section = {dataset: {}}
+  const loading = {hidden: false}
+  const list = {hidden: true, textContent: '', append() {}}
+  const empty = {hidden: true}
+  const unavailable = {hidden: true}
+  const cards = []
+
+  vi.stubGlobal('CSS', {escape: s => s})
+  vi.stubGlobal('document', {
+    querySelector(sel) {
+      if (sel === '[data-role="run-index"]') return section
+      if (sel === '[data-role="run-index-loading"]') return loading
+      if (sel === '[data-role="run-index-list"]') return list
+      if (sel === '[data-role="run-index-empty"]') return empty
+      if (sel === '[data-role="run-index-unavailable"]') return unavailable
+      const runIdMatch = sel.match(/^\[data-run-id="([^"]+)"\]$/)
+      if (runIdMatch) return cards.find(c => c.dataset?.runId === runIdMatch[1]) ?? null
+      return null
+    },
+    createElement() {
+      return makeElStub()
+    },
+  })
+
+  return {section, loading, list, empty, unavailable, cards}
+}
+
+describe('initOperatorRunIndex — section data-state transitions', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('sets data-state="loading" on section before fetch resolves', async () => {
+    let resolveJson
+    const jsonPromise = new Promise(res => {
+      resolveJson = res
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => jsonPromise,
+    }))
+    const {section} = stubDOMWithSection()
+
+    const initPromise = initOperatorRunIndex({endpointBase: '/operator'})
+    // Before fetch resolves, state must be 'loading'
+    expect(section.dataset.state).toBe('loading')
+
+    resolveJson([makeValidSummary()])
+    await initPromise
+  })
+
+  it('sets data-state="loaded" on section when list has runs', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => [makeValidSummary()],
+    }))
+    const {section} = stubDOMWithSection()
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(section.dataset.state).toBe('loaded')
+  })
+
+  it('sets data-state="empty" on section when list is empty', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => [],
+    }))
+    const {section} = stubDOMWithSection()
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(section.dataset.state).toBe('empty')
+  })
+
+  it('sets data-state="unavailable" on section on fetch failure', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network error')))
+    const {section} = stubDOMWithSection()
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(section.dataset.state).toBe('unavailable')
+  })
+
+  it('sets data-state="unavailable" on section on non-ok response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({}),
+    }))
+    const {section} = stubDOMWithSection()
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(section.dataset.state).toBe('unavailable')
   })
 })

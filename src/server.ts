@@ -661,10 +661,14 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // Serve the React SPA at /. index.html requires a session; shell assets are public.
   app.get('/', serveStatic({root: webDistRoot, path: 'index.html'}))
 
-  // ── /operator → / redirect (unconditional, flag-independent) ────────────────
-  // / is the canonical operator launch route. Old /operator links redirect here.
-  // Mounted before the operatorUiEnabled-gated handler so the flag has no effect.
+  // ── /operator and /operator/ → / redirect (unconditional, flag-independent) ──
+  // / is the canonical operator launch route. Old /operator and /operator/ links
+  // redirect here. Both are mounted before the operatorUiEnabled-gated handler so
+  // the flag has no effect. /operator/ is handled separately because Hono's
+  // app.route('/operator', router) does not strip the trailing slash — router.get('/')
+  // inside the sub-router never fires for /operator/.
   app.get('/operator', c => c.redirect('/', 302))
+  app.get('/operator/', c => c.redirect('/', 302))
 
   // ── Operator runtime JS assets — always served (flag-independent) ────────────
   // Root / owns the operator shell and always depends on these modules.

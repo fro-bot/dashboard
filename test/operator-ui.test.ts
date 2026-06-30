@@ -712,3 +712,132 @@ describe('operator UI — fixture-absence: GET /operator/runs returns 404 (no-pr
     expect(res.status).toBe(404)
   })
 })
+
+// ---------------------------------------------------------------------------
+// /operator/ trailing-slash redirect — inert surface regression
+//
+// /operator (exact) → 302 to / (unconditional redirect, pinned above).
+// /operator/ (trailing slash) → 302 to / (unconditional redirect, flag-independent).
+//
+// Both are handled directly in server.ts. The sub-router (buildOperatorRouter)
+// does NOT handle /operator/ — Hono's app.route('/operator', router) does not
+// strip the trailing slash, so router.get('/') never fires for /operator/.
+// The /operator/ redirect is therefore mounted unconditionally in server.ts.
+//
+// Invariants pinned here:
+// - /operator/ is a 302 redirect to / (not 200, not 404, not data surface)
+// - /operator/ redirect body contains no fixture strings, run data, or /__fixture paths
+// - /operator/ and /operator behave identically (both 302 → /)
+// - No operator client methods are called (no SSR gateway calls)
+// ---------------------------------------------------------------------------
+
+describe('operator UI — /operator/ trailing-slash redirect (flag ON + authenticated)', () => {
+  it('GET /operator/ returns 302 redirect to / (not 200, not 404)', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator/')
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toBe('/')
+  })
+
+  it('GET /operator/ redirect body contains no fixture run IDs', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator/')
+    expect(res.status).toBe(302)
+    const body = await res.text()
+    expect(body).not.toContain('run-fixture-queued-001')
+    expect(body).not.toContain('run-fixture-running-002')
+    expect(body).not.toContain('run-fixture-approval-003')
+    expect(body).not.toContain('run-fixture-failed-005')
+  })
+
+  it('GET /operator/ redirect body contains no /__fixture path strings', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator/')
+    expect(res.status).toBe(302)
+    const body = await res.text()
+    expect(body).not.toContain('/__fixture')
+    expect(body).not.toContain('__fixture')
+  })
+
+  it('GET /operator/ redirect body contains no run summary or timeline tokens', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator/')
+    expect(res.status).toBe(302)
+    const body = await res.text()
+    expect(body).not.toContain('entityRef')
+    expect(body).not.toContain('contractVersion')
+    expect(body).not.toContain('run-status-section')
+    expect(body).not.toContain('Run Event Timeline')
+    expect(body).not.toContain('timeline-heading')
+  })
+
+  it('GET /operator/ redirect body contains no fixture CSRF or idempotency key strings', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator/')
+    expect(res.status).toBe(302)
+    const body = await res.text()
+    expect(body).not.toContain('fixture-csrf-placeholder')
+    expect(body).not.toContain('fixture-idempotency-key-001')
+    expect(body).not.toContain('fixture-idempotency-key-002')
+    expect(body).not.toContain('[Fixture prompt — not rendered in UI]')
+  })
+
+  it('GET /operator/ redirect body contains no mock badge or skeleton copy', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator/')
+    expect(res.status).toBe(302)
+    const body = await res.text()
+    expect(body).not.toContain('Mock skeleton')
+    expect(body).not.toContain('badge-mock')
+    expect(body).not.toContain('Gateway Operator Controls')
+    expect(body).not.toContain('fixture data')
+  })
+
+  it('GET /operator/ redirect body contains no raw gateway cookie values', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator/')
+    expect(res.status).toBe(302)
+    const body = await res.text()
+    expect(body).not.toContain('test-gateway-cookie')
+  })
+
+  it('GET /operator/ does not call any operator client methods (no SSR gateway calls)', async () => {
+    // The throwing fake surfaces any accidental gateway call during /operator/ handling.
+    const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
+    const app = await buildTestApp({
+      operatorUiEnabled: true,
+      gatewayOperatorSessionEnabled: true,
+      operatorClient,
+    })
+    // Should redirect without calling getCurrentSession or any other method
+    const res = await authedGet(app, '/operator/')
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toBe('/')
+  })
+})
+
+describe('operator UI — /operator/ trailing-slash: same behavior as /operator exact', () => {
+  it('/operator and /operator/ both return 302 to / (flag-independent, identical behavior)', async () => {
+    const app = await buildTestApp(true)
+    const cookie = makeSessionCookie()
+    const [exactRes, trailingRes] = await Promise.all([
+      app.request('/operator', {headers: {cookie: `session=${cookie}`}}),
+      app.request('/operator/', {headers: {cookie: `session=${cookie}`}}),
+    ])
+    expect(exactRes.status).toBe(302)
+    expect(exactRes.headers.get('location')).toBe('/')
+    expect(trailingRes.status).toBe(302)
+    expect(trailingRes.headers.get('location')).toBe('/')
+  })
+
+  it('/operator/ redirect is flag-independent (flag OFF also redirects to /)', async () => {
+    const app = await buildTestApp(false)
+    const cookie = makeSessionCookie()
+    const res = await app.request('/operator/', {headers: {cookie: `session=${cookie}`}})
+    // /operator/ redirects unconditionally regardless of operatorUiEnabled
+    expect([302, 303]).toContain(res.status)
+    if (res.status === 302 || res.status === 303) {
+      expect(res.headers.get('location')).toBe('/')
+    }
+  })
+})

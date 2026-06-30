@@ -1433,6 +1433,22 @@ export function initOperatorStream(opts) {
         // Update status class for styling — use allowlisted status value (no whitespace)
         statusEl.className = statusEl.className.replaceAll(/\bstatus-\S+/g, '')
         statusEl.classList.add(`status-${view.status.replaceAll('_', '-')}`)
+      } else if (!aborted) {
+        const conn = state.connection
+        const runIsTerminal = runEntry !== undefined && runEntry.terminal === true
+        if (
+          !runIsTerminal &&
+          (conn === 'drift' ||
+            conn === 'not-found' ||
+            conn === 'failed' ||
+            conn === 'submitted-unobservable' ||
+            conn === 'closed')
+        ) {
+          statusEl.textContent = 'Unavailable'
+          statusEl.className = `${statusEl.className.replaceAll(/\bstatus-\S+/g, '')} status-unavailable`
+            .replaceAll(/\s+/g, ' ')
+            .trim()
+        }
       }
     }
 

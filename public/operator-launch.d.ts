@@ -141,6 +141,7 @@ export declare function initOperatorLaunch(opts?: {
   /** Called at submit time to get the current scenario; not frozen at init. */
   readonly getScenario?: () => string
   readonly fixtureSessionId?: string
+  readonly onRunLaunched?: (runId: string, card: HTMLElement) => void
 }): Promise<void>
 
 /**

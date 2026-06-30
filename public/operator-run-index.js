@@ -10,6 +10,9 @@
 
 export const RUN_INDEX_CAP = 100
 
+/** Timeout for the /runs fetch — matches server-side Gateway fetch timeout precedent. */
+export const FETCH_TIMEOUT_MS = 10_000
+
 const MAX_ID_LENGTH = 512
 const MAX_DATE_LENGTH = 128
 
@@ -126,33 +129,45 @@ export function buildRunSafeView(summary) {
  */
 export async function fetchRunIndex(opts) {
   const endpointBase = opts?.endpointBase ?? '/operator'
+  const fixtureSessionId = opts?.fixtureSessionId
 
+  const url = fixtureSessionId === undefined
+    ? `${endpointBase}/runs`
+    : `${endpointBase}/runs?fixtureSessionId=${encodeURIComponent(fixtureSessionId)}`
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+
+  let res
   try {
-    const res = await globalThis.fetch(`${endpointBase}/runs`, {
+    res = await globalThis.fetch(url, {
       credentials: 'include',
       redirect: 'error',
+      signal: controller.signal,
     })
+  } catch {
+    return {kind: 'unavailable'}
+  } finally {
+    clearTimeout(timeoutId)
+  }
 
-    if (!res.ok) {
-      return {kind: 'unavailable'}
-    }
+  if (!res.ok) {
+    return {kind: 'unavailable'}
+  }
 
-    let body
-    try {
-      body = await res.json()
-    } catch {
-      return {kind: 'unavailable'}
-    }
-
-    const parsed = parseRunSummaryList(body)
-    if (!parsed.success) {
-      return {kind: 'unavailable'}
-    }
-
-    return {kind: 'loaded', summaries: parsed.data}
+  let body
+  try {
+    body = await res.json()
   } catch {
     return {kind: 'unavailable'}
   }
+
+  const parsed = parseRunSummaryList(body)
+  if (!parsed.success) {
+    return {kind: 'unavailable'}
+  }
+
+  return {kind: 'loaded', summaries: parsed.data}
 }
 
 // _runIndexGeneration is a monotonically increasing counter. Each init captures its own
@@ -175,12 +190,22 @@ function isRunIndexInitStale(generation) {
  */
 export function markRunStreamAttached(runId) {
   _streamAttachedRunIds.add(runId)
+  if (typeof document !== 'undefined') {
+    const card = document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
+    if (card !== null) card.dataset.streamAttached = 'true'
+  }
 }
 
 /** Increment generation to invalidate pending inits. Called by the React runtime seam cleanup. */
 export function resetRunIndexState() {
   _runIndexGeneration++
   _runIndexInitialized = false
+  if (typeof document !== 'undefined') {
+    for (const runId of _streamAttachedRunIds) {
+      const card = document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
+      if (card !== null) delete card.dataset.streamAttached
+    }
+  }
   _streamAttachedRunIds.clear()
 }
 
@@ -188,6 +213,7 @@ export async function initOperatorRunIndex(opts) {
   const myGeneration = ++_runIndexGeneration
 
   const endpointBase = opts?.endpointBase ?? '/operator'
+  const fixtureSessionId = opts?.fixtureSessionId
   const onSelectRun = opts?.onSelectRun
 
   if (isRunIndexInitStale(myGeneration)) return
@@ -203,8 +229,9 @@ export async function initOperatorRunIndex(opts) {
   if (runIndexList !== null) runIndexList.hidden = true
   if (runIndexEmpty !== null) runIndexEmpty.hidden = true
   if (runIndexUnavailable !== null) runIndexUnavailable.hidden = true
+  if (runIndexSection !== null) runIndexSection.dataset.state = 'loading'
 
-  const result = await fetchRunIndex({endpointBase})
+  const result = await fetchRunIndex({endpointBase, fixtureSessionId})
 
   // Guard: bail if reset/replaced while awaiting fetch.
   if (isRunIndexInitStale(myGeneration)) return
@@ -213,6 +240,7 @@ export async function initOperatorRunIndex(opts) {
 
   if (result.kind === 'unavailable') {
     if (runIndexUnavailable !== null) runIndexUnavailable.hidden = false
+    if (runIndexSection !== null) runIndexSection.dataset.state = 'unavailable'
     return
   }
 
@@ -220,6 +248,7 @@ export async function initOperatorRunIndex(opts) {
 
   if (summaries.length === 0) {
     if (runIndexEmpty !== null) runIndexEmpty.hidden = false
+    if (runIndexSection !== null) runIndexSection.dataset.state = 'empty'
     return
   }
 

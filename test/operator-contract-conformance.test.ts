@@ -34,6 +34,7 @@ import {
   parseRepoSummaryList,
   parseRunSummary,
   parseRunSummaryList,
+  RUN_INDEX_CAP,
 } from '../src/gateway/operator-contract/index.ts'
 
 // ---------------------------------------------------------------------------
@@ -897,5 +898,26 @@ describe('parseRunSummaryList', () => {
     if (result.success) {
       expect(result.data).toHaveLength(0)
     }
+  })
+
+  it('caps output at RUN_INDEX_CAP (100) valid unique summaries even when input has more', () => {
+    // 110 unique valid items — only the first 100 should be returned
+    const input = Array.from({length: 110}, (_, i) => ({
+      runId: `run-${i}`,
+      repo: 'fro-bot/agent',
+      status: 'running',
+      createdAt: '2026-06-01T00:00:00.000Z',
+    }))
+    const result = parseRunSummaryList(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toHaveLength(100)
+      expect(result.data[0]?.runId).toBe('run-0')
+      expect(result.data[99]?.runId).toBe('run-99')
+    }
+  })
+
+  it('RUN_INDEX_CAP matches browser JS constant (parity)', () => {
+    expect(RUN_INDEX_CAP).toBe(100)
   })
 })

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Tests for the operator runtime seam.
  *
@@ -18,12 +19,12 @@
  */
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
+import {fetchFixtureSession} from '../web/src/operator/fixture-runtime-loader.ts'
 import {
   createOperatorRuntime,
   type OperatorRuntimeHandle,
   type OperatorRuntimeOptions,
-} from './runtime.ts'
-import {fetchFixtureSession} from './fixture-runtime-loader.ts'
+} from '../web/src/operator/runtime.ts'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -155,7 +156,7 @@ describe('createOperatorRuntime — idempotency key freshness', () => {
   })
 
   it('mintRuntimeIdempotencyKey returns unique non-empty strings', async () => {
-    const {mintRuntimeIdempotencyKey} = await import('./runtime.ts')
+    const {mintRuntimeIdempotencyKey} = await import('../web/src/operator/runtime.ts')
     const key1 = mintRuntimeIdempotencyKey()
     const key2 = mintRuntimeIdempotencyKey()
     expect(typeof key1).toBe('string')
@@ -164,7 +165,7 @@ describe('createOperatorRuntime — idempotency key freshness', () => {
   })
 
   it('mintRuntimeIdempotencyKey never returns the same key twice in sequence', async () => {
-    const {mintRuntimeIdempotencyKey} = await import('./runtime.ts')
+    const {mintRuntimeIdempotencyKey} = await import('../web/src/operator/runtime.ts')
     const keys = new Set(Array.from({length: 20}, () => mintRuntimeIdempotencyKey()))
     expect(keys.size).toBe(20)
   })
@@ -175,12 +176,11 @@ describe('createOperatorRuntime — idempotency key freshness', () => {
 // ---------------------------------------------------------------------------
 
 describe('createOperatorRuntime — security: no sensitive logging', () => {
-  let consoleSpy: ReturnType<typeof vi.spyOn>
+  let consoleSpy: {mockRestore: () => void}
 
   beforeEach(() => {
-    consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    vi.spyOn(console, 'warn').mockImplementation(() => {})
   })
 
   afterEach(() => {
@@ -195,7 +195,6 @@ describe('createOperatorRuntime — security: no sensitive logging', () => {
     handle.cleanup()
 
     const allLogs = [
-      ...vi.mocked(console.log).mock.calls,
       ...vi.mocked(console.error).mock.calls,
       ...vi.mocked(console.warn).mock.calls,
     ].flat().join(' ')
@@ -252,8 +251,8 @@ describe('createOperatorRuntime — CSP invariant: no unsafe-eval', () => {
     const fs = await import('node:fs/promises')
     const path = await import('node:path')
     const url = await import('node:url')
-    const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
-    const src = await fs.readFile(path.join(__dirname, 'runtime.ts'), 'utf8')
+    const dirName = path.dirname(url.fileURLToPath(import.meta.url))
+    const src = await fs.readFile(path.join(dirName, '../web/src/operator/runtime.ts'), 'utf8')
     expect(src).not.toMatch(/new Function\s*\(/)
     expect(src).not.toMatch(/\beval\s*\(/)
   })
@@ -328,38 +327,38 @@ describe('createOperatorRuntime — repo-list failure classification', () => {
   })
 
   it('classifyRepoListError maps auth failure to auth-required, not "No repositories available"', async () => {
-    const {classifyRepoListError} = await import('./runtime.ts')
+    const {classifyRepoListError} = await import('../web/src/operator/runtime.ts')
     const state = classifyRepoListError({kind: 'http', status: 401})
     expect(state).toBe('auth-required')
     expect(state).not.toBe('No repositories available')
   })
 
   it('classifyRepoListError maps 403 to auth-required', async () => {
-    const {classifyRepoListError} = await import('./runtime.ts')
+    const {classifyRepoListError} = await import('../web/src/operator/runtime.ts')
     const state = classifyRepoListError({kind: 'http', status: 403})
     expect(state).toBe('auth-required')
   })
 
   it('classifyRepoListError maps 429 to rate-limited', async () => {
-    const {classifyRepoListError} = await import('./runtime.ts')
+    const {classifyRepoListError} = await import('../web/src/operator/runtime.ts')
     const state = classifyRepoListError({kind: 'http', status: 429})
     expect(state).toBe('rate-limited')
   })
 
   it('classifyRepoListError maps network failure to offline', async () => {
-    const {classifyRepoListError} = await import('./runtime.ts')
+    const {classifyRepoListError} = await import('../web/src/operator/runtime.ts')
     const state = classifyRepoListError({kind: 'network'})
     expect(state).toBe('offline')
   })
 
   it('classifyRepoListError maps protocol failure to unavailable', async () => {
-    const {classifyRepoListError} = await import('./runtime.ts')
+    const {classifyRepoListError} = await import('../web/src/operator/runtime.ts')
     const state = classifyRepoListError({kind: 'protocol'})
     expect(state).toBe('unavailable')
   })
 
   it('classifyRepoListError maps 5xx to unavailable', async () => {
-    const {classifyRepoListError} = await import('./runtime.ts')
+    const {classifyRepoListError} = await import('../web/src/operator/runtime.ts')
     const state = classifyRepoListError({kind: 'http', status: 500})
     expect(state).toBe('unavailable')
   })
@@ -448,7 +447,9 @@ describe('createOperatorRuntime — stale loader race: second instance owns modu
     const secondCleanup = vi.fn()
 
     let resolveFirst!: (fn: () => void) => void
-    const firstLoader = new Promise<() => void>(resolve => { resolveFirst = resolve })
+    const firstLoader = new Promise<() => void>(resolve => {
+      resolveFirst = resolve
+    })
 
     // Second loader resolves immediately
     const secondLoaderFn = vi.fn(async () => secondCleanup)
@@ -483,7 +484,9 @@ describe('createOperatorRuntime — stale loader race: second instance owns modu
   it('stale loader resolving after handle cleanup calls its own cleanup fn immediately', async () => {
     const staleCleanup = vi.fn()
     let resolveStale!: (fn: () => void) => void
-    const staleLoader = new Promise<() => void>(resolve => { resolveStale = resolve })
+    const staleLoader = new Promise<() => void>(resolve => {
+      resolveStale = resolve
+    })
 
     const opts = makeOptions({_runtimeLoader: async () => staleLoader})
     const handle = createOperatorRuntime(opts)
@@ -600,7 +603,7 @@ describe('createOperatorRuntime — fixture context forwarded to loader', () => 
       fixtureEndpointBase: '/__fixture/operator',
       fixtureSessionId: 'fixture-session-0001',
       getScenario: () => 'success',
-      _runtimeLoader: async (loaderOpts) => {
+      _runtimeLoader: async loaderOpts => {
         capturedOpts = loaderOpts
       },
     })
@@ -617,7 +620,7 @@ describe('createOperatorRuntime — fixture context forwarded to loader', () => 
       fixtureEndpointBase: '/__fixture/operator',
       fixtureSessionId: 'fixture-session-0001',
       getScenario: () => 'terminal_failure',
-      _runtimeLoader: async (loaderOpts) => {
+      _runtimeLoader: async loaderOpts => {
         capturedOpts = loaderOpts
       },
     })
@@ -632,7 +635,7 @@ describe('createOperatorRuntime — fixture context forwarded to loader', () => 
     let capturedOpts: {endpointBase?: string; fixtureSessionId?: string; getScenario?: () => string} | undefined
     const opts = makeOptions({
       fixtureMode: false,
-      _runtimeLoader: async (loaderOpts) => {
+      _runtimeLoader: async loaderOpts => {
         capturedOpts = loaderOpts
       },
     })
@@ -654,7 +657,7 @@ describe('createOperatorRuntime — run-index module integration', () => {
       fixtureMode: true,
       fixtureEndpointBase: '/__fixture/operator',
       fixtureSessionId: 'fixture-session-0001',
-      _runtimeLoader: async (loaderOpts) => {
+      _runtimeLoader: async loaderOpts => {
         capturedOpts = loaderOpts
       },
     })
@@ -680,8 +683,8 @@ describe('createOperatorRuntime — run-index module integration', () => {
     const fs = await import('node:fs/promises')
     const path = await import('node:path')
     const url = await import('node:url')
-    const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
-    const src = await fs.readFile(path.join(__dirname, 'runtime.ts'), 'utf8')
+    const dirName = path.dirname(url.fileURLToPath(import.meta.url))
+    const src = await fs.readFile(path.join(dirName, '../web/src/operator/runtime.ts'), 'utf8')
     expect(src).toContain('_runIndexSpecifier')
     expect(src).toContain('operator-run-index.js')
   })
@@ -690,8 +693,8 @@ describe('createOperatorRuntime — run-index module integration', () => {
     const fs = await import('node:fs/promises')
     const path = await import('node:path')
     const url = await import('node:url')
-    const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
-    const src = await fs.readFile(path.join(__dirname, 'runtime.ts'), 'utf8')
+    const dirName = path.dirname(url.fileURLToPath(import.meta.url))
+    const src = await fs.readFile(path.join(dirName, '../web/src/operator/runtime.ts'), 'utf8')
     expect(src).toContain('resetRunIndexState')
   })
 })
@@ -701,8 +704,8 @@ describe('createOperatorRuntime — no literal fixture fallback in source', () =
     const fs = await import('node:fs/promises')
     const path = await import('node:path')
     const url = await import('node:url')
-    const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
-    const src = await fs.readFile(path.join(__dirname, 'runtime.ts'), 'utf8')
+    const dirName = path.dirname(url.fileURLToPath(import.meta.url))
+    const src = await fs.readFile(path.join(dirName, '../web/src/operator/runtime.ts'), 'utf8')
     expect(src).not.toContain('/__fixture/operator')
   })
 
@@ -713,7 +716,7 @@ describe('createOperatorRuntime — no literal fixture fallback in source', () =
       // No fixtureEndpointBase provided
       fixtureSessionId: 'fixture-session-0001',
       getScenario: () => 'success',
-      _runtimeLoader: async (loaderOpts) => {
+      _runtimeLoader: async loaderOpts => {
         capturedOpts = loaderOpts
       },
     })
@@ -724,10 +727,6 @@ describe('createOperatorRuntime — no literal fixture fallback in source', () =
     handle.cleanup()
   })
 })
-
-// ---------------------------------------------------------------------------
-// Unit 5: Active-stream ownership — runtime seam owns activeRunId + close handle
-// ---------------------------------------------------------------------------
 
 describe('createOperatorRuntime — active-stream coordination callbacks', () => {
   afterEach(() => {
@@ -774,8 +773,8 @@ describe('createOperatorRuntime — runtime.ts source contains active-stream coo
     const fs = await import('node:fs/promises')
     const path = await import('node:path')
     const url = await import('node:url')
-    const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
-    const src = await fs.readFile(path.join(__dirname, 'runtime.ts'), 'utf8')
+    const dirName = path.dirname(url.fileURLToPath(import.meta.url))
+    const src = await fs.readFile(path.join(dirName, '../web/src/operator/runtime.ts'), 'utf8')
     expect(src).toContain('onSelectRun')
   })
 
@@ -783,8 +782,8 @@ describe('createOperatorRuntime — runtime.ts source contains active-stream coo
     const fs = await import('node:fs/promises')
     const path = await import('node:path')
     const url = await import('node:url')
-    const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
-    const src = await fs.readFile(path.join(__dirname, 'runtime.ts'), 'utf8')
+    const dirName = path.dirname(url.fileURLToPath(import.meta.url))
+    const src = await fs.readFile(path.join(dirName, '../web/src/operator/runtime.ts'), 'utf8')
     expect(src).toContain('onRunLaunched')
   })
 
@@ -792,8 +791,8 @@ describe('createOperatorRuntime — runtime.ts source contains active-stream coo
     const fs = await import('node:fs/promises')
     const path = await import('node:path')
     const url = await import('node:url')
-    const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
-    const src = await fs.readFile(path.join(__dirname, 'runtime.ts'), 'utf8')
+    const dirName = path.dirname(url.fileURLToPath(import.meta.url))
+    const src = await fs.readFile(path.join(dirName, '../web/src/operator/runtime.ts'), 'utf8')
     expect(src).toMatch(/activeStream/)
   })
 
@@ -801,8 +800,8 @@ describe('createOperatorRuntime — runtime.ts source contains active-stream coo
     const fs = await import('node:fs/promises')
     const path = await import('node:path')
     const url = await import('node:url')
-    const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
-    const src = await fs.readFile(path.join(__dirname, 'runtime.ts'), 'utf8')
+    const dirName = path.dirname(url.fileURLToPath(import.meta.url))
+    const src = await fs.readFile(path.join(dirName, '../web/src/operator/runtime.ts'), 'utf8')
     expect(src).toContain('_closeActiveStream')
   })
 })

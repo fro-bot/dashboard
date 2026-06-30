@@ -30,6 +30,9 @@ export interface RunSummary {
   readonly updatedAt?: string
 }
 
+/** Maximum valid unique summaries returned by parseRunSummaryList. Matches browser JS RUN_INDEX_CAP. */
+export const RUN_INDEX_CAP = 100
+
 // Practical caps: GitHub run IDs and owner/repo paths are well under 512 chars;
 // ISO 8601 dates are at most ~35 chars.
 const MAX_ID_LENGTH = 512
@@ -109,6 +112,8 @@ export function parseRunSummaryList(input: unknown): Result<RunSummary[], Error>
   const valid: RunSummary[] = []
 
   for (const item of input) {
+    if (valid.length >= RUN_INDEX_CAP) break
+
     const parsed = parseRunSummary(item)
     if (!parsed.success) continue
 

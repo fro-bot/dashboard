@@ -12,6 +12,7 @@
  * - runId is bound to the launching fixtureSessionId; stream/approvals/decision
  *   require a matching session (query param or x-fixture-session-id header).
  */
+import type {RunSummary} from '../gateway/operator-contract/run-summary.ts'
 import {Hono} from 'hono'
 import {FIXTURE_OPERATOR_PREFIX} from '../gateway/operator-fixture-routes.ts'
 import {FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../gateway/operator-fixture-sse.ts'
@@ -26,18 +27,8 @@ const FIXTURE_REPOS = [
 
 const FIXTURE_APPROVAL = {requestID: 'req-fixture-harness-001', permission: 'tool_use', command: 'bash'}
 
-// Fixture run index — index-only statuses (queued/running/succeeded/failed/cancelled).
-// Stream-only statuses (blocked, waiting_for_approval) are intentionally absent.
-interface FixtureRunSummary {
-  readonly runId: string
-  readonly repo: string
-  readonly status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
-  readonly createdAt: string
-  readonly updatedAt?: string
-}
-
 // Sorted newest-first; updatedAt absent on some entries to exercise the optional field.
-const FIXTURE_RUN_SUMMARIES: readonly FixtureRunSummary[] = [
+const FIXTURE_RUN_SUMMARIES: readonly RunSummary[] = [
   {
     runId: 'run-fixture-index-queued-001',
     repo: 'fixture-org/fixture-repo',
@@ -77,7 +68,8 @@ const FIXTURE_RUN_SUMMARIES: readonly FixtureRunSummary[] = [
 // In-memory state — scoped by (fixtureSessionId, idempotencyKey). Resets on restart.
 const idempotencyMap = new Map<string, string>() // `${sessionId}:${idemKey}` → runId
 const runScenarioMap = new Map<string, string>() // runId → scenarioName
-const runSessionMap = new Map<string, string>() // runId → owning fixtureSessionId
+const runSessionMap = new Map<string, string>() // runId → owning fixtureSessionId (launched runs only)
+const validFixtureSessionIds = new Set<string>() // all session IDs minted by GET /session
 
 let sessionIdCounter = 0
 let runIdCounter = 0
@@ -85,6 +77,10 @@ let runIdCounter = 0
 function generateFixtureSessionId(): string {
   sessionIdCounter++
   return `fixture-session-${String(sessionIdCounter).padStart(4, '0')}`
+}
+
+function isIndexedRunId(runId: string): boolean {
+  return FIXTURE_RUN_SUMMARIES.some(s => s.runId === runId)
 }
 
 function generateFixtureRunId(): string {
@@ -119,9 +115,12 @@ function extractRequestSessionId(c: {req: {query: (k: string) => string | undefi
   return isValidFixtureSessionId(raw) ? raw : undefined
 }
 
-// Returns true if the request session matches the run's owning session.
+// Indexed runs are shared synthetic fixtures; launched runs stay session-bound.
 function verifyRunOwnership(runId: string, requestSessionId: string | undefined): boolean {
   if (requestSessionId === undefined) return false
+  if (isIndexedRunId(runId)) {
+    return runScenarioMap.has(runId) && validFixtureSessionIds.has(requestSessionId)
+  }
   const ownerSessionId = runSessionMap.get(runId)
   if (ownerSessionId === undefined) return false
   return ownerSessionId === requestSessionId
@@ -146,6 +145,7 @@ export function buildFixtureHarnessRouter(): Hono {
   router.get('/session', c => {
     logger.debug('fixture-harness: GET /session', {status: 200})
     const fixtureSessionId = generateFixtureSessionId()
+    validFixtureSessionIds.add(fixtureSessionId)
     const res = c.json({...FIXTURE_SESSION, fixtureMode: true, fixtureSessionId})
     setNoStore(res.headers)
     return res
@@ -167,8 +167,21 @@ export function buildFixtureHarnessRouter(): Hono {
     return res
   })
 
-  // GET /runs — synthetic run index (read-only; no session ownership required).
   router.get('/runs', c => {
+    const requestSessionId = extractRequestSessionId(c)
+
+    if (requestSessionId !== undefined) {
+      for (const summary of FIXTURE_RUN_SUMMARIES) {
+        if (!runScenarioMap.has(summary.runId)) {
+          const scenario =
+            summary.status === 'failed' || summary.status === 'cancelled'
+              ? FIXTURE_SCENARIO_NAMES.terminal_failure
+              : FIXTURE_SCENARIO_NAMES.success
+          runScenarioMap.set(summary.runId, scenario)
+        }
+      }
+    }
+
     logger.debug('fixture-harness: GET /runs', {status: 200})
     const res = c.json(FIXTURE_RUN_SUMMARIES)
     setNoStore(res.headers)
@@ -337,6 +350,7 @@ export function resetFixtureHarnessForTesting(): void {
   idempotencyMap.clear()
   runScenarioMap.clear()
   runSessionMap.clear()
+  validFixtureSessionIds.clear()
   sessionIdCounter = 0
   runIdCounter = 0
 }

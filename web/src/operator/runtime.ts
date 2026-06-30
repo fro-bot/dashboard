@@ -177,21 +177,12 @@ async function defaultRuntimeLoader(opts?: {
     resetLaunchState?: () => void
   }
 
-  // Build the active-stream coordination callbacks. These are passed to run-index and
-  // launch modules so the runtime seam owns the single active stream handle.
-  const onSelectRun = (runId: string) => {
-    // Close prior stream before attaching the new one.
+  function _attachStream(runId: string, statusEl: Element | null, noticeEl: Element | null): void {
     _closeActiveStream()
 
-    if (typeof streamMod.initOperatorStream === 'function') {
-      // Find the card element for this runId to get its statusEl and noticeEl.
-      const card = typeof document !== 'undefined'
-        ? document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
-        : null
-      const statusEl = card?.querySelector('[data-role="run-status"]') ?? null
-      const noticeEl = typeof document !== 'undefined'
-        ? document.querySelector('[data-role="stream-status"]')
-        : null
+    if (typeof streamMod.initOperatorStream !== 'function') return
+
+    try {
       const handle = streamMod.initOperatorStream({
         runId,
         statusEl,
@@ -200,35 +191,37 @@ async function defaultRuntimeLoader(opts?: {
         fixtureSessionId: opts?.fixtureSessionId,
       })
       _activeStreamHandle = handle
-      // Mark as stream-attached so index ignores later index-derived updates for this runId.
       if (typeof runIndexMod.markRunStreamAttached === 'function') {
         runIndexMod.markRunStreamAttached(runId)
+      }
+    } catch {
+      if (statusEl !== null) {
+        statusEl.textContent = 'Unavailable'
+        statusEl.className = 'status-unavailable'
       }
     }
   }
 
-  const onRunLaunched = (runId: string, card: HTMLElement) => {
-    // Close prior stream before attaching the new one.
-    _closeActiveStream()
+  // Build the active-stream coordination callbacks. These are passed to run-index and
+  // launch modules so the runtime seam owns the single active stream handle.
+  const onSelectRun = (runId: string) => {
+    // Find the card element for this runId to get its statusEl and noticeEl.
+    const card = typeof document !== 'undefined'
+      ? document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
+      : null
+    const statusEl = card?.querySelector('[data-role="run-status"]') ?? null
+    const noticeEl = typeof document !== 'undefined'
+      ? document.querySelector('[data-role="stream-status"]')
+      : null
+    _attachStream(runId, statusEl, noticeEl)
+  }
 
-    if (typeof streamMod.initOperatorStream === 'function') {
-      const statusEl = card.querySelector('[data-role="run-status"]') ?? null
-      const noticeEl = typeof document !== 'undefined'
-        ? document.querySelector('[data-role="stream-status"]')
-        : null
-      const handle = streamMod.initOperatorStream({
-        runId,
-        statusEl,
-        noticeEl,
-        endpointBase: opts?.endpointBase,
-        fixtureSessionId: opts?.fixtureSessionId,
-      })
-      _activeStreamHandle = handle
-      // Mark as stream-attached so index ignores later index-derived updates for this runId.
-      if (typeof runIndexMod.markRunStreamAttached === 'function') {
-        runIndexMod.markRunStreamAttached(runId)
-      }
-    }
+  const onRunLaunched = (runId: string, card: HTMLElement) => {
+    const statusEl = card.querySelector('[data-role="run-status"]') ?? null
+    const noticeEl = typeof document !== 'undefined'
+      ? document.querySelector('[data-role="stream-status"]')
+      : null
+    _attachStream(runId, statusEl, noticeEl)
   }
 
   if (typeof runIndexMod.resetRunIndexState === 'function') {
