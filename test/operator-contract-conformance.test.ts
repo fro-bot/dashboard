@@ -20,6 +20,7 @@ import type {
   ResetFrameData,
   ResetReason,
   RunStreamFrame,
+  RunSummary as RunSummaryType,
   StatusFrameData,
 } from '../src/gateway/operator-contract/index.ts'
 import {describe, expect, it} from 'vitest'
@@ -31,6 +32,8 @@ import {
   parseOperatorSessionInfo,
   parseRepoSummary,
   parseRepoSummaryList,
+  parseRunSummary,
+  parseRunSummaryList,
 } from '../src/gateway/operator-contract/index.ts'
 
 // ---------------------------------------------------------------------------
@@ -462,6 +465,26 @@ describe('parseRepoSummary', () => {
 })
 
 // ---------------------------------------------------------------------------
+// RunSummary type-level checks (compile-time)
+// ---------------------------------------------------------------------------
+
+// RunSummary: must accept literals with and without updatedAt
+const checkRunSummaryMinimal: RunSummaryType = {
+  runId: 'run-abc-123',
+  repo: 'fro-bot/agent',
+  status: 'running',
+  createdAt: '2026-06-01T00:00:00.000Z',
+}
+const checkRunSummaryWithUpdatedAt: RunSummaryType = {
+  runId: 'run-abc-123',
+  repo: 'fro-bot/agent',
+  status: 'succeeded',
+  createdAt: '2026-06-01T00:00:00.000Z',
+  updatedAt: '2026-06-01T01:00:00.000Z',
+}
+export {checkRunSummaryMinimal, checkRunSummaryWithUpdatedAt}
+
+// ---------------------------------------------------------------------------
 // parseRepoSummaryList
 // ---------------------------------------------------------------------------
 
@@ -561,6 +584,318 @@ describe('parseRepoSummaryList', () => {
     expect(result.success).toBe(false)
     if (!result.success) {
       expect(result.error.message).toBe('invalid repo summary list: item failed validation')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseRunSummary
+// ---------------------------------------------------------------------------
+
+describe('parseRunSummary', () => {
+  it('accepts a minimal valid run summary (no updatedAt)', () => {
+    const input = {
+      runId: 'run-abc-123',
+      repo: 'fro-bot/agent',
+      status: 'running',
+      createdAt: '2026-06-01T00:00:00.000Z',
+    }
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.runId).toBe('run-abc-123')
+      expect(result.data.repo).toBe('fro-bot/agent')
+      expect(result.data.status).toBe('running')
+      expect(result.data.createdAt).toBe('2026-06-01T00:00:00.000Z')
+      expect(result.data.updatedAt).toBeUndefined()
+    }
+  })
+
+  it('accepts a run summary with updatedAt present', () => {
+    const input = {
+      runId: 'run-abc-123',
+      repo: 'fro-bot/agent',
+      status: 'succeeded',
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T01:00:00.000Z',
+    }
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.updatedAt).toBe('2026-06-01T01:00:00.000Z')
+    }
+  })
+
+  it('updatedAt is absent (key not present) when omitted from input', () => {
+    const input = {
+      runId: 'run-abc-123',
+      repo: 'fro-bot/agent',
+      status: 'queued',
+      createdAt: '2026-06-01T00:00:00.000Z',
+    }
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(Object.prototype.hasOwnProperty.call(result.data, 'updatedAt')).toBe(false)
+    }
+  })
+
+  it('accepts extra fields (permissive structural subtyping)', () => {
+    const input = {
+      runId: 'run-abc-123',
+      repo: 'fro-bot/agent',
+      status: 'failed',
+      createdAt: '2026-06-01T00:00:00.000Z',
+      extra: 'ignored',
+      internalField: 42,
+    }
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      // Extra fields must not be accessible through the typed result
+      expect(Object.keys(result.data)).not.toContain('extra')
+      expect(Object.keys(result.data)).not.toContain('internalField')
+    }
+  })
+
+  it('accepts all five valid index statuses', () => {
+    const statuses = ['queued', 'running', 'succeeded', 'failed', 'cancelled'] as const
+    for (const status of statuses) {
+      const input = {runId: 'run-1', repo: 'fro-bot/agent', status, createdAt: '2026-06-01T00:00:00.000Z'}
+      const result = parseRunSummary(input)
+      expect(result.success).toBe(true)
+      if (result.success) {
+        expect(result.data.status).toBe(status)
+      }
+    }
+  })
+
+  it('rejects unknown status (fails closed)', () => {
+    const input = {runId: 'run-1', repo: 'fro-bot/agent', status: 'unknown_status', createdAt: '2026-06-01T00:00:00.000Z'}
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error.message).toBe('invalid run summary shape')
+    }
+  })
+
+  it('rejects stream-only status: waiting_for_approval', () => {
+    const input = {runId: 'run-1', repo: 'fro-bot/agent', status: 'waiting_for_approval', createdAt: '2026-06-01T00:00:00.000Z'}
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.message).toBe('invalid run summary shape')
+    }
+  })
+
+  it('rejects stream-only status: blocked', () => {
+    const input = {runId: 'run-1', repo: 'fro-bot/agent', status: 'blocked', createdAt: '2026-06-01T00:00:00.000Z'}
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.message).toBe('invalid run summary shape')
+    }
+  })
+
+  it('rejects missing runId', () => {
+    const input = {repo: 'fro-bot/agent', status: 'running', createdAt: '2026-06-01T00:00:00.000Z'}
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.message).toBe('invalid run summary shape')
+    }
+  })
+
+  it('rejects non-string runId', () => {
+    const input = {runId: 42, repo: 'fro-bot/agent', status: 'running', createdAt: '2026-06-01T00:00:00.000Z'}
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.message).toBe('invalid run summary shape')
+    }
+  })
+
+  it('rejects missing repo', () => {
+    const input = {runId: 'run-1', status: 'running', createdAt: '2026-06-01T00:00:00.000Z'}
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects non-string repo', () => {
+    const input = {runId: 'run-1', repo: 99, status: 'running', createdAt: '2026-06-01T00:00:00.000Z'}
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects missing createdAt', () => {
+    const input = {runId: 'run-1', repo: 'fro-bot/agent', status: 'running'}
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects non-string createdAt', () => {
+    const input = {runId: 'run-1', repo: 'fro-bot/agent', status: 'running', createdAt: 1234567890}
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects non-string updatedAt when present', () => {
+    const input = {runId: 'run-1', repo: 'fro-bot/agent', status: 'running', createdAt: '2026-06-01T00:00:00.000Z', updatedAt: 9999}
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.message).toBe('invalid run summary shape')
+    }
+  })
+
+  it('rejects oversized runId without logging raw value', () => {
+    const input = {runId: 'r'.repeat(513), repo: 'fro-bot/agent', status: 'running', createdAt: '2026-06-01T00:00:00.000Z'}
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      // Error message must be fixed — never echoes the oversized value
+      expect(result.error.message).toBe('invalid run summary shape')
+    }
+  })
+
+  it('rejects oversized repo without logging raw value', () => {
+    const input = {runId: 'run-1', repo: 'x'.repeat(513), status: 'running', createdAt: '2026-06-01T00:00:00.000Z'}
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.message).toBe('invalid run summary shape')
+    }
+  })
+
+  it('rejects oversized createdAt without logging raw value', () => {
+    const input = {runId: 'run-1', repo: 'fro-bot/agent', status: 'running', createdAt: '2'.repeat(129)}
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.message).toBe('invalid run summary shape')
+    }
+  })
+
+  it('rejects oversized updatedAt without logging raw value', () => {
+    const input = {runId: 'run-1', repo: 'fro-bot/agent', status: 'running', createdAt: '2026-06-01T00:00:00.000Z', updatedAt: '2'.repeat(129)}
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.message).toBe('invalid run summary shape')
+    }
+  })
+
+  it('rejects null', () => {
+    const result = parseRunSummary(null)
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects an array', () => {
+    const result = parseRunSummary([])
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects a non-object (string)', () => {
+    const result = parseRunSummary('run-abc-123')
+    expect(result.success).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseRunSummaryList
+// ---------------------------------------------------------------------------
+
+describe('parseRunSummaryList', () => {
+  it('accepts an empty array', () => {
+    const result = parseRunSummaryList([])
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toEqual([])
+    }
+  })
+
+  it('accepts an array of valid summaries', () => {
+    const input = [
+      {runId: 'run-1', repo: 'fro-bot/agent', status: 'running', createdAt: '2026-06-01T00:00:00.000Z'},
+      {runId: 'run-2', repo: 'fro-bot/dashboard', status: 'succeeded', createdAt: '2026-06-02T00:00:00.000Z'},
+    ]
+    const result = parseRunSummaryList(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toHaveLength(2)
+      expect(result.data[0]?.runId).toBe('run-1')
+      expect(result.data[1]?.status).toBe('succeeded')
+    }
+  })
+
+  it('deduplicates by runId: keeps first valid entry, suppresses later duplicates', () => {
+    const input = [
+      {runId: 'run-dup', repo: 'fro-bot/agent', status: 'running', createdAt: '2026-06-01T00:00:00.000Z'},
+      {runId: 'run-dup', repo: 'fro-bot/agent', status: 'succeeded', createdAt: '2026-06-01T01:00:00.000Z'},
+      {runId: 'run-other', repo: 'fro-bot/agent', status: 'queued', createdAt: '2026-06-01T02:00:00.000Z'},
+    ]
+    const result = parseRunSummaryList(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toHaveLength(2)
+      // First entry for run-dup is kept (status: running)
+      expect(result.data[0]?.runId).toBe('run-dup')
+      expect(result.data[0]?.status).toBe('running')
+      expect(result.data[1]?.runId).toBe('run-other')
+    }
+  })
+
+  it('skips invalid items (per-item validation, not whole-list fail)', () => {
+    const input = [
+      {runId: 'run-1', repo: 'fro-bot/agent', status: 'running', createdAt: '2026-06-01T00:00:00.000Z'},
+      {runId: 'run-2', repo: 'fro-bot/agent', status: 'blocked', createdAt: '2026-06-01T00:00:00.000Z'}, // invalid status
+      {runId: 'run-3', repo: 'fro-bot/agent', status: 'succeeded', createdAt: '2026-06-01T00:00:00.000Z'},
+    ]
+    const result = parseRunSummaryList(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      // Invalid item is skipped, valid ones are kept
+      expect(result.data).toHaveLength(2)
+      expect(result.data[0]?.runId).toBe('run-1')
+      expect(result.data[1]?.runId).toBe('run-3')
+    }
+  })
+
+  it('rejects a non-array input (object)', () => {
+    const result = parseRunSummaryList({runId: 'run-1', repo: 'fro-bot/agent', status: 'running', createdAt: '2026-06-01T00:00:00.000Z'})
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error.message).toBe('invalid run summary list: expected array')
+    }
+  })
+
+  it('rejects a non-array input (null)', () => {
+    const result = parseRunSummaryList(null)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.message).toBe('invalid run summary list: expected array')
+    }
+  })
+
+  it('rejects a non-array input (string)', () => {
+    const result = parseRunSummaryList('run-1')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.message).toBe('invalid run summary list: expected array')
+    }
+  })
+
+  it('returns empty array when all items are invalid', () => {
+    const input = [
+      {runId: 'run-1', repo: 'fro-bot/agent', status: 'blocked', createdAt: '2026-06-01T00:00:00.000Z'},
+      {runId: 'run-2', repo: 'fro-bot/agent', status: 'waiting_for_approval', createdAt: '2026-06-01T00:00:00.000Z'},
+    ]
+    const result = parseRunSummaryList(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toHaveLength(0)
     }
   })
 })

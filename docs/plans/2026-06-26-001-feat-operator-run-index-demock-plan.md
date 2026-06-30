@@ -159,7 +159,7 @@ All imports use the manual-load pattern that suppresses top-level auto-bootstrap
 
 ## Implementation Units
 
-- [ ] **Unit 1: Vendor run-summary contract**
+- [x] **Unit 1: Vendor run-summary contract**
 
 **Goal:** Add the dashboard-local contract shape needed to parse Gateway run summaries safely.
 
@@ -201,7 +201,7 @@ All imports use the manual-load pattern that suppresses top-level auto-bootstrap
 **Verification:**
 - Vendored contract tests prove the accepted shape, rejected shape, dedupe behavior, and unchanged version pin.
 
-- [ ] **Unit 2: Extend fixture harness with recent-runs listing**
+- [x] **Unit 2: Extend fixture harness with recent-runs listing**
 
 **Goal:** Give local fixture mode a synthetic `GET /runs` response so the run index can be tested without a live Gateway.
 
@@ -241,7 +241,7 @@ All imports use the manual-load pattern that suppresses top-level auto-bootstrap
 **Verification:**
 - Fixture harness tests prove the local endpoint can drive browser run-index development without exposing production routes.
 
-- [ ] **Unit 3: Prepare the active PWA shell and remove legacy fixture surfaces**
+- [x] **Unit 3: Prepare the active PWA shell and remove legacy fixture surfaces**
 
 **Goal:** Add stable run-index DOM anchors to the active React shell and prevent legacy compatibility paths from preserving fixture-only run/timeline surfaces.
 

@@ -475,3 +475,174 @@ describe('Operator — data-fixture-mode attribute for agent detection', () => {
     expect(shell?.getAttribute('data-fixture-mode')).toBe('true')
   })
 })
+
+
+// Recent-runs section presence
+
+describe('Operator — recent-runs section', () => {
+  it('ready state renders a recent-runs section', () => {
+    render(<Operator state="ready" />)
+    const section = document.querySelector('[data-testid="recent-runs-section"]')
+    expect(section).not.toBeNull()
+  })
+
+  it('recent-runs section appears before the launch form in DOM order', () => {
+    render(<Operator state="ready" />)
+    const allElements = Array.from(document.body.querySelectorAll('*'))
+    const runsSection = document.querySelector('[data-testid="recent-runs-section"]')
+    const launchForm = document.querySelector('#launch-form')
+    expect(runsSection).not.toBeNull()
+    expect(launchForm).not.toBeNull()
+    const runsIdx = allElements.indexOf(runsSection as Element)
+    const launchIdx = allElements.indexOf(launchForm as Element)
+    expect(runsIdx).toBeLessThan(launchIdx)
+  })
+
+  it('recent-runs section has a loading region with aria-live', () => {
+    render(<Operator state="ready" />)
+    const section = document.querySelector('[data-testid="recent-runs-section"]')
+    expect(section).not.toBeNull()
+    const liveRegion = section?.querySelector('[aria-live]')
+    expect(liveRegion).not.toBeNull()
+  })
+
+  it('recent-runs loading region does not imply whether runs exist', () => {
+    render(<Operator state="ready" />)
+    const section = document.querySelector('[data-testid="recent-runs-section"]')
+    const liveRegion = section?.querySelector('[aria-live]')
+    const text = liveRegion?.textContent ?? ''
+    // Must not assert presence or absence of runs — neutral loading copy only
+    expect(text).not.toMatch(/no runs/i)
+    expect(text).not.toMatch(/\d+ run/i)
+  })
+
+  it('recent-runs section has a stable hook for the run list', () => {
+    render(<Operator state="ready" />)
+    const listHook = document.querySelector('[data-role="run-index-list"]')
+    expect(listHook).not.toBeNull()
+  })
+
+  it('recent-runs section has a stable hook for loading state', () => {
+    render(<Operator state="ready" />)
+    const loadingHook = document.querySelector('[data-role="run-index-loading"]')
+    expect(loadingHook).not.toBeNull()
+  })
+
+  it('recent-runs section has a stable hook for empty state', () => {
+    render(<Operator state="ready" />)
+    const emptyHook = document.querySelector('[data-role="run-index-empty"]')
+    expect(emptyHook).not.toBeNull()
+  })
+
+  it('recent-runs section has a stable hook for unavailable state', () => {
+    render(<Operator state="ready" />)
+    const unavailableHook = document.querySelector('[data-role="run-index-unavailable"]')
+    expect(unavailableHook).not.toBeNull()
+  })
+
+  it('launch form is still present below recent-runs section', () => {
+    render(<Operator state="ready" />)
+    const launchForm = document.querySelector('#launch-form')
+    expect(launchForm).not.toBeNull()
+  })
+
+  it('run-status section is still present', () => {
+    render(<Operator state="ready" />)
+    const runStatusSection = document.querySelector('#run-status-section')
+    expect(runStatusSection).not.toBeNull()
+  })
+
+  it('recent-runs section is NOT rendered in non-ready states', () => {
+    render(<Operator state="loading" />)
+    const section = document.querySelector('[data-testid="recent-runs-section"]')
+    expect(section).toBeNull()
+  })
+})
+
+
+// Fixture-absence assertions for root PWA shell
+describe('Operator — fixture-absence: no fixture run IDs in root shell', () => {
+  const fixtureRunIds = [
+    'run-fixture-queued-001',
+    'run-fixture-running-002',
+    'run-fixture-approval-003',
+    'run-fixture-blocked-004',
+    'run-fixture-failed-005',
+    'run-fixture-cancelled-006',
+    'run-fixture-succeeded-007',
+  ]
+
+  for (const runId of fixtureRunIds) {
+    it(`root shell does not contain fixture run ID: ${runId}`, () => {
+      render(<Operator state="ready" />)
+      const text = document.body.textContent ?? ''
+      const html = document.body.innerHTML
+      expect(text).not.toContain(runId)
+      expect(html).not.toContain(runId)
+    })
+  }
+})
+
+describe('Operator — fixture-absence: no fixture timeline/stream tokens in root shell', () => {
+  it('root shell does not contain entityRef token', () => {
+    render(<Operator state="ready" />)
+    const html = document.body.innerHTML
+    expect(html).not.toContain('entityRef')
+  })
+
+  it('root shell does not contain contractVersion token', () => {
+    render(<Operator state="ready" />)
+    const html = document.body.innerHTML
+    expect(html).not.toContain('contractVersion')
+  })
+
+  it('root shell does not contain mock badge copy', () => {
+    render(<Operator state="ready" />)
+    const text = document.body.textContent ?? ''
+    expect(text).not.toContain('Mock skeleton')
+    expect(text).not.toContain('fixture data')
+    expect(text).not.toContain('fixture events')
+  })
+
+  it('root shell does not contain badge-mock class', () => {
+    render(<Operator state="ready" />)
+    const html = document.body.innerHTML
+    expect(html).not.toContain('badge-mock')
+  })
+})
+
+describe('Operator — fixture-absence: no sensitive fixture values in root shell', () => {
+  it('root shell does not contain fixture prompt', () => {
+    render(<Operator state="ready" />)
+    const text = document.body.textContent ?? ''
+    expect(text).not.toContain('[Fixture prompt — not rendered in UI]')
+  })
+
+  it('root shell does not contain fixture CSRF token', () => {
+    render(<Operator state="ready" />)
+    const html = document.body.innerHTML
+    expect(html).not.toContain('fixture-csrf-placeholder')
+  })
+
+  it('root shell does not contain fixture idempotency keys', () => {
+    render(<Operator state="ready" />)
+    const html = document.body.innerHTML
+    expect(html).not.toContain('fixture-idempotency-key-001')
+    expect(html).not.toContain('fixture-idempotency-key-002')
+  })
+
+  it('root shell does not contain fixture request ID', () => {
+    render(<Operator state="ready" />)
+    const html = document.body.innerHTML
+    expect(html).not.toContain('req-fixture-001')
+    expect(html).not.toContain('req-fixture-pending-001')
+  })
+
+  it('root shell does not contain fixture repo name in run card context', () => {
+    render(<Operator state="ready" />)
+    // The shell itself must not render fixture repo names in run cards
+    // (fixture-mode indicator may mention "synthetic" but not repo names)
+    const html = document.body.innerHTML
+    expect(html).not.toContain('run-fixture')
+  })
+})

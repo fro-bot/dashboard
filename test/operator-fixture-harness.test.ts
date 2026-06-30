@@ -956,6 +956,148 @@ describe('fixture repos — browser-compatible shape {owner, repo}', () => {
 })
 
 // ---------------------------------------------------------------------------
+// GET /__fixture/operator/runs — synthetic run index listing
+// ---------------------------------------------------------------------------
+
+describe('fixture runs index — GET /runs', () => {
+  it('returns 200 with a JSON array', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(Array.isArray(body)).toBe(true)
+  })
+
+  it('returns at least one run summary entry', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as unknown[]
+    expect(body.length).toBeGreaterThan(0)
+  })
+
+  it('each entry has runId, repo, status, and createdAt string fields', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
+    const body = await res.json() as Record<string, unknown>[]
+    for (const entry of body) {
+      expect(typeof entry.runId).toBe('string')
+      expect(typeof entry.repo).toBe('string')
+      expect(typeof entry.status).toBe('string')
+      expect(typeof entry.createdAt).toBe('string')
+    }
+  })
+
+  it('updatedAt is absent on some entries and a string when present', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
+    const body = await res.json() as Record<string, unknown>[]
+    // At least one entry must have updatedAt absent
+    const withoutUpdatedAt = body.filter(e => !('updatedAt' in e))
+    expect(withoutUpdatedAt.length).toBeGreaterThan(0)
+    // Any entry that has updatedAt must be a string
+    for (const entry of body) {
+      if ('updatedAt' in entry) {
+        expect(typeof entry.updatedAt).toBe('string')
+      }
+    }
+  })
+
+  it('statuses use only the five index summary values', async () => {
+    const ALLOWED_INDEX_STATUSES = new Set(['queued', 'running', 'succeeded', 'failed', 'cancelled'])
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
+    const body = await res.json() as Record<string, unknown>[]
+    for (const entry of body) {
+      expect(ALLOWED_INDEX_STATUSES.has(entry.status as string)).toBe(true)
+    }
+  })
+
+  it('statuses do NOT include stream-only values (blocked, waiting_for_approval)', async () => {
+    const STREAM_ONLY_STATUSES = new Set(['blocked', 'waiting_for_approval'])
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
+    const body = await res.json() as Record<string, unknown>[]
+    for (const entry of body) {
+      expect(STREAM_ONLY_STATUSES.has(entry.status as string)).toBe(false)
+    }
+  })
+
+  it('all runId values are fixture-prefixed (not UUID-shaped)', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
+    const body = await res.json() as Record<string, unknown>[]
+    for (const entry of body) {
+      expect(String(entry.runId)).toMatch(/^run-fixture-/)
+    }
+  })
+
+  it('all repo values are fixture-prefixed (no real repo names)', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
+    const body = await res.json() as Record<string, unknown>[]
+    for (const entry of body) {
+      expect(String(entry.repo)).toMatch(/fixture/)
+    }
+  })
+
+  it('response has Cache-Control: no-store', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('cache-control') ?? '').toContain('no-store')
+  })
+
+  it('response contains no real workspace paths, tokens, cookies, or CSRF values', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
+    const text = await res.text()
+    expect(text).not.toMatch(/Bearer\s+[\w\-.~+/]+=*/i)
+    expect(text).not.toMatch(/__Host-/)
+    expect(text).not.toMatch(/\/(?:home|Users|workspace|workspaces|var\/run|tmp)\/[\w.-]+\/[\w.-]/)
+    expect(text).not.toMatch(/\brun-[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}\b/i)
+  })
+
+  it('entries contain only allowed fields (no extra sensitive fields)', async () => {
+    const ALLOWED_FIELDS = new Set(['runId', 'repo', 'status', 'createdAt', 'updatedAt'])
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
+    const body = await res.json() as Record<string, unknown>[]
+    for (const entry of body) {
+      for (const key of Object.keys(entry)) {
+        expect(ALLOWED_FIELDS.has(key)).toBe(true)
+      }
+    }
+  })
+
+  it('is reachable without auth when fixture flag is on', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
+    expect(res.status).toBe(200)
+  })
+
+  it('returns 404 when fixture flag is off', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: false})
+    const res = await authedGet(app, `${FIXTURE_OPERATOR_PREFIX}/runs`)
+    expect(res.status).toBe(404)
+  })
+})
+
+describe('fixture runs index — GET /operator/runs still absent from dashboard', () => {
+  it('GET /operator/runs returns 404 (not proxied) even when fixture harness is active', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await authedGet(app, '/operator/runs')
+    expect(res.status).toBe(404)
+  })
+
+  it('GET /operator/runs returns 404 when fixture harness is off', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: false})
+    const res = await authedGet(app, '/operator/runs')
+    expect(res.status).toBe(404)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // NODE_ENV guard — fail closed unless explicitly development or test
 // ---------------------------------------------------------------------------
 

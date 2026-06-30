@@ -633,3 +633,82 @@ describe('operator UI — credential-domain: /operator redirect contains no back
     expect(csrf.status).toBe(404)
   })
 })
+
+// Fixture-absence assertions — /operator redirect and SPA shell
+
+describe('operator UI — fixture-absence: /operator redirect body', () => {
+  const fixtureRunIds = [
+    'run-fixture-queued-001',
+    'run-fixture-running-002',
+    'run-fixture-approval-003',
+    'run-fixture-blocked-004',
+    'run-fixture-failed-005',
+    'run-fixture-cancelled-006',
+    'run-fixture-succeeded-007',
+  ]
+
+  for (const runId of fixtureRunIds) {
+    it(`/operator redirect body does not contain fixture run ID: ${runId}`, async () => {
+      const app = await buildTestApp(true)
+      const res = await authedGet(app, '/operator')
+      expect([302, 303]).toContain(res.status)
+      const body = await res.text()
+      expect(body).not.toContain(runId)
+    })
+  }
+
+  it('/operator redirect body does not contain fixture request ID', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect([302, 303]).toContain(res.status)
+    const body = await res.text()
+    expect(body).not.toContain('req-fixture-001')
+    expect(body).not.toContain('req-fixture-pending-001')
+  })
+
+  it('/operator redirect body does not contain timeline tokens (entityRef, contractVersion)', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect([302, 303]).toContain(res.status)
+    const body = await res.text()
+    expect(body).not.toContain('entityRef')
+    expect(body).not.toContain('contractVersion')
+  })
+
+  it('/operator redirect body does not contain mock badge copy', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect([302, 303]).toContain(res.status)
+    const body = await res.text()
+    expect(body).not.toContain('Mock skeleton')
+    expect(body).not.toContain('badge-mock')
+    expect(body).not.toContain('fixture data')
+    expect(body).not.toContain('fixture events')
+  })
+
+  it('/operator redirect body does not contain fixture run cards or timeline sections', async () => {
+    const app = await buildTestApp(true)
+    const res = await authedGet(app, '/operator')
+    expect([302, 303]).toContain(res.status)
+    const body = await res.text()
+    expect(body).not.toContain('run-card')
+    expect(body).not.toContain('run-status-section')
+    expect(body).not.toContain('timeline-heading')
+    expect(body).not.toContain('Run Event Timeline')
+  })
+})
+
+describe('operator UI — fixture-absence: GET /operator/runs returns 404 (no-proxy invariant)', () => {
+  it('GET /operator/runs returns 404 from buildDashboardApp (not proxied)', async () => {
+    const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
+    const app = await buildTestApp({
+      operatorUiEnabled: true,
+      gatewayOperatorSessionEnabled: true,
+      operatorClient,
+    })
+    const res = await app.request('/operator/runs', {
+      headers: {cookie: 'gateway_session=test-gateway-cookie'},
+    })
+    expect(res.status).toBe(404)
+  })
+})
