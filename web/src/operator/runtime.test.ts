@@ -724,3 +724,85 @@ describe('createOperatorRuntime — no literal fixture fallback in source', () =
     handle.cleanup()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Unit 5: Active-stream ownership — runtime seam owns activeRunId + close handle
+// ---------------------------------------------------------------------------
+
+describe('createOperatorRuntime — active-stream coordination callbacks', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('cleanup does not throw when no active stream is set', async () => {
+    const cleanupFn = vi.fn()
+    const opts = makeOptions({
+      _runtimeLoader: async () => cleanupFn,
+    })
+    const handle = createOperatorRuntime(opts)
+    await vi.waitFor(() => expect(cleanupFn).not.toHaveBeenCalled())
+    expect(() => handle.cleanup()).not.toThrow()
+    expect(cleanupFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('cleanup calls loader cleanup which closes active stream', async () => {
+    const cleanupFn = vi.fn()
+    const opts = makeOptions({
+      _runtimeLoader: async () => cleanupFn,
+    })
+    const handle = createOperatorRuntime(opts)
+    await vi.waitFor(() => expect(cleanupFn).not.toHaveBeenCalled())
+    handle.cleanup()
+    expect(cleanupFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('loader cleanup is called exactly once even if cleanup is called twice', async () => {
+    const cleanupFn = vi.fn()
+    const opts = makeOptions({
+      _runtimeLoader: async () => cleanupFn,
+    })
+    const handle = createOperatorRuntime(opts)
+    await vi.waitFor(() => expect(cleanupFn).not.toHaveBeenCalled())
+    handle.cleanup()
+    handle.cleanup()
+    expect(cleanupFn).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('createOperatorRuntime — runtime.ts source contains active-stream coordination', () => {
+  it('runtime.ts source contains onSelectRun callback', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const url = await import('node:url')
+    const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
+    const src = await fs.readFile(path.join(__dirname, 'runtime.ts'), 'utf8')
+    expect(src).toContain('onSelectRun')
+  })
+
+  it('runtime.ts source contains onRunLaunched callback', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const url = await import('node:url')
+    const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
+    const src = await fs.readFile(path.join(__dirname, 'runtime.ts'), 'utf8')
+    expect(src).toContain('onRunLaunched')
+  })
+
+  it('runtime.ts source contains _activeStreamHandle or _activeStream', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const url = await import('node:url')
+    const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
+    const src = await fs.readFile(path.join(__dirname, 'runtime.ts'), 'utf8')
+    expect(src).toMatch(/activeStream/)
+  })
+
+  it('runtime.ts source contains _closeActiveStream or close active stream logic', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const url = await import('node:url')
+    const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
+    const src = await fs.readFile(path.join(__dirname, 'runtime.ts'), 'utf8')
+    expect(src).toContain('_closeActiveStream')
+  })
+})

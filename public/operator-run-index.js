@@ -160,20 +160,35 @@ export async function fetchRunIndex(opts) {
 let _runIndexGeneration = 0
 let _runIndexInitialized = false
 
+// Tracks runIds that have an active stream attached. Once a runId is in this set,
+// subsequent card clicks for that runId do not re-trigger onSelectRun (index is seed only).
+const _streamAttachedRunIds = new Set()
+
 function isRunIndexInitStale(generation) {
   return generation !== _runIndexGeneration
+}
+
+/**
+ * Mark a runId as stream-attached. Called by the runtime seam after attaching a stream.
+ * Once marked, card clicks for this runId will not re-trigger onSelectRun.
+ * Exported so the runtime seam can call it after initOperatorStream succeeds.
+ */
+export function markRunStreamAttached(runId) {
+  _streamAttachedRunIds.add(runId)
 }
 
 /** Increment generation to invalidate pending inits. Called by the React runtime seam cleanup. */
 export function resetRunIndexState() {
   _runIndexGeneration++
   _runIndexInitialized = false
+  _streamAttachedRunIds.clear()
 }
 
 export async function initOperatorRunIndex(opts) {
   const myGeneration = ++_runIndexGeneration
 
   const endpointBase = opts?.endpointBase ?? '/operator'
+  const onSelectRun = opts?.onSelectRun
 
   if (isRunIndexInitStale(myGeneration)) return
   if (typeof document === 'undefined') return
@@ -214,7 +229,12 @@ export async function initOperatorRunIndex(opts) {
 
     for (const summary of summaries) {
       const view = buildRunSafeView(summary)
-      const card = renderRunCard(view)
+
+      // Skip if a card for this runId already exists (e.g. launch-created optimistic card).
+      const existing = document.querySelector(`[data-run-id="${CSS.escape(view.runId)}"]`)
+      if (existing !== null) continue
+
+      const card = renderRunCard(view, onSelectRun)
       runIndexList.append(card)
     }
   }
@@ -225,7 +245,7 @@ export async function initOperatorRunIndex(opts) {
 }
 
 /** Safe DOM writes only — no innerHTML for Gateway content. */
-function renderRunCard(view) {
+function renderRunCard(view, onSelectRun) {
   const card = document.createElement('div')
   card.className = 'run-card'
   card.tabIndex = 0
@@ -254,6 +274,21 @@ function renderRunCard(view) {
     timeEl.setAttribute('datetime', view.updatedAt)
     timeEl.textContent = view.updatedAt
     card.append(timeEl)
+  }
+
+  // Wire click and keyboard activation to onSelectRun. Guard: skip if already stream-attached.
+  if (typeof onSelectRun === 'function') {
+    const runId = view.runId
+    card.addEventListener('click', () => {
+      if (_streamAttachedRunIds.has(runId)) return
+      onSelectRun(runId)
+    })
+    card.addEventListener('keydown', e => {
+      if (e.key !== 'Enter' && e.key !== ' ') return
+      if (e.key === ' ') e.preventDefault()
+      if (_streamAttachedRunIds.has(runId)) return
+      onSelectRun(runId)
+    })
   }
 
   return card

@@ -47,7 +47,15 @@ export declare function fetchRunIndex(opts: {endpointBase?: string}): Promise<Ru
 /** Increment generation to invalidate pending inits. Called by the React runtime seam cleanup. */
 export declare function resetRunIndexState(): void
 
+/**
+ * Mark a runId as stream-attached. Called by the runtime seam after attaching a stream.
+ * Once marked, card clicks for this runId will not re-trigger onSelectRun.
+ */
+export declare function markRunStreamAttached(runId: string): void
+
 export declare function initOperatorRunIndex(opts?: {
   endpointBase?: string
   fixtureSessionId?: string
+  /** Called when a run card is selected. Runtime seam owns stream attachment. */
+  onSelectRun?: (runId: string) => void
 }): Promise<void>

@@ -340,7 +340,7 @@ All imports use the manual-load pattern that suppresses top-level auto-bootstrap
 **Verification:**
 - Browser-core and runtime tests cover parsing, state transitions, DOM descriptors, cap/dedupe, unavailable behavior, fixture endpoint routing, and cleanup.
 
-- [ ] **Unit 5: Preserve stream and launch lifecycle semantics**
+- [x] **Unit 5: Preserve stream and launch lifecycle semantics**
 
 **Goal:** Make index-listed runs and launched runs converge on the same live stream behavior with centralized active-stream ownership.
 

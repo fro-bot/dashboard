@@ -129,14 +129,32 @@ const _streamSpecifier = '/static/operator-stream.js' + '?manual=1'
 const _launchSpecifier = '/static/operator-launch.js' + '?manual=1'
 const _runIndexSpecifier = '/static/operator-run-index.js' + '?manual=1'
 
+// Active-stream state owned by the runtime seam.
+// Only one stream is active at a time; switching cards closes the prior handle first.
+let _activeStreamHandle: {close(): void} | null = null
+
+function _closeActiveStream(): void {
+  if (_activeStreamHandle !== null) {
+    try {
+      _activeStreamHandle.close()
+    } catch {
+      // ignore close errors
+    }
+    _activeStreamHandle = null
+  }
+}
+
 async function defaultRuntimeLoader(opts?: {
   endpointBase?: string
   fixtureSessionId?: string
   getScenario?: () => string
+  onSelectRun?: (runId: string) => void
+  onRunLaunched?: (runId: string, card: HTMLElement) => void
 }): Promise<() => void> {
   const streamMod = await import(/* @vite-ignore */ _streamSpecifier) as {
     bootstrapOperatorStreams?: (opts?: {endpointBase?: string; fixtureSessionId?: string}) => void
     resetBootstrapState?: () => void
+    initOperatorStream?: (opts: {runId: string; statusEl?: Element | null; noticeEl?: Element | null; endpointBase?: string; fixtureSessionId?: string}) => {close(): void}
   }
   if (typeof streamMod.resetBootstrapState === 'function') {
     streamMod.resetBootstrapState()
@@ -148,35 +166,94 @@ async function defaultRuntimeLoader(opts?: {
     streamMod.bootstrapOperatorStreams(streamOpts)
   }
 
-  const launchMod = await import(/* @vite-ignore */ _launchSpecifier) as {
-    initOperatorLaunch?: (opts?: {endpointBase?: string; getScenario?: () => string; fixtureSessionId?: string}) => Promise<void>
-    resetLaunchState?: () => void
-  }
-  if (typeof launchMod.resetLaunchState === 'function') {
-    launchMod.resetLaunchState()
-  }
-  if (typeof launchMod.initOperatorLaunch === 'function') {
-    const launchOpts = opts?.endpointBase !== undefined
-      ? {endpointBase: opts.endpointBase, getScenario: opts.getScenario, fixtureSessionId: opts.fixtureSessionId}
-      : undefined
-    await launchMod.initOperatorLaunch(launchOpts)
+  const runIndexMod = await import(/* @vite-ignore */ _runIndexSpecifier) as {
+    initOperatorRunIndex?: (opts?: {endpointBase?: string; fixtureSessionId?: string; onSelectRun?: (runId: string) => void}) => Promise<void>
+    resetRunIndexState?: () => void
+    markRunStreamAttached?: (runId: string) => void
   }
 
-  const runIndexMod = await import(/* @vite-ignore */ _runIndexSpecifier) as {
-    initOperatorRunIndex?: (opts?: {endpointBase?: string; fixtureSessionId?: string}) => Promise<void>
-    resetRunIndexState?: () => void
+  const launchMod = await import(/* @vite-ignore */ _launchSpecifier) as {
+    initOperatorLaunch?: (opts?: {endpointBase?: string; getScenario?: () => string; fixtureSessionId?: string; onRunLaunched?: (runId: string, card: HTMLElement) => void}) => Promise<void>
+    resetLaunchState?: () => void
   }
+
+  // Build the active-stream coordination callbacks. These are passed to run-index and
+  // launch modules so the runtime seam owns the single active stream handle.
+  const onSelectRun = (runId: string) => {
+    // Close prior stream before attaching the new one.
+    _closeActiveStream()
+
+    if (typeof streamMod.initOperatorStream === 'function') {
+      // Find the card element for this runId to get its statusEl and noticeEl.
+      const card = typeof document !== 'undefined'
+        ? document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
+        : null
+      const statusEl = card?.querySelector('[data-role="run-status"]') ?? null
+      const noticeEl = typeof document !== 'undefined'
+        ? document.querySelector('[data-role="stream-status"]')
+        : null
+      const handle = streamMod.initOperatorStream({
+        runId,
+        statusEl,
+        noticeEl,
+        endpointBase: opts?.endpointBase,
+        fixtureSessionId: opts?.fixtureSessionId,
+      })
+      _activeStreamHandle = handle
+      // Mark as stream-attached so index ignores later index-derived updates for this runId.
+      if (typeof runIndexMod.markRunStreamAttached === 'function') {
+        runIndexMod.markRunStreamAttached(runId)
+      }
+    }
+  }
+
+  const onRunLaunched = (runId: string, card: HTMLElement) => {
+    // Close prior stream before attaching the new one.
+    _closeActiveStream()
+
+    if (typeof streamMod.initOperatorStream === 'function') {
+      const statusEl = card.querySelector('[data-role="run-status"]') ?? null
+      const noticeEl = typeof document !== 'undefined'
+        ? document.querySelector('[data-role="stream-status"]')
+        : null
+      const handle = streamMod.initOperatorStream({
+        runId,
+        statusEl,
+        noticeEl,
+        endpointBase: opts?.endpointBase,
+        fixtureSessionId: opts?.fixtureSessionId,
+      })
+      _activeStreamHandle = handle
+      // Mark as stream-attached so index ignores later index-derived updates for this runId.
+      if (typeof runIndexMod.markRunStreamAttached === 'function') {
+        runIndexMod.markRunStreamAttached(runId)
+      }
+    }
+  }
+
   if (typeof runIndexMod.resetRunIndexState === 'function') {
     runIndexMod.resetRunIndexState()
   }
   if (typeof runIndexMod.initOperatorRunIndex === 'function') {
     const runIndexOpts = opts?.endpointBase !== undefined
-      ? {endpointBase: opts.endpointBase, fixtureSessionId: opts.fixtureSessionId}
-      : undefined
+      ? {endpointBase: opts.endpointBase, fixtureSessionId: opts.fixtureSessionId, onSelectRun}
+      : {onSelectRun}
     await runIndexMod.initOperatorRunIndex(runIndexOpts)
   }
 
+  if (typeof launchMod.resetLaunchState === 'function') {
+    launchMod.resetLaunchState()
+  }
+  if (typeof launchMod.initOperatorLaunch === 'function') {
+    const launchOpts = opts?.endpointBase !== undefined
+      ? {endpointBase: opts.endpointBase, getScenario: opts.getScenario, fixtureSessionId: opts.fixtureSessionId, onRunLaunched}
+      : {onRunLaunched}
+    await launchMod.initOperatorLaunch(launchOpts)
+  }
+
   return () => {
+    // Close the active stream handle on cleanup.
+    _closeActiveStream()
     if (typeof streamMod.resetBootstrapState === 'function') {
       streamMod.resetBootstrapState()
     }

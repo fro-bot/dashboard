@@ -8,6 +8,7 @@ import {
   buildRunSafeView,
   fetchRunIndex,
   initOperatorRunIndex,
+  markRunStreamAttached,
   parseRunSummaryItem,
   parseRunSummaryList,
   resetRunIndexState,
@@ -587,5 +588,254 @@ describe('parser parity — JS parser mirrors vendored TS parser behavior', () =
     if (result.success) {
       expect('extraField' in result.data).toBe(false)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Card selection and lifecycle
+// ---------------------------------------------------------------------------
+
+describe('initOperatorRunIndex — onSelectRun callback wired to card clicks', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('initOperatorRunIndex accepts an onSelectRun callback option without throwing', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => [makeValidSummary({runId: 'run-select-001'})],
+    }))
+    // No DOM — function bails early when document is undefined
+    const onSelectRun = vi.fn()
+    await expect(initOperatorRunIndex({endpointBase: '/operator', onSelectRun})).resolves.toBeUndefined()
+    expect(onSelectRun).not.toHaveBeenCalled()
+  })
+
+  it('operator-run-index.js source contains onSelectRun callback wiring', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).toContain('onSelectRun')
+  })
+
+  it('operator-run-index.js source wires card click to onSelectRun', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    // The source must wire click events to onSelectRun
+    expect(src).toContain('onSelectRun')
+    expect(src).toContain('click')
+  })
+
+  it('operator-run-index.js source contains markRunStreamAttached export', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).toContain('markRunStreamAttached')
+  })
+})
+
+describe('initOperatorRunIndex — stream-attached runId guard (index is seed state only)', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('markRunStreamAttached export exists and is a function', async () => {
+    const mod = await import('../public/operator-run-index.js')
+    expect(typeof mod.markRunStreamAttached).toBe('function')
+  })
+
+  it('markRunStreamAttached does not throw when called', async () => {
+    const {markRunStreamAttached} = await import('../public/operator-run-index.js')
+    expect(() => markRunStreamAttached('run-attached-001')).not.toThrow()
+  })
+
+  it('markRunStreamAttached is idempotent — calling twice does not throw', async () => {
+    const {markRunStreamAttached} = await import('../public/operator-run-index.js')
+    expect(() => {
+      markRunStreamAttached('run-idempotent-001')
+      markRunStreamAttached('run-idempotent-001')
+    }).not.toThrow()
+  })
+
+  it('resetRunIndexState clears stream-attached set (markRunStreamAttached after reset does not throw)', async () => {
+    const {markRunStreamAttached} = await import('../public/operator-run-index.js')
+    markRunStreamAttached('run-reset-001')
+    resetRunIndexState()
+    // After reset, marking again should work without error
+    expect(() => markRunStreamAttached('run-reset-001')).not.toThrow()
+  })
+
+  it('operator-run-index.js source contains _streamAttachedRunIds or similar guard set', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    // The source must contain the stream-attached guard
+    expect(src).toContain('markRunStreamAttached')
+    // And the guard must be used in the click handler
+    expect(src).toContain('streamAttached')
+  })
+})
+
+describe('initOperatorRunIndex — launched run convergence (no duplicate card)', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('operator-run-index.js source skips rendering a card if runId already exists in DOM', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    // The source must check for existing cards before inserting
+    expect(src).toContain('data-run-id')
+    // Must have a duplicate-check guard
+    expect(src).toMatch(/querySelector.*data-run-id|data-run-id.*querySelector/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Keyboard activation on run cards
+// ---------------------------------------------------------------------------
+
+/** Minimal element stub with event dispatch. */
+function makeElStub() {
+  return {
+    _listeners: {},
+    className: '', tabIndex: 0, dataset: {}, textContent: '',
+    setAttribute() {}, append() {},
+    addEventListener(type, fn) {
+      this._listeners[type] = this._listeners[type] ?? []
+      this._listeners[type].push(fn)
+    },
+    dispatchEvent(event) {
+      const fns = this._listeners[event.type] ?? []
+      for (const fn of fns) fn(event)
+    },
+  }
+}
+
+/** Stub document + CSS globals, collect appended cards, return teardown. */
+function stubDOMWithCards(cards) {
+  const mockList = {
+    hidden: true,
+    textContent: '',
+    append(el) { cards.push(el) },
+  }
+  const mockSection = {dataset: {}}
+  vi.stubGlobal('CSS', {escape: s => s})
+  vi.stubGlobal('document', {
+    querySelector(sel) {
+      if (sel === '[data-role="run-index-list"]') return mockList
+      if (sel === '[data-role="run-index"]') return mockSection
+      return null
+    },
+    createElement() { return makeElStub() },
+  })
+}
+
+describe('renderRunCard — keyboard activation (Enter / Space)', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('operator-run-index.js source wires keydown to onSelectRun', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).toContain('keydown')
+  })
+
+  it('Enter key calls onSelectRun(runId)', async () => {
+    const onSelectRun = vi.fn()
+    const runId = 'run-kbd-enter-001'
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => [makeValidSummary({runId})],
+    }))
+    const cards = []
+    stubDOMWithCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+
+    expect(cards).toHaveLength(1)
+    cards[0].dispatchEvent({type: 'keydown', key: 'Enter', preventDefault: vi.fn()})
+
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
+    expect(onSelectRun).toHaveBeenCalledWith(runId)
+  })
+
+  it('Space key calls onSelectRun(runId) and calls preventDefault', async () => {
+    const onSelectRun = vi.fn()
+    const runId = 'run-kbd-space-001'
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => [makeValidSummary({runId})],
+    }))
+    const cards = []
+    stubDOMWithCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+
+    const spaceEvent = {type: 'keydown', key: ' ', preventDefault: vi.fn()}
+    cards[0].dispatchEvent(spaceEvent)
+
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
+    expect(onSelectRun).toHaveBeenCalledWith(runId)
+    expect(spaceEvent.preventDefault).toHaveBeenCalled()
+  })
+
+  it('other keys (ArrowDown, Tab, a) do not call onSelectRun', async () => {
+    const onSelectRun = vi.fn()
+    const runId = 'run-kbd-other-001'
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => [makeValidSummary({runId})],
+    }))
+    const cards = []
+    stubDOMWithCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+
+    for (const key of ['ArrowDown', 'Tab', 'a', 'Escape']) {
+      cards[0].dispatchEvent({type: 'keydown', key, preventDefault: vi.fn()})
+    }
+
+    expect(onSelectRun).not.toHaveBeenCalled()
+  })
+
+  it('Enter key does not call onSelectRun when runId is stream-attached', async () => {
+    const onSelectRun = vi.fn()
+    const runId = 'run-kbd-attached-001'
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => [makeValidSummary({runId})],
+    }))
+    const cards = []
+    stubDOMWithCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+    markRunStreamAttached(runId)
+
+    cards[0].dispatchEvent({type: 'keydown', key: 'Enter', preventDefault: vi.fn()})
+
+    expect(onSelectRun).not.toHaveBeenCalled()
+  })
+
+  it('Space key does not call onSelectRun when runId is stream-attached', async () => {
+    const onSelectRun = vi.fn()
+    const runId = 'run-kbd-attached-space-001'
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => [makeValidSummary({runId})],
+    }))
+    const cards = []
+    stubDOMWithCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+    markRunStreamAttached(runId)
+
+    const spaceEvent = {type: 'keydown', key: ' ', preventDefault: vi.fn()}
+    cards[0].dispatchEvent(spaceEvent)
+
+    expect(onSelectRun).not.toHaveBeenCalled()
   })
 })

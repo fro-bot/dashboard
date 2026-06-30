@@ -5067,3 +5067,171 @@ describe('buildApprovalClient — fixtureSessionId propagated to approval reques
     expect(capturedUrl).not.toContain('fixtureSessionId')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Late-frame guard — closed stream must not mutate shared noticeEl
+// ---------------------------------------------------------------------------
+
+describe('initOperatorStream — late-frame guard: closed stream does not mutate shared noticeEl', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('after close(), updateDOM does not write to noticeEl (shared notice guard)', async () => {
+    // Use fake DOM objects (no real document needed — test environment has no jsdom)
+    const noticeEl = {
+      textContent: 'Card B stream active',
+      hidden: false,
+      dataset: {connectionState: ''},
+    }
+
+    let resolveStream: ((value: {done: boolean; value?: Uint8Array}) => void) | undefined
+    const streamPromise = new Promise<{done: boolean; value?: Uint8Array}>(resolve => {
+      resolveStream = resolve
+    })
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {
+        getReader: () => ({
+          read: async () => streamPromise,
+        }),
+      },
+    }))
+
+    const statusEl = {textContent: 'Pending', className: '', classList: {add: () => {}}, dataset: {}, hidden: false}
+
+    const handle = initOperatorStream({
+      runId: 'run-card-a',
+      statusEl,
+      noticeEl,
+      endpointBase: '/operator',
+    })
+
+    // Close the stream (simulating card switch to card B)
+    handle.close()
+
+    // Resolve the stream reader with done=true (simulating stream end after close)
+    resolveStream?.({done: true})
+
+    // Give microtasks time to settle
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    // noticeEl should not have been mutated by the closed stream
+    // (it should still say 'Card B stream active' — not a stream state message)
+    const streamStateMessages = [
+      'Connecting to run stream',
+      'Stream version mismatch',
+      'Run stream unavailable',
+      'Stream temporarily unavailable',
+      'Stream connection failed',
+      'Run submitted',
+      'Run stream ended',
+    ]
+    const currentText = noticeEl.textContent ?? ''
+    for (const msg of streamStateMessages) {
+      expect(currentText, `noticeEl should not contain "${msg}" after close`).not.toContain(msg)
+    }
+  })
+
+  it('after close(), statusEl is not updated by late frames', async () => {
+    const noticeEl = {textContent: '', hidden: false, dataset: {connectionState: ''}}
+
+    let resolveStream: ((value: {done: boolean; value?: Uint8Array}) => void) | undefined
+    const streamPromise = new Promise<{done: boolean; value?: Uint8Array}>(resolve => {
+      resolveStream = resolve
+    })
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {
+        getReader: () => ({
+          read: async () => streamPromise,
+        }),
+      },
+    }))
+
+    const statusEl = {textContent: 'Pending', className: '', classList: {add: () => {}}, dataset: {}, hidden: false}
+
+    const handle = initOperatorStream({
+      runId: 'run-card-a-status',
+      statusEl,
+      noticeEl,
+      endpointBase: '/operator',
+    })
+
+    // Close the stream
+    handle.close()
+
+    const statusBefore = statusEl.textContent
+
+    // Resolve with done
+    resolveStream?.({done: true})
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    // statusEl should not have been updated to a stream-derived label after close
+    expect(statusEl.textContent).toBe(statusBefore)
+  })
+})
+
+describe('initOperatorStream — terminal run: immediate close preserves terminal state', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('terminal status frame before close preserves terminal state in statusEl', async () => {
+    const noticeEl = {textContent: '', hidden: false, dataset: {connectionState: ''}}
+
+    const encoder = new TextEncoder()
+    const readyFrame = 'event: ready\ndata: {"contractVersion":"1.5.0"}\n\n'
+    const terminalFrame = `event: status\ndata: ${JSON.stringify({
+      runId: 'run-terminal-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'COMPLETED',
+      status: 'succeeded',
+      startedAt: '2026-06-26T10:00:00Z',
+      stale: false,
+    })}\n\n`
+
+    let readCount = 0
+    const chunks = [encoder.encode(readyFrame + terminalFrame)]
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (readCount < chunks.length) {
+              return {done: false, value: chunks[readCount++]}
+            }
+            return {done: true}
+          },
+        }),
+      },
+    }))
+
+    const statusEl = {textContent: 'Pending', className: '', classList: {add: () => {}}, dataset: {}, hidden: false}
+
+    initOperatorStream({
+      runId: 'run-terminal-001',
+      statusEl,
+      noticeEl,
+      endpointBase: '/operator',
+    })
+
+    // Wait for stream to process
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    // Terminal status should be reflected in statusEl
+    expect(statusEl.textContent).toBe('Succeeded')
+    // noticeEl should be hidden (terminal run, stream closed cleanly)
+    expect(noticeEl.hidden).toBe(true)
+  })
+})

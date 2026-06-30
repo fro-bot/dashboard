@@ -428,6 +428,11 @@ export async function initOperatorLaunch(opts) {
   // is only set once this init wins the generation race and registers its listener.
   const abortController = new AbortController()
 
+  // onRunLaunched: optional callback from the runtime seam. When provided, the runtime
+  // seam owns stream attachment and the launch module delegates to it instead of calling
+  // initOperatorStream directly. This centralizes active-stream ownership in the runtime.
+  const onRunLaunched = opts?.onRunLaunched
+
   const {initOperatorStream} = await import(streamModuleSpecifier())
 
   // Guard: bail if a reset or newer init has superseded this one while we awaited.
@@ -606,11 +611,16 @@ export async function initOperatorLaunch(opts) {
           card.append(statusSpan)
           runStatusSection.append(card)
 
-          // Wire the SSE stream directly — do NOT re-run bootstrapOperatorStreams.
-          // Store the returned handle so resetLaunchState() can close it on cleanup.
-          const statusEl = card.querySelector('[data-role="run-status"]')
-          const streamHandle = initOperatorStream({runId, statusEl, noticeEl: sharedNoticeEl, endpointBase: opts?.endpointBase, fixtureSessionId: opts?.fixtureSessionId})
-          setLaunchStreamHandle(streamHandle)
+          if (typeof onRunLaunched === 'function') {
+            // Delegate stream attachment to the runtime seam (centralized ownership).
+            // The runtime seam will close any prior stream and attach the new one.
+            onRunLaunched(runId, card)
+          } else {
+            // Legacy path: no runtime callback — attach stream directly and store handle.
+            const statusEl = card.querySelector('[data-role="run-status"]')
+            const streamHandle = initOperatorStream({runId, statusEl, noticeEl: sharedNoticeEl, endpointBase: opts?.endpointBase, fixtureSessionId: opts?.fixtureSessionId})
+            setLaunchStreamHandle(streamHandle)
+          }
         }
 
         // Reset the form
