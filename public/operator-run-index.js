@@ -175,9 +175,9 @@ export async function fetchRunIndex(opts) {
 let _runIndexGeneration = 0
 let _runIndexInitialized = false
 
-// Tracks runIds that have an active stream attached. Once a runId is in this set,
-// subsequent card clicks for that runId do not re-trigger onSelectRun (index is seed only).
-const _streamAttachedRunIds = new Set()
+// Tracks the single runId that currently has an active stream attached.
+// Only this run's card is inert; switching to a new run clears the previous card's state.
+let _activeStreamRunId = null
 
 function isRunIndexInitStale(generation) {
   return generation !== _runIndexGeneration
@@ -189,7 +189,12 @@ function isRunIndexInitStale(generation) {
  * Exported so the runtime seam can call it after initOperatorStream succeeds.
  */
 export function markRunStreamAttached(runId) {
-  _streamAttachedRunIds.add(runId)
+  // Unmark the previously active run's card before marking the new one.
+  if (_activeStreamRunId !== null && _activeStreamRunId !== runId && typeof document !== 'undefined') {
+    const prev = document.querySelector(`[data-run-id="${CSS.escape(_activeStreamRunId)}"]`)
+    if (prev !== null) delete prev.dataset.streamAttached
+  }
+  _activeStreamRunId = runId
   if (typeof document !== 'undefined') {
     const card = document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
     if (card !== null) card.dataset.streamAttached = 'true'
@@ -200,13 +205,11 @@ export function markRunStreamAttached(runId) {
 export function resetRunIndexState() {
   _runIndexGeneration++
   _runIndexInitialized = false
-  if (typeof document !== 'undefined') {
-    for (const runId of _streamAttachedRunIds) {
-      const card = document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
-      if (card !== null) delete card.dataset.streamAttached
-    }
+  if (typeof document !== 'undefined' && _activeStreamRunId !== null) {
+    const card = document.querySelector(`[data-run-id="${CSS.escape(_activeStreamRunId)}"]`)
+    if (card !== null) delete card.dataset.streamAttached
   }
-  _streamAttachedRunIds.clear()
+  _activeStreamRunId = null
 }
 
 export async function initOperatorRunIndex(opts) {
@@ -309,13 +312,13 @@ function renderRunCard(view, onSelectRun) {
   if (typeof onSelectRun === 'function') {
     const runId = view.runId
     card.addEventListener('click', () => {
-      if (_streamAttachedRunIds.has(runId)) return
+      if (_activeStreamRunId === runId) return
       onSelectRun(runId)
     })
     card.addEventListener('keydown', e => {
       if (e.key !== 'Enter' && e.key !== ' ') return
       if (e.key === ' ') e.preventDefault()
-      if (_streamAttachedRunIds.has(runId)) return
+      if (_activeStreamRunId === runId) return
       onSelectRun(runId)
     })
   }

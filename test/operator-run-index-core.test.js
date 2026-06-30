@@ -734,6 +734,114 @@ describe('initOperatorRunIndex — launched run convergence (no duplicate card)'
 })
 
 // ---------------------------------------------------------------------------
+// markRunStreamAttached — A → B → A lifecycle (single active stream)
+// ---------------------------------------------------------------------------
+
+describe('markRunStreamAttached — A → B clears A, only B is inert', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('marking B removes data-stream-attached from A and sets it on B', async () => {
+    const runIdA = 'run-lifecycle-A'
+    const runIdB = 'run-lifecycle-B'
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => [makeValidSummary({runId: runIdA}), makeValidSummary({runId: runIdB})],
+    }))
+    const cards = []
+    stubDOMWithCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    expect(cards).toHaveLength(2)
+
+    const cardA = cards.find(c => c.dataset.runId === runIdA)
+    const cardB = cards.find(c => c.dataset.runId === runIdB)
+
+    markRunStreamAttached(runIdA)
+    expect(cardA.dataset.streamAttached).toBe('true')
+
+    markRunStreamAttached(runIdB)
+    // A must be cleared
+    expect(cardA.dataset.streamAttached).toBeUndefined()
+    // B must be marked
+    expect(cardB.dataset.streamAttached).toBe('true')
+  })
+
+  it('after A → B, clicking A calls onSelectRun (A is no longer suppressed)', async () => {
+    const onSelectRun = vi.fn()
+    const runIdA = 'run-lifecycle-click-A'
+    const runIdB = 'run-lifecycle-click-B'
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => [makeValidSummary({runId: runIdA}), makeValidSummary({runId: runIdB})],
+    }))
+    const cards = []
+    stubDOMWithCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+
+    const cardA = cards.find(c => c.dataset.runId === runIdA)
+
+    markRunStreamAttached(runIdA)
+    markRunStreamAttached(runIdB)
+
+    // A is no longer the active stream — clicking it must call onSelectRun
+    cardA.dispatchEvent({type: 'click'})
+    expect(onSelectRun).toHaveBeenCalledWith(runIdA)
+  })
+
+  it('after A → B, Enter on A calls onSelectRun (A is no longer suppressed)', async () => {
+    const onSelectRun = vi.fn()
+    const runIdA = 'run-lifecycle-kbd-A'
+    const runIdB = 'run-lifecycle-kbd-B'
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => [makeValidSummary({runId: runIdA}), makeValidSummary({runId: runIdB})],
+    }))
+    const cards = []
+    stubDOMWithCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+
+    const cardA = cards.find(c => c.dataset.runId === runIdA)
+
+    markRunStreamAttached(runIdA)
+    markRunStreamAttached(runIdB)
+
+    cardA.dispatchEvent({type: 'keydown', key: 'Enter', preventDefault: vi.fn()})
+    expect(onSelectRun).toHaveBeenCalledWith(runIdA)
+  })
+
+  it('B remains suppressed after A → B transition', async () => {
+    const onSelectRun = vi.fn()
+    const runIdA = 'run-lifecycle-suppress-A'
+    const runIdB = 'run-lifecycle-suppress-B'
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => [makeValidSummary({runId: runIdA}), makeValidSummary({runId: runIdB})],
+    }))
+    const cards = []
+    stubDOMWithCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+
+    const cardB = cards.find(c => c.dataset.runId === runIdB)
+
+    markRunStreamAttached(runIdA)
+    markRunStreamAttached(runIdB)
+
+    cardB.dispatchEvent({type: 'click'})
+    expect(onSelectRun).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // markRunStreamAttached — card DOM attribute
 // ---------------------------------------------------------------------------
 
