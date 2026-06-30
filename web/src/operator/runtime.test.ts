@@ -23,6 +23,7 @@ import {
   type OperatorRuntimeHandle,
   type OperatorRuntimeOptions,
 } from './runtime.ts'
+import {fetchFixtureSession} from './fixture-runtime-loader.ts'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -364,10 +365,6 @@ describe('createOperatorRuntime — repo-list failure classification', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// TDD: New lifecycle/race-condition tests (RED phase)
-// ---------------------------------------------------------------------------
-
 describe('createOperatorRuntime — cleanup does not emit loading state', () => {
   afterEach(() => {
     document.body.innerHTML = ''
@@ -389,6 +386,55 @@ describe('createOperatorRuntime — cleanup does not emit loading state', () => 
     handle.cleanup()
     // Cleanup itself must not emit any state change — only the loader failure path does
     expect(onStateChange).not.toHaveBeenCalled()
+  })
+})
+
+describe('createOperatorRuntime — fixture loader seam', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('accepts a _runtimeLoader that receives an endpointBase option', async () => {
+    let capturedEndpointBase: string | undefined
+    const opts = makeOptions({
+      _runtimeLoader: async (loaderOpts?: {endpointBase?: string}) => {
+        capturedEndpointBase = loaderOpts?.endpointBase
+      },
+    })
+    const handle = createOperatorRuntime(opts)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    // Default: no endpointBase passed (production path)
+    expect(capturedEndpointBase).toBeUndefined()
+    handle.cleanup()
+  })
+
+  it('passes endpointBase to _runtimeLoader when fixtureMode is true', async () => {
+    let capturedEndpointBase: string | undefined
+    const opts = makeOptions({
+      fixtureMode: true,
+      fixtureEndpointBase: '/__fixture/operator',
+      _runtimeLoader: async (loaderOpts?: {endpointBase?: string}) => {
+        capturedEndpointBase = loaderOpts?.endpointBase
+      },
+    })
+    const handle = createOperatorRuntime(opts)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(capturedEndpointBase).toBe('/__fixture/operator')
+    handle.cleanup()
+  })
+
+  it('does not pass endpointBase when fixtureMode is false', async () => {
+    let capturedEndpointBase: string | undefined
+    const opts = makeOptions({
+      fixtureMode: false,
+      _runtimeLoader: async (loaderOpts?: {endpointBase?: string}) => {
+        capturedEndpointBase = loaderOpts?.endpointBase
+      },
+    })
+    const handle = createOperatorRuntime(opts)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(capturedEndpointBase).toBeUndefined()
+    handle.cleanup()
   })
 })
 
@@ -451,5 +497,177 @@ describe('createOperatorRuntime — stale loader race: second instance owns modu
     await vi.waitFor(() => {
       expect(staleCleanup).toHaveBeenCalledTimes(1)
     })
+  })
+})
+
+describe('fetchFixtureSession — session response contract', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('accepts a valid fixture session response with fixtureMode and fixtureSessionId (no csrfToken required)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({fixtureMode: true, fixtureSessionId: 'fixture-session-0001', operatorId: 1, login: 'fixture-operator', expiresAt: 9999999999999}),
+    }))
+    const session = await fetchFixtureSession()
+    expect(session).not.toBeNull()
+    expect(session?.fixtureMode).toBe(true)
+    expect(session?.fixtureSessionId).toBe('fixture-session-0001')
+  })
+
+  it('does NOT require csrfToken in the session response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({fixtureMode: true, fixtureSessionId: 'fixture-session-0002'}),
+    }))
+    const session = await fetchFixtureSession()
+    expect(session).not.toBeNull()
+  })
+
+  it('returns null when fixtureMode is missing', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({fixtureSessionId: 'fixture-session-0003'}),
+    }))
+    const session = await fetchFixtureSession()
+    expect(session).toBeNull()
+  })
+
+  it('returns null when fixtureMode is not true', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({fixtureMode: false, fixtureSessionId: 'fixture-session-0004'}),
+    }))
+    const session = await fetchFixtureSession()
+    expect(session).toBeNull()
+  })
+
+  it('returns null when fixtureSessionId is missing', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({fixtureMode: true}),
+    }))
+    const session = await fetchFixtureSession()
+    expect(session).toBeNull()
+  })
+
+  it('returns null when fixtureSessionId is not a string', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({fixtureMode: true, fixtureSessionId: 42}),
+    }))
+    const session = await fetchFixtureSession()
+    expect(session).toBeNull()
+  })
+
+  it('returns null when response is not ok', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      json: async () => ({fixtureMode: true, fixtureSessionId: 'fixture-session-0005'}),
+    }))
+    const session = await fetchFixtureSession()
+    expect(session).toBeNull()
+  })
+
+  it('returns null when fetch throws', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network error')))
+    const session = await fetchFixtureSession()
+    expect(session).toBeNull()
+  })
+
+  it('FixtureSession type does not carry csrfToken (CSRF is fetched separately via /session/csrf)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({fixtureMode: true, fixtureSessionId: 'fixture-session-0006'}),
+    }))
+    const session = await fetchFixtureSession()
+    expect(session).not.toBeNull()
+    // csrfToken must NOT be present on the session object
+    expect('csrfToken' in (session ?? {})).toBe(false)
+  })
+})
+
+describe('createOperatorRuntime — fixture context forwarded to loader', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('loader receives fixtureSessionId when fixtureMode is true', async () => {
+    let capturedOpts: {endpointBase?: string; fixtureSessionId?: string; getScenario?: () => string} | undefined
+    const opts = makeOptions({
+      fixtureMode: true,
+      fixtureEndpointBase: '/__fixture/operator',
+      fixtureSessionId: 'fixture-session-0001',
+      getScenario: () => 'success',
+      _runtimeLoader: async (loaderOpts) => {
+        capturedOpts = loaderOpts
+      },
+    })
+    const handle = createOperatorRuntime(opts)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(capturedOpts?.fixtureSessionId).toBe('fixture-session-0001')
+    handle.cleanup()
+  })
+
+  it('loader receives getScenario function when fixtureMode is true', async () => {
+    let capturedOpts: {endpointBase?: string; fixtureSessionId?: string; getScenario?: () => string} | undefined
+    const opts = makeOptions({
+      fixtureMode: true,
+      fixtureEndpointBase: '/__fixture/operator',
+      fixtureSessionId: 'fixture-session-0001',
+      getScenario: () => 'terminal_failure',
+      _runtimeLoader: async (loaderOpts) => {
+        capturedOpts = loaderOpts
+      },
+    })
+    const handle = createOperatorRuntime(opts)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(typeof capturedOpts?.getScenario).toBe('function')
+    expect(capturedOpts?.getScenario?.()).toBe('terminal_failure')
+    handle.cleanup()
+  })
+
+  it('loader does NOT receive fixtureSessionId or getScenario when fixtureMode is false', async () => {
+    let capturedOpts: {endpointBase?: string; fixtureSessionId?: string; getScenario?: () => string} | undefined
+    const opts = makeOptions({
+      fixtureMode: false,
+      _runtimeLoader: async (loaderOpts) => {
+        capturedOpts = loaderOpts
+      },
+    })
+    const handle = createOperatorRuntime(opts)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(capturedOpts).toBeUndefined()
+    handle.cleanup()
+  })
+})
+
+describe('createOperatorRuntime — no literal fixture fallback in source', () => {
+  it('runtime.ts source does not contain a literal /__fixture/operator string', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const url = await import('node:url')
+    const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
+    const src = await fs.readFile(path.join(__dirname, 'runtime.ts'), 'utf8')
+    expect(src).not.toContain('/__fixture/operator')
+  })
+
+  it('fixtureMode=true without fixtureEndpointBase passes undefined endpointBase to loader', async () => {
+    let capturedOpts: {endpointBase?: string; fixtureSessionId?: string; getScenario?: () => string} | undefined
+    const opts = makeOptions({
+      fixtureMode: true,
+      // No fixtureEndpointBase provided
+      fixtureSessionId: 'fixture-session-0001',
+      getScenario: () => 'success',
+      _runtimeLoader: async (loaderOpts) => {
+        capturedOpts = loaderOpts
+      },
+    })
+    const handle = createOperatorRuntime(opts)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    // endpointBase must be undefined (not a hardcoded fallback string)
+    expect(capturedOpts?.endpointBase).toBeUndefined()
+    handle.cleanup()
   })
 })

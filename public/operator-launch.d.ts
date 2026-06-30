@@ -91,13 +91,57 @@ export declare function buildPendingCardHooks(runId: string): PendingCardHooks
 // ---------------------------------------------------------------------------
 
 /**
+ * Returns the module specifier for operator-stream that includes ?manual=1.
+ * Exported so tests can assert the correct specifier without intercepting dynamic imports.
+ */
+export declare function streamModuleSpecifier(): string
+
+/**
+ * Build a browser-direct launch client.
+ *
+ * Accepts an optional endpointBase (default: '/operator') so the runtime-loader
+ * seam can configure a different endpoint base in dev mode without modifying
+ * production behavior. Also accepts optional scenario and fixtureSessionId for
+ * dev-mode launches.
+ */
+export declare function buildLaunchClient(opts?: {
+  readonly endpointBase?: string
+  /** Called at submit time to get the current scenario; not frozen at init. */
+  readonly getScenario?: () => string
+  readonly fixtureSessionId?: string
+}): {
+  readonly refreshCsrf: () => Promise<
+    | {readonly success: true; readonly data: {readonly csrfToken: string}}
+    | {readonly success: false; readonly error: {readonly kind: string; readonly status?: number; readonly message?: string}}
+  >
+  readonly listRepos: () => Promise<
+    | {readonly success: true; readonly data: readonly {readonly owner: string; readonly repo: string; readonly channelName?: string}[]}
+    | {readonly success: false; readonly error: {readonly kind: string; readonly status?: number; readonly message?: string}}
+  >
+  readonly launchRun: (req: {
+    readonly repo: string
+    readonly prompt: string
+    readonly csrfToken: string
+    readonly idempotencyKey: string
+  }) => Promise<
+    | {readonly success: true; readonly data: {readonly runId: string}}
+    | {readonly success: false; readonly error: {readonly kind: string; readonly status?: number; readonly message?: string}}
+  >
+}
+
+/**
  * Initialize the operator launch UI.
  * Builds a browser OperatorClient, renders the repo picker, wires the launch
  * form, and on success inserts an optimistic pending card + calls initOperatorStream.
  *
  * Must only be called from a browser context.
  */
-export declare function initOperatorLaunch(): Promise<void>
+export declare function initOperatorLaunch(opts?: {
+  readonly endpointBase?: string
+  /** Called at submit time to get the current scenario; not frozen at init. */
+  readonly getScenario?: () => string
+  readonly fixtureSessionId?: string
+}): Promise<void>
 
 /**
  * Set the launch-created stream handle.
@@ -114,3 +158,35 @@ export declare function setLaunchStreamHandle(handle: {close: () => void}): void
  * Internal to the runtime seam contract — not part of the public operator API.
  */
 export declare function resetLaunchState(): void
+
+/**
+ * Returns true if the given init is no longer the active init.
+ *
+ * An init is stale when its AbortController signal is aborted or its captured
+ * generation no longer matches the current generation counter. Called after every
+ * await in initOperatorLaunch to bail out of stale inits before they register
+ * listeners or mutate the DOM.
+ *
+ * Exported for testing.
+ */
+export declare function isInitStale(controller: AbortController, generation: number): boolean
+
+/**
+ * Test-only seam: directly set _launchGeneration.
+ *
+ * Allows tests to simulate the Strict Mode race condition without calling the
+ * DOM-touching initOperatorLaunch. Never call this in production code.
+ */
+export declare function setLaunchGeneration(gen: number): void
+
+/**
+ * Test-only seam: directly set _launchListenerController and its owning generation.
+ *
+ * Allows tests to simulate the listener registration step of initOperatorLaunch
+ * without calling the DOM-touching function. The generation parameter must match
+ * the generation that "owns" this controller — resetLaunchState() will only abort
+ * the controller if _launchListenerGeneration matches the pre-increment generation.
+ *
+ * Never call this in production code.
+ */
+export declare function setLaunchListenerController(controller: AbortController, generation: number): void

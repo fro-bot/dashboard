@@ -276,11 +276,15 @@ export interface InitOptions {
   readonly badgeEl?: (HTMLElement & {hidden: boolean}) | null
   /** Injectable approval client for testing. If absent, buildApprovalClient() is used. */
   readonly approvalClient?: ApprovalClient | null
+  /** Optional endpoint base for fixture mode (default: '/operator'). */
+  readonly endpointBase?: string
+  /** Fixture session ID (fixture mode only). Appended as query param to stream URL and approval requests. */
+  readonly fixtureSessionId?: string
 }
 
 export declare function initOperatorStream(opts: InitOptions): StreamHandle
 
-export declare function bootstrapOperatorStreams(): void
+export declare function bootstrapOperatorStreams(opts?: {readonly endpointBase?: string; readonly fixtureSessionId?: string}): void
 
 /**
  * Reset the bootstrap-called flag.
@@ -294,7 +298,7 @@ export declare function resetBootstrapState(): void
 // ---------------------------------------------------------------------------
 
 /** Browser-direct approval client factory. Returns refreshCsrf/decideRunApproval/listRunApprovals. */
-export declare function buildApprovalClient(): ApprovalClient
+export declare function buildApprovalClient(opts?: {readonly endpointBase?: string; readonly fixtureSessionId?: string}): ApprovalClient
 
 /**
  * Render a single open approval prompt into a container element.

@@ -1,9 +1,6 @@
 /**
  * Tests for the pure core of the operator run stream client.
  *
- * Imports directly from public/operator-stream.js (plain ESM, no TS syntax).
- * Vitest runs in Node 24 and can import .js ESM files directly.
- *
  * Security invariants tested:
  * - Parser: ready/status/reset parsed; heartbeat comment ignored; malformed → no bogus frame.
  * - State machine: terminal status → closed; reset → resubscribe; max-duration + active → reconnect;
@@ -39,10 +36,7 @@ import {
   toSafeRunView,
 } from '../public/operator-stream.js'
 import {OPERATOR_CONTRACT_VERSION} from '../src/gateway/operator-contract/index.ts'
-
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
+import {FIXTURE_RUN_ID_FOR_TESTS, FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../src/gateway/operator-fixture-sse.ts'
 
 const ACTIVE_STATUS = {
   runId: 'run-abc',
@@ -70,10 +64,6 @@ const INITIAL_STATE: StreamState = {
   retryCount: 0,
   shouldReconnect: false,
 }
-
-// ---------------------------------------------------------------------------
-// parseSseFrame — pure parser
-// ---------------------------------------------------------------------------
 
 describe('parseSseFrame — pure parser', () => {
   it('parses a ready frame', () => {
@@ -237,10 +227,6 @@ describe('parseSseFrame — pure parser', () => {
     }
   })
 })
-
-// ---------------------------------------------------------------------------
-// parseSseFrame — approval frame parsing
-// ---------------------------------------------------------------------------
 
 describe('parseSseFrame — approval frame (open variant)', () => {
   it('parses an open approval frame with command', () => {
@@ -495,12 +481,7 @@ describe('parseSseFrame — approval frame (error cases, fail-closed, no wire ec
   })
 })
 
-// ---------------------------------------------------------------------------
-// nextStreamState — output accumulation
-// ---------------------------------------------------------------------------
-
 describe('nextStreamState — output accumulation', () => {
-  // Reach 'live' so output frames are applied (mirrors status: pre-ready is ignored).
   const live = (): StreamState =>
     nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
   const applyOutput = (state: StreamState, data: OutputFrameData): StreamState =>
@@ -579,10 +560,6 @@ describe('nextStreamState — output accumulation', () => {
     expect(entry.outputTruncated).toBe(true)
   })
 })
-
-// ---------------------------------------------------------------------------
-// nextStreamState — lifecycle state machine
-// ---------------------------------------------------------------------------
 
 describe('nextStreamState — ready frame', () => {
   it('transitions to live when contractVersion matches the pinned version', () => {
@@ -696,7 +673,6 @@ describe('nextStreamState — status frame', () => {
       type: 'ready',
       data: {contractVersion: PINNED_CONTRACT_VERSION},
     })
-    // Add two runs: one active, one terminal
     const withActive = nextStreamState(liveState, {
       type: 'status',
       data: ACTIVE_STATUS,
@@ -763,7 +739,7 @@ describe('nextStreamState — reset frame', () => {
       type: 'status',
       data: TERMINAL_STATUS,
     })
-    // Override connection back to live to test the reset path
+    // max-duration + terminal → no reconnect; override connection to test the reset path
     const liveWithTerminal: StreamState = {...withTerminal, connection: 'live'}
     const state = nextStreamState(liveWithTerminal, {
       type: 'reset',
@@ -849,10 +825,6 @@ describe('nextStreamState — lifecycle signals', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// toSafeRunView — render model safety
-// ---------------------------------------------------------------------------
-
 describe('toSafeRunView — safe render model', () => {
   it('returns only safe fields: runId, status, phase, startedAt, stale', () => {
     const view = toSafeRunView(ACTIVE_STATUS)
@@ -900,10 +872,6 @@ describe('toSafeRunView — safe render model', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// No-leak test: drive a sequence and assert no sensitive data in render model
-// ---------------------------------------------------------------------------
-
 describe('no-leak: render model contains no sensitive fields', () => {
   it('a full sequence produces a render model with no repo name or entityRef', () => {
     const liveState = nextStreamState(INITIAL_STATE, {
@@ -918,20 +886,15 @@ describe('no-leak: render model contains no sensitive fields', () => {
       },
     })
 
-    // Extract the run entry and map to safe view
     const runEntry = withStatus.runs['run-abc']
     expect(runEntry).toBeDefined()
 
     if (runEntry) {
       const view = toSafeRunView(runEntry)
       const serialized = JSON.stringify(view)
-
-      // Must not contain the repo name / entityRef
       expect(serialized).not.toContain('fro-bot/secret-repo')
       expect(serialized).not.toContain('entityRef')
       expect(serialized).not.toContain('surface')
-
-      // Must contain only the safe fields
       expect(view.runId).toBe('run-abc')
       expect(view.status).toBe('running')
     }
@@ -960,10 +923,6 @@ describe('no-leak: render model contains no sensitive fields', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// Backoff constants sanity
-// ---------------------------------------------------------------------------
-
 describe('backoff constants', () => {
   it('RETRY_BASE_MS is a positive number', () => {
     expect(typeof RETRY_BASE_MS).toBe('number')
@@ -991,10 +950,6 @@ describe('contract pin lockstep parity', () => {
     expect(PINNED_CONTRACT_VERSION).toBe(OPERATOR_CONTRACT_VERSION)
   })
 })
-
-// ---------------------------------------------------------------------------
-// CRLF normalization in parseSseFrame
-// ---------------------------------------------------------------------------
 
 describe('parseSseFrame — CRLF normalization', () => {
   it('parses a ready frame delimited by CRLF record separators', () => {
@@ -1036,20 +991,12 @@ describe('parseSseFrame — CRLF normalization', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// Bounded buffer constant exported
-// ---------------------------------------------------------------------------
-
 describe('MAX_SSE_BUFFER_BYTES constant', () => {
   it('is a positive number', () => {
     expect(typeof MAX_SSE_BUFFER_BYTES).toBe('number')
     expect(MAX_SSE_BUFFER_BYTES).toBeGreaterThan(0)
   })
 })
-
-// ---------------------------------------------------------------------------
-// Cap reset-triggered reconnects
-// ---------------------------------------------------------------------------
 
 describe('nextStreamState — reset retryCount capping', () => {
   it('increments retryCount on each non-terminal reset', () => {
@@ -1115,17 +1062,12 @@ describe('nextStreamState — reset retryCount capping', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// Drift is absorbing; status before ready not rendered
-// ---------------------------------------------------------------------------
-
 describe('nextStreamState — drift is absorbing', () => {
   it('status before any ready is not applied (connection stays connecting)', () => {
     const state = nextStreamState(INITIAL_STATE, {
       type: 'status',
       data: ACTIVE_STATUS,
     })
-    // Status before ready must not move to live or add runs
     expect(state.connection).toBe('connecting')
     expect(Object.keys(state.runs)).toHaveLength(0)
   })
@@ -1136,8 +1078,6 @@ describe('nextStreamState — drift is absorbing', () => {
       data: {contractVersion: '0.0.1'},
     })
     expect(drifted.connection).toBe('drift')
-
-    // Now send a matching ready — must stay in drift
     const state = nextStreamState(drifted, {
       type: 'ready',
       data: {contractVersion: PINNED_CONTRACT_VERSION},
@@ -1177,10 +1117,6 @@ describe('nextStreamState — drift is absorbing', () => {
     expect(Object.keys(afterOutput.runs)).toHaveLength(0)
   })
 })
-
-// ---------------------------------------------------------------------------
-// Value-allowlist in parseSseFrame
-// ---------------------------------------------------------------------------
 
 describe('parseSseFrame — allowlist gate for status/phase/surface', () => {
   it('rejects a status frame with out-of-allowlist status — parse failure, not dispatched', () => {
@@ -1247,10 +1183,6 @@ describe('parseSseFrame — allowlist gate for status/phase/surface', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// backoffDelay(0) === RETRY_BASE_MS
-// ---------------------------------------------------------------------------
-
 describe('backoff first-delay', () => {
   it('RETRY_BASE_MS is 1000ms', () => {
     expect(RETRY_BASE_MS).toBe(1000)
@@ -1261,17 +1193,10 @@ describe('backoff first-delay', () => {
   })
 
   it('first retry delay (retryCount=1 after increment) uses backoffDelay(1) = 2000ms', () => {
-    // After the first network-error, retryCount becomes 1.
-    // scheduleReconnect calls backoffDelay(retryCount) = backoffDelay(1) = 2000ms.
-    // This is the corrected behavior (was backoffDelay(retryCount-1) = backoffDelay(0) = 1000ms).
-    // We verify the formula: RETRY_BASE_MS * RETRY_FACTOR^1 = 2000
+    // backoffDelay(retryCount) = RETRY_BASE_MS * RETRY_FACTOR^retryCount; after first error retryCount=1
     expect(RETRY_BASE_MS * RETRY_FACTOR ** 1).toBe(2000)
   })
 })
-
-// ---------------------------------------------------------------------------
-// null-prototype runs map guards __proto__ keys
-// ---------------------------------------------------------------------------
 
 describe('nextStreamState — null-prototype runs map', () => {
   it('a runId of __proto__ is stored in the runs map without polluting Object.prototype', () => {
@@ -1287,14 +1212,11 @@ describe('nextStreamState — null-prototype runs map', () => {
         runId: protoRunId,
       },
     })
-    // The run entry should be stored (accessible via Object.hasOwn)
     expect(Object.hasOwn(state.runs, protoRunId)).toBe(true)
-    // Object.prototype must not be polluted — a plain {} should not have the key
     expect(Object.hasOwn({}, protoRunId)).toBe(false)
   })
 
   it('runs map produced by the reducer has a null prototype', () => {
-    // We verify the reducer preserves null-prototype by checking the state machine output
     const liveState = nextStreamState(INITIAL_STATE, {
       type: 'ready',
       data: {contractVersion: PINNED_CONTRACT_VERSION},
@@ -1303,15 +1225,9 @@ describe('nextStreamState — null-prototype runs map', () => {
       type: 'status',
       data: ACTIVE_STATUS,
     })
-    // The runs object should not have Object.prototype methods directly
-    // (null-prototype objects don't inherit hasOwnProperty etc.)
     expect(Object.getPrototypeOf(state.runs)).toBeNull()
   })
 })
-
-// ---------------------------------------------------------------------------
-// Browser bootstrap (discovers run cards, starts a stream per card)
-// ---------------------------------------------------------------------------
 
 interface FakeStatusEl {
   textContent: string
@@ -1406,10 +1322,6 @@ describe('bootstrapOperatorStreams', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// First-frame timeout — reducer-level tests
-// ---------------------------------------------------------------------------
-
 describe('nextStreamState — first-frame timeout', () => {
   it('connecting + first-frame-timeout → submitted-unobservable, shouldReconnect false', () => {
     const state = nextStreamState(INITIAL_STATE, {type: 'first-frame-timeout'})
@@ -1476,13 +1388,11 @@ describe('nextStreamState — first-frame timeout', () => {
   })
 
   it('a ready frame before the timeout leaves state live (timer-clear is DOM-shell only; reducer is fully tested here)', () => {
-    // The pure reducer path: ready → live, then timeout is a no-op
     const liveState = nextStreamState(INITIAL_STATE, {
       type: 'ready',
       data: {contractVersion: PINNED_CONTRACT_VERSION},
     })
     expect(liveState.connection).toBe('live')
-    // Timeout after live is a no-op
     const afterTimeout = nextStreamState(liveState, {type: 'first-frame-timeout'})
     expect(afterTimeout.connection).toBe('live')
   })
@@ -1492,10 +1402,6 @@ describe('nextStreamState — first-frame timeout', () => {
     expect(FIRST_FRAME_TIMEOUT_MS).toBeGreaterThan(0)
   })
 })
-
-// ---------------------------------------------------------------------------
-// closed/submitted-unobservable guard: abort-rejection must not reopen
-// ---------------------------------------------------------------------------
 
 describe('nextStreamState — closed and submitted-unobservable are terminal for network events', () => {
   it('closed + network-error → stays closed (abort-rejection must not reopen the stream)', () => {
@@ -1565,10 +1471,6 @@ describe('nextStreamState — closed and submitted-unobservable are terminal for
   })
 })
 
-// ---------------------------------------------------------------------------
-// #47 scope-5: output accumulation edge cases
-// ---------------------------------------------------------------------------
-
 describe('nextStreamState — output accumulation edge cases', () => {
   // Helpers mirroring the existing output accumulation describe block
   const live = (): StreamState =>
@@ -1581,15 +1483,11 @@ describe('nextStreamState — output accumulation edge cases', () => {
     return entry
   }
 
-  // Gap 2: no-output run — terminal status with no prior output frame
   it('terminal status with no prior output frame leaves run with no outputText (no-output case)', () => {
     let state = live()
-    // Receive a terminal status with no preceding output frame
     state = nextStreamState(state, {type: 'status', data: TERMINAL_STATUS})
     const run = runOf(state, 'run-abc')
-    // outputText must be absent or empty — never a required empty terminal frame
     expect(run.outputText === undefined || run.outputText === '').toBe(true)
-    // Must not block or error — terminal state is still reached
     expect(run.terminal).toBe(true)
     expect(run.status).toBe('succeeded')
   })
@@ -1612,22 +1510,17 @@ describe('nextStreamState — output accumulation edge cases', () => {
     expect(run.status).toBe('running')
   })
 
-  // Gap 3: late-subscriber final-only — only a final:true frame, no deltas
   it('a subscriber receiving only a final:true frame ends with authoritative outputText and outputFinal===true', () => {
     let state = live()
-    // No deltas — only the authoritative final frame (mirrors gateway replay cache)
     state = applyOutput(state, {runId: 'run-001', text: 'Authoritative final answer', final: true, seq: 7})
     const run = runOf(state, 'run-001')
     expect(run.outputText).toBe('Authoritative final answer')
     expect(run.outputFinal).toBe(true)
   })
 
-  // Gap 4: droppedCount on a final/terminal frame
   it('a final:true frame with droppedCount > 0 sets outputCoalesced AND replaces text', () => {
     let state = live()
-    // Some prior deltas
     state = applyOutput(state, {runId: 'run-001', text: 'partial ', final: false, seq: 0})
-    // Final frame carries droppedCount (coalesced under backpressure)
     state = applyOutput(state, {runId: 'run-001', text: 'complete answer', final: true, seq: 3, droppedCount: 2})
     const run = runOf(state, 'run-001')
     expect(run.outputText).toBe('complete answer')
@@ -1635,45 +1528,31 @@ describe('nextStreamState — output accumulation edge cases', () => {
     expect(run.outputCoalesced).toBe(true)
   })
 
-  // Gap 6: no-leak — accumulated output path never surfaces frame metadata as free text
   it('accumulated output state does not surface runId, droppedCount, or other frame fields as free text', () => {
     let state = live()
     state = applyOutput(state, {runId: 'run-001', text: 'hello', final: false, seq: 0, droppedCount: 1})
     state = applyOutput(state, {runId: 'run-001', text: ' world', final: true, seq: 1})
     const run = runOf(state, 'run-001')
-
-    // Only outputText carries user-visible text — the other frame fields must not
-    // appear as free-text values in the accumulated output string
     expect(run.outputText).not.toContain('run-001')
     expect(run.outputText).not.toContain('droppedCount')
     expect(run.outputText).not.toContain('final')
     expect(run.outputText).not.toContain('seq')
-
-    // The run entry itself must not have a field whose value is the raw runId string
-    // embedded in the outputText (only the runId key is expected, not as output content)
     const serialized = JSON.stringify({outputText: run.outputText, outputFinal: run.outputFinal, outputCoalesced: run.outputCoalesced})
     expect(serialized).not.toContain('run-001')
     expect(serialized).not.toContain('droppedCount')
   })
 })
 
-// ---------------------------------------------------------------------------
-// nextStreamState — approval reducer state
-// ---------------------------------------------------------------------------
-
 describe('nextStreamState — approval reducer state', () => {
-  // Helper: reach 'live' state (mirrors existing output-accumulation helpers)
   const live = (): StreamState =>
     nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
 
-  // Helper: get run entry or throw
   const runOf = (state: StreamState, runId: string): RunEntry => {
     const entry = state.runs[runId]
     if (entry === undefined) throw new Error(`expected run ${runId} in state`)
     return entry
   }
 
-  // Helper: dispatch an open approval frame
   const openApproval = (
     state: StreamState,
     runId: string,
@@ -1692,16 +1571,11 @@ describe('nextStreamState — approval reducer state', () => {
       },
     })
 
-  // Helper: dispatch a settle approval frame
   const settleApproval = (state: StreamState, runId: string, requestID: string): StreamState =>
     nextStreamState(state, {
       type: 'approval',
       data: {runId, requestID, settled: true},
     })
-
-  // ---------------------------------------------------------------------------
-  // Happy path
-  // ---------------------------------------------------------------------------
 
   it('happy: open(req-001) → open-prompts has req-001 with permission/command', () => {
     let state = live()
@@ -1722,78 +1596,49 @@ describe('nextStreamState — approval reducer state', () => {
     const run = runOf(state, 'run-001')
     expect(hasOpenApprovals(run)).toBe(false)
     expect(getOpenApprovals(run)).toHaveLength(0)
-    // A subsequent open for the same id must be ignored (tombstone wins)
     state = openApproval(state, 'run-001', 'req-001', 'shell', 'echo again')
     const runAfterReopen = runOf(state, 'run-001')
     expect(hasOpenApprovals(runAfterReopen)).toBe(false)
   })
 
-  // ---------------------------------------------------------------------------
-  // Pre-live: approval frame before ready is ignored
-  // ---------------------------------------------------------------------------
-
   it('pre-live: approval frame before ready (connection !== live) → ignored, no prompt', () => {
-    // INITIAL_STATE is 'connecting', not 'live'
     const state = openApproval(INITIAL_STATE, 'run-001', 'req-001', 'shell')
-    // run-001 must not appear in runs at all
     expect(state.runs['run-001']).toBeUndefined()
   })
 
-  // ---------------------------------------------------------------------------
-  // Race: open-after-settle
-  // ---------------------------------------------------------------------------
-
   it('race — open-after-settle: settle(req-001) THEN open(req-001) → open is ignored (tombstone wins)', () => {
     let state = live()
-    // Settle first (without a prior open — settle-unseen is valid)
     state = settleApproval(state, 'run-001', 'req-001')
-    // Now open arrives — must be ignored
     state = openApproval(state, 'run-001', 'req-001', 'shell', 'echo late')
     const run = runOf(state, 'run-001')
     expect(hasOpenApprovals(run)).toBe(false)
     expect(getOpenApprovals(run)).toHaveLength(0)
   })
 
-  // ---------------------------------------------------------------------------
-  // Race: settle-unseen
-  // ---------------------------------------------------------------------------
-
   it('race — settle-unseen: settle(req-002) with no prior open → no prompt added, req-002 tombstoned', () => {
     let state = live()
     state = settleApproval(state, 'run-001', 'req-002')
     const run = runOf(state, 'run-001')
     expect(hasOpenApprovals(run)).toBe(false)
-    // A later open for req-002 must also be ignored (tombstone wins)
     state = openApproval(state, 'run-001', 'req-002', 'network')
     const runAfter = runOf(state, 'run-001')
     expect(hasOpenApprovals(runAfter)).toBe(false)
   })
 
-  // ---------------------------------------------------------------------------
-  // Race: id-reuse (same as open-after-settle, explicit test)
-  // ---------------------------------------------------------------------------
-
   it('race — id-reuse: settle(req-001) then fresh open(req-001) → ignored (tombstone wins)', () => {
     let state = live()
     state = openApproval(state, 'run-001', 'req-001', 'shell', 'echo first')
     state = settleApproval(state, 'run-001', 'req-001')
-    // Simulate id reuse: a new open with the same requestID
     state = openApproval(state, 'run-001', 'req-001', 'shell', 'echo reused')
     const run = runOf(state, 'run-001')
     expect(hasOpenApprovals(run)).toBe(false)
     expect(getOpenApprovals(run)).toHaveLength(0)
   })
 
-  // ---------------------------------------------------------------------------
-  // Race: terminal absorbing
-  // ---------------------------------------------------------------------------
-
   it('race — terminal absorbing: open(req-001) then terminal status → all prompts cleared', () => {
     let state = live()
     state = openApproval(state, 'run-001', 'req-001', 'shell', 'echo hello')
-    // Verify prompt is open before terminal
     expect(hasOpenApprovals(runOf(state, 'run-001'))).toBe(true)
-    // Apply terminal status
     state = nextStreamState(state, {
       type: 'status',
       data: {
@@ -1827,16 +1672,11 @@ describe('nextStreamState — approval reducer state', () => {
         stale: false,
       },
     })
-    // A new open for a different requestID after terminal → must be ignored
     state = openApproval(state, 'run-001', 'req-003', 'network')
     const run = runOf(state, 'run-001')
     expect(hasOpenApprovals(run)).toBe(false)
     expect(getOpenApprovals(run)).toHaveLength(0)
   })
-
-  // ---------------------------------------------------------------------------
-  // Idempotent: duplicate open
-  // ---------------------------------------------------------------------------
 
   it('idempotent: duplicate open(req-001) → single prompt, no corruption', () => {
     let state = live()
@@ -1847,10 +1687,6 @@ describe('nextStreamState — approval reducer state', () => {
     expect(prompts).toHaveLength(1)
     expect(prompts[0]?.requestID).toBe('req-001')
   })
-
-  // ---------------------------------------------------------------------------
-  // Derivation: hasOpenApprovals
-  // ---------------------------------------------------------------------------
 
   it('derivation: hasOpenApprovals true with ≥1 open prompt, false after all settled/cleared', () => {
     let state = live()
@@ -1863,32 +1699,18 @@ describe('nextStreamState — approval reducer state', () => {
     expect(hasOpenApprovals(runOf(state, 'run-001'))).toBe(false)
   })
 
-  // ---------------------------------------------------------------------------
-  // Immutability: prior state not mutated
-  // ---------------------------------------------------------------------------
-
   it('immutability: prior state object is not mutated by an approval transition', () => {
     const liveState = live()
     const beforeOpen = openApproval(liveState, 'run-001', 'req-001', 'shell')
-    // Capture a reference to the prior runs map
     const priorRuns = beforeOpen.runs
     const priorEntry = beforeOpen.runs['run-001']
-    // Apply a settle
     const afterSettle = settleApproval(beforeOpen, 'run-001', 'req-001')
-    // The prior state's runs map must be unchanged
-    expect(beforeOpen.runs).toBe(priorRuns) // same reference (not mutated)
-    expect(beforeOpen.runs['run-001']).toBe(priorEntry) // same entry reference
-    // The new state must have a different runs map
+    expect(beforeOpen.runs).toBe(priorRuns)
+    expect(beforeOpen.runs['run-001']).toBe(priorEntry)
     expect(afterSettle.runs).not.toBe(priorRuns)
-    // The prior entry must still show the prompt as open
     expect(hasOpenApprovals(priorEntry)).toBe(true)
-    // The new entry must show it settled
     expect(hasOpenApprovals(afterSettle.runs['run-001'])).toBe(false)
   })
-
-  // ---------------------------------------------------------------------------
-  // Multi-prompt
-  // ---------------------------------------------------------------------------
 
   it('multi-prompt: open(req-001) + open(req-002) on one run → both present; settle(req-001) → only req-002 remains', () => {
     let state = live()
@@ -1905,10 +1727,6 @@ describe('nextStreamState — approval reducer state', () => {
     expect(remaining[0]?.requestID).toBe('req-002')
     expect(hasOpenApprovals(runAfter)).toBe(true)
   })
-
-  // ---------------------------------------------------------------------------
-  // Approval state preserved across status updates (non-terminal)
-  // ---------------------------------------------------------------------------
 
   it('approval state survives a non-terminal status update', () => {
     let state = live()
@@ -1931,10 +1749,6 @@ describe('nextStreamState — approval reducer state', () => {
     expect(getOpenApprovals(run)[0]?.requestID).toBe('req-001')
   })
 })
-
-// ---------------------------------------------------------------------------
-// hasOpenApprovals / getOpenApprovals — derivation helpers
-// ---------------------------------------------------------------------------
 
 describe('hasOpenApprovals / getOpenApprovals — derivation helpers', () => {
   it('hasOpenApprovals returns false for a run entry with no approval fields', () => {
@@ -1980,10 +1794,6 @@ describe('hasOpenApprovals / getOpenApprovals — derivation helpers', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// Buffer overflow fails closed terminally (no reconnect)
-// ---------------------------------------------------------------------------
-
 describe('nextStreamState — buffer overflow', () => {
   it('buffer-overflow → failed with no reconnect, regardless of retry budget', () => {
     const live: StreamState = nextStreamState(
@@ -2011,10 +1821,6 @@ describe('nextStreamState — buffer overflow', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// Fix 1: tombstone map cap + open-approvals map cap
-// ---------------------------------------------------------------------------
-
 describe('nextStreamState — approval tombstone cap (MAX_APPROVAL_TOMBSTONES)', () => {
   const live = (): StreamState =>
     nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
@@ -2031,7 +1837,6 @@ describe('nextStreamState — approval tombstone cap (MAX_APPROVAL_TOMBSTONES)',
 
   it('tombstone map stays at cap after MAX_APPROVAL_TOMBSTONES+1 settles — oldest evicted, newest present', () => {
     let state = live()
-    // Add MAX_APPROVAL_TOMBSTONES settles
     for (let i = 0; i < MAX_APPROVAL_TOMBSTONES; i++) {
       state = nextStreamState(state, {
         type: 'approval',
@@ -2043,18 +1848,14 @@ describe('nextStreamState — approval tombstone cap (MAX_APPROVAL_TOMBSTONES)',
     const tombstonesBefore = runBefore?.approvalTombstones ?? {}
     expect(Object.keys(tombstonesBefore)).toHaveLength(MAX_APPROVAL_TOMBSTONES)
 
-    // Add one more — should evict oldest (req-0) and add newest
     state = nextStreamState(state, {
       type: 'approval',
       data: {runId: 'run-001', requestID: `req-${MAX_APPROVAL_TOMBSTONES}`, settled: true},
     })
     const run = state.runs['run-001']
     const tombstones = run?.approvalTombstones ?? {}
-    // Map size stays at cap
     expect(Object.keys(tombstones)).toHaveLength(MAX_APPROVAL_TOMBSTONES)
-    // Oldest (req-0) evicted
     expect(Object.hasOwn(tombstones, 'req-0')).toBe(false)
-    // Newest present
     expect(Object.hasOwn(tombstones, `req-${MAX_APPROVAL_TOMBSTONES}`)).toBe(true)
   })
 })
@@ -2065,7 +1866,6 @@ describe('nextStreamState — open-approvals cap (MAX_OPEN_APPROVALS)', () => {
 
   it('overflow open frame is ignored when open-prompts map is at cap — existing prompts intact', () => {
     let state = live()
-    // Add MAX_OPEN_APPROVALS distinct open prompts
     for (let i = 0; i < MAX_OPEN_APPROVALS; i++) {
       state = nextStreamState(state, {
         type: 'approval',
@@ -2075,26 +1875,18 @@ describe('nextStreamState — open-approvals cap (MAX_OPEN_APPROVALS)', () => {
     const runAtCap = state.runs['run-001']
     expect(Object.keys(runAtCap?.approvalOpenPrompts ?? {})).toHaveLength(MAX_OPEN_APPROVALS)
 
-    // One more distinct open — must be ignored
     state = nextStreamState(state, {
       type: 'approval',
       data: {runId: 'run-001', requestID: `req-${MAX_OPEN_APPROVALS}`, permission: 'shell', settled: false},
     })
     const run = state.runs['run-001']
     const openPrompts = run?.approvalOpenPrompts ?? {}
-    // Size stays at cap
     expect(Object.keys(openPrompts)).toHaveLength(MAX_OPEN_APPROVALS)
-    // Overflow requestID not present
     expect(Object.hasOwn(openPrompts, `req-${MAX_OPEN_APPROVALS}`)).toBe(false)
-    // All original prompts still present
     expect(Object.hasOwn(openPrompts, 'req-0')).toBe(true)
     expect(Object.hasOwn(openPrompts, `req-${MAX_OPEN_APPROVALS - 1}`)).toBe(true)
   })
 })
-
-// ---------------------------------------------------------------------------
-// Fix 3: coverage gaps
-// ---------------------------------------------------------------------------
 
 describe('parseSseFrame — approval frame (settle variant) — extra fields absent', () => {
   it('settle frame with extra wire fields: parsed data has ONLY {runId, requestID, settled}', () => {
@@ -2230,14 +2022,6 @@ describe('nextStreamState — approval reducer open frame with filepath', () => 
   })
 })
 
-// ---------------------------------------------------------------------------
-// initOperatorStream — approval prompt DOM rendering
-// ---------------------------------------------------------------------------
-
-/**
- * Minimal fake DOM element for testing approval prompt rendering.
- * Tracks textContent, hidden state, and child elements.
- */
 interface FakeElement {
   tagName: string
   textContent: string
@@ -2260,15 +2044,13 @@ interface FakeElement {
 }
 
 function makeFakeEl(tagName = 'div'): FakeElement {
-  // Use a plain object with a textContent property that clears children when set to ''.
-  // This mirrors the real DOM behavior where `el.textContent = ''` removes all child nodes.
+  // Setting textContent to '' clears children, mirroring real DOM behavior.
   let textContentValue = ''
   const el = {
     tagName,
     get textContent() { return textContentValue },
     set textContent(v: string) {
       textContentValue = v
-      // Setting textContent clears children (mirrors real DOM behavior)
       if (v === '') {
         el.children = []
       }
@@ -2281,7 +2063,6 @@ function makeFakeEl(tagName = 'div'): FakeElement {
     dataset: {} as Record<string, string>,
     eventListeners: {} as Record<string, ((...args: unknown[]) => void)[]>,
     querySelector(sel: string): FakeElement | null {
-      // Simple selector matching for data-role and id
       for (const child of el.children) {
         if (sel.includes('data-role=')) {
           const role = sel.match(/data-role="([^"]+)"/)?.[1]
@@ -2317,9 +2098,7 @@ function makeFakeEl(tagName = 'div'): FakeElement {
         el.children.push(node)
       }
     },
-    remove() {
-      // No-op in fake — parent would need to remove from children
-    },
+    remove() {}, // parent would need to remove from children
     setAttribute(name: string, value: string) {
       el.attributes[name] = value
     },
@@ -2327,8 +2106,8 @@ function makeFakeEl(tagName = 'div'): FakeElement {
       return el.attributes[name] ?? null
     },
     classList: {
-      add(_cls: string) { /* no-op */ },
-      remove(_cls: string) { /* no-op */ },
+      add(_cls: string) {},
+      remove(_cls: string) {},
       contains(_cls: string) { return false },
     },
     addEventListener(event: string, handler: (...args: unknown[]) => void) {
@@ -2349,10 +2128,6 @@ type ListRunApprovalsResult =
   | {success: false; error: {kind: 'network'}}
   | {success: false; error: {kind: 'protocol'}}
 
-/**
- * Build a fake approval client for testing.
- * Records calls and returns configurable results.
- */
 function makeFakeApprovalClient(opts: {
   decideResult?: {success: boolean; data?: {state: string}; error?: {kind: string; status?: number}}
   listResult?: {requestID: string; permission: string; command?: string; filepath?: string}[]
@@ -2384,7 +2159,6 @@ function makeFakeApprovalClient(opts: {
   }
 }
 
-// Helper: build a fake DOM environment and run initOperatorStream
 function makeApprovalTestEnv(opts: {
   approvalClientOpts?: Parameters<typeof makeFakeApprovalClient>[0]
 } = {}) {
@@ -2401,7 +2175,6 @@ function makeApprovalTestEnv(opts: {
   const statusEl = makeFakeEl('span')
   const noticeEl = makeFakeEl('div')
 
-  // Stub document.createElement to return fake elements
   const createdElements: FakeElement[] = []
   vi.stubGlobal('document', {
     createElement: (tag: string) => {
@@ -2441,8 +2214,6 @@ describe('initOperatorStream — approval prompt DOM rendering', () => {
   })
 
   it('no approval client constructed when approvalsEl is absent', () => {
-    // When approvalsEl is not provided, no approval client should be built
-    // (the injected client should not be called)
     const {client, decideCalls, listCalls} = makeFakeApprovalClient()
 
     vi.stubGlobal('document', {
@@ -2458,22 +2229,15 @@ describe('initOperatorStream — approval prompt DOM rendering', () => {
       runId: 'run-001',
       statusEl: makeFakeEl('span'),
       noticeEl: makeFakeEl('div'),
-      // No approvalsEl — approval client should not be used
       approvalClient: client,
     })
 
-    // No calls should have been made to the client
     expect(decideCalls).toHaveLength(0)
     expect(listCalls).toHaveLength(0)
   })
 })
 
-// ---------------------------------------------------------------------------
-// bootstrapOperatorStreams — discovers approvalsEl and badgeEl
-// ---------------------------------------------------------------------------
-
 describe('bootstrapOperatorStreams — discovers approvalsEl and badgeEl', () => {
-  // Reset the module-level idempotency flag before each test so tests are isolated.
   beforeEach(() => resetBootstrapState())
   afterEach(() => resetBootstrapState())
 
@@ -2528,15 +2292,10 @@ describe('bootstrapOperatorStreams — discovers approvalsEl and badgeEl', () =>
       vi.unstubAllGlobals()
     }
 
-    // Should have started a stream for the card
     expect(fetchCalls).toHaveLength(1)
     expect(fetchCalls[0]).toBe('/operator/runs/run-001/stream')
   })
 })
-
-// ---------------------------------------------------------------------------
-// reconcile-on-reconnect — reducer-level no-resurrect
-// ---------------------------------------------------------------------------
 
 describe('reconcile-on-reconnect — reducer-level no-resurrect', () => {
   const live = (): StreamState =>
@@ -2544,7 +2303,6 @@ describe('reconcile-on-reconnect — reducer-level no-resurrect', () => {
 
   it('reconcile: a synthetic open frame for a tombstoned requestID is ignored (no-resurrect)', () => {
     let state = live()
-    // Open and settle req-001
     state = nextStreamState(state, {
       type: 'approval',
       data: {runId: 'run-001', requestID: 'req-001', permission: 'shell', settled: false},
@@ -2553,37 +2311,28 @@ describe('reconcile-on-reconnect — reducer-level no-resurrect', () => {
       type: 'approval',
       data: {runId: 'run-001', requestID: 'req-001', settled: true},
     })
-    // Verify tombstoned
     expect(hasOpenApprovals(state.runs['run-001'])).toBe(false)
-
-    // Simulate reconcile: dispatch a synthetic open frame for the same requestID
-    // (as if the GET returned it — the reducer must ignore it because it's tombstoned)
+    // Tombstoned: a synthetic open for the same requestID (e.g. from a reconcile GET) must be ignored
     state = nextStreamState(state, {
       type: 'approval',
       data: {runId: 'run-001', requestID: 'req-001', permission: 'shell', settled: false},
     })
-    // Must still be absent (tombstone wins)
     expect(hasOpenApprovals(state.runs['run-001'])).toBe(false)
     expect(getOpenApprovals(state.runs['run-001'])).toHaveLength(0)
   })
 
   it('reconcile: a synthetic open frame for a non-tombstoned requestID is added', () => {
     let state = live()
-    // No prior open/settle for req-002
-
-    // Simulate reconcile: dispatch a synthetic open frame
     state = nextStreamState(state, {
       type: 'approval',
       data: {runId: 'run-001', requestID: 'req-002', permission: 'network', settled: false},
     })
-    // Must be present
     expect(hasOpenApprovals(state.runs['run-001'])).toBe(true)
     expect(getOpenApprovals(state.runs['run-001'])[0]?.requestID).toBe('req-002')
   })
 
   it('reconcile: after terminal status, synthetic open frames are ignored', () => {
     let state = live()
-    // Apply terminal status
     state = nextStreamState(state, {
       type: 'status',
       data: {
@@ -2596,34 +2345,16 @@ describe('reconcile-on-reconnect — reducer-level no-resurrect', () => {
         stale: false,
       },
     })
-    // Simulate reconcile: dispatch a synthetic open frame after terminal
     state = nextStreamState(state, {
       type: 'approval',
       data: {runId: 'run-001', requestID: 'req-003', permission: 'shell', settled: false},
     })
-    // Must be ignored (terminal is absorbing)
     expect(hasOpenApprovals(state.runs['run-001'])).toBe(false)
   })
 })
 
-// ---------------------------------------------------------------------------
-// safe DOM — inert text rendering (no injection)
-// ---------------------------------------------------------------------------
-
 describe('safe DOM — inert text rendering', () => {
   it('a command containing HTML/script renders as inert text (no element injection)', () => {
-    // This test verifies the renderApprovalPrompt function uses textContent only.
-    // We test this by checking that the rendered element's textContent contains
-    // the raw string (including HTML chars) without any element injection.
-    //
-    // Since renderApprovalPrompt is not exported, we test it indirectly through
-    // the reducer + DOM rendering path. The key invariant is:
-    // - command/filepath values are set via textContent, not innerHTML
-    // - HTML characters in command/filepath must appear as literal text, not parsed HTML
-    //
-    // We verify this at the reducer level: the prompt data is stored as-is,
-    // and the rendering contract (textContent only) is enforced by the implementation.
-
     const liveState = nextStreamState(INITIAL_STATE, {
       type: 'ready',
       data: {contractVersion: PINNED_CONTRACT_VERSION},
@@ -2640,17 +2371,10 @@ describe('safe DOM — inert text rendering', () => {
       },
     })
 
-    // The reducer stores the command as-is (no sanitization at reducer level)
+    // Reducer stores command as-is; rendering layer must use textContent (never innerHTML)
     const prompts = getOpenApprovals(state.runs['run-001'])
     expect(prompts).toHaveLength(1)
-    // The raw command is stored — the rendering layer is responsible for safe DOM
     expect(prompts[0]?.command).toBe(maliciousCommand)
-
-    // The rendering contract: when this is rendered, it MUST use textContent,
-    // not innerHTML. This is enforced by the renderApprovalPrompt implementation
-    // which uses `actionEl.textContent = command` (never innerHTML).
-    // The test above verifies the data is correct; the implementation contract
-    // is verified by code review and the no-injection invariant in the module header.
   })
 
   it('a filepath containing HTML renders as inert text (no element injection)', () => {
@@ -2672,14 +2396,9 @@ describe('safe DOM — inert text rendering', () => {
 
     const prompts = getOpenApprovals(state.runs['run-001'])
     expect(prompts).toHaveLength(1)
-    // The raw filepath is stored — the rendering layer uses textContent only
     expect(prompts[0]?.filepath).toBe(maliciousFilepath)
   })
 })
-
-// ---------------------------------------------------------------------------
-// Shared helpers for renderApprovalPrompt and buildApprovalClient tests
-// ---------------------------------------------------------------------------
 
 /** Stub a minimal browser environment for renderApprovalPrompt tests. */
 function stubRenderEnv() {
@@ -2693,11 +2412,6 @@ function stubRenderEnv() {
   vi.stubGlobal('addEventListener', () => {})
 }
 
-/**
- * Call renderApprovalPrompt and return the result as a FakeElement.
- * renderApprovalPrompt is typed as returning HTMLElement (for browser use),
- * but in tests it returns a FakeElement from the stubbed document.createElement.
- */
 function renderPromptAsFake(
   prompt: ApprovalFrameDataOpen,
   runId: string,
@@ -2706,7 +2420,6 @@ function renderPromptAsFake(
   return renderApprovalPrompt(prompt, runId, client, () => {}) as FakeElement
 }
 
-/** Find all visible (non-hidden) button elements recursively. */
 function findVisibleButtons(el: FakeElement): FakeElement[] {
   const buttons: FakeElement[] = []
   for (const child of el.children) {
@@ -2717,7 +2430,6 @@ function findVisibleButtons(el: FakeElement): FakeElement[] {
   return buttons
 }
 
-/** Find the status element (role="status") recursively. */
 function findStatusElement(el: FakeElement): FakeElement | undefined {
   for (const child of el.children) {
     if (child.attributes.role === 'status') return child
@@ -2726,10 +2438,6 @@ function findStatusElement(el: FakeElement): FakeElement | undefined {
   }
   return undefined
 }
-
-// ---------------------------------------------------------------------------
-// renderApprovalPrompt — safe-DOM inertness (injection-safety regression guard)
-// ---------------------------------------------------------------------------
 
 describe('renderApprovalPrompt — safe-DOM inertness', () => {
   afterEach(() => {
@@ -2749,14 +2457,10 @@ describe('renderApprovalPrompt — safe-DOM inertness', () => {
     const {client} = makeFakeApprovalClient()
     const el = renderPromptAsFake(prompt, 'run-001', client)
 
-    // Find the action element (pre tag) — it should have the raw string as textContent
     const actionEl = el.children.find((c: FakeElement) => c.tagName === 'pre')
     expect(actionEl).toBeDefined()
     if (actionEl !== undefined) {
-      // textContent must equal the literal string (not parsed HTML)
       expect(actionEl.textContent).toBe(maliciousCommand)
-      // No child elements should have been injected (innerHTML was never set)
-      // In our fake DOM, children are only added via append() — never innerHTML
       expect(actionEl.children).toHaveLength(0)
     }
   })
@@ -2782,10 +2486,6 @@ describe('renderApprovalPrompt — safe-DOM inertness', () => {
     }
   })
 })
-
-// ---------------------------------------------------------------------------
-// renderApprovalPrompt — two-step always flow
-// ---------------------------------------------------------------------------
 
 describe('renderApprovalPrompt — two-step always flow', () => {
   afterEach(() => {
@@ -2815,12 +2515,10 @@ describe('renderApprovalPrompt — two-step always flow', () => {
     const {client} = makeFakeApprovalClient()
     const el = renderPromptAsFake(prompt, 'run-001', client)
 
-    // Click always
     const alwaysBtn = findVisibleButtons(el).find(b => b.textContent === 'Always')
     expect(alwaysBtn).toBeDefined()
     alwaysBtn?.dispatchEvent({type: 'click'})
 
-    // After click: once/reject should be gone, confirm/cancel should appear
     const buttons = findVisibleButtons(el)
     const labels = buttons.map(b => b.textContent)
     expect(labels).not.toContain('Once')
@@ -2837,14 +2535,12 @@ describe('renderApprovalPrompt — two-step always flow', () => {
     const {client} = makeFakeApprovalClient()
     const el = renderPromptAsFake(prompt, 'run-001', client)
 
-    // Click always then cancel
     const alwaysBtn = findVisibleButtons(el).find(b => b.textContent === 'Always')
     alwaysBtn?.dispatchEvent({type: 'click'})
     const cancelBtn = findVisibleButtons(el).find(b => b.textContent === 'Cancel')
     expect(cancelBtn).toBeDefined()
     cancelBtn?.dispatchEvent({type: 'click'})
 
-    // Should be back to 3 controls
     const buttons = findVisibleButtons(el)
     const labels = buttons.map(b => b.textContent)
     expect(labels).toContain('Once')
@@ -2864,14 +2560,11 @@ describe('renderApprovalPrompt — two-step always flow', () => {
     })
     const el = renderPromptAsFake(prompt, 'run-001', client)
 
-    // Click always then confirm
     const alwaysBtn = findVisibleButtons(el).find(b => b.textContent === 'Always')
     alwaysBtn?.dispatchEvent({type: 'click'})
     const confirmBtn = findVisibleButtons(el).find(b => b.textContent === 'Confirm always')
     expect(confirmBtn).toBeDefined()
     confirmBtn?.dispatchEvent({type: 'click'})
-
-    // Wait for async decision
     await new Promise(resolve => setTimeout(resolve, 10))
 
     expect(decideCalls).toHaveLength(1)
@@ -2880,10 +2573,6 @@ describe('renderApprovalPrompt — two-step always flow', () => {
     expect(decideCalls[0]?.requestId).toBe('req-001')
   })
 })
-
-// ---------------------------------------------------------------------------
-// renderApprovalPrompt — DOM-level failure states
-// ---------------------------------------------------------------------------
 
 describe('renderApprovalPrompt — DOM-level failure states', () => {
   afterEach(() => {
@@ -2901,17 +2590,14 @@ describe('renderApprovalPrompt — DOM-level failure states', () => {
     })
     const el = renderPromptAsFake(prompt, 'run-001', client)
 
-    // Click once to trigger decision
     const onceBtn = findVisibleButtons(el).find(b => b.textContent === 'Once')
     onceBtn?.dispatchEvent({type: 'click'})
     await new Promise(resolve => setTimeout(resolve, 10))
 
     const statusEl = findStatusElement(el)
     expect(statusEl?.textContent).toMatch(/may not have approval access|check your gateway/i)
-    // Controls should be cleared (no buttons)
     const buttons = findVisibleButtons(el)
     expect(buttons).toHaveLength(0)
-    // Denial copy must not contain "try again"
     expect(statusEl?.textContent).not.toMatch(/try again/i)
   })
 
@@ -2932,10 +2618,8 @@ describe('renderApprovalPrompt — DOM-level failure states', () => {
 
     const statusEl = findStatusElement(el)
     expect(statusEl?.textContent).toMatch(/didn.t go through|try again/i)
-    // Controls must still be present (retryable)
     const buttons = findVisibleButtons(el)
     expect(buttons.length).toBeGreaterThan(0)
-    // Transport copy must not contain "access" language that implies denial
     expect(statusEl?.textContent).not.toMatch(/may not have.*access|approval access/i)
   })
 
@@ -2956,7 +2640,6 @@ describe('renderApprovalPrompt — DOM-level failure states', () => {
 
     const statusEl = findStatusElement(el)
     expect(statusEl?.textContent).toMatch(/session.*expired|reload.*page/i)
-    // Controls should be cleared (non-retryable)
     const buttons = findVisibleButtons(el)
     expect(buttons).toHaveLength(0)
   })
@@ -2967,8 +2650,6 @@ describe('renderApprovalPrompt — DOM-level failure states', () => {
     const prompt: ApprovalFrameDataOpen = {
       runId: 'run-001', requestID: 'req-001', permission: 'shell', command: 'echo hi', settled: false,
     }
-    // A 401/403 on the CSRF refresh that precedes the decision surfaces as http,
-    // so the operator is told to reload rather than looping on "try again".
     const {client} = makeFakeApprovalClient({
       decideResult: {success: false, error: {kind: 'http', status: 401}},
     })
@@ -3003,7 +2684,7 @@ describe('renderApprovalPrompt — DOM-level failure states', () => {
     expect(statusEl?.textContent).toMatch(/already been settled/i)
   })
 
-  it('scope_mismatch → scope label shown, controls cleared (Fix 2)', async () => {
+  it('scope_mismatch → scope label shown, controls cleared', async () => {
     stubRenderEnv()
     vi.stubGlobal('crypto', {randomUUID: () => 'test-uuid-1234'})
     const prompt: ApprovalFrameDataOpen = {
@@ -3020,12 +2701,11 @@ describe('renderApprovalPrompt — DOM-level failure states', () => {
 
     const statusEl = findStatusElement(el)
     expect(statusEl?.textContent).toMatch(/scope.*didn.t match|decision not applied/i)
-    // Controls should be cleared (terminal non-retryable)
     const buttons = findVisibleButtons(el)
     expect(buttons).toHaveLength(0)
   })
 
-  it('failed_to_settle → retryable copy shown, controls still present (Fix 2)', async () => {
+  it('failed_to_settle → retryable copy shown, controls still present', async () => {
     stubRenderEnv()
     vi.stubGlobal('crypto', {randomUUID: () => 'test-uuid-1234'})
     const prompt: ApprovalFrameDataOpen = {
@@ -3042,15 +2722,10 @@ describe('renderApprovalPrompt — DOM-level failure states', () => {
 
     const statusEl = findStatusElement(el)
     expect(statusEl?.textContent).toMatch(/couldn.t finalize|please try again/i)
-    // Controls must still be present (retryable)
     const buttons = findVisibleButtons(el)
     expect(buttons.length).toBeGreaterThan(0)
   })
 })
-
-// ---------------------------------------------------------------------------
-// renderApprovalPrompt — in-flight guard
-// ---------------------------------------------------------------------------
 
 describe('renderApprovalPrompt — in-flight guard', () => {
   afterEach(() => {
@@ -3081,25 +2756,14 @@ describe('renderApprovalPrompt — in-flight guard', () => {
     }
     const el = renderApprovalPrompt(prompt, 'run-001', client, () => {}) as unknown as FakeElement
 
-    // Click once — starts in-flight
     const onceBtn = findVisibleButtons(el).find(b => b.textContent === 'Once')
     onceBtn?.dispatchEvent({type: 'click'})
-
-    // Immediately click again — should be ignored (in-flight guard)
-    onceBtn?.dispatchEvent({type: 'click'})
-
-    // Resolve the pending decision
+    onceBtn?.dispatchEvent({type: 'click'}) // second click while in-flight must be ignored
     resolveDecide({success: true, data: {state: 'claimed'}})
     await new Promise(resolve => setTimeout(resolve, 10))
-
-    // Only one call should have been made
     expect(decideCalls).toHaveLength(1)
   })
 })
-
-// ---------------------------------------------------------------------------
-// buildApprovalClient — refreshCsrf and decideRunApproval
-// ---------------------------------------------------------------------------
 
 describe('buildApprovalClient — refreshCsrf', () => {
   afterEach(() => {
@@ -3157,7 +2821,6 @@ describe('buildApprovalClient — decideRunApproval', () => {
     const fetchCalls: {url: string; init: RequestInit}[] = []
     vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
       fetchCalls.push({url, init})
-      // CSRF endpoint returns csrfToken; decision endpoint returns state
       if (typeof url === 'string' && url.includes('/csrf')) {
         return {ok: true, status: 200, json: async () => ({csrfToken: 'test-csrf-token'})}
       }
@@ -3169,14 +2832,12 @@ describe('buildApprovalClient — decideRunApproval', () => {
     const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc')
 
     expect(result.success).toBe(true)
-    // Should have made 2 calls: one for CSRF, one for the decision
     expect(fetchCalls).toHaveLength(2)
     const decisionCall = fetchCalls[1]
     expect(decisionCall?.init?.headers).toBeDefined()
     const headers = decisionCall?.init?.headers as Record<string, string>
     expect(headers['x-csrf-token']).toBe('test-csrf-token')
     expect(headers['idempotency-key']).toBe('idem-key-abc')
-    // redirect:'error' is set by the browserFetch wrapper (merged into the fetch call)
     expect(decisionCall?.init?.redirect).toBe('error')
   })
 
@@ -3185,11 +2846,10 @@ describe('buildApprovalClient — decideRunApproval', () => {
     let decisionCallCount = 0
     vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
       fetchCalls.push({url, init})
-      // CSRF endpoint always returns a token
       if (typeof url === 'string' && url.includes('/csrf')) {
         return {ok: true, status: 200, json: async () => ({csrfToken: `csrf-${fetchCalls.length}`})}
       }
-      // Decision endpoint: first call → 400, second call → success
+      // First decision call → 400, second → success
       decisionCallCount++
       if (decisionCallCount === 1) {
         return {ok: false, status: 400, json: async () => ({})}
@@ -3201,9 +2861,7 @@ describe('buildApprovalClient — decideRunApproval', () => {
     const result = await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-abc')
 
     expect(result.success).toBe(true)
-    // Should have made 4 calls: CSRF, decision (400), CSRF retry, decision retry
     expect(fetchCalls).toHaveLength(4)
-    // Both decision calls must use the same idempotency key
     const decisionCalls = fetchCalls.filter(c => typeof c.url === 'string' && c.url.includes('/decision'))
     expect(decisionCalls).toHaveLength(2)
     const idemKeys = decisionCalls.map(c => (c.init?.headers as Record<string, string>)['idempotency-key'])
@@ -3216,13 +2874,11 @@ describe('buildApprovalClient — decideRunApproval', () => {
     vi.stubGlobal('fetch', async (url: string) => {
       if (typeof url === 'string' && url.includes('/csrf')) {
         csrfCallCount++
-        // First CSRF → success; second CSRF → throws
         if (csrfCallCount === 1) {
           return {ok: true, status: 200, json: async () => ({csrfToken: 'csrf-1'})}
         }
         throw new Error('network failure on retry')
       }
-      // Decision → 400
       return {ok: false, status: 400, json: async () => ({})}
     })
 
@@ -3235,7 +2891,7 @@ describe('buildApprovalClient — decideRunApproval', () => {
     }
   })
 
-  it('initial CSRF refresh returning 401 → http error (session-expired), not network', async () => {
+  it('initial CSRF refresh returning 401 → http error, not network', async () => {
     vi.stubGlobal('fetch', async (url: string) => {
       if (typeof url === 'string' && url.includes('/csrf')) {
         return {ok: false, status: 401, json: async () => ({})}
@@ -3248,7 +2904,7 @@ describe('buildApprovalClient — decideRunApproval', () => {
 
     expect(result.success).toBe(false)
     if (!result.success) {
-      // Must surface as http (so the prompt shows the reload state), not a retryable network failure.
+      // Surfaces as http so the prompt shows the reload state, not a retryable network failure
       expect(result.error?.kind).toBe('http')
       if (result.error?.kind === 'http') {
         expect(result.error.status).toBe(401)
@@ -3358,10 +3014,6 @@ describe('buildApprovalClient — listRunApprovals', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// approval badge indicator
-// ---------------------------------------------------------------------------
-
 describe('approval badge indicator', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -3379,7 +3031,6 @@ describe('approval badge indicator', () => {
       approvalClient: client,
     })
 
-    // No prompts yet — badge should remain hidden
     expect(badgeEl.hidden).toBe(true)
     expect(badgeEl.textContent).toBe('')
 
@@ -3387,8 +3038,6 @@ describe('approval badge indicator', () => {
   })
 
   it('badge shows "2" for two open prompts and hides on settle (reducer-level)', () => {
-    // Test the badge logic via the reducer state machine
-    // (badge is driven by hasOpenApprovals/getOpenApprovals from the reducer)
     const live = (): StreamState =>
       nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
 
@@ -3406,7 +3055,6 @@ describe('approval badge indicator', () => {
     expect(hasOpenApprovals(run)).toBe(true)
     expect(getOpenApprovals(run)).toHaveLength(2)
 
-    // Settle one
     state = nextStreamState(state, {
       type: 'approval',
       data: {runId: 'run-001', requestID: 'req-001', settled: true},
@@ -3414,7 +3062,6 @@ describe('approval badge indicator', () => {
     const runAfter = state.runs['run-001']
     expect(getOpenApprovals(runAfter)).toHaveLength(1)
 
-    // Settle both
     state = nextStreamState(state, {
       type: 'approval',
       data: {runId: 'run-001', requestID: 'req-002', settled: true},
@@ -3424,10 +3071,6 @@ describe('approval badge indicator', () => {
     expect(getOpenApprovals(runFinal)).toHaveLength(0)
   })
 })
-
-// ---------------------------------------------------------------------------
-// approval-reconcile reducer action
-// ---------------------------------------------------------------------------
 
 describe('nextStreamState — approval-reconcile action', () => {
   const live = (): StreamState =>
@@ -3476,10 +3119,6 @@ describe('nextStreamState — approval-reconcile action', () => {
       addPrompts,
     })
 
-  // ---------------------------------------------------------------------------
-  // Happy path
-  // ---------------------------------------------------------------------------
-
   it('happy: open(A), open(B) → reconcile pruneIds:[A], addPrompts:[] → A absent, tombstoned; B still open', () => {
     let state = live()
     state = openApproval(state, 'run-001', 'req-A', 'shell', 'echo A')
@@ -3491,13 +3130,8 @@ describe('nextStreamState — approval-reconcile action', () => {
     expect(openIds).not.toContain('req-A')
     expect(openIds).toContain('req-B')
     expect(hasOpenApprovals(run)).toBe(true)
-    // req-A must be tombstoned
     expect(Object.hasOwn(run.approvalTombstones ?? {}, 'req-A')).toBe(true)
   })
-
-  // ---------------------------------------------------------------------------
-  // Edge: prune multiple ids
-  // ---------------------------------------------------------------------------
 
   it('edge: reconcile pruneIds:[A,B] → both pruned and tombstoned', () => {
     let state = live()
@@ -3512,42 +3146,26 @@ describe('nextStreamState — approval-reconcile action', () => {
     expect(Object.hasOwn(run.approvalTombstones ?? {}, 'req-B')).toBe(true)
   })
 
-  // ---------------------------------------------------------------------------
-  // Edge: no-resurrect — pruned id stays suppressed after a later open frame
-  // ---------------------------------------------------------------------------
-
   it('edge (no-resurrect): A pruned → later open frame for A → A stays suppressed (tombstone precedence)', () => {
     let state = live()
     state = openApproval(state, 'run-001', 'req-A', 'shell', 'echo A')
     state = reconcile(state, 'run-001', ['req-A'], [])
-    // Verify pruned
     expect(hasOpenApprovals(runOf(state, 'run-001'))).toBe(false)
-    // Now a late open frame arrives for req-A
     state = openApproval(state, 'run-001', 'req-A', 'shell', 'echo late')
     expect(hasOpenApprovals(runOf(state, 'run-001'))).toBe(false)
     expect(getOpenApprovals(runOf(state, 'run-001'))).toHaveLength(0)
   })
 
-  // ---------------------------------------------------------------------------
-  // Edge: idempotent — already settled then pruneIds includes same id
-  // ---------------------------------------------------------------------------
-
   it('edge (idempotent settle/prune overlap): A already settled then pruneIds:[A] → no-op, no error, A stays tombstoned', () => {
     let state = live()
     state = openApproval(state, 'run-001', 'req-A', 'shell', 'echo A')
     state = settleApproval(state, 'run-001', 'req-A')
-    // Verify tombstoned
     expect(Object.hasOwn(runOf(state, 'run-001').approvalTombstones ?? {}, 'req-A')).toBe(true)
-    // Now reconcile with pruneIds:[req-A] — should be a no-op
     state = reconcile(state, 'run-001', ['req-A'], [])
     const run = runOf(state, 'run-001')
     expect(hasOpenApprovals(run)).toBe(false)
     expect(Object.hasOwn(run.approvalTombstones ?? {}, 'req-A')).toBe(true)
   })
-
-  // ---------------------------------------------------------------------------
-  // Edge: add path — addPrompts adds a new open prompt
-  // ---------------------------------------------------------------------------
 
   it('edge (add path): addPrompts:[{requestID:C}] where C not open and not tombstoned → C added as open', () => {
     let state = live()
@@ -3561,25 +3179,15 @@ describe('nextStreamState — approval-reconcile action', () => {
     expect(prompts[0]?.permission).toBe('network')
   })
 
-  // ---------------------------------------------------------------------------
-  // Edge: add ignores tombstoned ids
-  // ---------------------------------------------------------------------------
-
   it('edge (add ignores tombstoned): addPrompts:[{requestID:A}] where A is tombstoned → A NOT added', () => {
     let state = live()
-    // Settle req-A to tombstone it
     state = settleApproval(state, 'run-001', 'req-A')
     expect(Object.hasOwn(runOf(state, 'run-001').approvalTombstones ?? {}, 'req-A')).toBe(true)
-    // Now reconcile with addPrompts containing req-A
     state = reconcile(state, 'run-001', [], [{requestID: 'req-A', permission: 'shell'}])
     const run = runOf(state, 'run-001')
     expect(hasOpenApprovals(run)).toBe(false)
     expect(getOpenApprovals(run)).toHaveLength(0)
   })
-
-  // ---------------------------------------------------------------------------
-  // Edge: empty pruneIds and empty addPrompts → no-op
-  // ---------------------------------------------------------------------------
 
   it('edge: empty pruneIds and empty addPrompts → no-op, no spurious tombstones', () => {
     let state = live()
@@ -3587,22 +3195,15 @@ describe('nextStreamState — approval-reconcile action', () => {
     const before = runOf(state, 'run-001')
     state = reconcile(state, 'run-001', [], [])
     const after = runOf(state, 'run-001')
-    // Open prompts unchanged
     expect(getOpenApprovals(after)).toHaveLength(1)
     expect(getOpenApprovals(after)[0]?.requestID).toBe('req-A')
-    // Tombstones unchanged (no new tombstones)
     expect(Object.keys(after.approvalTombstones ?? {})).toHaveLength(
       Object.keys(before.approvalTombstones ?? {}).length,
     )
   })
 
-  // ---------------------------------------------------------------------------
-  // Edge: FIFO cap — pruning when tombstone map is at MAX_APPROVAL_TOMBSTONES evicts oldest
-  // ---------------------------------------------------------------------------
-
   it('edge (FIFO cap): pruning when tombstone map is at MAX_APPROVAL_TOMBSTONES evicts oldest', () => {
     let state = live()
-    // Fill tombstones to cap via settle frames
     for (let i = 0; i < MAX_APPROVAL_TOMBSTONES; i++) {
       state = nextStreamState(state, {
         type: 'approval',
@@ -3612,23 +3213,15 @@ describe('nextStreamState — approval-reconcile action', () => {
     const runAtCap = runOf(state, 'run-001')
     expect(Object.keys(runAtCap.approvalTombstones ?? {})).toHaveLength(MAX_APPROVAL_TOMBSTONES)
 
-    // Now open a new prompt and prune it via reconcile — should evict oldest tombstone
     state = openApproval(state, 'run-001', 'req-new', 'shell', 'echo new')
     state = reconcile(state, 'run-001', ['req-new'], [])
 
     const run = runOf(state, 'run-001')
     const tombstones = run.approvalTombstones ?? {}
-    // Map size stays at cap
     expect(Object.keys(tombstones)).toHaveLength(MAX_APPROVAL_TOMBSTONES)
-    // Oldest (req-0) evicted
     expect(Object.hasOwn(tombstones, 'req-0')).toBe(false)
-    // Newest (req-new) present
     expect(Object.hasOwn(tombstones, 'req-new')).toBe(true)
   })
-
-  // ---------------------------------------------------------------------------
-  // Edge: add path — addPrompts with already-open id is idempotent
-  // ---------------------------------------------------------------------------
 
   it('edge (add idempotent): addPrompts containing an id already locally open → idempotent, no duplicate', () => {
     let state = live()
@@ -3639,23 +3232,14 @@ describe('nextStreamState — approval-reconcile action', () => {
     expect(getOpenApprovals(run)[0]?.requestID).toBe('req-A')
   })
 
-  // ---------------------------------------------------------------------------
-  // Edge: pruneIds containing an id not in open-prompts → no-op (absent is a no-op)
-  // ---------------------------------------------------------------------------
-
   it('edge: pruneIds containing an id not in open-prompts → tombstoned but no error', () => {
     let state = live()
-    // req-X was never opened
     state = reconcile(state, 'run-001', ['req-X'], [])
     const run = runOf(state, 'run-001')
-    // Should be tombstoned (settle-unseen behavior mirrors settle branch)
+    // settle-unseen behavior: tombstoned even if never opened
     expect(Object.hasOwn(run.approvalTombstones ?? {}, 'req-X')).toBe(true)
     expect(hasOpenApprovals(run)).toBe(false)
   })
-
-  // ---------------------------------------------------------------------------
-  // Immutability: prior state not mutated
-  // ---------------------------------------------------------------------------
 
   it('immutability: prior state is not mutated by approval-reconcile', () => {
     let state = live()
@@ -3663,20 +3247,12 @@ describe('nextStreamState — approval-reconcile action', () => {
     const priorRuns = state.runs
     const priorEntry = state.runs['run-001']
     const after = reconcile(state, 'run-001', ['req-A'], [])
-    // Prior state unchanged
     expect(state.runs).toBe(priorRuns)
     expect(state.runs['run-001']).toBe(priorEntry)
-    // New state has different runs map
     expect(after.runs).not.toBe(priorRuns)
-    // Prior entry still shows req-A as open
     expect(hasOpenApprovals(priorEntry)).toBe(true)
-    // New entry shows req-A pruned
     expect(hasOpenApprovals(after.runs['run-001'])).toBe(false)
   })
-
-  // ---------------------------------------------------------------------------
-  // Terminal absorbing: reconcile on a terminal run is ignored
-  // ---------------------------------------------------------------------------
 
   it('terminal absorbing: approval-reconcile on a terminal run is ignored', () => {
     let state = live()
@@ -3695,18 +3271,11 @@ describe('nextStreamState — approval-reconcile action', () => {
       },
     })
     expect(runOf(state, 'run-001').terminal).toBe(true)
-    // Reconcile on terminal run — should be ignored
     state = reconcile(state, 'run-001', ['req-A'], [{requestID: 'req-B', permission: 'network'}])
     const run = runOf(state, 'run-001')
-    // Terminal run: open prompts cleared by terminal status, reconcile is a no-op
     expect(hasOpenApprovals(run)).toBe(false)
-    // req-B must NOT have been added (terminal is absorbing)
     expect(getOpenApprovals(run).map(p => p.requestID)).not.toContain('req-B')
   })
-
-  // ---------------------------------------------------------------------------
-  // Pre-live: approval-reconcile before ready is ignored
-  // ---------------------------------------------------------------------------
 
   it('pre-live: approval-reconcile before ready (connection !== live) → ignored', () => {
     const state = reconcile(INITIAL_STATE, 'run-001', ['req-A'], [{requestID: 'req-B', permission: 'shell'}])
@@ -3714,13 +3283,8 @@ describe('nextStreamState — approval-reconcile action', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// GATEWAY_PENDING_APPROVALS_CAP constant
-// ---------------------------------------------------------------------------
-
 describe('GATEWAY_PENDING_APPROVALS_CAP constant', () => {
   it('GATEWAY_PENDING_APPROVALS_CAP is exported and equals 50', () => {
-    // Import is at the top of the file — verify the value
     expect(GATEWAY_PENDING_APPROVALS_CAP).toBe(50)
   })
 
@@ -3731,28 +3295,10 @@ describe('GATEWAY_PENDING_APPROVALS_CAP constant', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// reconcileApprovals — wired integration (corrective prune)
-//
-// These tests drive initOperatorStream with a fake SSE stream that emits a
-// ready frame (transitioning the stream to "live"), then await the async
-// reconcile GET and assert the resulting DOM/state effects.
-//
-// Ghost-prompt scenario (the issue): req-A was open before a disconnect.
-// On reconnect the stream goes live again, reconcileApprovals runs, and the
-// gateway reports req-A is no longer open → req-A is pruned from the UI.
-//
-// To simulate "req-A was open before the reconnect", the tests use a two-
-// connection approach: first connection opens req-A, then a reset frame
-// triggers a reconnect (via fake timers), and the second connection's
-// reconcile GET returns a set that omits req-A.
-// ---------------------------------------------------------------------------
-
 /**
  * Build a fake SSE ReadableStream that emits the given SSE text chunks.
- * Pass `keepOpen: true` to leave the stream open after all chunks are emitted
- * (simulates a live connection that stays open). By default the stream closes
- * after all chunks, which triggers the reconnect path in the SSE reader.
+ * Pass `keepOpen: true` to leave the stream open after all chunks are emitted.
+ * By default the stream closes after all chunks, triggering the reconnect path.
  */
 function makeSseStream(chunks: string[], opts: {keepOpen?: boolean} = {}): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
@@ -3768,11 +3314,6 @@ function makeSseStream(chunks: string[], opts: {keepOpen?: boolean} = {}): Reada
   })
 }
 
-/**
- * Build a minimal fake SSE response for a 200 text/event-stream.
- * By default the stream closes after all chunks (triggers reconnect path).
- * Pass `keepOpen: true` to keep the stream open (simulates a live connection).
- */
 function makeSseResponse(chunks: string[], opts: {keepOpen?: boolean} = {}): Response {
   return {
     ok: true,
@@ -3782,30 +3323,18 @@ function makeSseResponse(chunks: string[], opts: {keepOpen?: boolean} = {}): Res
   } as unknown as Response
 }
 
-describe('reconcileApprovals — corrective prune wiring', () => {
+describe('reconcileApprovals — wired integration (corrective prune)', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.useRealTimers()
   })
 
-  // -------------------------------------------------------------------------
-  // Integration (issue scenario): open(A) → disconnect → A settles during gap
-  // → reconnect, recovery returns complete set WITHOUT A → A pruned.
-  //
-  // Two-connection approach:
-  //   Connection 1: ready + open(A) + reset → req-A in state, reconnect scheduled
-  //   Connection 2: ready → reconcile GET returns [] → req-A pruned
-  // -------------------------------------------------------------------------
-
   it('integration: ghost prompt A absent from complete recovery set is pruned on reconnect', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', command: 'echo A', settled: false})}\n\n`
-    // Reset frame triggers reconnect (shouldReconnect = true)
     const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
 
-    // Connection 1: ready + open(A) + reset (stream closes after reset)
     const conn1Chunks = [readyChunk, openAChunk, resetChunk]
-    // Connection 2: ready only (reconcile GET will run)
     const conn2Chunks = [readyChunk]
 
     let connectionCount = 0
@@ -3816,8 +3345,7 @@ describe('reconcileApprovals — corrective prune wiring', () => {
       decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
       listRunApprovals: async (runId: string) => {
         listCalls.push(runId)
-        // Both connections return empty recovery (req-A settled during gap)
-        return {success: true as const, data: {approvals: []}}
+        return {success: true as const, data: {approvals: []}} // req-A settled during gap
       },
     }
 
@@ -3851,25 +3379,10 @@ describe('reconcileApprovals — corrective prune wiring', () => {
       approvalClient: client,
     })
 
-    // Wait for connection 1 to complete (ready → live → reconcile → open(A) → reset → done)
-    // and for the reconnect timer to fire (RETRY_BASE_MS = 1000ms) and connection 2 to complete.
     await new Promise(resolve => setTimeout(resolve, 2500))
-
-    // listRunApprovals must have been called at least twice (once per connection)
     expect(listCalls.length).toBeGreaterThanOrEqual(2)
-
-    // After the second reconcile, req-A must be pruned — approvalsEl hidden
     expect(approvalsEl.hidden).toBe(true)
   }, 10000)
-
-  // -------------------------------------------------------------------------
-  // Error path (catastrophic-wipe guard): listRunApprovals returns {success:false}
-  // → NO prune, open prompts preserved.
-  //
-  // On the first connection, req-A opens during the GET window (so it's not in
-  // the pre-GET snapshot). On the second connection, req-A IS in the pre-GET
-  // snapshot, but the GET fails → req-A must NOT be pruned.
-  // -------------------------------------------------------------------------
 
   it('error path: listRunApprovals failure → open prompts preserved, no prune', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
@@ -3886,11 +3399,9 @@ describe('reconcileApprovals — corrective prune wiring', () => {
         listCalls.push(runId)
         listCallCount++
         if (listCallCount === 1) {
-          // First connection: success with empty (req-A arrives during GET window)
-          return {success: true as const, data: {approvals: []}}
+          return {success: true as const, data: {approvals: []}} // req-A arrives during GET window
         }
-        // Second connection: failure — must NOT prune req-A
-        return {success: false as const, error: {kind: 'network' as const}}
+        return {success: false as const, error: {kind: 'network' as const}} // must NOT prune req-A
       },
     }
 
@@ -3928,20 +3439,12 @@ describe('reconcileApprovals — corrective prune wiring', () => {
     })
 
     await new Promise(resolve => setTimeout(resolve, 2500))
-
-    // listRunApprovals must have been called at least twice
     expect(listCalls.length).toBeGreaterThanOrEqual(2)
-
-    // req-A must NOT have been pruned (second reconcile failed) — approvalsEl visible
-    expect(approvalsEl.hidden).toBe(false)
+    expect(approvalsEl.hidden).toBe(false) // req-A must NOT have been pruned (reconcile failed)
   }, 10000)
 
-  // -------------------------------------------------------------------------
-  // Race guard: a prompt C is locally open but was added AFTER preGetLocalOpenIds
-  // capture (i.e. C opened during the await window) → C is NOT pruned.
-  //
-  // Structural assertion: pruneIds is derived from the pre-GET snapshot, so a
-  // prompt opened after the snapshot and absent from the recovered set survives.
+  // Race guard: a prompt C opened AFTER the pre-GET snapshot and absent from the
+  // recovered set must NOT be pruned (pruneIds is derived from the pre-GET snapshot).
   //
   // Setup: stream goes live (no pre-existing open prompts), reconcileApprovals
   // starts (GET pending). req-C's open frame arrives via SSE DURING the await.
@@ -4134,17 +3637,8 @@ describe('reconcileApprovals — corrective prune wiring', () => {
 
     await new Promise(resolve => setTimeout(resolve, 2500))
 
-    // req-A must NOT be pruned (truncation guard) — approvalsEl visible
-    expect(approvalsEl.hidden).toBe(false)
+    expect(approvalsEl.hidden).toBe(false) // truncation guard: req-A must NOT be pruned
   }, 10000)
-
-  // -------------------------------------------------------------------------
-  // Edge (complete empty): recovery success {approvals:[]} while A,B locally open
-  // → both pruned.
-  //
-  // On the second connection, req-A and req-B are in the pre-GET snapshot.
-  // Recovery returns [] → both pruned.
-  // -------------------------------------------------------------------------
 
   it('edge (complete empty): recovery returns empty set while A,B open → both pruned', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
@@ -4193,13 +3687,8 @@ describe('reconcileApprovals — corrective prune wiring', () => {
 
     await new Promise(resolve => setTimeout(resolve, 2500))
 
-    // Both A and B must be pruned — approvalsEl hidden
     expect(approvalsEl.hidden).toBe(true)
   }, 10000)
-
-  // -------------------------------------------------------------------------
-  // One-shot guard: reconcile fires only once per connect, not on every dispatch.
-  // -------------------------------------------------------------------------
 
   it('one-shot: listRunApprovals called exactly once per connect', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
@@ -4228,7 +3717,6 @@ describe('reconcileApprovals — corrective prune wiring', () => {
       readyState: 'complete',
       addEventListener: () => {},
     })
-    // Keep the stream open so the connection stays live (no reconnect)
     vi.stubGlobal('fetch', async () => makeSseResponse([readyChunk], {keepOpen: true}))
     vi.stubGlobal('addEventListener', () => {})
 
@@ -4242,20 +3730,9 @@ describe('reconcileApprovals — corrective prune wiring', () => {
     })
 
     await new Promise(resolve => setTimeout(resolve, 20))
-
-    // Must have been called exactly once
     expect(listCalls).toHaveLength(1)
     expect(listCalls[0]).toBe('run-001')
   })
-
-  // -------------------------------------------------------------------------
-  // FIX 1 regression: malformed entries — entries present but all invalid
-  // → NO prune (open prompts preserved).
-  //
-  // The gateway returns entries that all fail validation (missing requestID or
-  // permission). recoveredOpenIds is empty but recovered.length > 0 → the
-  // malformed-entries guard fires and aborts without dispatching.
-  // -------------------------------------------------------------------------
 
   it('malformed-entries no-wipe: all-invalid entries with A,B locally open → NO prune', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
@@ -4267,7 +3744,7 @@ describe('reconcileApprovals — corrective prune wiring', () => {
     const client = {
       refreshCsrf: async () => ({success: true as const, data: {csrfToken: 'csrf'}}),
       decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
-      // Returns entries that all fail validation: missing requestID and empty requestID
+      // All entries fail validation (missing requestID / empty requestID) → malformed-entries guard fires
       listRunApprovals: async () => ({
         success: true as const,
         data: {approvals: [{permission: 'shell'}, {requestID: ''}] as unknown as {requestID: string; permission: string}[]},
@@ -4308,36 +3785,14 @@ describe('reconcileApprovals — corrective prune wiring', () => {
 
     await new Promise(resolve => setTimeout(resolve, 2500))
 
-    // All-invalid entries → malformed-entries guard fires → no prune → A,B still open
     expect(approvalsEl.hidden).toBe(false)
   }, 10000)
-
-  // -------------------------------------------------------------------------
-  // FIX 1 complete-empty case: recovered.length === 0 is authoritative → prune.
-  // This is the existing 'edge (complete empty)' test re-verified here to confirm
-  // the malformed-entries guard does NOT break the genuine-empty path.
-  // (The existing test above already covers this; this comment documents intent.)
-  // -------------------------------------------------------------------------
-
-  // -------------------------------------------------------------------------
-  // FIX 2 regression: stale reconcile discard.
-  //
-  // A second connect() resets reconcileDone during the first reconcile's GET
-  // await. The first (stale) reconcile must be discarded — it must not dispatch
-  // and must not prune prompts that the fresh reconcile would preserve.
-  //
-  // Setup: connection 1 opens req-A, then a reset triggers reconnect. During
-  // the reconnect the first reconcile's GET is still pending (deferred). The
-  // second connection goes live and its own reconcile runs. We then resolve the
-  // first (stale) GET with a set that would prune req-A — req-A must survive.
-  // -------------------------------------------------------------------------
 
   it('stale-reconcile discard: first reconcile resolved after second connect → stale result discarded, no wrong prune', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
     const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
 
-    // Deferred promise for the first reconcile's GET — we control when it resolves
     let resolveFirstList!: (v: {success: true; data: {approvals: []}}) => void
     const firstListPromise = new Promise<{success: true; data: {approvals: []}}>(resolve => {
       resolveFirstList = resolve
@@ -4349,11 +3804,7 @@ describe('reconcileApprovals — corrective prune wiring', () => {
       decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
       listRunApprovals: async () => {
         listCallCount++
-        if (listCallCount === 1) {
-          // First reconcile: hold the GET open until we explicitly resolve it
-          return firstListPromise
-        }
-        // Second reconcile: returns req-A as still open (fresh authoritative set)
+        if (listCallCount === 1) return firstListPromise // hold open until we resolve it
         return {success: true as const, data: {approvals: [{requestID: 'req-A', permission: 'shell'}]}}
       },
     }
@@ -4391,22 +3842,12 @@ describe('reconcileApprovals — corrective prune wiring', () => {
       approvalClient: client,
     })
 
-    // Let connection 1 complete (ready → open(A) → reset → reconnect scheduled)
-    // and connection 2 start and its reconcile complete (second list returns req-A)
     await new Promise(resolve => setTimeout(resolve, 2500))
-
-    // Now resolve the first (stale) GET with an empty set — would prune req-A if not discarded
+    // Resolve the stale GET with [] — would prune req-A if epoch guard is absent
     resolveFirstList({success: true, data: {approvals: []}})
     await new Promise(resolve => setTimeout(resolve, 20))
-
-    // The stale result must be discarded — req-A must still be open
     expect(approvalsEl.hidden).toBe(false)
   }, 10000)
-
-  // -------------------------------------------------------------------------
-  // Error path parity: http 500 and protocol errors preserve open prompts.
-  // The existing test covers {kind:'network'}; these cover the other two kinds.
-  // -------------------------------------------------------------------------
 
   it('error path (http 500): listRunApprovals http-500 failure → open prompts preserved', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
@@ -4516,22 +3957,11 @@ describe('reconcileApprovals — corrective prune wiring', () => {
     expect(approvalsEl.hidden).toBe(false)
   }, 10000)
 
-  // -------------------------------------------------------------------------
-  // Truncation boundary (allow-prune side): valid size === CAP - 1 → prune IS
-  // performed. Complements the existing >= CAP test (additive-only side).
-  //
-  // Note: this test also validates that the truncation guard uses recoveredOpenIds.size
-  // (valid entries only) rather than recovered.length (raw array length). With the
-  // old guard, CAP-1 valid entries + 1 invalid entry would still equal CAP raw entries
-  // and incorrectly suppress the prune. With the fixed guard, only valid size matters.
-  // -------------------------------------------------------------------------
-
   it('truncation boundary (allow-prune): valid size === CAP-1 → prune IS performed', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
     const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
 
-    // Recovery returns exactly CAP-1 valid entries, none of which is req-A
     const nearCapRecovery = Array.from({length: GATEWAY_PENDING_APPROVALS_CAP - 1}, (_, i) => ({
       requestID: `req-recovered-${i}`,
       permission: 'shell',
@@ -4578,24 +4008,10 @@ describe('reconcileApprovals — corrective prune wiring', () => {
 
     await new Promise(resolve => setTimeout(resolve, 2500))
 
-    // CAP-1 valid entries → truncation guard does NOT fire → req-A IS pruned.
-    // The 49 recovered entries are added as new prompts, so approvalsEl is visible.
-    // If the truncation guard had fired (>= CAP), req-A would NOT be pruned and
-    // the total would be 50 (req-A + 49 new). With the guard not firing, req-A is
-    // pruned and the total is 49 (only the recovered entries).
+    // CAP-1 valid entries → truncation guard does NOT fire → req-A IS pruned
     expect(approvalsEl.hidden).toBe(false)
     expect(badgeEl.textContent).toBe(String(GATEWAY_PENDING_APPROVALS_CAP - 1))
   }, 10000)
-
-  // -------------------------------------------------------------------------
-  // Partial-malformed recovery — a response with any invalid entry is not authoritative
-  // must NOT prune any locally-open prompt.
-  //
-  // A and B are locally open. Recovery returns [{requestID:'req-A',permission:'shell'},
-  // {permission:'bad'}] — A is valid, second entry is malformed (missing requestID).
-  // sawMalformed fires → pruneIds=[] → B is NOT pruned even though B is absent from
-  // the valid subset. A is retained (already open). B is retained (not pruned).
-  // -------------------------------------------------------------------------
 
   it('mixed valid/invalid recovery — a locally-open prompt absent from the valid subset is NOT pruned', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
@@ -4607,7 +4023,7 @@ describe('reconcileApprovals — corrective prune wiring', () => {
     const client = {
       refreshCsrf: async () => ({success: true as const, data: {csrfToken: 'csrf'}}),
       decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
-      // A is valid; second entry is malformed (missing requestID) — partial-malformed response
+      // A is valid; second entry is malformed (missing requestID) → sawMalformed fires → no prune
       listRunApprovals: async () => ({
         success: true as const,
         data: {
@@ -4653,53 +4069,21 @@ describe('reconcileApprovals — corrective prune wiring', () => {
 
     await new Promise(resolve => setTimeout(resolve, 2500))
 
-    // sawMalformed → pruneIds=[] → B is NOT pruned despite being absent from the
-    // valid recovered subset. Both A and B remain open.
     expect(approvalsEl.hidden).toBe(false)
     expect(badgeEl.hidden).toBe(false)
-    // Badge must show 2 (A retained, B retained — not pruned)
     expect(badgeEl.textContent).toBe('2')
   }, 10000)
 
-  // -------------------------------------------------------------------------
-  // Stale reconcile with a non-empty pre-GET snapshot resolving after a newer reconnect.
-  //
-  // The previous version of this test was broken: it emitted open(A) BEFORE ready
-  // on conn1, but the reducer drops approval frames when connection !== 'live', so
-  // open(A) was silently discarded. The stale reconcile's preGetLocalOpenIds was
-  // therefore empty, and pruneIds was always [] regardless of the epoch guard —
-  // the test passed even without the guard.
-  //
-  // This version uses three connections to guarantee a non-empty snapshot:
-  //
-  //   conn1: [readyChunk, openAChunk, resetChunk]
-  //     reconcile-1 returns [] immediately (no-op). After ready, A enters state
-  //     via SSE (connection is live). Reset triggers reconnect.
-  //
-  //   conn2: [readyChunk, resetChunk]
-  //     reconcile-2 is the STALE one — its GET is deferred. When ready fires,
-  //     reconcileApprovals snapshots preGetLocalOpenIds: A is already in state
-  //     from conn1's SSE, so preGetLocalOpenIds = ['req-A']. The GET is held.
-  //     Reset triggers reconnect, incrementing connectEpoch (making reconcile-2
-  //     stale).
-  //
-  //   conn3: [readyChunk]
-  //     reconcile-3 returns [req-A] immediately, preserving A in state.
-  //
-  //   We then resolve reconcile-2's deferred GET with [] — without the epoch
-  //   guard this would dispatch pruneIds=['req-A'] and close A's prompt. With
-  //   the guard (myEpoch !== connectEpoch) it bails and A is preserved.
-  //
-  // Failure mode: removing the `if (myEpoch !== connectEpoch) return` line from
-  // reconcileApprovals causes this test to fail (approvalsEl.hidden becomes true).
-  // -------------------------------------------------------------------------
-
+  // Three-connection test to guarantee a non-empty pre-GET snapshot for the stale reconcile:
+  //   conn1: ready + open(A) + reset → A in state, reconnect
+  //   conn2: ready + reset → reconcile-2 (STALE) snapshots preGetLocalOpenIds=[req-A], GET deferred
+  //   conn3: ready (keepOpen) → reconcile-3 returns [req-A], preserving A
+  // Resolving the stale GET with [] must be discarded (epoch guard: myEpoch !== connectEpoch).
   it('stale reconcile with a non-empty pre-GET snapshot bails on epoch mismatch — the prompt is NOT pruned', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
     const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
 
-    // Deferred promise for reconcile-2 (the stale one on conn2)
     let resolveStaleList!: (v: {success: true; data: {approvals: []}}) => void
     const staleListPromise = new Promise<{success: true; data: {approvals: []}}>(resolve => {
       resolveStaleList = resolve
@@ -4711,17 +4095,9 @@ describe('reconcileApprovals — corrective prune wiring', () => {
       decideRunApproval: async () => ({success: true as const, data: {state: 'claimed'}}),
       listRunApprovals: async () => {
         listCallCount++
-        if (listCallCount === 1) {
-          // reconcile-1 (conn1): no-op, returns immediately so conn1 can proceed
-          return {success: true as const, data: {approvals: []}}
-        }
-        if (listCallCount === 2) {
-          // reconcile-2 (conn2): STALE — hold the GET open. preGetLocalOpenIds
-          // will contain req-A (added via SSE on conn1 after ready).
-          return staleListPromise
-        }
-        // reconcile-3 (conn3): fresh, authoritative — preserves req-A
-        return {success: true as const, data: {approvals: [{requestID: 'req-A', permission: 'shell'}]}}
+        if (listCallCount === 1) return {success: true as const, data: {approvals: []}} // conn1: no-op
+        if (listCallCount === 2) return staleListPromise // conn2: STALE, hold open
+        return {success: true as const, data: {approvals: [{requestID: 'req-A', permission: 'shell'}]}} // conn3
       },
     }
 
@@ -4742,18 +4118,10 @@ describe('reconcileApprovals — corrective prune wiring', () => {
     })
     vi.stubGlobal('fetch', async () => {
       fetchCount++
-      if (fetchCount === 1) {
-        // conn1: ready → live → reconcile-1 (immediate []) → open(A) enters state → reset → reconnect
-        return makeSseResponse([readyChunk, openAChunk, resetChunk])
-      }
-      if (fetchCount === 2) {
-        // conn2: ready → live → reconcile-2 snapshots preGetLocalOpenIds=[req-A], GET deferred → reset → reconnect
-        return makeSseResponse([readyChunk, resetChunk])
-      }
-      // conn3: keepOpen so the connection stays live when reconcile-2's stale GET resolves.
-      // Without keepOpen, stream-closed fires and connection becomes 'closed', which gates
-      // the approval-reconcile reducer — the stale prune would be silently dropped even
-      // without the epoch guard, making the test a false positive.
+      if (fetchCount === 1) return makeSseResponse([readyChunk, openAChunk, resetChunk])
+      if (fetchCount === 2) return makeSseResponse([readyChunk, resetChunk])
+      // conn3: keepOpen so the connection stays live when reconcile-2's stale GET resolves
+      // (without keepOpen, stream-closed gates the reducer and the test becomes a false positive)
       return makeSseResponse([readyChunk], {keepOpen: true})
     })
     vi.stubGlobal('addEventListener', () => {})
@@ -4767,30 +4135,17 @@ describe('reconcileApprovals — corrective prune wiring', () => {
       approvalClient: client,
     })
 
-    // Wait for conn1 → conn2 → conn3 to complete.
-    // Backoff: conn1→conn2 = RETRY_BASE_MS * 2^1 = 2000ms,
-    //          conn2→conn3 = RETRY_BASE_MS * 2^2 = 4000ms.
-    // Total minimum: ~6000ms. Use 7000ms for margin.
+    // Backoff: conn1→conn2 = 2000ms, conn2→conn3 = 4000ms; use 7000ms for margin
     await new Promise(resolve => setTimeout(resolve, 7000))
-
-    // Sanity check: verify we actually got 3 connections and 3 list calls
     expect(fetchCount).toBe(3)
     expect(listCallCount).toBe(3)
-
-    // Now resolve the stale GET with [] — without the epoch guard this would
-    // dispatch pruneIds=['req-A'] and close A's prompt.
+    // Resolve the stale GET with [] — epoch guard must discard it
     resolveStaleList({success: true, data: {approvals: []}})
     await new Promise(resolve => setTimeout(resolve, 50))
-
-    // Epoch guard must have fired: stale reconcile discarded, req-A still open
     expect(approvalsEl.hidden).toBe(false)
     expect(badgeEl.hidden).toBe(false)
   }, 20000)
 })
-
-// ---------------------------------------------------------------------------
-// approval-reconcile reducer — __proto__ key guard
-// ---------------------------------------------------------------------------
 
 describe('nextStreamState — approval-reconcile __proto__ key guard', () => {
   const live = (): StreamState =>
@@ -4806,8 +4161,6 @@ describe('nextStreamState — approval-reconcile __proto__ key guard', () => {
     let state = live()
     state = openApproval(state, 'run-001', 'req-A', 'shell')
     state = openApproval(state, 'run-001', 'req-B', 'network')
-
-    // Dispatch reconcile with __proto__ in pruneIds
     state = nextStreamState(state, {
       type: 'approval-reconcile',
       runId: 'run-001',
@@ -4816,18 +4169,14 @@ describe('nextStreamState — approval-reconcile __proto__ key guard', () => {
     })
 
     const run = state.runs['run-001']
-    // req-A and req-B must still be open — __proto__ prune is a no-op
     const openIds = getOpenApprovals(run).map(p => p.requestID)
     expect(openIds).toContain('req-A')
     expect(openIds).toContain('req-B')
-    // Object.prototype must not be polluted
     expect(Object.hasOwn({}, '__proto__')).toBe(false)
   })
 
   it('addPrompts:[{requestID:__proto__}] → not added, Object.prototype not polluted', () => {
     let state = live()
-
-    // Dispatch reconcile with __proto__ in addPrompts
     state = nextStreamState(state, {
       type: 'approval-reconcile',
       runId: 'run-001',
@@ -4835,13 +4184,10 @@ describe('nextStreamState — approval-reconcile __proto__ key guard', () => {
       addPrompts: [{requestID: '__proto__', permission: 'shell'}],
     })
 
-    // __proto__ must not appear as an open prompt
     const run = state.runs['run-001']
     const openIds = getOpenApprovals(run).map(p => p.requestID)
     expect(openIds).not.toContain('__proto__')
-    // Object.prototype must not be polluted
     expect(Object.hasOwn({}, '__proto__')).toBe(false)
-    // The run entry itself must not have a __proto__ key in its open prompts map
     if (run?.approvalOpenPrompts !== undefined) {
       expect(Object.hasOwn(run.approvalOpenPrompts, '__proto__')).toBe(false)
     }
@@ -4858,7 +4204,6 @@ describe('bootstrapOperatorStreams — idempotency guard', () => {
   })
 
   it('calling resetBootstrapState allows bootstrapOperatorStreams to run again', async () => {
-    // Use withFakeBrowser to provide a DOM context (no section → no-op, but no throw)
     await withFakeBrowser([], false, bootstrapOperatorStreams)
     // Reset the flag
     resetBootstrapState()
@@ -4869,25 +4214,18 @@ describe('bootstrapOperatorStreams — idempotency guard', () => {
 
   it('bootstrapOperatorStreams is idempotent — calling twice does not start streams twice', async () => {
     const cards = [makeFakeCard('run-idempotent')]
-    // First call: starts one stream
     const fetchCalls1 = await withFakeBrowser(cards, true, bootstrapOperatorStreams)
     expect(fetchCalls1).toHaveLength(1)
-    // Second call (without reset): idempotency guard prevents double-start
     const fetchCalls2 = await withFakeBrowser(cards, true, bootstrapOperatorStreams)
     expect(fetchCalls2).toHaveLength(0)
   })
 })
-
-// ---------------------------------------------------------------------------
-// resetBootstrapState — closes handles and removes pagehide listener
-// ---------------------------------------------------------------------------
 
 describe('resetBootstrapState — handle cleanup and pagehide listener removal', () => {
   beforeEach(() => resetBootstrapState())
   afterEach(() => resetBootstrapState())
 
   it('resetBootstrapState closes active stream handles', async () => {
-    // Stub a fake browser with a section that has one card
     const cards = [makeFakeCard('run-cleanup-001')]
     const section = {
       querySelector: (sel: string) =>
@@ -4904,16 +4242,12 @@ describe('resetBootstrapState — handle cleanup and pagehide listener removal',
     vi.stubGlobal('fetch', async () => new Promise<Response>(() => {}))
     vi.stubGlobal('addEventListener', () => {})
 
-    // We cannot easily monkey-patch the module export in ESM, so we test the
-    // behavior indirectly: resetBootstrapState() must not throw, and after reset
-    // the bootstrap can run again (proving state was cleared).
     try {
       bootstrapOperatorStreams()
     } finally {
       vi.unstubAllGlobals()
     }
 
-    // resetBootstrapState must not throw even with active handles
     expect(() => resetBootstrapState()).not.toThrow()
   })
 
@@ -4934,7 +4268,6 @@ describe('resetBootstrapState — handle cleanup and pagehide listener removal',
 
     vi.stubGlobal('document', fakeDocument)
     vi.stubGlobal('fetch', async () => new Promise<Response>(() => {}))
-    // Track addEventListener/removeEventListener calls on globalThis
     vi.stubGlobal('addEventListener', () => {})
     vi.stubGlobal('removeEventListener', (event: string) => {
       removedListeners.push(event)
@@ -4946,8 +4279,6 @@ describe('resetBootstrapState — handle cleanup and pagehide listener removal',
       vi.unstubAllGlobals()
     }
 
-    // After bootstrap, resetBootstrapState should call removeEventListener('pagehide', ...)
-    // We stub globalThis.removeEventListener to capture the call
     vi.stubGlobal('removeEventListener', (event: string) => {
       removedListeners.push(event)
     })
@@ -4991,25 +4322,17 @@ describe('resetBootstrapState — handle cleanup and pagehide listener removal',
     vi.stubGlobal('removeEventListener', () => {})
 
     try {
-      // First bootstrap cycle
       bootstrapOperatorStreams()
       resetBootstrapState()
-      // Second bootstrap cycle
       bootstrapOperatorStreams()
     } finally {
       vi.unstubAllGlobals()
     }
 
-    // Each bootstrap registers exactly one pagehide listener; two cycles → two registrations
-    // (the first is removed by reset before the second is added)
     const pagehideCount = addedListeners.filter(e => e === 'pagehide').length
     expect(pagehideCount).toBe(2)
   })
 })
-
-// ---------------------------------------------------------------------------
-// Agent-native: stream notice exposes data-connection-state attribute
-// ---------------------------------------------------------------------------
 
 describe('initOperatorStream — noticeEl gets data-connection-state attribute', () => {
   afterEach(() => {
@@ -5017,15 +4340,11 @@ describe('initOperatorStream — noticeEl gets data-connection-state attribute',
   })
 
   it('noticeEl has data-connection-state="live" when stream goes live', async () => {
-    // Use the existing makeFakeEl helper (defined above in this file) which
-    // stores setAttribute calls in el.attributes — the same shape the DOM shell uses.
     const noticeEl = makeFakeEl('div')
     const statusEl = makeFakeEl('span')
 
-    // Stub fetch to return a readable stream that sends a ready frame
     const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
     const encoder = new TextEncoder()
-    // Capture the controller via a promise to avoid non-null assertion
     let resolveController: (c: ReadableStreamDefaultController<Uint8Array>) => void
     const controllerReady = new Promise<ReadableStreamDefaultController<Uint8Array>>(resolve => {
       resolveController = resolve
@@ -5042,14 +4361,9 @@ describe('initOperatorStream — noticeEl gets data-connection-state attribute',
 
     const handle = initOperatorStream({runId: 'run-state-test', statusEl, noticeEl})
 
-    // Push the ready frame once the controller is available
     const controller = await controllerReady
     controller.enqueue(encoder.encode(readyFrame))
-
-    // Allow microtasks to process
     await new Promise(resolve => setTimeout(resolve, 10))
-
-    // dataset.connectionState mirrors the data-connection-state attribute (camelCase)
     expect(noticeEl.dataset.connectionState).toBe('live')
 
     handle.close()
@@ -5058,8 +4372,6 @@ describe('initOperatorStream — noticeEl gets data-connection-state attribute',
   it('noticeEl has data-connection-state="reconnecting" when stream gets a 500 (network-error path)', async () => {
     const noticeEl = makeFakeEl('div')
     const statusEl = makeFakeEl('span')
-
-    // Stub fetch to return a non-200 status — triggers network-error → reconnecting
     vi.stubGlobal('fetch', async () => ({
       status: 500,
       headers: {get: () => 'text/html'},
@@ -5068,10 +4380,7 @@ describe('initOperatorStream — noticeEl gets data-connection-state attribute',
 
     const handle = initOperatorStream({runId: 'run-fail-test', statusEl, noticeEl})
 
-    // Allow microtasks to process
     await new Promise(resolve => setTimeout(resolve, 10))
-
-    // A 500 triggers network-error → reconnecting (not immediately failed)
     expect(noticeEl.dataset.connectionState).toBe('reconnecting')
 
     handle.close()
@@ -5107,7 +4416,7 @@ describe('initOperatorStream — terminal status updates statusEl when connectio
     const addedClasses: string[] = []
     statusEl.classList = {
       add(cls: string) { addedClasses.push(cls) },
-      remove(_cls: string) { /* no-op */ },
+      remove(_cls: string) {},
       contains(_cls: string) { return false },
     }
 
@@ -5229,5 +4538,532 @@ describe('initOperatorStream — terminal status updates statusEl when connectio
     expect(statusEl.textContent).toBe('')
 
     handle.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fixture SSE scenario integration (browser reducer path)
+// ---------------------------------------------------------------------------
+// These tests verify that the typed fixture scenarios serialize to SSE bytes
+// that the browser-side parseSseFrame + nextStreamState reducer can consume.
+// ---------------------------------------------------------------------------
+
+describe('fixture SSE scenarios — browser reducer: success scenario', () => {
+  it('success scenario frames drive the browser reducer to closed with succeeded run', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success, FIXTURE_RUN_ID_FOR_TESTS)
+    // Split into individual records and parse each
+    const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
+
+    const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
+    let state = INITIAL_STATE
+
+    for (const record of records) {
+      const result = parseSseFrame(`${record}\n\n`)
+      if (result !== null && result.success) {
+        state = nextStreamState(state, result.frame)
+      }
+    }
+
+    // After all frames: connection closed, run terminal with succeeded status
+    expect(state.connection).toBe('closed')
+    const runEntries = Object.values(state.runs)
+    expect(runEntries.length).toBeGreaterThanOrEqual(1)
+    const succeededRun = runEntries.find(r => r.terminal && r.status === 'succeeded')
+    expect(succeededRun).toBeDefined()
+  })
+
+  it('success scenario output accumulation: final output replaces accumulated text', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success, FIXTURE_RUN_ID_FOR_TESTS)
+    const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
+
+    const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
+    let state = INITIAL_STATE
+
+    for (const record of records) {
+      const result = parseSseFrame(`${record}\n\n`)
+      if (result !== null && result.success) {
+        state = nextStreamState(state, result.frame)
+      }
+    }
+
+    // At least one run must have output
+    const runEntries = Object.values(state.runs)
+    const runWithOutput = runEntries.find(r => r.outputFinal === true)
+    expect(runWithOutput).toBeDefined()
+    if (runWithOutput) {
+      expect(runWithOutput.outputFinal).toBe(true)
+    }
+  })
+
+  it('success scenario: terminal status after output preserves output fields', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.success, FIXTURE_RUN_ID_FOR_TESTS)
+    const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
+
+    const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
+    let state = INITIAL_STATE
+
+    for (const record of records) {
+      const result = parseSseFrame(`${record}\n\n`)
+      if (result !== null && result.success) {
+        state = nextStreamState(state, result.frame)
+      }
+    }
+
+    // The terminal run must have both output and terminal status
+    const runEntries = Object.values(state.runs)
+    const terminalRun = runEntries.find(r => r.terminal)
+    expect(terminalRun).toBeDefined()
+    if (terminalRun) {
+      // Output fields must survive the terminal status update
+      expect(terminalRun.outputFinal).toBe(true)
+      expect(terminalRun.status).toBe('succeeded')
+    }
+  })
+})
+
+describe('fixture SSE scenarios — browser reducer: terminal_failure scenario', () => {
+  it('terminal_failure scenario drives the browser reducer to closed with failed run', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.terminal_failure, FIXTURE_RUN_ID_FOR_TESTS)
+    const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
+
+    const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
+    let state = INITIAL_STATE
+
+    for (const record of records) {
+      const result = parseSseFrame(`${record}\n\n`)
+      if (result !== null && result.success) {
+        state = nextStreamState(state, result.frame)
+      }
+    }
+
+    expect(state.connection).toBe('closed')
+    const runEntries = Object.values(state.runs)
+    const failedRun = runEntries.find(r => r.terminal && r.status === 'failed')
+    expect(failedRun).toBeDefined()
+  })
+
+  it('terminal_failure scenario: failed run remains renderable (has status and terminal flag)', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.terminal_failure, FIXTURE_RUN_ID_FOR_TESTS)
+    const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
+
+    const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
+    let state = INITIAL_STATE
+
+    for (const record of records) {
+      const result = parseSseFrame(`${record}\n\n`)
+      if (result !== null && result.success) {
+        state = nextStreamState(state, result.frame)
+      }
+    }
+
+    const runEntries = Object.values(state.runs)
+    const failedRun = runEntries.find(r => r.status === 'failed')
+    expect(failedRun).toBeDefined()
+    if (failedRun) {
+      expect(failedRun.terminal).toBe(true)
+      expect(failedRun.status).toBe('failed')
+      // Output fields must be preserved (visible output before failure)
+      expect(failedRun.outputFinal).toBe(true)
+    }
+  })
+})
+
+describe('fixture SSE scenarios — browser reducer: contract_drift scenario', () => {
+  it('contract_drift scenario drives the browser reducer to drift state', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.contract_drift, FIXTURE_RUN_ID_FOR_TESTS)
+    const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
+
+    const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
+    let state = INITIAL_STATE
+
+    for (const record of records) {
+      const result = parseSseFrame(`${record}\n\n`)
+      if (result !== null && result.success) {
+        state = nextStreamState(state, result.frame)
+      }
+    }
+
+    expect(state.connection).toBe('drift')
+    expect(Object.keys(state.runs)).toHaveLength(0)
+  })
+
+  it('contract_drift scenario: later frames after drift are absorbed (no runs populated)', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.contract_drift, FIXTURE_RUN_ID_FOR_TESTS)
+    const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
+
+    const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
+    let state = INITIAL_STATE
+
+    for (const record of records) {
+      const result = parseSseFrame(`${record}\n\n`)
+      if (result !== null && result.success) {
+        state = nextStreamState(state, result.frame)
+      }
+    }
+
+    // Drift is absorbing — no runs should be populated even if status frames follow
+    expect(Object.keys(state.runs)).toHaveLength(0)
+    expect(state.shouldReconnect).toBe(false)
+  })
+})
+
+describe('fixture SSE scenarios — browser reducer: malformed_unavailable scenario', () => {
+  it('malformed_unavailable scenario: at least one parseSseFrame call returns a failure', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.malformed_unavailable, FIXTURE_RUN_ID_FOR_TESTS)
+    const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
+
+    let hasFailure = false
+    for (const record of records) {
+      const result = parseSseFrame(`${record}\n\n`)
+      if (result !== null && !result.success) {
+        hasFailure = true
+        break
+      }
+    }
+
+    expect(hasFailure).toBe(true)
+  })
+
+  it('malformed_unavailable scenario: parse failure error string does not echo wire content', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.malformed_unavailable, FIXTURE_RUN_ID_FOR_TESTS)
+    const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
+
+    for (const record of records) {
+      const result = parseSseFrame(`${record}\n\n`)
+      if (result !== null && !result.success) {
+        // Error must be a fixed string, not echoing wire content
+        expect(result.error.length).toBeGreaterThan(0)
+        expect(result.error).not.toContain('{not valid json}')
+      }
+    }
+  })
+})
+
+describe('buildApprovalClient — endpoint base support', () => {
+  it('buildApprovalClient accepts an optional endpointBase option', () => {
+    // Should not throw when called with an endpointBase
+    expect(() => buildApprovalClient({endpointBase: '/__fixture/operator'})).not.toThrow()
+  })
+
+  it('buildApprovalClient with no options uses /operator as default', () => {
+    // Should not throw when called with no options
+    expect(() => buildApprovalClient()).not.toThrow()
+    const client = buildApprovalClient()
+    expect(typeof client.refreshCsrf).toBe('function')
+    expect(typeof client.decideRunApproval).toBe('function')
+    expect(typeof client.listRunApprovals).toBe('function')
+  })
+
+  it('buildApprovalClient with fixture endpointBase returns a client with the same interface', () => {
+    const client = buildApprovalClient({endpointBase: '/__fixture/operator'})
+    expect(typeof client.refreshCsrf).toBe('function')
+    expect(typeof client.decideRunApproval).toBe('function')
+    expect(typeof client.listRunApprovals).toBe('function')
+  })
+})
+
+describe('initOperatorStream — malformed/closed-before-terminal: stream unavailable notice', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('noticeEl shows a visible generic unavailable notice when stream closes before any terminal status for the run', async () => {
+    // Simulate the malformed_unavailable scenario: stream sends a malformed frame
+    // (unrecognized event name) then closes. The run card was inserted before the
+    // stream started, so runId is known but no status frame was ever received.
+    // The UI must surface a path-unaware unavailable notice — not silent Pending.
+    const noticeEl = makeFakeEl('div')
+    const statusEl = makeFakeEl('span')
+
+    // Malformed SSE frame: unrecognized event name → parser returns failure → silently dropped
+    const malformedFrame = `event: fixture-unknown-event\ndata: {"id":"run-fixture-malformed-001","reason":"fixture-malformed"}\n\n`
+    const encoder = new TextEncoder()
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(malformedFrame))
+        controller.close()
+      },
+    })
+
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      headers: {get: (h: string) => (h === 'content-type' ? 'text/event-stream' : null)},
+      body: stream,
+    }))
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    const handle = initOperatorStream({runId: 'run-fixture-malformed-001', statusEl, noticeEl})
+
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    // The stream closed before any terminal status — the notice must be visible
+    // and contain a generic unavailable message (no raw error, URL, or scenario name).
+    expect(noticeEl.hidden).toBe(false)
+    expect(noticeEl.textContent.length).toBeGreaterThan(0)
+    // Must not echo raw parse error, URL, status code, or scenario name
+    expect(noticeEl.textContent).not.toContain('fixture-unknown-event')
+    expect(noticeEl.textContent).not.toContain('fixture-malformed')
+    expect(noticeEl.textContent).not.toContain('malformed_unavailable')
+    expect(noticeEl.textContent).not.toContain('/stream')
+    expect(noticeEl.textContent).not.toContain('200')
+
+    handle.close()
+  })
+
+  it('noticeEl is hidden (silent) when stream closes after a terminal status for the run', async () => {
+    // Contrast: when the stream closes normally after a terminal status, no notice.
+    const noticeEl = makeFakeEl('div')
+    const statusEl = makeFakeEl('span')
+    statusEl.classList = {
+      add(_cls: string) {},
+      remove(_cls: string) {},
+      contains(_cls: string) { return false },
+    }
+
+    const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
+    const succeededStatusFrame = `event: status\ndata: ${JSON.stringify({
+      runId: 'run-ok-terminal',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'COMPLETED',
+      status: 'succeeded',
+      startedAt: '2026-06-27T10:00:00Z',
+      stale: false,
+    })}\n\n`
+
+    const encoder = new TextEncoder()
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(readyFrame + succeededStatusFrame))
+        controller.close()
+      },
+    })
+
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      headers: {get: (h: string) => (h === 'content-type' ? 'text/event-stream' : null)},
+      body: stream,
+    }))
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeFakeEl(tag),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    const handle = initOperatorStream({runId: 'run-ok-terminal', statusEl, noticeEl})
+
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    // Terminal status received before close — notice must be silent
+    expect(noticeEl.hidden).toBe(true)
+    expect(noticeEl.textContent).toBe('')
+
+    handle.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// fixtureSessionId propagation to stream URL and approval client
+// ---------------------------------------------------------------------------
+
+describe('initOperatorStream — fixtureSessionId propagated to stream URL', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('stream URL includes fixtureSessionId as query param when provided', async () => {
+    let capturedUrl: string | undefined
+
+    vi.stubGlobal('fetch', async (url: string) => {
+      capturedUrl = url
+      return {
+        ok: true,
+        status: 200,
+        headers: {get: (h: string) => (h === 'content-type' ? 'text/event-stream' : null)},
+        body: new ReadableStream({start(c) { c.close() }}),
+      }
+    })
+    vi.stubGlobal('document', {
+      createElement: () => ({style: {}, className: '', textContent: '', hidden: false, dataset: {}, setAttribute: () => {}, append: () => {}, remove: () => {}, querySelector: () => null, querySelectorAll: () => [], classList: {add: () => {}, remove: () => {}}, replaceAll: () => ''}),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    const statusEl = {textContent: '', className: '', classList: {add: () => {}}, dataset: {}, hidden: false, style: {}}
+    const noticeEl = {textContent: '', hidden: false, dataset: {connectionState: ''}, setAttribute: () => {}}
+
+    initOperatorStream({
+      runId: 'run-fixture-001',
+      statusEl,
+      noticeEl,
+      endpointBase: '/__fixture/operator',
+      fixtureSessionId: 'fixture-session-0001',
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    expect(capturedUrl).toBeDefined()
+    expect(capturedUrl).toContain('fixtureSessionId=fixture-session-0001')
+  })
+
+  it('stream URL does NOT include fixtureSessionId when not provided (production path)', async () => {
+    let capturedUrl: string | undefined
+
+    vi.stubGlobal('fetch', async (url: string) => {
+      capturedUrl = url
+      return {
+        ok: true,
+        status: 200,
+        headers: {get: (h: string) => (h === 'content-type' ? 'text/event-stream' : null)},
+        body: new ReadableStream({start(c) { c.close() }}),
+      }
+    })
+    vi.stubGlobal('document', {
+      createElement: () => ({style: {}, className: '', textContent: '', hidden: false, dataset: {}, setAttribute: () => {}, append: () => {}, remove: () => {}, querySelector: () => null, querySelectorAll: () => [], classList: {add: () => {}, remove: () => {}}, replaceAll: () => ''}),
+      querySelector: () => null,
+      readyState: 'complete',
+      addEventListener: () => {},
+    })
+    vi.stubGlobal('addEventListener', () => {})
+
+    const statusEl = {textContent: '', className: '', classList: {add: () => {}}, dataset: {}, hidden: false, style: {}}
+    const noticeEl = {textContent: '', hidden: false, dataset: {connectionState: ''}, setAttribute: () => {}}
+
+    initOperatorStream({
+      runId: 'run-prod-001',
+      statusEl,
+      noticeEl,
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    expect(capturedUrl).toBeDefined()
+    expect(capturedUrl).not.toContain('fixtureSessionId')
+  })
+})
+
+describe('buildApprovalClient — fixtureSessionId propagated to approval requests', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('decideRunApproval URL includes fixtureSessionId as query param when provided', async () => {
+    let capturedUrl: string | undefined
+
+    vi.stubGlobal('fetch', async (url: string) => {
+      capturedUrl = url
+      return {ok: true, status: 200, json: async () => ({state: 'claimed'})}
+    })
+
+    const client = buildApprovalClient({
+      endpointBase: '/__fixture/operator',
+      fixtureSessionId: 'fixture-session-0001',
+    })
+
+    await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-001')
+
+    expect(capturedUrl).toBeDefined()
+    expect(capturedUrl).toContain('fixtureSessionId=fixture-session-0001')
+  })
+
+  it('decideRunApproval URL does NOT include fixtureSessionId in production mode', async () => {
+    let capturedUrl: string | undefined
+
+    vi.stubGlobal('fetch', async (url: string) => {
+      capturedUrl = url
+      return {ok: true, status: 200, json: async () => ({state: 'claimed'})}
+    })
+
+    const client = buildApprovalClient({endpointBase: '/operator'})
+
+    await client.decideRunApproval('run-001', 'req-001', 'once', 'idem-key-001')
+
+    expect(capturedUrl).toBeDefined()
+    expect(capturedUrl).not.toContain('fixtureSessionId')
+  })
+
+  it('listRunApprovals URL includes fixtureSessionId as query param when provided', async () => {
+    let capturedUrl: string | undefined
+
+    vi.stubGlobal('fetch', async (url: string) => {
+      capturedUrl = url
+      return {ok: true, status: 200, json: async () => ({approvals: []})}
+    })
+
+    const client = buildApprovalClient({
+      endpointBase: '/__fixture/operator',
+      fixtureSessionId: 'fixture-session-0002',
+    })
+
+    await client.listRunApprovals('run-002')
+
+    expect(capturedUrl).toBeDefined()
+    expect(capturedUrl).toContain('fixtureSessionId=fixture-session-0002')
+  })
+
+  it('listRunApprovals URL does NOT include fixtureSessionId in production mode', async () => {
+    let capturedUrl: string | undefined
+
+    vi.stubGlobal('fetch', async (url: string) => {
+      capturedUrl = url
+      return {ok: true, status: 200, json: async () => ({approvals: []})}
+    })
+
+    const client = buildApprovalClient({endpointBase: '/operator'})
+
+    await client.listRunApprovals('run-002')
+
+    expect(capturedUrl).toBeDefined()
+    expect(capturedUrl).not.toContain('fixtureSessionId')
+  })
+
+  it('refreshCsrf URL includes fixtureSessionId as query param when provided', async () => {
+    let capturedUrl: string | undefined
+
+    vi.stubGlobal('fetch', async (url: string) => {
+      capturedUrl = url
+      return {ok: true, status: 200, json: async () => ({csrfToken: 'tok'})}
+    })
+
+    const client = buildApprovalClient({
+      endpointBase: '/__fixture/operator',
+      fixtureSessionId: 'fixture-session-0003',
+    })
+
+    await client.refreshCsrf()
+
+    expect(capturedUrl).toBeDefined()
+    expect(capturedUrl).toContain('fixtureSessionId=fixture-session-0003')
+  })
+
+  it('refreshCsrf URL does NOT include fixtureSessionId in production mode', async () => {
+    let capturedUrl: string | undefined
+
+    vi.stubGlobal('fetch', async (url: string) => {
+      capturedUrl = url
+      return {ok: true, status: 200, json: async () => ({csrfToken: 'tok'})}
+    })
+
+    const client = buildApprovalClient({endpointBase: '/operator'})
+
+    await client.refreshCsrf()
+
+    expect(capturedUrl).toBeDefined()
+    expect(capturedUrl).not.toContain('fixtureSessionId')
   })
 })

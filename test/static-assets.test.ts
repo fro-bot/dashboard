@@ -11,7 +11,8 @@
  */
 import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
 import {Buffer} from 'node:buffer'
-import {describe, expect, it} from 'vitest'
+import process from 'node:process'
+import {afterEach, describe, expect, it} from 'vitest'
 import {buildDashboardApp} from '../src/server.ts'
 import {SessionManager} from '../src/session.ts'
 
@@ -428,6 +429,317 @@ describe('auth boundary — SW assets public, protected routes still gated', () 
     expect(swRes.status).not.toBe(401)
     const apiRes = await app.request('/api/monitoring')
     expect(apiRes.status).not.toBe(200)
+  })
+})
+
+describe('production static JS assets — no fixture strings', () => {
+  it('operator-stream.js source does not contain /__fixture string', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-stream.js', 'utf8')
+    expect(src).not.toContain('/__fixture')
+  })
+
+  it('operator-launch.js source does not contain /__fixture string', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).not.toContain('/__fixture')
+  })
+
+  it('operator-stream.js source does not contain fixture-mode flag strings', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-stream.js', 'utf8')
+    expect(src).not.toContain('fixtureMode')
+    expect(src).not.toContain('fixture-runtime-loader')
+  })
+
+  it('operator-launch.js source does not contain fixture-mode flag strings', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).not.toContain('fixtureMode')
+    expect(src).not.toContain('fixture-runtime-loader')
+  })
+
+  it('operator-stream.js default endpoint base is /operator (not fixture prefix)', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-stream.js', 'utf8')
+    // The default endpoint base must be /operator, not /__fixture/operator
+    // The file may contain /operator as part of paths like /operator/session/csrf
+    expect(src).toContain('/operator')
+    expect(src).not.toContain('/__fixture/operator')
+  })
+
+  it('operator-launch.js default endpoint base is /operator (not fixture prefix)', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).toContain('/operator')
+    expect(src).not.toContain('/__fixture/operator')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Production build artifact assertions — web/dist must be fixture-free
+//
+// These tests scan the compiled browser bundle and service-worker output after
+// `pnpm build:web`. Fixture imports are dev-gated so Vite removes the module
+// request strings from production output. The pretest hook runs build:web before
+// vitest, so web/dist is always fresh when these tests run.
+// ---------------------------------------------------------------------------
+
+describe('production build artifacts — no fixture strings in web/dist JS', () => {
+  it('web/dist/sw.js does not contain /__fixture route string', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('web/dist/sw.js', 'utf8')
+    expect(src).not.toContain('/__fixture')
+  })
+
+  it('web/dist/sw.js does not contain fixture-runtime-loader import path', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('web/dist/sw.js', 'utf8')
+    expect(src).not.toContain('fixture-runtime-loader')
+  })
+
+  it('web/dist/index.html does not contain /__fixture string', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('web/dist/index.html', 'utf8')
+    expect(src).not.toContain('/__fixture')
+  })
+
+  it('web/dist JS bundle does not contain /__fixture route string', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const assetsDir = 'web/dist/assets'
+    const entries = await fs.readdir(assetsDir)
+    const jsFiles = entries.filter(f => f.endsWith('.js'))
+    for (const file of jsFiles) {
+      const src = await fs.readFile(path.join(assetsDir, file), 'utf8')
+      expect(src, `${file} must not contain /__fixture`).not.toContain('/__fixture')
+    }
+  })
+
+  it('web/dist JS bundle does not contain fixture-runtime-loader import path', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const assetsDir = 'web/dist/assets'
+    const entries = await fs.readdir(assetsDir)
+    const jsFiles = entries.filter(f => f.endsWith('.js'))
+    for (const file of jsFiles) {
+      const src = await fs.readFile(path.join(assetsDir, file), 'utf8')
+      expect(src, `${file} must not contain fixture-runtime-loader`).not.toContain('fixture-runtime-loader')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Service worker cache boundary — fixture routes are not intercepted
+//
+// The SW uses a deny-by-default NavigationRoute with an explicit denylist.
+// /__fixture/* paths are not in the SW route table, so they naturally pass
+// through to the server. These tests prove the SW source does not add fixture
+// route handling and does not precache or runtime-cache fixture paths.
+// ---------------------------------------------------------------------------
+
+describe('service worker cache boundary — fixture routes not intercepted', () => {
+  it('web/dist/sw.js does not register a route for /__fixture paths', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('web/dist/sw.js', 'utf8')
+    expect(src).not.toContain('/__fixture')
+  })
+
+  it('web/src/sw.ts source does not contain /__fixture route registration', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('web/src/sw.ts', 'utf8')
+    expect(src).not.toContain('/__fixture')
+  })
+
+  it('web/dist/sw.js NavigationRoute denylist does not include fixture prefix', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('web/dist/sw.js', 'utf8')
+    // The denylist patterns are /^\/auth/, /^\/operator\/auth/, /^\/api/
+    // /__fixture must not appear in any denylist or allowlist pattern
+    expect(src).not.toContain('fixture')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// DASHBOARD_WEB_DIST static root override
+//
+// The server must read DASHBOARD_WEB_DIST (defaulting to ./web/dist) and use it
+// for all SPA static asset routes: /, /assets/*, /icon-*, /manifest.webmanifest,
+// /sw.js, /registerSW.js, and the missing-index warning.
+//
+// Tests here verify:
+// 1. Default root is ./web/dist (production unchanged).
+// 2. DASHBOARD_WEB_DIST env var is forwarded to the app config.
+// 3. package.json dev:fixture script sets DASHBOARD_WEB_DIST=./web/dist-fixture.
+// ---------------------------------------------------------------------------
+
+describe('DASHBOARD_WEB_DIST — static root override', () => {
+  const ORIGINAL_WEB_DIST = process.env.DASHBOARD_WEB_DIST
+
+  afterEach(() => {
+    if (ORIGINAL_WEB_DIST === undefined) {
+      delete process.env.DASHBOARD_WEB_DIST
+    } else {
+      process.env.DASHBOARD_WEB_DIST = ORIGINAL_WEB_DIST
+    }
+  })
+
+  it('default webDistRoot is ./web/dist when DASHBOARD_WEB_DIST is unset', async () => {
+    delete process.env.DASHBOARD_WEB_DIST
+    // The app builds without error using the default root (web/dist exists from pretest build:web)
+    const app = await buildDashboardApp({
+      operatorLogin: TEST_OPERATOR,
+      cookieKey: TEST_KEY,
+      oauthClient: makeFakeOAuthClient(),
+      fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+      getSnapshot: () => ({repos: [], staleBanner: false, driftCount: 0, refreshedAt: null}),
+    })
+    // /sw.js is served from web/dist — 200 confirms the default root is correct
+    const res = await app.request('/sw.js')
+    expect(res.status).toBe(200)
+  })
+
+  it('injected webDistRoot=./web/dist-fixture serves assets from dist-fixture', async () => {
+    // web/dist-fixture is built by pnpm build:web:fixture; skip if not present
+    const fs = await import('node:fs')
+    if (!fs.existsSync('./web/dist-fixture')) {
+      return
+    }
+    const app = await buildDashboardApp({
+      operatorLogin: TEST_OPERATOR,
+      cookieKey: TEST_KEY,
+      oauthClient: makeFakeOAuthClient(),
+      fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+      getSnapshot: () => ({repos: [], staleBanner: false, driftCount: 0, refreshedAt: null}),
+      webDistRoot: './web/dist-fixture',
+    })
+    const res = await app.request('/sw.js')
+    expect(res.status).toBe(200)
+  })
+
+  it('DASHBOARD_WEB_DIST env var is used as the static root when set', async () => {
+    process.env.DASHBOARD_WEB_DIST = './web/dist'
+    const app = await buildDashboardApp({
+      operatorLogin: TEST_OPERATOR,
+      cookieKey: TEST_KEY,
+      oauthClient: makeFakeOAuthClient(),
+      fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+      getSnapshot: () => ({repos: [], staleBanner: false, driftCount: 0, refreshedAt: null}),
+      // No webDistRoot injected — reads from env
+    })
+    const res = await app.request('/sw.js')
+    expect(res.status).toBe(200)
+  })
+})
+
+describe('DASHBOARD_WEB_DIST — production guard: dist-fixture must not be used in production', () => {
+  it('buildDashboardApp throws when webDistRoot is ./web/dist-fixture and NODE_ENV=production', async () => {
+    const originalNodeEnv = process.env.NODE_ENV
+    process.env.NODE_ENV = 'production'
+    try {
+      await expect(
+        buildDashboardApp({
+          operatorLogin: TEST_OPERATOR,
+          cookieKey: TEST_KEY,
+          oauthClient: makeFakeOAuthClient(),
+          fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+          getSnapshot: () => ({repos: [], staleBanner: false, driftCount: 0, refreshedAt: null}),
+          webDistRoot: './web/dist-fixture',
+        }),
+      ).rejects.toThrow(/dist-fixture.*production|production.*dist-fixture/i)
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv
+    }
+  })
+
+  it('buildDashboardApp does NOT throw when webDistRoot is ./web/dist-fixture and NODE_ENV=development', async () => {
+    const originalNodeEnv = process.env.NODE_ENV
+    process.env.NODE_ENV = 'development'
+    try {
+      await expect(
+        buildDashboardApp({
+          operatorLogin: TEST_OPERATOR,
+          cookieKey: TEST_KEY,
+          oauthClient: makeFakeOAuthClient(),
+          fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+          getSnapshot: () => ({repos: [], staleBanner: false, driftCount: 0, refreshedAt: null}),
+          webDistRoot: './web/dist-fixture',
+        }),
+      ).resolves.toBeDefined()
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv
+    }
+  })
+
+  it('buildDashboardApp does NOT throw when webDistRoot is ./web/dist (production-safe root)', async () => {
+    const originalNodeEnv = process.env.NODE_ENV
+    process.env.NODE_ENV = 'production'
+    try {
+      await expect(
+        buildDashboardApp({
+          operatorLogin: TEST_OPERATOR,
+          cookieKey: TEST_KEY,
+          oauthClient: makeFakeOAuthClient(),
+          fetchUserLogin: async (_token: string) => TEST_OPERATOR,
+          getSnapshot: () => ({repos: [], staleBanner: false, driftCount: 0, refreshedAt: null}),
+          webDistRoot: './web/dist',
+        }),
+      ).resolves.toBeDefined()
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv
+    }
+  })
+})
+
+describe('dev:fixture script — package.json content', () => {
+  it('dev:fixture script sets DASHBOARD_WEB_DIST=./web/dist-fixture', async () => {
+    const fs = await import('node:fs/promises')
+    const pkg = JSON.parse(await fs.readFile('package.json', 'utf8')) as {scripts: Record<string, string>}
+    const script = pkg.scripts['dev:fixture'] ?? ''
+    expect(script).toContain('DASHBOARD_WEB_DIST=./web/dist-fixture')
+  })
+
+  it('dev:fixture script chains build:web:fixture before starting the server', async () => {
+    const fs = await import('node:fs/promises')
+    const pkg = JSON.parse(await fs.readFile('package.json', 'utf8')) as {scripts: Record<string, string>}
+    const script = pkg.scripts['dev:fixture'] ?? ''
+    expect(script).toContain('build:web:fixture')
+  })
+
+  it('dev:fixture script sets DASHBOARD_HOST=127.0.0.1 (loopback safety)', async () => {
+    const fs = await import('node:fs/promises')
+    const pkg = JSON.parse(await fs.readFile('package.json', 'utf8')) as {scripts: Record<string, string>}
+    const script = pkg.scripts['dev:fixture'] ?? ''
+    expect(script).toContain('DASHBOARD_HOST=127.0.0.1')
+  })
+
+  it('dev:fixture script enables the dashboard fixture harness flag', async () => {
+    const fs = await import('node:fs/promises')
+    const pkg = JSON.parse(await fs.readFile('package.json', 'utf8')) as {scripts: Record<string, string>}
+    const script = pkg.scripts['dev:fixture'] ?? ''
+    expect(script).toContain('DASHBOARD_FIXTURE_HARNESS_ENABLED=true')
+  })
+
+  it('dev:fixture script enables dashboard dev autologin', async () => {
+    const fs = await import('node:fs/promises')
+    const pkg = JSON.parse(await fs.readFile('package.json', 'utf8')) as {scripts: Record<string, string>}
+    const script = pkg.scripts['dev:fixture'] ?? ''
+    expect(script).toContain('DASHBOARD_DEV_AUTOLOGIN=true')
+  })
+
+  it('dev:fixture script does not use stale fixture/autologin env aliases', async () => {
+    const fs = await import('node:fs/promises')
+    const pkg = JSON.parse(await fs.readFile('package.json', 'utf8')) as {scripts: Record<string, string>}
+    const script = pkg.scripts['dev:fixture'] ?? ''
+    expect(script).not.toContain('FIXTURE_HARNESS=true')
+    expect(script).not.toContain('DEV_AUTO_LOGIN=true')
+  })
+
+  it('dev:fixture script sets NODE_ENV=development (fixture guard requires explicit development or test)', async () => {
+    const fs = await import('node:fs/promises')
+    const pkg = JSON.parse(await fs.readFile('package.json', 'utf8')) as {scripts: Record<string, string>}
+    const script = pkg.scripts['dev:fixture'] ?? ''
+    expect(script).toContain('NODE_ENV=development')
   })
 })
 

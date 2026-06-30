@@ -163,7 +163,7 @@ export async function submitLaunch(client, params, idempotencyKey) {
  * and the shared stream-status notice element after the card is inserted.
  *
  * @param {string} runId
- * @returns {PendingCardHooks} The hook descriptor with runId and element selectors.
+ * @returns {{runId: string, statusElSelector: string, noticeElSelector: string}} The hook descriptor.
  */
 export function buildPendingCardHooks(runId) {
   return {
@@ -194,18 +194,199 @@ export function streamModuleSpecifier() {
 }
 
 // ---------------------------------------------------------------------------
+// Pure: browser launch client builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a browser-direct launch client.
+ *
+ * Accepts an optional endpointBase (default: '/operator') so the runtime-loader
+ * seam can configure a different endpoint base in dev mode without modifying
+ * production behavior. The default is always '/operator'.
+ *
+ * Also accepts optional getScenario and fixtureSessionId for dev-mode launches.
+ * These are included in the launch request body only when provided.
+ *
+ * Security:
+ * - Never logs prompt, csrf, idempotency key, runId, or endpoint base.
+ * - All 400s → one generic failure; 404 → one uniform unavailable.
+ * - credentials:'include', redirect:'error' on all fetch calls.
+ *
+ * @param {object} [opts] - Optional configuration.
+ * @param {string} [opts.endpointBase] - The endpoint base path. Defaults to '/operator'.
+ * @param {() => string} [opts.getScenario] - Fixture scenario source (fixture mode only).
+ * @param {string} [opts.fixtureSessionId] - Fixture session ID (fixture mode only).
+ * @returns {object} A client with refreshCsrf, listRepos, and launchRun methods.
+ */
+export function buildLaunchClient(opts) {
+  const endpointBase = opts?.endpointBase ?? '/operator'
+  const getScenario = opts?.getScenario
+  const fixtureSessionId = opts?.fixtureSessionId
+
+  const browserFetch = (input, init) =>
+    globalThis.fetch(input, {
+      ...init,
+      credentials: 'include',
+      redirect: 'error',
+    })
+
+  return {
+    async refreshCsrf() {
+      try {
+        const res = await browserFetch(`${endpointBase}/session/csrf`, {
+          headers: {'content-type': 'application/json'},
+        })
+        if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
+        const data = await res.json()
+        if (data === null || typeof data !== 'object' || typeof data.csrfToken !== 'string') {
+          return {success: false, error: {kind: 'protocol', message: 'invalid csrf response'}}
+        }
+        return {success: true, data: {csrfToken: data.csrfToken}}
+      } catch {
+        return {success: false, error: {kind: 'network', message: 'network error'}}
+      }
+    },
+
+    async listRepos() {
+      try {
+        const res = await browserFetch(`${endpointBase}/repos`, {
+          headers: {'content-type': 'application/json'},
+        })
+        if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
+        const data = await res.json()
+        if (!Array.isArray(data)) {
+          return {success: false, error: {kind: 'protocol', message: 'invalid repos response'}}
+        }
+        for (const item of data) {
+          if (!validateRepoItem(item)) {
+            return {success: false, error: {kind: 'protocol', message: 'invalid repos response'}}
+          }
+        }
+        return {success: true, data}
+      } catch {
+        return {success: false, error: {kind: 'network', message: 'network error'}}
+      }
+    },
+
+    async launchRun(req) {
+      if (!req.csrfToken || req.csrfToken.trim() === '') {
+        return {success: false, error: {kind: 'validation', code: 'missing_csrf', message: 'CSRF token required'}}
+      }
+      if (!req.idempotencyKey || req.idempotencyKey.trim() === '') {
+        return {success: false, error: {kind: 'validation', code: 'missing_idempotency_key', message: 'Idempotency key required'}}
+      }
+      try {
+        // Build the request body — include fixture fields only when provided.
+        // getScenario() is called at submit time so scenario changes after init are reflected.
+        const bodyObj = {repo: req.repo, prompt: req.prompt}
+        const currentScenario = typeof getScenario === 'function' ? getScenario() : undefined
+        if (currentScenario !== undefined) bodyObj.scenario = currentScenario
+        if (fixtureSessionId !== undefined) bodyObj.fixtureSessionId = fixtureSessionId
+        if (req.idempotencyKey !== undefined) bodyObj.idempotencyKey = req.idempotencyKey
+
+        const res = await browserFetch(`${endpointBase}/runs`, {
+          method: 'POST',
+          redirect: 'error',
+          headers: {
+            'content-type': 'application/json',
+            'x-csrf-token': req.csrfToken,
+            'idempotency-key': req.idempotencyKey,
+          },
+          body: JSON.stringify(bodyObj),
+        })
+        if (res.status === 200 || res.status === 202) {
+          const data = await res.json()
+          if (typeof data.runId !== 'string' || data.runId === '') {
+            return {success: false, error: {kind: 'protocol', message: 'invalid runId in launch response'}}
+          }
+          return {success: true, data: {runId: data.runId}}
+        }
+        return {success: false, error: {kind: 'http', status: res.status}}
+      } catch {
+        return {success: false, error: {kind: 'network', message: 'network error'}}
+      }
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
 // DOM shell — only runs in a browser (document must exist)
 // ---------------------------------------------------------------------------
 
-// Module-level state: tracks whether initOperatorLaunch has been called and
-// the AbortController used to remove the submit listener on reset.
-// resetLaunchState() aborts the prior listener before clearing state.
-// Declared here (before initOperatorLaunch) to satisfy no-use-before-define.
-let _launchInitialized = false
-let _launchAbortController = null
+// Module-level state for the DOM shell lifecycle.
+// _launchGeneration is a monotonically increasing counter. Each initOperatorLaunch()
+// call captures its own generation at entry; resetLaunchState() increments the counter
+// to invalidate all pending inits without clearing it to null (which would cause a
+// fresh init resuming after reset to see a null mismatch and bail incorrectly).
+// _launchListenerController is the AbortController passed to the active submit listener.
+// _launchListenerGeneration is the generation value at the time the controller was set.
+// resetLaunchState() only aborts the controller if _launchListenerGeneration matches
+// the pre-increment generation — this prevents stale cleanup from aborting a listener
+// registered by a newer init that started after the stale reset.
+let _launchGeneration = 0
+let _launchListenerController = null
+let _launchListenerGeneration = -1
 // Tracks the stream handle returned by initOperatorStream for launch-created runs.
 // resetLaunchState() closes this handle to prevent leaked connections/timers.
 let _launchStreamHandle = null
+// Idempotency flag: prevents double-init when auto-start fires before DOMContentLoaded.
+let _launchInitialized = false
+
+/**
+ * Returns true if the given init is no longer the active init.
+ *
+ * An init is stale when either:
+ * - Its AbortController signal has been aborted (resetLaunchState() was called
+ *   and the controller was the active listener controller at that time), or
+ * - Its captured generation no longer matches the current generation (a newer
+ *   init has started, or resetLaunchState() incremented the counter).
+ *
+ * Call this after every await in initOperatorLaunch to bail out of stale inits
+ * before they register listeners or mutate the DOM.
+ *
+ * Using a generation counter (rather than controller identity) means that
+ * resetLaunchState() can increment the counter without setting it to null,
+ * so a fresh init that starts after reset gets a new generation and its
+ * isInitStale checks pass correctly even if stale cleanup runs concurrently.
+ *
+ * Exported for testing.
+ *
+ * @param {AbortController} controller - The AbortController created at init entry.
+ * @param {number} generation - The generation captured at init entry.
+ */
+export function isInitStale(controller, generation) {
+  return controller.signal.aborted || generation !== _launchGeneration
+}
+
+/**
+ * Test-only seam: directly set _launchGeneration.
+ *
+ * Allows tests to simulate the race condition (reset mid-async) without
+ * calling the DOM-touching initOperatorLaunch. Never call this in production code.
+ *
+ * @param {number} gen - The generation value to set.
+ */
+export function setLaunchGeneration(gen) {
+  _launchGeneration = gen
+}
+
+/**
+ * Test-only seam: directly set _launchListenerController and its owning generation.
+ *
+ * Allows tests to simulate the listener registration step of initOperatorLaunch
+ * without calling the DOM-touching function. The generation parameter must match
+ * the generation that "owns" this controller — resetLaunchState() will only abort
+ * the controller if _launchListenerGeneration matches the pre-increment generation.
+ *
+ * Never call this in production code.
+ *
+ * @param {AbortController} controller - The controller to set as the active listener controller.
+ * @param {number} generation - The generation that owns this controller.
+ */
+export function setLaunchListenerController(controller, generation) {
+  _launchListenerController = controller
+  _launchListenerGeneration = generation
+}
 
 /**
  * Set the launch-created stream handle.
@@ -236,102 +417,30 @@ export function setLaunchStreamHandle(handle) {
  * - runId appears only in data-run-id attribute and the stream URL (via initOperatorStream).
  * - All 400s → one generic failure message; 404 → one uniform unavailable message.
  */
-export async function initOperatorLaunch() {
-  // Create an AbortController for this init session. The controller's signal is
-  // passed to the submit event listener so that resetLaunchState() can abort it,
-  // removing the listener without needing a reference to the handler function.
-  // This prevents double-registration under React Strict Mode.
+export async function initOperatorLaunch(opts) {
+  // Capture this init's generation at entry. Each call increments the counter so
+  // that any concurrent or prior init with a different generation is considered stale.
+  // resetLaunchState() also increments the counter, invalidating pending inits without
+  // setting it to null (which would cause a fresh post-reset init to fail its own guard).
+  const myGeneration = ++_launchGeneration
+  // Create a per-init AbortController used only as a staleness signal for this init's
+  // async steps. The listener controller (_launchListenerController) is separate and
+  // is only set once this init wins the generation race and registers its listener.
   const abortController = new AbortController()
-  _launchAbortController = abortController
 
   const {initOperatorStream} = await import(streamModuleSpecifier())
 
-  // Browser fetch adapter: credentials:'include', redirect:'error'
-  const browserFetch = (input, init) =>
-    globalThis.fetch(input, {
-      ...init,
-      credentials: 'include',
-      redirect: 'error',
-    })
+  // Guard: bail if a reset or newer init has superseded this one while we awaited.
+  if (isInitStale(abortController, myGeneration)) return
 
-  // These same-origin relative /operator/* paths (session/csrf, repos, runs) are
-  // owned by the public reverse proxy, which routes them to the gateway. The
-  // dashboard app deliberately does NOT mount or proxy them — serving them here
-  // would make this read-only app a credential-forwarding component. The browser
-  // calls them same-origin so the cookie, Origin, and Sec-Fetch metadata ride
-  // automatically and the gateway enforces its own auth/CSRF/origin checks.
-  const client = {
-    async refreshCsrf() {
-      try {
-        const res = await browserFetch('/operator/session/csrf', {
-          headers: {'content-type': 'application/json'},
-        })
-        if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
-        const data = await res.json()
-        if (data === null || typeof data !== 'object' || typeof data.csrfToken !== 'string') {
-          return {success: false, error: {kind: 'protocol', message: 'invalid csrf response'}}
-        }
-        return {success: true, data: {csrfToken: data.csrfToken}}
-      } catch {
-        return {success: false, error: {kind: 'network', message: 'network error'}}
-      }
-    },
-
-    async listRepos() {
-      try {
-        const res = await browserFetch('/operator/repos', {
-          headers: {'content-type': 'application/json'},
-        })
-        if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
-        const data = await res.json()
-        if (!Array.isArray(data)) {
-          return {success: false, error: {kind: 'protocol', message: 'invalid repos response'}}
-        }
-        // Validate each item — fail closed if any item is malformed.
-        // A null or missing-field item would crash the picker render loop.
-        for (const item of data) {
-          if (!validateRepoItem(item)) {
-            return {success: false, error: {kind: 'protocol', message: 'invalid repos response'}}
-          }
-        }
-        return {success: true, data}
-      } catch {
-        return {success: false, error: {kind: 'network', message: 'network error'}}
-      }
-    },
-
-    async launchRun(req) {
-      if (!req.csrfToken || req.csrfToken.trim() === '') {
-        return {success: false, error: {kind: 'validation', code: 'missing_csrf', message: 'CSRF token required'}}
-      }
-      if (!req.idempotencyKey || req.idempotencyKey.trim() === '') {
-        return {success: false, error: {kind: 'validation', code: 'missing_idempotency_key', message: 'Idempotency key required'}}
-      }
-      try {
-        const res = await browserFetch('/operator/runs', {
-          method: 'POST',
-          redirect: 'error',
-          headers: {
-            'content-type': 'application/json',
-            'x-csrf-token': req.csrfToken,
-            'idempotency-key': req.idempotencyKey,
-          },
-          body: JSON.stringify({repo: req.repo, prompt: req.prompt}),
-        })
-        if (res.status === 202) {
-          const data = await res.json()
-          // Validate runId — a missing or non-string runId would produce a bogus stream URL
-          if (typeof data.runId !== 'string' || data.runId === '') {
-            return {success: false, error: {kind: 'protocol', message: 'invalid runId in 202 response'}}
-          }
-          return {success: true, data: {runId: data.runId}}
-        }
-        return {success: false, error: {kind: 'http', status: res.status}}
-      } catch {
-        return {success: false, error: {kind: 'network', message: 'network error'}}
-      }
-    },
-  }
+  // Build the client using the optional endpointBase from opts.
+  // Default is '/operator' (production path). Dev mode may pass a different base
+  // through the runtime-loader seam.
+  // These same-origin relative paths are owned by the public reverse proxy
+  // (production) or the dev harness. The dashboard app deliberately
+  // does NOT mount or proxy them — serving them here would make this read-only
+  // app a credential-forwarding component.
+  const client = buildLaunchClient(opts)
 
   // -------------------------------------------------------------------------
   // Render repo picker
@@ -341,6 +450,9 @@ export async function initOperatorLaunch() {
 
   if (pickerContainer !== null) {
     const reposResult = await client.listRepos()
+
+    // Guard: bail if reset/replaced while awaiting listRepos.
+    if (isInitStale(abortController, myGeneration)) return
 
     if (!reposResult.success) {
       // Failure — classify into a neutral operator failure state.
@@ -399,6 +511,16 @@ export async function initOperatorLaunch() {
   const sharedNoticeEl = runStatusSection?.querySelector('[data-role="stream-status"]') ?? null
 
   if (launchForm !== null) {
+    // Create a dedicated AbortController for the submit listener. This is separate
+    // from the per-init abortController used for staleness guards above, so that
+    // resetLaunchState() can abort only the active listener without interfering with
+    // the init-guard controller of a concurrently-running newer init.
+    // Record the generation that owns this controller so resetLaunchState() can
+    // verify ownership before aborting — stale cleanup must not abort a newer listener.
+    const listenerController = new AbortController()
+    _launchListenerController = listenerController
+    _launchListenerGeneration = myGeneration
+
     // In-flight submit mutex: prevents double-launch even when requestSubmit()
     // bypasses the disabled button (e.g. DevTools or browser extensions).
     let launching = false
@@ -487,7 +609,7 @@ export async function initOperatorLaunch() {
           // Wire the SSE stream directly — do NOT re-run bootstrapOperatorStreams.
           // Store the returned handle so resetLaunchState() can close it on cleanup.
           const statusEl = card.querySelector('[data-role="run-status"]')
-          const streamHandle = initOperatorStream({runId, statusEl, noticeEl: sharedNoticeEl})
+          const streamHandle = initOperatorStream({runId, statusEl, noticeEl: sharedNoticeEl, endpointBase: opts?.endpointBase, fixtureSessionId: opts?.fixtureSessionId})
           setLaunchStreamHandle(streamHandle)
         }
 
@@ -508,22 +630,34 @@ export async function initOperatorLaunch() {
         launchError.textContent = 'Launch failed. Please try again.'
         launchError.hidden = false
       }
-    }, {signal: abortController.signal})
+    }, {signal: listenerController.signal})
   }
 }
 
 /**
  * Reset the launch state.
  *
- * Aborts the AbortController that was passed to the submit event listener,
- * removing it from the form. Called by the React runtime seam cleanup so that
- * a remount (e.g. after auth expiry and re-login) can re-initialize the launch
- * UI without double-registering submit handlers. Also used in tests.
+ * Increments the generation counter to invalidate all pending inits, then aborts
+ * the active submit listener controller (removing the listener from the form).
+ * Called by the React runtime seam cleanup so that a remount can re-initialize
+ * the launch UI without double-registering submit handlers. Also used in tests.
+ *
+ * Incrementing (not nulling) the generation means a fresh init that starts after
+ * this reset will capture a new generation and pass its own staleness guards,
+ * even if stale cleanup from an older init runs concurrently.
  */
 export function resetLaunchState() {
-  if (_launchAbortController !== null) {
-    _launchAbortController.abort()
-    _launchAbortController = null
+  // Capture the pre-increment generation to check listener ownership.
+  const preIncrementGeneration = _launchGeneration
+  // Increment generation to invalidate all pending inits.
+  _launchGeneration++
+  // Abort and clear the active listener controller only if it was set during the
+  // pre-increment generation. This prevents stale cleanup from aborting a listener
+  // registered by a newer init that started after the stale reset fired.
+  if (_launchListenerController !== null && _launchListenerGeneration === preIncrementGeneration) {
+    _launchListenerController.abort()
+    _launchListenerController = null
+    _launchListenerGeneration = -1
   }
   // Close the launch-created stream handle to prevent leaked connections/timers.
   if (_launchStreamHandle !== null) {
