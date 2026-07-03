@@ -19,6 +19,7 @@ import type {
   RepoSummary,
   ResetFrameData,
   ResetReason,
+  RunsListResponse,
   RunStreamFrame,
   RunSummary as RunSummaryType,
   StatusFrameData,
@@ -32,6 +33,7 @@ import {
   parseOperatorSessionInfo,
   parseRepoSummary,
   parseRepoSummaryList,
+  parseRunsListResponse,
   parseRunSummary,
   parseRunSummaryList,
   RUN_INDEX_CAP,
@@ -484,6 +486,86 @@ const checkRunSummaryWithUpdatedAt: RunSummaryType = {
   updatedAt: '2026-06-01T01:00:00.000Z',
 }
 export {checkRunSummaryMinimal, checkRunSummaryWithUpdatedAt}
+
+// ---------------------------------------------------------------------------
+// RunsListResponse type-level check (compile-time)
+// ---------------------------------------------------------------------------
+
+// RunsListResponse: must accept the envelope shape {runs: RunSummary[]}
+const checkRunsListResponse: RunsListResponse = {
+  runs: [checkRunSummaryMinimal],
+}
+export {checkRunsListResponse}
+
+// ---------------------------------------------------------------------------
+// parseRunsListResponse
+// ---------------------------------------------------------------------------
+
+describe('parseRunsListResponse', () => {
+  it('accepts the envelope shape {runs: []}', () => {
+    const result = parseRunsListResponse({runs: []})
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.runs).toEqual([])
+    }
+  })
+
+  it('accepts the envelope shape with valid summaries', () => {
+    const input = {
+      runs: [
+        {runId: 'run-1', repo: 'fro-bot/agent', status: 'running', createdAt: '2026-06-01T00:00:00.000Z'},
+      ],
+    }
+    const result = parseRunsListResponse(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.runs).toHaveLength(1)
+      expect(result.data.runs[0]?.runId).toBe('run-1')
+    }
+  })
+
+  it('rejects a bare array (no envelope)', () => {
+    const result = parseRunsListResponse([
+      {runId: 'run-1', repo: 'fro-bot/agent', status: 'running', createdAt: '2026-06-01T00:00:00.000Z'},
+    ])
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects a non-array runs field', () => {
+    const result = parseRunsListResponse({runs: 'nope'})
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects a missing runs field', () => {
+    const result = parseRunsListResponse({})
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects null', () => {
+    const result = parseRunsListResponse(null)
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects a non-object (string)', () => {
+    const result = parseRunsListResponse('not-a-response')
+    expect(result.success).toBe(false)
+  })
+
+  it('skips invalid items within runs (per-item validation)', () => {
+    const input = {
+      runs: [
+        {runId: 'run-1', repo: 'fro-bot/agent', status: 'running', createdAt: '2026-06-01T00:00:00.000Z'},
+        {runId: 'run-2', repo: 'fro-bot/agent', status: 'blocked', createdAt: '2026-06-01T00:00:00.000Z'}, // invalid status
+      ],
+    }
+    const result = parseRunsListResponse(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.runs).toHaveLength(1)
+      expect(result.data.runs[0]?.runId).toBe('run-1')
+    }
+  })
+})
 
 // ---------------------------------------------------------------------------
 // parseRepoSummaryList

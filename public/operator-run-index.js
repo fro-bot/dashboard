@@ -162,7 +162,13 @@ export async function fetchRunIndex(opts) {
     return {kind: 'unavailable'}
   }
 
-  const parsed = parseRunSummaryList(body)
+  // The Gateway wraps run listings in an envelope: {runs: RunSummary[]}.
+  // A bare array is no longer accepted — fail closed on contract drift.
+  if (body === null || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.runs)) {
+    return {kind: 'unavailable'}
+  }
+
+  const parsed = parseRunSummaryList(body.runs)
   if (!parsed.success) {
     return {kind: 'unavailable'}
   }
