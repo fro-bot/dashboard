@@ -1,7 +1,7 @@
 ---
 title: Operator local fixture harness pattern
 date: 2026-06-30
-last_updated: 2026-06-30
+last_updated: 2026-07-03
 category: best-practices
 module: operator-fixture-harness
 problem_type: best_practice
@@ -143,6 +143,16 @@ Fixture mode supplies the same contract under the reserved prefix:
 ```ts
 await fetch('/__fixture/operator/runs')
 ```
+
+"Same contract" means the exact wire shape, not an approximation. Derive the fixture
+response from the upstream route's actual `c.json(...)` call, never from a sibling
+route — adjacent routes disagree (`/operator/runs` returns the envelope
+`{runs: [...]}`, `/operator/repos` returns a bare array). A fixture that returns a
+plausible-but-wrong shape makes every test and browser check that consumes it green
+while production stays broken. Vendor and conformance-pin the response *envelope*, not
+just the item DTO, and when correcting a shape make the parser reject the old one so
+drift is loud. See
+[Local fixture harness must mirror the wire contract exactly](./local-fixture-harness-must-mirror-wire-contract-2026-07-03.md).
 
 Do not add a dashboard pass-through proxy for `/operator/runs`. The dashboard owns
 the PWA shell and static modules; Gateway owns operator data routes.
