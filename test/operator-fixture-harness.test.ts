@@ -960,26 +960,27 @@ describe('fixture repos — browser-compatible shape {owner, repo}', () => {
 // ---------------------------------------------------------------------------
 
 describe('fixture runs index — GET /runs', () => {
-  it('returns 200 with a JSON array', async () => {
+  it('returns 200 with a JSON envelope {runs: [...]} — mirrors the gateway, not a bare array', async () => {
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
     const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
     expect(res.status).toBe(200)
     const body = await res.json()
-    expect(Array.isArray(body)).toBe(true)
+    expect(Array.isArray(body)).toBe(false)
+    expect(Array.isArray((body as {runs: unknown}).runs)).toBe(true)
   })
 
   it('returns at least one run summary entry', async () => {
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
     const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
     expect(res.status).toBe(200)
-    const body = await res.json() as unknown[]
+    const {runs: body} = await res.json() as {runs: unknown[]}
     expect(body.length).toBeGreaterThan(0)
   })
 
   it('each entry has runId, repo, status, and createdAt string fields', async () => {
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
     const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
-    const body = await res.json() as Record<string, unknown>[]
+    const {runs: body} = await res.json() as {runs: Record<string, unknown>[]}
     for (const entry of body) {
       expect(typeof entry.runId).toBe('string')
       expect(typeof entry.repo).toBe('string')
@@ -991,7 +992,7 @@ describe('fixture runs index — GET /runs', () => {
   it('updatedAt is absent on some entries and a string when present', async () => {
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
     const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
-    const body = await res.json() as Record<string, unknown>[]
+    const {runs: body} = await res.json() as {runs: Record<string, unknown>[]}
     // At least one entry must have updatedAt absent
     const withoutUpdatedAt = body.filter(e => !('updatedAt' in e))
     expect(withoutUpdatedAt.length).toBeGreaterThan(0)
@@ -1007,7 +1008,7 @@ describe('fixture runs index — GET /runs', () => {
     const ALLOWED_INDEX_STATUSES = new Set(['queued', 'running', 'succeeded', 'failed', 'cancelled'])
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
     const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
-    const body = await res.json() as Record<string, unknown>[]
+    const {runs: body} = await res.json() as {runs: Record<string, unknown>[]}
     for (const entry of body) {
       expect(ALLOWED_INDEX_STATUSES.has(entry.status as string)).toBe(true)
     }
@@ -1017,7 +1018,7 @@ describe('fixture runs index — GET /runs', () => {
     const STREAM_ONLY_STATUSES = new Set(['blocked', 'waiting_for_approval'])
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
     const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
-    const body = await res.json() as Record<string, unknown>[]
+    const {runs: body} = await res.json() as {runs: Record<string, unknown>[]}
     for (const entry of body) {
       expect(STREAM_ONLY_STATUSES.has(entry.status as string)).toBe(false)
     }
@@ -1026,7 +1027,7 @@ describe('fixture runs index — GET /runs', () => {
   it('all runId values are fixture-prefixed (not UUID-shaped)', async () => {
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
     const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
-    const body = await res.json() as Record<string, unknown>[]
+    const {runs: body} = await res.json() as {runs: Record<string, unknown>[]}
     for (const entry of body) {
       expect(String(entry.runId)).toMatch(/^run-fixture-/)
     }
@@ -1035,7 +1036,7 @@ describe('fixture runs index — GET /runs', () => {
   it('all repo values are fixture-prefixed (no real repo names)', async () => {
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
     const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
-    const body = await res.json() as Record<string, unknown>[]
+    const {runs: body} = await res.json() as {runs: Record<string, unknown>[]}
     for (const entry of body) {
       expect(String(entry.repo)).toMatch(/fixture/)
     }
@@ -1062,7 +1063,7 @@ describe('fixture runs index — GET /runs', () => {
     const ALLOWED_FIELDS = new Set(['runId', 'repo', 'status', 'createdAt', 'updatedAt'])
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
     const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
-    const body = await res.json() as Record<string, unknown>[]
+    const {runs: body} = await res.json() as {runs: Record<string, unknown>[]}
     for (const entry of body) {
       for (const key of Object.keys(entry)) {
         expect(ALLOWED_FIELDS.has(key)).toBe(true)
@@ -1518,7 +1519,7 @@ describe('fixture runs index — indexed run stream binding', () => {
 
     const runsRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)
     expect(runsRes.status).toBe(200)
-    const runs = await runsRes.json() as {runId: string}[]
+    const {runs} = await runsRes.json() as {runs: {runId: string}[]}
     expect(runs.length).toBeGreaterThan(0)
 
     const firstRun = runs[0] ?? {runId: ''}
@@ -1536,7 +1537,7 @@ describe('fixture runs index — indexed run stream binding', () => {
     const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
 
     const runsRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)
-    const runs = await runsRes.json() as {runId: string}[]
+    const {runs} = await runsRes.json() as {runs: {runId: string}[]}
     const firstRun = runs[0] ?? {runId: ''}
 
     const streamRes = await app.request(
@@ -1552,7 +1553,7 @@ describe('fixture runs index — indexed run stream binding', () => {
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
 
     const runsRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
-    const runs = await runsRes.json() as {runId: string}[]
+    const {runs} = await runsRes.json() as {runs: {runId: string}[]}
     const firstRun = runs[0] ?? {runId: ''}
 
     const streamRes = await app.request(
@@ -1568,7 +1569,7 @@ describe('fixture runs index — indexed run stream binding', () => {
     const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
 
     const runsRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)
-    const runs = await runsRes.json() as {runId: string}[]
+    const {runs} = await runsRes.json() as {runs: {runId: string}[]}
     const firstRun = runs[0] ?? {runId: ''}
 
     const wrongSession = 'fixture-session-WRONG-6666'
@@ -1582,7 +1583,7 @@ describe('fixture runs index — indexed run stream binding', () => {
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
     const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
     expect(res.status).toBe(200)
-    const body = await res.json() as unknown[]
+    const {runs: body} = await res.json() as {runs: unknown[]}
     expect(body.length).toBeGreaterThan(0)
   })
 
@@ -1596,7 +1597,7 @@ describe('fixture runs index — indexed run stream binding', () => {
     const {fixtureSessionId: sid2} = await s2Res.json() as {fixtureSessionId: string}
 
     const runsRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${sid1}`)
-    const runs = await runsRes.json() as {runId: string}[]
+    const {runs} = await runsRes.json() as {runs: {runId: string}[]}
     const firstRun = runs[0] ?? {runId: ''}
 
     const ok1 = await app.request(
@@ -1617,7 +1618,7 @@ describe('fixture runs index — indexed run stream binding', () => {
     const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
 
     const runsRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)
-    const runs = await runsRes.json() as {runId: string; status: string}[]
+    const {runs} = await runsRes.json() as {runs: {runId: string; status: string}[]}
 
     const successRun = runs.find(r => ['queued', 'running', 'succeeded'].includes(r.status))
     expect(successRun).toBeDefined()
@@ -1655,7 +1656,7 @@ describe('fixture runs index — indexed run stream binding', () => {
 
     const runs1Res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${sid1}`)
     expect(runs1Res.status).toBe(200)
-    const runs1 = await runs1Res.json() as {runId: string}[]
+    const {runs: runs1} = await runs1Res.json() as {runs: {runId: string}[]}
     const indexedRunId = (runs1[0] ?? {runId: ''}).runId
     expect(indexedRunId).toMatch(/^run-fixture-index-/)
 
@@ -1682,7 +1683,7 @@ describe('fixture runs index — indexed run stream binding', () => {
     const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
 
     const runsRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)
-    const runs = await runsRes.json() as {runId: string}[]
+    const {runs} = await runsRes.json() as {runs: {runId: string}[]}
     const indexedRunId = (runs[0] ?? {runId: ''}).runId
 
     const unmintedSession = 'fixture-session-not-minted'

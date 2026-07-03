@@ -99,6 +99,14 @@ export function parseRunSummary(input: unknown): Result<RunSummary, Error> {
 }
 
 /**
+ * Canonical response shape for GET /operator/runs (run index listing).
+ * Mirrors the gateway's envelope: `{runs: RunSummary[]}` — never a bare array.
+ */
+export interface RunsListResponse {
+  readonly runs: readonly RunSummary[]
+}
+
+/**
  * Parse an unknown value as an array of RunSummary.
  * Invalid items are skipped (per-item validation, not whole-list fail).
  * Duplicate runIds: keeps first valid entry (Gateway sorts newest-first).
@@ -125,4 +133,28 @@ export function parseRunSummaryList(input: unknown): Result<RunSummary[], Error>
   }
 
   return ok(valid)
+}
+
+/**
+ * Parse an unknown value as RunsListResponse: `{runs: RunSummary[]}`.
+ * A bare array is rejected — the Gateway always wraps run listings in an envelope.
+ * Invalid items within `runs` are skipped (delegates to parseRunSummaryList).
+ */
+export function parseRunsListResponse(input: unknown): Result<RunsListResponse, Error> {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return err(new Error('invalid runs list response shape'))
+  }
+
+  const candidate = input as Record<string, unknown>
+
+  if (!Array.isArray(candidate.runs)) {
+    return err(new Error('invalid runs list response shape'))
+  }
+
+  const parsed = parseRunSummaryList(candidate.runs)
+  if (!parsed.success) {
+    return err(new Error('invalid runs list response shape'))
+  }
+
+  return ok({runs: parsed.data})
 }

@@ -416,11 +416,44 @@ describe('fetchRunIndex — error paths collapse to neutral unavailable', () => 
     expect(result.kind).toBe('unavailable')
   })
 
-  it('valid response returns loaded kind with summaries', async () => {
+  // Regression pin: the gateway wraps run listings in an envelope
+  // ({runs: RunSummary[]}) — see fro-bot/agent packages/gateway/src/web/operator/runs-route.ts.
+  // A bare array must no longer be accepted; it must collapse to unavailable.
+  it('bare-array response body collapses to unavailable (gateway envelope required)', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
       json: async () => [makeValidSummary()],
+    }))
+    const result = await fetchRunIndex({endpointBase: '/operator'})
+    expect(result.kind).toBe('unavailable')
+  })
+
+  it('{runs: "nope"} (non-array runs field) collapses to unavailable', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({runs: 'nope'}),
+    }))
+    const result = await fetchRunIndex({endpointBase: '/operator'})
+    expect(result.kind).toBe('unavailable')
+  })
+
+  it('{} (missing runs field) collapses to unavailable', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+    }))
+    const result = await fetchRunIndex({endpointBase: '/operator'})
+    expect(result.kind).toBe('unavailable')
+  })
+
+  it('valid envelope response returns loaded kind with summaries', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({runs: [makeValidSummary()]}),
     }))
     const result = await fetchRunIndex({endpointBase: '/operator'})
     expect(result.kind).toBe('loaded')
@@ -429,11 +462,11 @@ describe('fetchRunIndex — error paths collapse to neutral unavailable', () => 
     }
   })
 
-  it('empty array response returns loaded kind with empty summaries', async () => {
+  it('{runs: []} returns loaded kind with empty summaries', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => [],
+      json: async () => ({runs: []}),
     }))
     const result = await fetchRunIndex({endpointBase: '/operator'})
     expect(result.kind).toBe('loaded')
@@ -452,7 +485,7 @@ describe('fetchRunIndex — fixture endpointBase', () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => [],
+      json: async () => ({runs: []}),
     })
     vi.stubGlobal('fetch', mockFetch)
     await fetchRunIndex({endpointBase: '/__fixture/operator'})
@@ -466,7 +499,7 @@ describe('fetchRunIndex — fixture endpointBase', () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => [],
+      json: async () => ({runs: []}),
     })
     vi.stubGlobal('fetch', mockFetch)
     await fetchRunIndex({endpointBase: '/operator'})
@@ -480,7 +513,7 @@ describe('fetchRunIndex — fixture endpointBase', () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => [],
+      json: async () => ({runs: []}),
     })
     vi.stubGlobal('fetch', mockFetch)
     await fetchRunIndex({endpointBase: '/__fixture/operator', fixtureSessionId: 'fixture-session-0001'})
@@ -494,7 +527,7 @@ describe('fetchRunIndex — fixture endpointBase', () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => [],
+      json: async () => ({runs: []}),
     })
     vi.stubGlobal('fetch', mockFetch)
     await fetchRunIndex({endpointBase: '/operator'})
@@ -507,7 +540,7 @@ describe('fetchRunIndex — fixture endpointBase', () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => [],
+      json: async () => ({runs: []}),
     })
     vi.stubGlobal('fetch', mockFetch)
     await fetchRunIndex({endpointBase: '/operator', fixtureSessionId: undefined})
@@ -572,7 +605,7 @@ describe('initOperatorRunIndex — module lifecycle export', () => {
   })
 
   it('returns a promise', () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ok: true, status: 200, json: async () => []}))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ok: true, status: 200, json: async () => ({runs: []})}))
     const result = initOperatorRunIndex({endpointBase: '/operator'})
     expect(result).toBeInstanceOf(Promise)
     vi.restoreAllMocks()
@@ -646,7 +679,7 @@ describe('initOperatorRunIndex — onSelectRun callback wired to card clicks', (
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => [makeValidSummary({runId: 'run-select-001'})],
+      json: async () => ({runs: [makeValidSummary({runId: 'run-select-001'})]}),
     }))
     // No DOM — function bails early when document is undefined
     const onSelectRun = vi.fn()
@@ -749,7 +782,7 @@ describe('markRunStreamAttached — A → B clears A, only B is inert', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: async () => [makeValidSummary({runId: runIdA}), makeValidSummary({runId: runIdB})],
+      json: async () => ({runs: [makeValidSummary({runId: runIdA}), makeValidSummary({runId: runIdB})]}),
     }))
     const cards = []
     stubDOMWithCards(cards)
@@ -777,7 +810,7 @@ describe('markRunStreamAttached — A → B clears A, only B is inert', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: async () => [makeValidSummary({runId: runIdA}), makeValidSummary({runId: runIdB})],
+      json: async () => ({runs: [makeValidSummary({runId: runIdA}), makeValidSummary({runId: runIdB})]}),
     }))
     const cards = []
     stubDOMWithCards(cards)
@@ -801,7 +834,7 @@ describe('markRunStreamAttached — A → B clears A, only B is inert', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: async () => [makeValidSummary({runId: runIdA}), makeValidSummary({runId: runIdB})],
+      json: async () => ({runs: [makeValidSummary({runId: runIdA}), makeValidSummary({runId: runIdB})]}),
     }))
     const cards = []
     stubDOMWithCards(cards)
@@ -824,7 +857,7 @@ describe('markRunStreamAttached — A → B clears A, only B is inert', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: async () => [makeValidSummary({runId: runIdA}), makeValidSummary({runId: runIdB})],
+      json: async () => ({runs: [makeValidSummary({runId: runIdA}), makeValidSummary({runId: runIdB})]}),
     }))
     const cards = []
     stubDOMWithCards(cards)
@@ -854,7 +887,7 @@ describe('markRunStreamAttached — sets data-stream-attached on matching card',
   it('sets data-stream-attached="true" on the card after markRunStreamAttached', async () => {
     const runId = 'run-stream-attr-001'
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true, status: 200, json: async () => [makeValidSummary({runId})],
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
     }))
     const cards = []
     stubDOMWithCards(cards)
@@ -870,7 +903,7 @@ describe('markRunStreamAttached — sets data-stream-attached on matching card',
   it('resetRunIndexState clears data-stream-attached from cards remaining in DOM', async () => {
     const runId = 'run-stream-reset-001'
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true, status: 200, json: async () => [makeValidSummary({runId})],
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
     }))
     const cards = []
     stubDOMWithCards(cards)
@@ -944,7 +977,7 @@ describe('renderRunCard — keyboard activation (Enter / Space)', () => {
     const runId = 'run-kbd-enter-001'
 
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true, status: 200, json: async () => [makeValidSummary({runId})],
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
     }))
     const cards = []
     stubDOMWithCards(cards)
@@ -963,7 +996,7 @@ describe('renderRunCard — keyboard activation (Enter / Space)', () => {
     const runId = 'run-kbd-space-001'
 
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true, status: 200, json: async () => [makeValidSummary({runId})],
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
     }))
     const cards = []
     stubDOMWithCards(cards)
@@ -983,7 +1016,7 @@ describe('renderRunCard — keyboard activation (Enter / Space)', () => {
     const runId = 'run-kbd-other-001'
 
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true, status: 200, json: async () => [makeValidSummary({runId})],
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
     }))
     const cards = []
     stubDOMWithCards(cards)
@@ -1002,7 +1035,7 @@ describe('renderRunCard — keyboard activation (Enter / Space)', () => {
     const runId = 'run-kbd-attached-001'
 
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true, status: 200, json: async () => [makeValidSummary({runId})],
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
     }))
     const cards = []
     stubDOMWithCards(cards)
@@ -1020,7 +1053,7 @@ describe('renderRunCard — keyboard activation (Enter / Space)', () => {
     const runId = 'run-kbd-attached-space-001'
 
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true, status: 200, json: async () => [makeValidSummary({runId})],
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
     }))
     const cards = []
     stubDOMWithCards(cards)
@@ -1049,7 +1082,7 @@ describe('fetchRunIndex — passes AbortSignal to fetch', () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => [],
+      json: async () => ({runs: []}),
     })
     vi.stubGlobal('fetch', mockFetch)
     await fetchRunIndex({endpointBase: '/operator'})
@@ -1062,7 +1095,7 @@ describe('fetchRunIndex — passes AbortSignal to fetch', () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => [],
+      json: async () => ({runs: []}),
     })
     vi.stubGlobal('fetch', mockFetch)
     await fetchRunIndex({endpointBase: '/operator'})
@@ -1167,7 +1200,7 @@ describe('initOperatorRunIndex — section data-state transitions', () => {
     // Before fetch resolves, state must be 'loading'
     expect(section.dataset.state).toBe('loading')
 
-    resolveJson([makeValidSummary()])
+    resolveJson({runs: [makeValidSummary()]})
     await initPromise
   })
 
@@ -1175,7 +1208,7 @@ describe('initOperatorRunIndex — section data-state transitions', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => [makeValidSummary()],
+      json: async () => ({runs: [makeValidSummary()]}),
     }))
     const {section} = stubDOMWithSection()
 
@@ -1188,7 +1221,7 @@ describe('initOperatorRunIndex — section data-state transitions', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => [],
+      json: async () => ({runs: []}),
     }))
     const {section} = stubDOMWithSection()
 

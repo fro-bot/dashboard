@@ -183,7 +183,7 @@ export function buildFixtureHarnessRouter(): Hono {
     }
 
     logger.debug('fixture-harness: GET /runs', {status: 200})
-    const res = c.json(FIXTURE_RUN_SUMMARIES)
+    const res = c.json({runs: FIXTURE_RUN_SUMMARIES})
     setNoStore(res.headers)
     return res
   })
