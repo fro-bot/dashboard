@@ -1805,6 +1805,21 @@ describe('fixture SSE scenarios — scenario names', () => {
     expect(FIXTURE_SCENARIO_NAMES.malformed_unavailable.length).toBeGreaterThan(0)
   })
 
+  it('exports no_output scenario name', () => {
+    expect(typeof FIXTURE_SCENARIO_NAMES.no_output).toBe('string')
+    expect(FIXTURE_SCENARIO_NAMES.no_output.length).toBeGreaterThan(0)
+  })
+
+  it('exports stream_reset scenario name', () => {
+    expect(typeof FIXTURE_SCENARIO_NAMES.stream_reset).toBe('string')
+    expect(FIXTURE_SCENARIO_NAMES.stream_reset.length).toBeGreaterThan(0)
+  })
+
+  it('exports approval_flow scenario name', () => {
+    expect(typeof FIXTURE_SCENARIO_NAMES.approval_flow).toBe('string')
+    expect(FIXTURE_SCENARIO_NAMES.approval_flow.length).toBeGreaterThan(0)
+  })
+
   it('scenario names are code-safe (no spaces, lowercase with underscores)', () => {
     for (const name of Object.values(FIXTURE_SCENARIO_NAMES)) {
       expect(/^[a-z][a-z0-9_]*$/.test(name)).toBe(true)
@@ -1981,6 +1996,77 @@ describe('fixture SSE scenarios — malformed_unavailable scenario fails closed'
         expect(failure.error.message).not.toContain('{not valid json}')
         expect(failure.error.message).not.toContain('malformed')
       }
+    }
+  })
+})
+
+describe('fixture SSE scenarios — no_output scenario parses with empty terminal output', () => {
+  it('no_output scenario SSE bytes parse as ready + running status + empty output + terminal succeeded', async () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.no_output, FIXTURE_RUN_ID_FOR_TESTS)
+    const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseBytes]))
+    const reader = createOperatorSseReader({fetchImpl})
+
+    const events: RunStreamFrame[] = []
+    const errors: Error[] = []
+    let closed = false
+
+    await reader.open('/operator/runs/run-fixture-no-output-001/stream', {
+      onEvent: frame => events.push(frame),
+      onError: err => errors.push(err),
+      onClose: () => { closed = true },
+    })
+
+    expect(errors).toHaveLength(0)
+    expect(closed).toBe(true)
+
+    const outputFrames = events.filter(e => e.type === 'output')
+    expect(outputFrames).toHaveLength(1)
+    const outputFrame = outputFrames[0]
+    if (outputFrame?.type === 'output') {
+      expect(outputFrame.data.text).toBe('')
+      expect(outputFrame.data.final).toBe(true)
+    }
+
+    const statusFrames = events.filter(e => e.type === 'status')
+    const terminalStatus = statusFrames.at(-1)
+    if (terminalStatus?.type === 'status') {
+      expect(terminalStatus.data.status).toBe('succeeded')
+    }
+  })
+})
+
+describe('fixture SSE scenarios — stream_reset scenario carries a terminal reason', () => {
+  it('stream_reset scenario SSE bytes parse a reset frame with reason terminal', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.stream_reset, FIXTURE_RUN_ID_FOR_TESTS)
+    const results = parseSseChunk(sseBytes)
+    const resetResult = results.find(r => r.success && r.frame.type === 'reset')
+    expect(resetResult).toBeDefined()
+    if (resetResult?.success && resetResult.frame.type === 'reset') {
+      expect(resetResult.frame.data.reason).toBe('terminal')
+      expect(resetResult.frame.data.runId).toBe(FIXTURE_RUN_ID_FOR_TESTS)
+    }
+  })
+})
+
+describe('fixture SSE scenarios — approval_flow scenario carries open then settle', () => {
+  it('approval_flow scenario SSE bytes parse an open approval frame followed by a settle', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.approval_flow, FIXTURE_RUN_ID_FOR_TESTS)
+    const results = parseSseChunk(sseBytes)
+    const approvalResults = results.filter(r => r.success && r.frame.type === 'approval')
+    expect(approvalResults.length).toBe(2)
+
+    const [openResult, settleResult] = approvalResults
+    if (openResult?.success && openResult.frame.type === 'approval' && openResult.frame.data.settled === false) {
+      expect(openResult.frame.data.requestID).toBe('req-fixture-approval-001')
+      expect(openResult.frame.data.permission).toBe('shell')
+      expect(openResult.frame.data.command).toBe('[fixture command — synthetic]')
+    } else {
+      expect.unreachable('expected first approval frame to be the open variant')
+    }
+    if (settleResult?.success && settleResult.frame.type === 'approval' && settleResult.frame.data.settled === true) {
+      expect(settleResult.frame.data.requestID).toBe('req-fixture-approval-001')
+    } else {
+      expect.unreachable('expected second approval frame to be the settle variant')
     }
   })
 })

@@ -24,6 +24,12 @@ export const FIXTURE_SCENARIO_NAMES = {
   contract_drift: 'contract_drift',
   /** Malformed/unavailable stream: contains a malformed SSE record that fails closed. */
   malformed_unavailable: 'malformed_unavailable',
+  /** Contract-1.5.0 no-output run: ready → running → empty terminal output → terminal succeeded. */
+  no_output: 'no_output',
+  /** Stream reset with a terminal reason: ready → running → reset (closes without reconnect). */
+  stream_reset: 'stream_reset',
+  /** Approval open→settle round trip: ready → running → approval open → approval settle → terminal succeeded. */
+  approval_flow: 'approval_flow',
 } as const
 
 /** Union of all canonical scenario name values. */
@@ -76,6 +82,23 @@ function outputFrame(
   return sseRecord('output', {runId, text, final, seq})
 }
 
+function resetFrame(runId: string, reason: string): string {
+  return sseRecord('reset', {runId, reason})
+}
+
+function approvalOpenFrame(
+  runId: string,
+  requestID: string,
+  permission: string,
+  command: string,
+): string {
+  return sseRecord('approval', {runId, requestID, permission, command, settled: false})
+}
+
+function approvalSettleFrame(runId: string, requestID: string): string {
+  return sseRecord('approval', {runId, requestID, settled: true})
+}
+
 function buildSuccessScenario(activeRunId: string): string {
   const startedAt = '2026-06-28T10:00:00Z'
 
@@ -123,11 +146,48 @@ function buildMalformedUnavailableScenario(_activeRunId: string): string {
   })
 }
 
+function buildNoOutputScenario(activeRunId: string): string {
+  const startedAt = '2026-06-28T10:03:00Z'
+
+  return (
+    readyFrame(OPERATOR_CONTRACT_VERSION) +
+    statusFrame(activeRunId, 'running', 'EXECUTING', startedAt) +
+    outputFrame(activeRunId, '', true, 0) +
+    statusFrame(activeRunId, 'succeeded', 'COMPLETED', startedAt)
+  )
+}
+
+function buildStreamResetScenario(activeRunId: string): string {
+  const startedAt = '2026-06-28T10:04:00Z'
+
+  return (
+    readyFrame(OPERATOR_CONTRACT_VERSION) +
+    statusFrame(activeRunId, 'running', 'EXECUTING', startedAt) +
+    resetFrame(activeRunId, 'terminal')
+  )
+}
+
+function buildApprovalFlowScenario(activeRunId: string): string {
+  const startedAt = '2026-06-28T10:05:00Z'
+  const requestID = 'req-fixture-approval-001'
+
+  return (
+    readyFrame(OPERATOR_CONTRACT_VERSION) +
+    statusFrame(activeRunId, 'running', 'EXECUTING', startedAt) +
+    approvalOpenFrame(activeRunId, requestID, 'shell', '[fixture command — synthetic]') +
+    approvalSettleFrame(activeRunId, requestID) +
+    statusFrame(activeRunId, 'succeeded', 'COMPLETED', startedAt)
+  )
+}
+
 const SCENARIO_BUILDERS: Readonly<Record<FixtureScenarioName, (activeRunId: string) => string>> = {
   [FIXTURE_SCENARIO_NAMES.success]: buildSuccessScenario,
   [FIXTURE_SCENARIO_NAMES.terminal_failure]: buildTerminalFailureScenario,
   [FIXTURE_SCENARIO_NAMES.contract_drift]: buildContractDriftScenario,
   [FIXTURE_SCENARIO_NAMES.malformed_unavailable]: buildMalformedUnavailableScenario,
+  [FIXTURE_SCENARIO_NAMES.no_output]: buildNoOutputScenario,
+  [FIXTURE_SCENARIO_NAMES.stream_reset]: buildStreamResetScenario,
+  [FIXTURE_SCENARIO_NAMES.approval_flow]: buildApprovalFlowScenario,
 }
 
 /**
