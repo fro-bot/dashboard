@@ -4739,6 +4739,84 @@ describe('fixture SSE scenarios — browser reducer: malformed_unavailable scena
   })
 })
 
+describe('fixture SSE scenarios — browser reducer: no_output scenario', () => {
+  it('no_output scenario: empty terminal output does not crash the reducer and outputFinal is true', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.no_output, FIXTURE_RUN_ID_FOR_TESTS)
+    const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
+
+    const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
+    let state = INITIAL_STATE
+
+    for (const record of records) {
+      const result = parseSseFrame(`${record}\n\n`)
+      if (result !== null && result.success) {
+        state = nextStreamState(state, result.frame)
+      }
+    }
+
+    expect(state.connection).toBe('closed')
+    const runEntries = Object.values(state.runs)
+    const run = runEntries.find(r => r.runId === FIXTURE_RUN_ID_FOR_TESTS)
+    expect(run).toBeDefined()
+    if (run) {
+      expect(run.outputText).toBe('')
+      expect(run.outputFinal).toBe(true)
+      expect(run.terminal).toBe(true)
+      expect(run.status).toBe('succeeded')
+    }
+  })
+})
+
+describe('fixture SSE scenarios — browser reducer: stream_reset scenario', () => {
+  it('stream_reset scenario: terminal reset reason closes the stream without reconnect', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.stream_reset, FIXTURE_RUN_ID_FOR_TESTS)
+    const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
+
+    const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
+    let state = INITIAL_STATE
+
+    for (const record of records) {
+      const result = parseSseFrame(`${record}\n\n`)
+      if (result !== null && result.success) {
+        state = nextStreamState(state, result.frame)
+      }
+    }
+
+    expect(state.connection).toBe('closed')
+    expect(state.shouldReconnect).toBe(false)
+  })
+})
+
+describe('fixture SSE scenarios — browser reducer: approval_flow scenario', () => {
+  it('approval_flow scenario: open frame creates an open approval prompt for the run', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.approval_flow, FIXTURE_RUN_ID_FOR_TESTS)
+    const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
+
+    const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
+    let state = INITIAL_STATE
+
+    for (const record of records) {
+      const result = parseSseFrame(`${record}\n\n`)
+      if (result !== null && result.success) {
+        state = nextStreamState(state, result.frame)
+        if (result.frame.type === 'approval' && result.frame.data.settled === false) {
+          // Immediately after the open frame is applied, the prompt must be open.
+          const run = state.runs[FIXTURE_RUN_ID_FOR_TESTS]
+          expect(hasOpenApprovals(run)).toBe(true)
+          const openApprovals = getOpenApprovals(run)
+          expect(openApprovals.some(p => p.requestID === 'req-fixture-approval-001')).toBe(true)
+        }
+      }
+    }
+
+    // After the settle frame (and terminal status), the prompt must be removed.
+    const finalRun = state.runs[FIXTURE_RUN_ID_FOR_TESTS]
+    expect(hasOpenApprovals(finalRun)).toBe(false)
+    expect(finalRun?.terminal).toBe(true)
+    expect(finalRun?.status).toBe('succeeded')
+  })
+})
+
 describe('buildApprovalClient — endpoint base support', () => {
   it('buildApprovalClient accepts an optional endpointBase option', () => {
     // Should not throw when called with an endpointBase
