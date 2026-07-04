@@ -295,15 +295,25 @@ describe('Operator — fixture scenario selector', () => {
     expect(selector).not.toBeNull()
   })
 
-  it('scenario selector has options for success, terminal_failure, contract_drift, malformed_unavailable', () => {
+  it('scenario selector exposes every fixture scenario the harness supports', () => {
     render(<Operator state="ready" fixtureMode={true} />)
     const selector = document.querySelector('[data-testid="fixture-scenario-select"]') as HTMLSelectElement | null
     expect(selector).not.toBeNull()
     const values = Array.from(selector?.options ?? []).map(o => o.value)
-    expect(values).toContain('success')
-    expect(values).toContain('terminal_failure')
-    expect(values).toContain('contract_drift')
-    expect(values).toContain('malformed_unavailable')
+    // Mirror of FIXTURE_SCENARIO_NAMES in src/gateway/operator-fixture-sse.ts. The web bundle
+    // cannot import from the server tree, so the drawer options are hand-maintained; this test
+    // fails loudly if a harness scenario is added there without surfacing it in the drawer.
+    expect(values.sort()).toEqual(
+      [
+        'success',
+        'terminal_failure',
+        'contract_drift',
+        'malformed_unavailable',
+        'no_output',
+        'stream_reset',
+        'approval_flow',
+      ].sort(),
+    )
   })
 
   it('does NOT render scenario selector when fixtureMode is not set', () => {

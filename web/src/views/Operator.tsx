@@ -384,6 +384,9 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
                       <option value="terminal_failure">Terminal failure</option>
                       <option value="contract_drift">Contract drift</option>
                       <option value="malformed_unavailable">Malformed / unavailable</option>
+                      <option value="no_output">No output</option>
+                      <option value="stream_reset">Stream reset</option>
+                      <option value="approval_flow">Approval flow</option>
                     </select>
                   </div>
                 )}
