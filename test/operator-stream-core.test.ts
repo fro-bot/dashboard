@@ -1253,7 +1253,7 @@ interface FakeSection {
 }
 
 interface FakeDocument {
-  querySelector: (sel: string) => FakeSection | null
+  querySelector: (sel: string) => FakeSection | {textContent: string; hidden: boolean} | null
   readyState: string
   addEventListener: () => void
 }
@@ -1271,8 +1271,14 @@ async function withFakeBrowser(
     querySelectorAll: () => cards,
   }
 
+  const noticeEl = {textContent: '', hidden: false}
+
   const fakeDocument: FakeDocument = {
-    querySelector: (sel: string) => (sel === '#run-status-section' && sectionPresent ? section : null),
+    querySelector: (sel: string) => {
+      if (sel === '[data-role="run-index-list"]') return sectionPresent ? section : null
+      if (sel === '[data-role="stream-status"]') return sectionPresent ? noticeEl : null
+      return null
+    },
     readyState: 'complete',
     addEventListener() {},
   }
@@ -2270,13 +2276,16 @@ describe('bootstrapOperatorStreams — discovers approvalsEl and badgeEl', () =>
     const cards = [makeFakeCardWithApprovals('run-001')]
 
     const section = {
-      querySelector: (sel: string) =>
-        sel.includes('stream-status') ? {textContent: '', hidden: false} : null,
       querySelectorAll: () => cards,
     }
+    const noticeEl = {textContent: '', hidden: false}
 
     vi.stubGlobal('document', {
-      querySelector: (sel: string) => (sel === '#run-status-section' ? section : null),
+      querySelector: (sel: string) => {
+        if (sel === '[data-role="run-index-list"]') return section
+        if (sel === '[data-role="stream-status"]') return noticeEl
+        return null
+      },
       readyState: 'complete',
       addEventListener() {},
     })
@@ -4228,12 +4237,15 @@ describe('resetBootstrapState — handle cleanup and pagehide listener removal',
   it('resetBootstrapState closes active stream handles', async () => {
     const cards = [makeFakeCard('run-cleanup-001')]
     const section = {
-      querySelector: (sel: string) =>
-        sel.includes('stream-status') ? {textContent: '', hidden: false} : null,
       querySelectorAll: () => cards,
     }
+    const noticeEl = {textContent: '', hidden: false}
     const fakeDocument = {
-      querySelector: (sel: string) => (sel === '#run-status-section' ? section : null),
+      querySelector: (sel: string) => {
+        if (sel === '[data-role="run-index-list"]') return section
+        if (sel === '[data-role="stream-status"]') return noticeEl
+        return null
+      },
       readyState: 'complete',
       addEventListener() {},
     }
@@ -4256,12 +4268,15 @@ describe('resetBootstrapState — handle cleanup and pagehide listener removal',
 
     const cards = [makeFakeCard('run-pagehide-001')]
     const section = {
-      querySelector: (sel: string) =>
-        sel.includes('stream-status') ? {textContent: '', hidden: false} : null,
       querySelectorAll: () => cards,
     }
+    const noticeEl = {textContent: '', hidden: false}
     const fakeDocument = {
-      querySelector: (sel: string) => (sel === '#run-status-section' ? section : null),
+      querySelector: (sel: string) => {
+        if (sel === '[data-role="run-index-list"]') return section
+        if (sel === '[data-role="stream-status"]') return noticeEl
+        return null
+      },
       readyState: 'complete',
       addEventListener() {},
     }
@@ -4304,12 +4319,15 @@ describe('resetBootstrapState — handle cleanup and pagehide listener removal',
 
     const cards = [makeFakeCard('run-cycle-001')]
     const section = {
-      querySelector: (sel: string) =>
-        sel.includes('stream-status') ? {textContent: '', hidden: false} : null,
       querySelectorAll: () => cards,
     }
+    const noticeEl = {textContent: '', hidden: false}
     const fakeDocument = {
-      querySelector: (sel: string) => (sel === '#run-status-section' ? section : null),
+      querySelector: (sel: string) => {
+        if (sel === '[data-role="run-index-list"]') return section
+        if (sel === '[data-role="stream-status"]') return noticeEl
+        return null
+      },
       readyState: 'complete',
       addEventListener() {},
     }

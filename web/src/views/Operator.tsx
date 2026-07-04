@@ -230,6 +230,18 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
                 color: 'var(--color-text-muted)',
               }}
             />
+
+            <div
+              data-role="stream-status"
+              role="status"
+              aria-live="polite"
+              hidden
+              style={{
+                fontSize: 'var(--text-body-sm)',
+                color: 'var(--color-text-muted)',
+                marginBottom: 'var(--space-2)',
+              }}
+            />
           </section>
 
           <section className="operator-panel">
@@ -317,36 +329,6 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
                 Launch
               </button>
             </form>
-          </section>
-
-          <section
-            id="run-status-section"
-            className="operator-panel"
-            aria-label="Run status"
-          >
-            <h2
-              style={{
-                fontSize: 'var(--text-body-lg)',
-                fontWeight: 600,
-                color: 'var(--color-text)',
-                marginBottom: 'var(--space-4)',
-                letterSpacing: 'var(--tracking-heading)',
-              }}
-            >
-              Runs
-            </h2>
-
-            <div
-              data-role="stream-status"
-              role="status"
-              aria-live="polite"
-              hidden
-              style={{
-                fontSize: 'var(--text-body-sm)',
-                color: 'var(--color-text-muted)',
-                marginBottom: 'var(--space-2)',
-              }}
-            />
           </section>
         </div>
       )}

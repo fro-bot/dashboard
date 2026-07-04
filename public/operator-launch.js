@@ -516,8 +516,8 @@ export async function initOperatorLaunch(opts) {
 
   const launchForm = document.querySelector('#launch-form')
   const launchError = document.querySelector('#launch-error')
-  const runStatusSection = document.querySelector('#run-status-section')
-  const sharedNoticeEl = runStatusSection?.querySelector('[data-role="stream-status"]') ?? null
+  const runIndexList = document.querySelector('[data-role="run-index-list"]')
+  const sharedNoticeEl = document.querySelector('[data-role="stream-status"]')
 
   if (launchForm !== null) {
     // Create a dedicated AbortController for the submit listener. This is separate
@@ -598,8 +598,8 @@ export async function initOperatorLaunch(opts) {
       if (outcome.kind === 'launched') {
         const {runId} = outcome
 
-        // Insert an optimistic pending card into #run-status-section
-        if (runStatusSection !== null) {
+        // Insert an optimistic pending card into the unified run-index list.
+        if (runIndexList !== null) {
           const card = document.createElement('div')
           card.className = 'run-card'
           card.tabIndex = 0
@@ -611,9 +611,31 @@ export async function initOperatorLaunch(opts) {
           statusSpan.className = 'run-status status-queued'
           statusSpan.dataset.role = 'run-status'
           statusSpan.textContent = 'Pending'
-
           card.append(statusSpan)
-          runStatusSection.append(card)
+
+          // Hidden per-card substructure — same anatomy as renderRunCard, so
+          // operator-stream.js's updateDOM() has targets on a launch-created card.
+          const outputEl = document.createElement('div')
+          outputEl.dataset.role = 'run-output'
+          outputEl.hidden = true
+          card.append(outputEl)
+
+          const coalescedEl = document.createElement('div')
+          coalescedEl.dataset.role = 'run-output-coalesced'
+          coalescedEl.hidden = true
+          card.append(coalescedEl)
+
+          const approvalsEl = document.createElement('div')
+          approvalsEl.dataset.role = 'run-approvals'
+          approvalsEl.hidden = true
+          card.append(approvalsEl)
+
+          const badgeEl = document.createElement('span')
+          badgeEl.dataset.role = 'approval-badge'
+          badgeEl.hidden = true
+          card.append(badgeEl)
+
+          runIndexList.append(card)
 
           if (typeof onRunLaunched === 'function') {
             // Delegate stream attachment to the runtime seam (centralized ownership).

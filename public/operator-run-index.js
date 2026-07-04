@@ -289,7 +289,7 @@ function renderRunCard(view, onSelectRun) {
   card.tabIndex = 0
   card.setAttribute('role', 'button')
   card.setAttribute('aria-label', `Run, status: ${view.statusLabel}`)
-  card.dataset.testid = 'run-index-card'
+  card.dataset.testid = 'run-card'
   card.dataset.runId = view.runId
 
   const statusSpan = document.createElement('span')
@@ -313,6 +313,30 @@ function renderRunCard(view, onSelectRun) {
     timeEl.textContent = view.updatedAt
     card.append(timeEl)
   }
+
+  // Hidden per-card substructure — targets for operator-stream.js's updateDOM().
+  // Revealed on expansion (Unit 2). Safe-DOM only: createElement + textContent/
+  // hidden/dataset, never innerHTML. No run field beyond the closed safe-view
+  // reaches these elements at creation time.
+  const outputEl = document.createElement('div')
+  outputEl.dataset.role = 'run-output'
+  outputEl.hidden = true
+  card.append(outputEl)
+
+  const coalescedEl = document.createElement('div')
+  coalescedEl.dataset.role = 'run-output-coalesced'
+  coalescedEl.hidden = true
+  card.append(coalescedEl)
+
+  const approvalsEl = document.createElement('div')
+  approvalsEl.dataset.role = 'run-approvals'
+  approvalsEl.hidden = true
+  card.append(approvalsEl)
+
+  const badgeEl = document.createElement('span')
+  badgeEl.dataset.role = 'approval-badge'
+  badgeEl.hidden = true
+  card.append(badgeEl)
 
   // Wire click and keyboard activation to onSelectRun. Guard: skip if already stream-attached.
   if (typeof onSelectRun === 'function') {

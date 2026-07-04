@@ -552,10 +552,16 @@ describe('Operator — recent-runs section', () => {
     expect(launchForm).not.toBeNull()
   })
 
-  it('run-status section is still present', () => {
+  it('the unified run list is the single content region — no separate run-status section', () => {
     render(<Operator state="ready" />)
-    const runStatusSection = document.querySelector('#run-status-section')
-    expect(runStatusSection).not.toBeNull()
+    expect(document.querySelector('#run-status-section')).toBeNull()
+  })
+
+  it('the shared stream-status notice lives with the unified list', () => {
+    render(<Operator state="ready" />)
+    const section = document.querySelector('[data-testid="recent-runs-section"]')
+    const notice = section?.querySelector('[data-role="stream-status"]')
+    expect(notice).not.toBeNull()
   })
 
   it('recent-runs section is NOT rendered in non-ready states', () => {

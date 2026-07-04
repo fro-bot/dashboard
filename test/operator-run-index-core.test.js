@@ -1252,3 +1252,182 @@ describe('initOperatorRunIndex — section data-state transitions', () => {
     expect(section.dataset.state).toBe('unavailable')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Unit 1 — unified card substructure (run-output, run-output-coalesced,
+// run-approvals, approval-badge) + single data-testid="run-card"
+// ---------------------------------------------------------------------------
+
+/** Richer element stub that tracks appended children and dataset.role. */
+function makeSubstructureElStub() {
+  return {
+    _listeners: {},
+    _children: [],
+    className: '',
+    tabIndex: 0,
+    dataset: {},
+    textContent: '',
+    hidden: false,
+    attributes: {},
+    setAttribute(name, value) { this.attributes[name] = value },
+    append(...els) { this._children.push(...els) },
+    addEventListener(type, fn) {
+      this._listeners[type] = this._listeners[type] ?? []
+      this._listeners[type].push(fn)
+    },
+    dispatchEvent(event) {
+      const fns = this._listeners[event.type] ?? []
+      for (const fn of fns) fn(event)
+    },
+    querySelector(sel) {
+      const roleMatch = sel.match(/^\[data-role="([^"]+)"\]$/)
+      if (roleMatch) {
+        return findByRole(this._children, roleMatch[1])
+      }
+      return null
+    },
+  }
+}
+
+function findByRole(children, role) {
+  for (const child of children) {
+    if (child.dataset?.role === role) return child
+    if (Array.isArray(child._children)) {
+      const found = findByRole(child._children, role)
+      if (found !== null) return found
+    }
+  }
+  return null
+}
+
+/** Stub document + CSS globals for substructure assertions; collects appended cards. */
+function stubDOMWithSubstructureCards(cards) {
+  const mockList = {
+    hidden: true,
+    textContent: '',
+    append(el) { cards.push(el) },
+  }
+  const mockSection = {dataset: {}}
+  vi.stubGlobal('CSS', {escape: s => s})
+  vi.stubGlobal('document', {
+    querySelector(sel) {
+      if (sel === '[data-role="run-index-list"]') return mockList
+      if (sel === '[data-role="run-index"]') return mockSection
+      const runIdMatch = sel.match(/^\[data-run-id="([^"]+)"\]$/)
+      if (runIdMatch) return cards.find(c => c.dataset.runId === runIdMatch[1]) ?? null
+      return null
+    },
+    createElement() { return makeSubstructureElStub() },
+  })
+}
+
+describe('renderRunCard — unified per-card substructure (Unit 1)', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('renders a card with a single data-testid="run-card" (no run-index-card)', async () => {
+    const runId = 'run-substructure-testid-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(1)
+    expect(cards[0].dataset.testid).toBe('run-card')
+  })
+
+  it('operator-run-index.js source no longer contains "run-index-card"', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).not.toContain('run-index-card')
+  })
+
+  it('renders the four hidden substructure elements with correct data-role values', async () => {
+    const runId = 'run-substructure-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(1)
+    const card = cards[0]
+
+    const output = card.querySelector('[data-role="run-output"]')
+    const coalesced = card.querySelector('[data-role="run-output-coalesced"]')
+    const approvals = card.querySelector('[data-role="run-approvals"]')
+    const badge = card.querySelector('[data-role="approval-badge"]')
+
+    expect(output).not.toBeNull()
+    expect(coalesced).not.toBeNull()
+    expect(approvals).not.toBeNull()
+    expect(badge).not.toBeNull()
+  })
+
+  it('substructure elements are hidden by default (revealed only on expansion, per Unit 2)', async () => {
+    const runId = 'run-substructure-hidden-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    const card = cards[0]
+    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+      const el = card.querySelector(`[data-role="${role}"]`)
+      expect(el.hidden).toBe(true)
+    }
+  })
+
+  it('card with no updatedAt still renders all four hidden substructure elements', async () => {
+    const runId = 'run-substructure-no-updated-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    const card = cards[0]
+    expect(card.querySelector('[data-role="run-output"]')).not.toBeNull()
+    expect(card.querySelector('[data-role="run-output-coalesced"]')).not.toBeNull()
+    expect(card.querySelector('[data-role="run-approvals"]')).not.toBeNull()
+    expect(card.querySelector('[data-role="approval-badge"]')).not.toBeNull()
+  })
+
+  it('source builds substructure via createElement/textContent — never innerHTML', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).not.toMatch(/\.innerHTML\s*=/)
+  })
+
+  it('substructure elements carry no unexpected attributes beyond role/hidden state', async () => {
+    const runId = 'run-substructure-attrs-001'
+    const repo = 'fro-bot/agent'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId, repo})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    const card = cards[0]
+    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+      const el = card.querySelector(`[data-role="${role}"]`)
+      // No run field (repo/runId) leaks into substructure text content.
+      expect(el.textContent ?? '').not.toContain(repo)
+      expect(el.textContent ?? '').not.toContain(runId)
+    }
+  })
+})
