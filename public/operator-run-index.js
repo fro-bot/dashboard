@@ -124,6 +124,28 @@ export function buildRunSafeView(summary) {
 }
 
 /**
+ * Format an ISO timestamp as a coarse relative time string.
+ * Returns 'just now', 'N minute(s) ago', 'N hour(s) ago', or 'N day(s) ago'.
+ */
+export function formatRelativeTime(isoString, nowMs = Date.now()) {
+  if (!isoString) return ''
+  const date = new Date(isoString)
+  if (Number.isNaN(date.getTime())) return ''
+
+  const diff = Math.max(0, nowMs - date.getTime())
+  if (diff < 60_000) return 'just now'
+
+  const mins = Math.floor(diff / 60_000)
+  if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'} ago`
+
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`
+
+  const days = Math.floor(hours / 24)
+  return `${days} day${days === 1 ? '' : 's'} ago`
+}
+
+/**
  * Fetch the run index from the Gateway.
  * All error classes collapse to {kind: 'unavailable'} — never logs endpoint paths or bodies.
  */
@@ -494,7 +516,7 @@ function updateCardInPlace(card, view) {
     const timeEl = card.querySelector('[data-role="run-updated-at"]')
     if ('updatedAt' in view && view.updatedAt !== undefined && timeEl !== null && timeEl !== undefined) {
       timeEl.setAttribute('datetime', view.updatedAt)
-      timeEl.textContent = view.updatedAt
+      timeEl.textContent = formatRelativeTime(view.updatedAt)
     }
   }
 }
@@ -527,7 +549,7 @@ function renderRunCard(view, onSelectRun) {
     timeEl.className = 'run-updated-at'
     timeEl.dataset.role = 'run-updated-at'
     timeEl.setAttribute('datetime', view.updatedAt)
-    timeEl.textContent = view.updatedAt
+    timeEl.textContent = formatRelativeTime(view.updatedAt)
     card.append(timeEl)
   }
 

@@ -115,36 +115,14 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
           data-testid="fixture-mode-indicator"
           role="status"
           aria-label="Fixture mode active"
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 'var(--space-2)',
-            padding: 'var(--space-2) var(--space-3)',
-            marginBottom: 'var(--space-4)',
-            background: 'var(--color-surface-overlay)',
-            border: '1px solid var(--color-warning)',
-            borderRadius: 'var(--radius-md)',
-            fontSize: 'var(--text-label)',
-            fontWeight: 600,
-            letterSpacing: 'var(--tracking-label)',
-            color: 'var(--color-warning)',
-            textTransform: 'uppercase',
-          }}
+          className="operator-fixture-indicator"
         >
           <span aria-hidden="true">⚠</span>
           <span>Local fixture mode — all data is synthetic</span>
         </div>
       )}
-      <div style={{ marginBottom: 'var(--space-6)' }}>
-        <h1
-          style={{
-            fontSize: 'var(--text-h3)',
-            fontWeight: 700,
-            letterSpacing: 'var(--tracking-heading)',
-            color: 'var(--color-text)',
-            marginBottom: 'var(--space-1)',
-          }}
-        >
+      <div className="operator-header-container">
+        <h1 className="operator-headline">
           {headline}
         </h1>
 
@@ -152,14 +130,11 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
           aria-live="polite"
           aria-atomic="true"
           data-testid="operator-status-region"
-          style={{
-            fontSize: 'var(--text-body-sm)',
-            color: 'var(--color-text-muted)',
-          }}
+          className="operator-status-region"
         >
           <p>{detail}</p>
           {recoveryHint.length > 0 && (
-            <p style={{marginTop: 'var(--space-1)', color: 'var(--color-text-subtle)'}}>{recoveryHint}</p>
+            <p className="operator-recovery-hint">{recoveryHint}</p>
           )}
         </div>
       </div>
@@ -185,15 +160,7 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
             className="operator-panel"
             aria-label="Recent runs"
           >
-            <h2
-              style={{
-                fontSize: 'var(--text-body-lg)',
-                fontWeight: 600,
-                color: 'var(--color-text)',
-                marginBottom: 'var(--space-4)',
-                letterSpacing: 'var(--tracking-heading)',
-              }}
-            >
+            <h2 className="operator-section-heading">
               Recent Runs
             </h2>
 
@@ -202,10 +169,7 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
               aria-live="polite"
               aria-atomic="true"
               aria-label="Recent runs loading"
-              style={{
-                fontSize: 'var(--text-body-sm)',
-                color: 'var(--color-text-muted)',
-              }}
+              className="operator-status-text"
             />
 
             <div
@@ -216,19 +180,13 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
             <div
               data-role="run-index-empty"
               hidden
-              style={{
-                fontSize: 'var(--text-body-sm)',
-                color: 'var(--color-text-muted)',
-              }}
+              className="operator-status-text"
             />
 
             <div
               data-role="run-index-unavailable"
               hidden
-              style={{
-                fontSize: 'var(--text-body-sm)',
-                color: 'var(--color-text-muted)',
-              }}
+              className="operator-status-text"
             />
 
             <div
@@ -236,46 +194,27 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
               role="status"
               aria-live="polite"
               hidden
-              style={{
-                fontSize: 'var(--text-body-sm)',
-                color: 'var(--color-text-muted)',
-                marginBottom: 'var(--space-2)',
-              }}
+              className="operator-stream-status"
             />
           </section>
 
           <section className="operator-panel">
-            <h2
-              style={{
-                fontSize: 'var(--text-body-lg)',
-                fontWeight: 600,
-                color: 'var(--color-text)',
-                marginBottom: 'var(--space-4)',
-                letterSpacing: 'var(--tracking-heading)',
-              }}
-            >
+            <h2 className="operator-section-heading">
               Launch
             </h2>
 
             {fixtureMode === true && (
-              <div style={{marginBottom: 'var(--space-4)'}}>
+              <div className="operator-form-group">
                 <label
                   htmlFor="fixture-scenario-select"
-                  style={{
-                    display: 'block',
-                    fontSize: 'var(--text-body-sm)',
-                    fontWeight: 500,
-                    color: 'var(--color-text-muted)',
-                    marginBottom: 'var(--space-1)',
-                  }}
+                  className="operator-label"
                 >
                   Fixture scenario
                 </label>
                 <select
                   id="fixture-scenario-select"
                   data-testid="fixture-scenario-select"
-                  className="operator-input"
-                  style={{width: 'auto', minWidth: '220px'}}
+                  className="operator-input operator-select-inline"
                   value={scenario}
                   onChange={e => { setScenario(e.target.value) }}
                 >
@@ -289,17 +228,13 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
 
             <div
               id="repo-picker-container"
-              style={{marginBottom: 'var(--space-4)'}}
+              className="operator-form-group"
             />
 
-            <form id="launch-form" style={{display: 'flex', flexDirection: 'column', gap: 'var(--space-3)'}}>
+            <form id="launch-form" className="operator-form">
               <label
                 htmlFor="launch-prompt"
-                style={{
-                  fontSize: 'var(--text-body-sm)',
-                  fontWeight: 500,
-                  color: 'var(--color-text-muted)',
-                }}
+                className="operator-label"
               >
                 Prompt
               </label>
@@ -315,16 +250,11 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
                 id="launch-error"
                 role="alert"
                 hidden
-                style={{
-                  fontSize: 'var(--text-body-sm)',
-                  color: 'var(--color-error)',
-                  marginTop: 'var(--space-2)'
-                }}
+                className="operator-launch-error"
               />
               <button
                 type="submit"
-                className="operator-primary-action"
-                style={{ alignSelf: 'flex-start' }}
+                className="operator-primary-action operator-submit-btn"
               >
                 Launch
               </button>

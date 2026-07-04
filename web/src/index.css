@@ -56,3 +56,248 @@
   margin-bottom: var(--space-3);
   font-size: var(--text-body-sm);
 }
+
+/* ─── 6. Operator Run Cards ───────────────────────────────────────────────── */
+
+[data-role="run-index-list"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.run-card {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-standard);
+  position: relative;
+  overflow: hidden;
+}
+
+.run-card:hover {
+  border-color: var(--color-border-accent);
+  background: var(--color-surface-raised);
+}
+
+.run-card:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-accent);
+}
+
+.run-card[data-expanded="true"] {
+  background: var(--color-surface-raised);
+  border-color: var(--color-border-accent);
+}
+
+.run-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-2);
+  height: 24px;
+  font-size: var(--text-label);
+  font-family: var(--font-mono);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+}
+
+.run-status.status-succeeded {
+  background: rgba(105, 240, 174, 0.1);
+  color: var(--color-success);
+  border-color: rgba(105, 240, 174, 0.2);
+}
+[data-theme="light"] .run-status.status-succeeded {
+  background: rgba(46, 125, 50, 0.1);
+}
+
+.run-status.status-failed,
+.run-status.status-blocked {
+  background: rgba(244, 67, 54, 0.1);
+  color: var(--color-error);
+  border-color: rgba(244, 67, 54, 0.2);
+}
+[data-theme="light"] .run-status.status-failed,
+[data-theme="light"] .run-status.status-blocked {
+  background: rgba(198, 40, 40, 0.1);
+}
+
+.run-status.status-running {
+  background: rgba(0, 188, 212, 0.1);
+  color: var(--color-info);
+  border-color: rgba(0, 188, 212, 0.2);
+  animation: pulse 2s infinite ease-in-out;
+}
+[data-theme="light"] .run-status.status-running {
+  background: rgba(0, 96, 100, 0.1);
+}
+
+.run-status.status-waiting_for_approval {
+  background: rgba(255, 193, 7, 0.1);
+  color: var(--color-warning);
+  border-color: rgba(255, 193, 7, 0.2);
+}
+[data-theme="light"] .run-status.status-waiting_for_approval {
+  background: rgba(230, 81, 0, 0.1);
+}
+
+.run-status.status-pending,
+.run-status.status-queued,
+.run-status.status-cancelled {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--color-text-muted);
+  border-color: var(--color-border-muted);
+}
+[data-theme="light"] .run-status.status-pending,
+[data-theme="light"] .run-status.status-queued,
+[data-theme="light"] .run-status.status-cancelled {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.run-repo {
+  font-family: var(--font-mono);
+  font-size: var(--text-code);
+  font-weight: 500;
+  color: var(--color-text);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.run-updated-at {
+  font-size: var(--text-body-sm);
+  color: var(--color-text-subtle);
+  white-space: nowrap;
+}
+
+/* Expanded substructure */
+[data-role="run-output"],
+[data-role="run-output-coalesced"],
+[data-role="run-approvals"] {
+  width: 100%;
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-code);
+  color: var(--color-text-muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+[data-role="approval-badge"] {
+  display: inline-block;
+  margin-left: var(--space-2);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--color-accent);
+  color: var(--color-bg);
+  font-size: var(--text-label);
+  font-weight: bold;
+}
+
+@keyframes pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.6; }
+  100% { opacity: 1; }
+}
+
+/* ─── 7. Operator View Layout Classes ─────────────────────────────────────── */
+
+.operator-fixture-indicator {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-4);
+  background: var(--color-surface-overlay);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-md);
+  font-size: var(--text-label);
+  font-weight: 600;
+  letter-spacing: var(--tracking-label);
+  color: var(--color-warning);
+  text-transform: uppercase;
+}
+
+.operator-header-container {
+  margin-bottom: var(--space-6);
+}
+
+.operator-headline {
+  font-size: var(--text-h3);
+  font-weight: 700;
+  letter-spacing: var(--tracking-heading);
+  color: var(--color-text);
+  margin-bottom: var(--space-1);
+}
+
+.operator-status-region {
+  font-size: var(--text-body-sm);
+  color: var(--color-text-muted);
+}
+
+.operator-recovery-hint {
+  margin-top: var(--space-1);
+  color: var(--color-text-subtle);
+}
+
+.operator-section-heading {
+  font-size: var(--text-body-lg);
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: var(--space-4);
+  letter-spacing: var(--tracking-heading);
+}
+
+.operator-status-text {
+  font-size: var(--text-body-sm);
+  color: var(--color-text-muted);
+}
+
+.operator-stream-status {
+  font-size: var(--text-body-sm);
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-2);
+}
+
+.operator-form-group {
+  margin-bottom: var(--space-4);
+}
+
+.operator-label {
+  display: block;
+  font-size: var(--text-body-sm);
+  font-weight: 500;
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-1);
+}
+
+.operator-select-inline {
+  width: auto;
+  min-width: 220px;
+}
+
+.operator-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.operator-launch-error {
+  font-size: var(--text-body-sm);
+  color: var(--color-error);
+  margin-top: var(--space-2);
+}
+
+.operator-submit-btn {
+  align-self: flex-start;
+}

@@ -8,6 +8,7 @@ import {
   buildRunSafeView,
   FETCH_TIMEOUT_MS,
   fetchRunIndex,
+  formatRelativeTime,
   initOperatorRunIndex,
   markRunStreamAttached,
   parseRunSummaryItem,
@@ -1888,3 +1889,67 @@ function renderRunCardForTest(cards, summaryLike) {
   list.append(card)
   return card
 }
+
+describe('CSS selector ↔ status emitter agreement', () => {
+  it('has a .status-<value> selector in web/src/index.css for every valid status', async () => {
+    const fs = await import('node:fs/promises')
+    const cssPath = new URL('../web/src/index.css', import.meta.url).pathname
+    const cssContent = await fs.readFile(cssPath, 'utf8')
+
+    // All core index statuses plus the optimistic pending state
+    const coreStatuses = Array.from(VALID_RUN_SUMMARY_STATUSES)
+    const requiredStatuses = [...coreStatuses, 'pending', 'blocked', 'waiting_for_approval']
+
+    for (const status of requiredStatuses) {
+      const expectedSelector = `.status-${status}`
+      expect(cssContent).toContain(expectedSelector)
+    }
+
+    // Explicitly verify the old wrong ones are GONE
+    expect(cssContent).not.toContain('.status-success')
+    expect(cssContent).not.toContain('.status-failure')
+    expect(cssContent).not.toContain('.status-error')
+    expect(cssContent).not.toContain('.status-in_progress')
+  })
+})
+
+describe('formatRelativeTime — coarse relative time formatting', () => {
+  it('handles missing or invalid input safely', () => {
+    expect(formatRelativeTime(undefined)).toBe('')
+    expect(formatRelativeTime(null)).toBe('')
+    expect(formatRelativeTime('')).toBe('')
+    expect(formatRelativeTime('not-a-date')).toBe('')
+  })
+
+  it('formats "just now" for times < 1 minute', () => {
+    const now = 1000000000000
+    expect(formatRelativeTime(new Date(now).toISOString(), now)).toBe('just now')
+    expect(formatRelativeTime(new Date(now - 59999).toISOString(), now)).toBe('just now')
+    // Handles future/drift by clamping to 0
+    expect(formatRelativeTime(new Date(now + 10000).toISOString(), now)).toBe('just now')
+  })
+
+  it('formats "N minute(s) ago" for times < 1 hour', () => {
+    const now = 1000000000000
+    expect(formatRelativeTime(new Date(now - 60000).toISOString(), now)).toBe('1 minute ago')
+    expect(formatRelativeTime(new Date(now - 119999).toISOString(), now)).toBe('1 minute ago')
+    expect(formatRelativeTime(new Date(now - 120000).toISOString(), now)).toBe('2 minutes ago')
+    expect(formatRelativeTime(new Date(now - 3599000).toISOString(), now)).toBe('59 minutes ago')
+  })
+
+  it('formats "N hour(s) ago" for times < 24 hours', () => {
+    const now = 1000000000000
+    expect(formatRelativeTime(new Date(now - 3600000).toISOString(), now)).toBe('1 hour ago')
+    expect(formatRelativeTime(new Date(now - 7199000).toISOString(), now)).toBe('1 hour ago')
+    expect(formatRelativeTime(new Date(now - 7200000).toISOString(), now)).toBe('2 hours ago')
+    expect(formatRelativeTime(new Date(now - 86399000).toISOString(), now)).toBe('23 hours ago')
+  })
+
+  it('formats "N day(s) ago" for times >= 24 hours', () => {
+    const now = 1000000000000
+    expect(formatRelativeTime(new Date(now - 86400000).toISOString(), now)).toBe('1 day ago')
+    expect(formatRelativeTime(new Date(now - 172799000).toISOString(), now)).toBe('1 day ago')
+    expect(formatRelativeTime(new Date(now - 172800000).toISOString(), now)).toBe('2 days ago')
+    expect(formatRelativeTime(new Date(now - 864000000).toISOString(), now)).toBe('10 days ago')
+  })
+})
