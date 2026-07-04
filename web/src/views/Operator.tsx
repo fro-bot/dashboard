@@ -143,7 +143,7 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
         <div
           data-testid="operator-action-reason"
           role="status"
-          className="operator-warning-panel"
+          className={`operator-warning-panel operator-failure-state-${state}`}
         >
           {actionReason}
         </div>
@@ -180,8 +180,12 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
             <div
               data-role="run-index-empty"
               hidden
-              className="operator-status-text"
-            />
+              className="operator-empty-state"
+            >
+              <div className="operator-empty-icon" aria-hidden="true"></div>
+              <p className="operator-empty-title">Ready to launch</p>
+              <p className="operator-empty-desc">Describe a task to deploy an operator instance.</p>
+            </div>
 
             <div
               data-role="run-index-unavailable"

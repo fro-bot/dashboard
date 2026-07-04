@@ -658,3 +658,25 @@ describe('Operator — fixture-absence: no sensitive fixture values in root shel
     expect(html).not.toContain('run-fixture')
   })
 })
+
+describe('Operator — failure state distinct treatments', () => {
+  const failureStates: ('auth-required' | 'rate-limited' | 'offline' | 'unavailable')[] = [
+    'auth-required',
+    'rate-limited',
+    'offline',
+    'unavailable',
+  ]
+
+  for (const state of failureStates) {
+    it(`renders its distinct failure state treatment for ${state} with disabled actions`, () => {
+      render(<Operator state={state} />)
+      const shell = screen.getByTestId('operator-shell')
+      expect(shell).toHaveAttribute('data-state', state)
+
+      const reasonEl = screen.getByTestId('operator-action-reason')
+      expect(reasonEl).toHaveClass(`operator-failure-state-${state}`)
+      expect(reasonEl).toHaveClass('operator-warning-panel')
+      expect(reasonEl.textContent?.trim().length).toBeGreaterThan(0)
+    })
+  }
+})
