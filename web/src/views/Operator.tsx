@@ -73,6 +73,85 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
   const onRuntimeStateChangeRef = useRef(onRuntimeStateChange)
   onRuntimeStateChangeRef.current = onRuntimeStateChange
 
+  const [isLaunchOpen, setIsLaunchOpen] = useState(false)
+  const triggerBtnRef = useRef<HTMLButtonElement>(null)
+  const drawerRef = useRef<HTMLDivElement>(null)
+  const formRef = useRef<HTMLFormElement>(null)
+
+  // Escape to close drawer
+  useEffect(() => {
+    if (!isLaunchOpen) return
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsLaunchOpen(false)
+        triggerBtnRef.current?.focus()
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [isLaunchOpen])
+
+  // Focus the first interactive element or input inside drawer when opened
+  useEffect(() => {
+    if (isLaunchOpen) {
+      const container = drawerRef.current
+      if (container) {
+        const first = container.querySelector<HTMLElement>(
+          'select, textarea, button:not([data-testid="close-drawer-btn"])'
+        )
+        if (first) {
+          first.focus()
+        } else {
+          container.querySelector<HTMLElement>('#launch-prompt')?.focus()
+        }
+      }
+    }
+  }, [isLaunchOpen])
+
+  // Handle focus trapping in the drawer
+  const handleDrawerKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== 'Tab') return
+    const container = drawerRef.current
+    if (!container) return
+    const focusables = Array.from(container.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    ))
+    if (focusables.length === 0) return
+    const first = focusables[0]
+    const last = focusables[focusables.length - 1]
+    if (!first || !last) return
+    if (e.shiftKey) {
+      if (document.activeElement === first) {
+        last.focus()
+        e.preventDefault()
+      }
+    } else {
+      if (document.activeElement === last) {
+        first.focus()
+        e.preventDefault()
+      }
+    }
+  }
+
+  // Handle successful launch (close drawer & focus new card)
+  useEffect(() => {
+    const form = formRef.current
+    if (!form) return
+    const handleSuccess = () => {
+      setIsLaunchOpen(false)
+      setTimeout(() => {
+        const topCard = document.querySelector('[data-role="run-index-list"] [data-testid="run-card"]') as HTMLElement | null
+        if (topCard) {
+          topCard.focus()
+        } else {
+          triggerBtnRef.current?.focus()
+        }
+      }, 50)
+    }
+    form.addEventListener('launch-success', handleSuccess)
+    return () => form.removeEventListener('launch-success', handleSuccess)
+  }, [state])
+
   useEffect(() => {
     if (state !== 'ready') {
       if (runtimeHandleRef.current !== null) {
@@ -122,21 +201,36 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
         </div>
       )}
       <div className="operator-header-container">
-        <h1 className="operator-headline">
-          {headline}
-        </h1>
+        <div className="operator-header-main">
+          <h1 className="operator-headline">
+            {headline}
+          </h1>
 
-        <div
-          aria-live="polite"
-          aria-atomic="true"
-          data-testid="operator-status-region"
-          className="operator-status-region"
-        >
-          <p>{detail}</p>
-          {recoveryHint.length > 0 && (
-            <p className="operator-recovery-hint">{recoveryHint}</p>
-          )}
+          <div
+            aria-live="polite"
+            aria-atomic="true"
+            data-testid="operator-status-region"
+            className="operator-status-region"
+          >
+            <p>{detail}</p>
+            {recoveryHint.length > 0 && (
+              <p className="operator-recovery-hint">{recoveryHint}</p>
+            )}
+          </div>
         </div>
+
+        {state === 'ready' && (
+          <button
+            type="button"
+            ref={triggerBtnRef}
+            data-testid="launch-trigger-btn"
+            className="operator-primary-action operator-launch-trigger"
+            onClick={() => setIsLaunchOpen(true)}
+          >
+            <span className="operator-btn-icon" aria-hidden="true">⚡</span>
+            <span>Launch Run</span>
+          </button>
+        )}
       </div>
 
       {actionsDisabled && actionReason !== null && (
@@ -202,68 +296,108 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
             />
           </section>
 
-          <section className="operator-panel">
-            <h2 className="operator-section-heading">
-              Launch
-            </h2>
-
-            {fixtureMode === true && (
-              <div className="operator-form-group">
-                <label
-                  htmlFor="fixture-scenario-select"
-                  className="operator-label"
-                >
-                  Fixture scenario
-                </label>
-                <select
-                  id="fixture-scenario-select"
-                  data-testid="fixture-scenario-select"
-                  className="operator-input operator-select-inline"
-                  value={scenario}
-                  onChange={e => { setScenario(e.target.value) }}
-                >
-                  <option value="success">Success</option>
-                  <option value="terminal_failure">Terminal failure</option>
-                  <option value="contract_drift">Contract drift</option>
-                  <option value="malformed_unavailable">Malformed / unavailable</option>
-                </select>
-              </div>
-            )}
-
+          {/* Persistent Launch Drawer */}
+          <div
+            ref={drawerRef}
+            data-testid="launch-drawer"
+            className={`operator-drawer-container ${isLaunchOpen ? 'open' : ''}`}
+            onKeyDown={handleDrawerKeyDown}
+            style={{ display: isLaunchOpen ? 'block' : 'none' }}
+          >
+            {/* Backdrop */}
             <div
-              id="repo-picker-container"
-              className="operator-form-group"
+              className="operator-drawer-backdrop"
+              onClick={() => {
+                setIsLaunchOpen(false)
+                triggerBtnRef.current?.focus()
+              }}
             />
 
-            <form id="launch-form" className="operator-form">
-              <label
-                htmlFor="launch-prompt"
-                className="operator-label"
-              >
-                Prompt
-              </label>
-              <textarea
-                id="launch-prompt"
-                name="prompt"
-                className="operator-input"
-                rows={3}
-                placeholder="Describe what you want the agent to do…"
-                style={{ resize: 'vertical' }}
-              />
-              <div
-                id="launch-error"
-                role="alert"
-                hidden
-                className="operator-launch-error"
-              />
-              <button
-                type="submit"
-                className="operator-primary-action operator-submit-btn"
-              >
-                Launch
-              </button>
-            </form>
-          </section>
+            {/* Panel */}
+            <div
+              className="operator-drawer-panel"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="drawer-title"
+            >
+              <div className="operator-drawer-header">
+                <h2 id="drawer-title" className="operator-section-heading" style={{ marginBottom: 0 }}>
+                  Launch Run
+                </h2>
+                <button
+                  type="button"
+                  data-testid="close-drawer-btn"
+                  className="operator-drawer-close"
+                  onClick={() => {
+                    setIsLaunchOpen(false)
+                    triggerBtnRef.current?.focus()
+                  }}
+                  aria-label="Close launch panel"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="operator-drawer-body">
+                {fixtureMode === true && (
+                  <div className="operator-form-group">
+                    <label
+                      htmlFor="fixture-scenario-select"
+                      className="operator-label"
+                    >
+                      Fixture scenario
+                    </label>
+                    <select
+                      id="fixture-scenario-select"
+                      data-testid="fixture-scenario-select"
+                      className="operator-input operator-select-inline"
+                      value={scenario}
+                      onChange={e => { setScenario(e.target.value) }}
+                    >
+                      <option value="success">Success</option>
+                      <option value="terminal_failure">Terminal failure</option>
+                      <option value="contract_drift">Contract drift</option>
+                      <option value="malformed_unavailable">Malformed / unavailable</option>
+                    </select>
+                  </div>
+                )}
+
+                <div
+                  id="repo-picker-container"
+                  className="operator-form-group"
+                />
+
+                <form id="launch-form" ref={formRef} className="operator-form">
+                  <label
+                    htmlFor="launch-prompt"
+                    className="operator-label"
+                  >
+                    Prompt
+                  </label>
+                  <textarea
+                    id="launch-prompt"
+                    name="prompt"
+                    className="operator-input"
+                    rows={3}
+                    placeholder="Describe what you want the agent to do…"
+                    style={{ resize: 'vertical' }}
+                  />
+                  <div
+                    id="launch-error"
+                    role="alert"
+                    hidden
+                    className="operator-launch-error"
+                  />
+                  <button
+                    type="submit"
+                    className="operator-primary-action operator-submit-btn"
+                  >
+                    Launch
+                  </button>
+                </form>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

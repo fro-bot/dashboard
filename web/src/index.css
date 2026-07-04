@@ -582,3 +582,113 @@
   display: flex;
   gap: var(--space-2);
 }
+
+/* ─── 9. Operator Persistent Launch Drawer ───────────────────────────────── */
+
+.operator-drawer-container {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 100;
+}
+
+.operator-drawer-backdrop {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(13, 2, 22, 0.7);
+  backdrop-filter: blur(4px);
+  cursor: pointer;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.operator-drawer-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 100%;
+  max-width: 480px;
+  height: 100%;
+  background: var(--color-surface-overlay);
+  border-left: 1px solid var(--color-border);
+  box-shadow: -4px 0 24px rgba(13, 2, 22, 0.5);
+  display: flex;
+  flex-direction: column;
+  animation: slideIn var(--duration-fast) var(--ease-standard);
+  z-index: 101;
+}
+
+.operator-drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-6);
+  border-bottom: 1px solid var(--color-border-muted);
+}
+
+.operator-drawer-close {
+  background: transparent;
+  border: none;
+  color: var(--color-text-muted);
+  font-size: var(--text-body-lg);
+  cursor: pointer;
+  padding: var(--space-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  min-width: 44px;
+  border-radius: var(--radius-sm);
+  transition: all var(--duration-fast) var(--ease-standard);
+}
+
+.operator-drawer-close:hover {
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+}
+
+.operator-drawer-close:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-accent);
+}
+
+.operator-drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.operator-launch-trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.operator-btn-icon {
+  font-size: var(--text-body);
+}
+
+.operator-header-container {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}

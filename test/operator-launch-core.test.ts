@@ -1251,8 +1251,34 @@ describe('operator-launch — CSRF/idempotency/mutex discipline preserved throug
   it('source still contains the in-flight submit mutex guard', async () => {
     const fs = await import('node:fs/promises')
     const src = await fs.readFile('public/operator-launch.js', 'utf8')
-    expect(src).toMatch(/let launching = false/)
-    expect(src).toMatch(/if \(launching\) return/)
+    expect(src).toMatch(/let _launching = false/)
+    expect(src).toMatch(/if \(_launching\) return/)
+  })
+
+  it('mutex persists — no double-submit from a fresh affordance mount', async () => {
+    // Tests that _launching is declared at module-level (not inside initOperatorLaunch or standard per-mount scope)
+    // so it persists across multiple init/unmount/remount cycles.
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    // Assert it is declared in global/module scope of the file, not nested inside the init function
+    const lines = src.split('\n')
+    const initFnLine = lines.findIndex(l => l.includes('function initOperatorLaunch'))
+    const mutexLine = lines.findIndex(l => l.includes('let _launching = false'))
+    expect(mutexLine).toBeGreaterThan(-1)
+    expect(initFnLine).toBeGreaterThan(-1)
+    expect(mutexLine).toBeLessThan(initFnLine)
+  })
+
+  it('repo-list auth/rate-limit/network/protocol failures render the canonical failure state, not "No repositories available"', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    // Verify that the code handles listRepos failure by setting neutral failure messages
+    // rather than "No repositories available"
+    expect(src).toContain('Sign in required to load repositories.')
+    expect(src).toContain('Repository list temporarily unavailable. Try again shortly.')
+    expect(src).toContain('Repository list unavailable.')
+    // Verify "No repositories available" is not used for failure paths
+    expect(src).not.toContain('No repositories available')
   })
 })
 

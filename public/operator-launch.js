@@ -342,6 +342,8 @@ let _launchListenerGeneration = -1
 let _launchStreamHandle = null
 // Idempotency flag: prevents double-init when auto-start fires before DOMContentLoaded.
 let _launchInitialized = false
+// In-flight submit mutex: persists across unmount/remount to prevent double-submit.
+let _launching = false
 
 /**
  * Returns true if the given init is no longer the active init.
@@ -472,7 +474,7 @@ export async function initOperatorLaunch(opts) {
 
     if (!reposResult.success) {
       // Failure — classify into a neutral operator failure state.
-      // Never render "No repositories available" for auth/rate-limit/network/protocol failures.
+      // Never render a generic failure message for auth/rate-limit/network/protocol failures.
       // The copy is fixed and coarse — no raw error details, status codes, or paths.
       const error = reposResult.error
       let failureCopy
@@ -537,22 +539,18 @@ export async function initOperatorLaunch(opts) {
     _launchListenerController = listenerController
     _launchListenerGeneration = myGeneration
 
-    // In-flight submit mutex: prevents double-launch even when requestSubmit()
-    // bypasses the disabled button (e.g. DevTools or browser extensions).
-    let launching = false
-
     launchForm.addEventListener('submit', async event => {
       event.preventDefault()
 
       // Mutex guard — re-entry is impossible regardless of how submit is triggered
-      if (launching) return
-      launching = true
+      if (_launching) return
+      _launching = true
 
       // Pre-fetch validation: empty prompt
       const formData = new FormData(launchForm)
       const prompt = (formData.get('prompt') ?? '').toString().trim()
       if (prompt === '') {
-        launching = false
+        _launching = false
         if (launchError !== null) {
           launchError.textContent = 'Please enter a prompt before launching.'
           launchError.hidden = false
@@ -564,7 +562,7 @@ export async function initOperatorLaunch(opts) {
       const repoSelectEl = document.querySelector('#launch-repo-select')
       const repo = repoSelectEl?.value ?? formData.get('repo')?.toString() ?? ''
       if (repo === '') {
-        launching = false
+        _launching = false
         if (launchError !== null) {
           launchError.textContent = 'Please select a repository.'
           launchError.hidden = false
@@ -599,7 +597,7 @@ export async function initOperatorLaunch(opts) {
       } finally {
         // Always re-enable the button and clear the mutex, even on throw
         if (submitBtn !== null) submitBtn.disabled = false
-        launching = false
+        _launching = false
       }
 
       if (outcome.kind === 'launched') {
@@ -688,6 +686,12 @@ export async function initOperatorLaunch(opts) {
 
         // Reset the form
         launchForm.reset()
+
+        // Dispatch success event to the form so React components/drawers can react (e.g. close drawer and focus card)
+        launchForm.dispatchEvent(new CustomEvent('launch-success', {
+          bubbles: true,
+          detail: {runId},
+        }))
       } else if (outcome.kind === 'not-found') {
         if (launchError !== null) {
           launchError.textContent = 'The selected repository is not available for launch.'

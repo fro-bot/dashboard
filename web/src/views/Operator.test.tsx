@@ -546,10 +546,61 @@ describe('Operator — recent-runs section', () => {
     expect(unavailableHook).not.toBeNull()
   })
 
-  it('launch form is still present below recent-runs section', () => {
+  it('renders a persistent launch trigger button in ready state', () => {
     render(<Operator state="ready" />)
+    const triggerBtn = screen.getByTestId('launch-trigger-btn')
+    expect(triggerBtn).toBeInTheDocument()
+  })
+
+  it('opening the persistent affordance reveals the launch controls', async () => {
+    const {act} = await import('react')
+    render(<Operator state="ready" />)
+    const drawer = screen.getByTestId('launch-drawer')
+    expect(drawer).toHaveStyle({display: 'none'})
+
+    const triggerBtn = screen.getByTestId('launch-trigger-btn')
+    await act(async () => {
+      triggerBtn.click()
+    })
+
+    expect(drawer).toHaveStyle({display: 'block'})
+    const launchForm = document.querySelector('#launch-form')
+    expect(launchForm).toBeInTheDocument()
+  })
+
+  it('submit path is still reachable when drawer is open', async () => {
+    const {act} = await import('react')
+    render(<Operator state="ready" />)
+    const triggerBtn = screen.getByTestId('launch-trigger-btn')
+    await act(async () => {
+      triggerBtn.click()
+    })
+
     const launchForm = document.querySelector('#launch-form')
     expect(launchForm).not.toBeNull()
+    const submitBtn = launchForm?.querySelector('[type="submit"]')
+    expect(submitBtn).not.toBeNull()
+  })
+
+  it('the standalone stacked launch section is gone and no duplicate launch form exists', () => {
+    render(<Operator state="ready" />)
+    // Check there is exactly one launch-form
+    const forms = document.querySelectorAll('#launch-form')
+    expect(forms).toHaveLength(1)
+
+    // The form is inside the drawer, not in a direct sibling section of the body
+    const drawer = screen.getByTestId('launch-drawer')
+    const formInsideDrawer = drawer.querySelector('#launch-form')
+    expect(formInsideDrawer).not.toBeNull()
+
+    // No stacked section panel named "Launch" in the page content
+    const sections = document.querySelectorAll('section')
+    for (const section of Array.from(sections)) {
+      const heading = section.querySelector('h2')
+      if (heading) {
+        expect(heading.textContent).not.toBe('Launch')
+      }
+    }
   })
 
   it('the unified run list is the single content region — no separate run-status section', () => {
