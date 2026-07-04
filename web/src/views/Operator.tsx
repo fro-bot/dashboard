@@ -281,21 +281,21 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
               aria-label="Recent runs loading"
               className="operator-status-text run-index-skeleton-container"
             >
-              <div className="run-card-skeleton" data-testid="run-card-skeleton">
-                <span className="skeleton-item skeleton-pill" />
-                <span className="skeleton-item skeleton-repo" />
-                <span className="skeleton-item skeleton-time" />
-              </div>
-              <div className="run-card-skeleton" data-testid="run-card-skeleton">
-                <span className="skeleton-item skeleton-pill" />
-                <span className="skeleton-item skeleton-repo" />
-                <span className="skeleton-item skeleton-time" />
-              </div>
-              <div className="run-card-skeleton" data-testid="run-card-skeleton">
-                <span className="skeleton-item skeleton-pill" />
-                <span className="skeleton-item skeleton-repo" />
-                <span className="skeleton-item skeleton-time" />
-              </div>
+            <div className="run-card-skeleton" data-testid="run-card-skeleton">
+              <span className="skeleton-item skeleton-pill" aria-hidden="true" />
+              <span className="skeleton-item skeleton-repo" aria-hidden="true" />
+              <span className="skeleton-item skeleton-time" aria-hidden="true" />
+            </div>
+            <div className="run-card-skeleton" data-testid="run-card-skeleton">
+              <span className="skeleton-item skeleton-pill" aria-hidden="true" />
+              <span className="skeleton-item skeleton-repo" aria-hidden="true" />
+              <span className="skeleton-item skeleton-time" aria-hidden="true" />
+            </div>
+            <div className="run-card-skeleton" data-testid="run-card-skeleton">
+              <span className="skeleton-item skeleton-pill" aria-hidden="true" />
+              <span className="skeleton-item skeleton-repo" aria-hidden="true" />
+              <span className="skeleton-item skeleton-time" aria-hidden="true" />
+            </div>
             </div>
 
             <div

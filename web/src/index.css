@@ -241,7 +241,6 @@
   font-size: var(--text-code);
   font-weight: 500;
   color: var(--color-text);
-  flex: 1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -727,7 +726,6 @@
   background: var(--color-surface);
   border: 1px solid var(--color-border-muted);
   border-radius: var(--radius-md);
-  height: 48px;
   overflow: hidden;
 }
 
@@ -784,7 +782,8 @@
 /* Responsive and grid auto-layout for expanded components */
 [data-role="run-output"],
 [data-role="run-output-coalesced"],
-[data-role="run-approvals"] {
+[data-role="run-approvals"],
+[data-role="approval-badge"] {
   grid-column: 1 / -1;
 }
 
