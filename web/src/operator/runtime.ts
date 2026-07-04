@@ -24,7 +24,7 @@
  *   A hash value over MAX_HASH_ID_LENGTH is rejected before any further processing.
  */
 
-import {validateDynamicId} from '../../../src/gateway/operator-client.ts'
+import {validateDynamicId} from './validate-dynamic-id.ts'
 import type {OperatorState} from './state.ts'
 
 /**

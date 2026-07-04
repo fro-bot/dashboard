@@ -18,7 +18,7 @@
  * - Only active when import.meta.env.DEV is true.
  */
 
-import {FIXTURE_OPERATOR_PREFIX} from '../../../src/gateway/operator-fixture-routes.ts'
+import {FIXTURE_OPERATOR_PREFIX} from './fixture-prefix.ts'
 
 export {FIXTURE_OPERATOR_PREFIX}
 
