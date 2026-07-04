@@ -26,6 +26,7 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {
   createOperatorRuntime,
+  discoverCardStreamTargets,
   MAX_HASH_ID_LENGTH,
   sanitizeRunIdFromHash,
   type OperatorRuntimeHandle,
@@ -462,7 +463,20 @@ describe('defaultRuntimeLoader — single-open accordion via onSelectRun/onRunLa
     function attach(runId: string, statusEl: Element | null, noticeEl: Element | null) {
       closeActive()
       attachCalls.push(runId)
-      const handle = streamMod.initOperatorStream({runId, statusEl, noticeEl})
+      // Use the real exported production discovery function (not a re-implementation)
+      // so these tests exercise the exact same lookup `_attachStream` calls. If the
+      // production fix in runtime.ts were reverted, discoverCardStreamTargets would
+      // return all-nulls and the regression tests below would fail.
+      const {outputEl, coalescedEl, approvalsEl, badgeEl} = discoverCardStreamTargets(runId)
+      const handle = streamMod.initOperatorStream({
+        runId,
+        statusEl,
+        noticeEl,
+        outputEl: outputEl as unknown as (HTMLElement & {hidden: boolean}) | null,
+        coalescedEl: coalescedEl as unknown as (HTMLElement & {hidden: boolean}) | null,
+        approvalsEl: approvalsEl as unknown as (HTMLElement & {hidden: boolean}) | null,
+        badgeEl: badgeEl as unknown as (HTMLElement & {hidden: boolean}) | null,
+      })
       // Wrap close to observe ordering in tests.
       activeHandle = {
         close() {
@@ -540,6 +554,167 @@ describe('defaultRuntimeLoader — single-open accordion via onSelectRun/onRunLa
     expect(attachCalls).toEqual(['run-1', 'run-2', 'run-3'])
     // Each prior run is closed before the next attach; the last is closed by closeActive().
     expect(closeOrder).toEqual(['run-1', 'run-2', 'run-3'])
+  })
+
+  /** Build a run card with the full per-run substructure that renderRunCard creates. */
+  function makeCardWithSubstructure(runId: string): HTMLElement {
+    const card = document.createElement('div')
+    card.dataset.runId = runId
+    const statusEl = document.createElement('span')
+    statusEl.dataset.role = 'run-status'
+    card.append(statusEl)
+    const outputEl = document.createElement('div')
+    outputEl.dataset.role = 'run-output'
+    outputEl.hidden = true
+    card.append(outputEl)
+    const coalescedEl = document.createElement('div')
+    coalescedEl.dataset.role = 'run-output-coalesced'
+    coalescedEl.hidden = true
+    card.append(coalescedEl)
+    const approvalsEl = document.createElement('div')
+    approvalsEl.dataset.role = 'run-approvals'
+    approvalsEl.hidden = true
+    card.append(approvalsEl)
+    const badgeEl = document.createElement('span')
+    badgeEl.dataset.role = 'approval-badge'
+    badgeEl.hidden = true
+    card.append(badgeEl)
+    document.body.append(card)
+    return card
+  }
+
+  it('regression: an output SSE frame populates the expanded card\'s [data-role="run-output"] (bug: _attachStream never forwarded outputEl)', async () => {
+    const card = makeCardWithSubstructure('run-out-1')
+    const statusEl = card.querySelector('[data-role="run-status"]')
+
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve({
+      ok: true,
+      status: 200,
+      headers: {get: (h: string) => (h === 'content-type' ? 'text/event-stream' : null)},
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          const encoder = new TextEncoder()
+          controller.enqueue(encoder.encode('event: ready\ndata: {"contractVersion":"1.5.0"}\n\n'))
+          controller.enqueue(encoder.encode(
+            'event: output\ndata: {"runId":"run-out-1","text":"hello from the run","final":true,"seq":0}\n\n',
+          ))
+          controller.close()
+        },
+      }),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const {attach, closeActive} = await buildLoaderHarness()
+    attach('run-out-1', statusEl, null)
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    const outputEl = card.querySelector('[data-role="run-output"]') as HTMLElement
+    expect(outputEl.hidden).toBe(false)
+    expect(outputEl.textContent).toBe('hello from the run')
+
+    closeActive()
+  })
+
+  it('regression: an approval SSE frame populates [data-role="run-approvals"] and [data-role="approval-badge"] (bug: _attachStream never forwarded approvalsEl/badgeEl)', async () => {
+    const card = makeCardWithSubstructure('run-appr-1')
+    const statusEl = card.querySelector('[data-role="run-status"]')
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === 'string' && url.includes('/runs/')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: {get: (h: string) => (h === 'content-type' ? 'text/event-stream' : null)},
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              const encoder = new TextEncoder()
+              controller.enqueue(encoder.encode('event: ready\ndata: {"contractVersion":"1.5.0"}\n\n'))
+              controller.enqueue(encoder.encode(
+                'event: approval\ndata: {"runId":"run-appr-1","requestID":"req-1","permission":"bash","settled":false}\n\n',
+              ))
+              controller.close()
+            },
+          }),
+        })
+      }
+      // Approval-client reconcile GET on connect — respond with no recovered approvals
+      // so the SSE-opened prompt above is the only source of truth.
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({approvals: []}),
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const {attach, closeActive} = await buildLoaderHarness()
+    attach('run-appr-1', statusEl, null)
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    const approvalsEl = card.querySelector('[data-role="run-approvals"]') as HTMLElement
+    const badgeEl = card.querySelector('[data-role="approval-badge"]') as HTMLElement
+    expect(approvalsEl.hidden).toBe(false)
+    expect(approvalsEl.childElementCount).toBeGreaterThan(0)
+    expect(badgeEl.hidden).toBe(false)
+    expect(badgeEl.textContent).toBe('1')
+
+    closeActive()
+  })
+})
+
+describe('discoverCardStreamTargets', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('returns all four per-card render targets when the card and substructure exist', () => {
+    const card = document.createElement('div')
+    card.dataset.runId = 'run-full'
+    const outputEl = document.createElement('div')
+    outputEl.dataset.role = 'run-output'
+    card.append(outputEl)
+    const coalescedEl = document.createElement('div')
+    coalescedEl.dataset.role = 'run-output-coalesced'
+    card.append(coalescedEl)
+    const approvalsEl = document.createElement('div')
+    approvalsEl.dataset.role = 'run-approvals'
+    card.append(approvalsEl)
+    const badgeEl = document.createElement('span')
+    badgeEl.dataset.role = 'approval-badge'
+    card.append(badgeEl)
+    document.body.append(card)
+
+    const result = discoverCardStreamTargets('run-full')
+
+    expect(result.outputEl).toBe(outputEl)
+    expect(result.coalescedEl).toBe(coalescedEl)
+    expect(result.approvalsEl).toBe(approvalsEl)
+    expect(result.badgeEl).toBe(badgeEl)
+  })
+
+  it('returns all nulls when no card matches the runId', () => {
+    const result = discoverCardStreamTargets('no-such-run')
+
+    expect(result.outputEl).toBeNull()
+    expect(result.coalescedEl).toBeNull()
+    expect(result.approvalsEl).toBeNull()
+    expect(result.badgeEl).toBeNull()
+  })
+
+  it('uses CSS.escape so a runId with special characters still resolves', () => {
+    const runId = 'run:with[special].chars'
+    const card = document.createElement('div')
+    card.dataset.runId = runId
+    const outputEl = document.createElement('div')
+    outputEl.dataset.role = 'run-output'
+    card.append(outputEl)
+    document.body.append(card)
+
+    const result = discoverCardStreamTargets(runId)
+
+    expect(result.outputEl).toBe(outputEl)
   })
 })
 

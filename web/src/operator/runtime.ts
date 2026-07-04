@@ -36,6 +36,33 @@ import type {OperatorState} from './state.ts'
 export const MAX_HASH_ID_LENGTH = 512
 
 /**
+ * Discover the per-card render targets for a run's stream (output, coalesced
+ * output hint, approval prompt, approval badge). Without these, a stream
+ * handle's DOM updates only ever touch statusEl/noticeEl, leaving the card's
+ * core content (output + approvals) blank.
+ *
+ * Exported so both production (`_attachStream`) and tests exercise the exact
+ * same discovery logic — a test that re-implements this lookup proves nothing
+ * about whether production actually wires the elements.
+ */
+export function discoverCardStreamTargets(runId: string): {
+  outputEl: Element | null
+  coalescedEl: Element | null
+  approvalsEl: Element | null
+  badgeEl: Element | null
+} {
+  const card = typeof document !== 'undefined'
+    ? document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
+    : null
+  return {
+    outputEl: card?.querySelector('[data-role="run-output"]') ?? null,
+    coalescedEl: card?.querySelector('[data-role="run-output-coalesced"]') ?? null,
+    approvalsEl: card?.querySelector('[data-role="run-approvals"]') ?? null,
+    badgeEl: card?.querySelector('[data-role="approval-badge"]') ?? null,
+  }
+}
+
+/**
  * Sanitize a raw location.hash fragment (with or without the leading '#') into a
  * safe runId, or null if it is absent/oversized/malformed.
  *
@@ -221,7 +248,17 @@ async function defaultRuntimeLoader(opts?: {
   const streamMod = await import(/* @vite-ignore */ _streamSpecifier) as {
     bootstrapOperatorStreams?: (opts?: {endpointBase?: string; fixtureSessionId?: string}) => void
     resetBootstrapState?: () => void
-    initOperatorStream?: (opts: {runId: string; statusEl?: Element | null; noticeEl?: Element | null; endpointBase?: string; fixtureSessionId?: string}) => {close(): void}
+    initOperatorStream?: (opts: {
+      runId: string
+      statusEl?: Element | null
+      noticeEl?: Element | null
+      outputEl?: Element | null
+      coalescedEl?: Element | null
+      approvalsEl?: Element | null
+      badgeEl?: Element | null
+      endpointBase?: string
+      fixtureSessionId?: string
+    }) => {close(): void}
   }
   if (typeof streamMod.resetBootstrapState === 'function') {
     streamMod.resetBootstrapState()
@@ -258,11 +295,19 @@ async function defaultRuntimeLoader(opts?: {
 
     if (typeof streamMod.initOperatorStream !== 'function') return
 
+    // Discover the per-card render targets so live output, coalescing hints,
+    // approval prompts, and the approval badge all render — not just status.
+    const {outputEl, coalescedEl, approvalsEl, badgeEl} = discoverCardStreamTargets(runId)
+
     try {
       const handle = streamMod.initOperatorStream({
         runId,
         statusEl,
         noticeEl,
+        outputEl,
+        coalescedEl,
+        approvalsEl,
+        badgeEl,
         endpointBase: opts?.endpointBase,
         fixtureSessionId: opts?.fixtureSessionId,
       })
