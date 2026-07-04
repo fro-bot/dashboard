@@ -269,6 +269,7 @@
 
 [data-role="approval-badge"] {
   display: inline-block;
+  justify-self: start;
   margin-left: var(--space-2);
   padding: 0 var(--space-1);
   border-radius: var(--radius-sm);
