@@ -279,8 +279,24 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
               aria-live="polite"
               aria-atomic="true"
               aria-label="Recent runs loading"
-              className="operator-status-text"
-            />
+              className="operator-status-text run-index-skeleton-container"
+            >
+            <div className="run-card-skeleton" data-testid="run-card-skeleton">
+              <span className="skeleton-item skeleton-pill" aria-hidden="true" />
+              <span className="skeleton-item skeleton-repo" aria-hidden="true" />
+              <span className="skeleton-item skeleton-time" aria-hidden="true" />
+            </div>
+            <div className="run-card-skeleton" data-testid="run-card-skeleton">
+              <span className="skeleton-item skeleton-pill" aria-hidden="true" />
+              <span className="skeleton-item skeleton-repo" aria-hidden="true" />
+              <span className="skeleton-item skeleton-time" aria-hidden="true" />
+            </div>
+            <div className="run-card-skeleton" data-testid="run-card-skeleton">
+              <span className="skeleton-item skeleton-pill" aria-hidden="true" />
+              <span className="skeleton-item skeleton-repo" aria-hidden="true" />
+              <span className="skeleton-item skeleton-time" aria-hidden="true" />
+            </div>
+            </div>
 
             <div
               data-role="run-index-list"

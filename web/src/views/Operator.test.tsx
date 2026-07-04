@@ -534,6 +534,30 @@ describe('Operator — recent-runs section', () => {
     expect(loadingHook).not.toBeNull()
   })
 
+  it('renders run-index loading skeletons in the ready state', () => {
+    render(<Operator state="ready" />)
+    const loadingHook = document.querySelector('[data-role="run-index-loading"]')
+    expect(loadingHook).toHaveClass('run-index-skeleton-container')
+
+    const skeletons = document.querySelectorAll('[data-testid="run-card-skeleton"]')
+    expect(skeletons).toHaveLength(3)
+
+    for (const skeleton of Array.from(skeletons)) {
+      expect(skeleton.querySelector('.skeleton-pill')).not.toBeNull()
+      expect(skeleton.querySelector('.skeleton-repo')).not.toBeNull()
+      expect(skeleton.querySelector('.skeleton-time')).not.toBeNull()
+    }
+  })
+
+  it('does not render run-index loading skeletons in a non-ready state', () => {
+    render(<Operator state="unavailable" />)
+    const loadingHook = document.querySelector('[data-role="run-index-loading"]')
+    expect(loadingHook).toBeNull()
+
+    const skeletons = document.querySelectorAll('[data-testid="run-card-skeleton"]')
+    expect(skeletons).toHaveLength(0)
+  })
+
   it('recent-runs section has a stable hook for empty state', () => {
     render(<Operator state="ready" />)
     const emptyHook = document.querySelector('[data-role="run-index-empty"]')
