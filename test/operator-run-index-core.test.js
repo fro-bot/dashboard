@@ -850,7 +850,12 @@ describe('markRunStreamAttached — A → B clears A, only B is inert', () => {
     expect(onSelectRun).toHaveBeenCalledWith(runIdA)
   })
 
-  it('B remains suppressed after A → B transition', async () => {
+  // Unit 2 note: the plain click/keydown activation is now expand/collapse-driven
+  // (data-expanded), not gated by markRunStreamAttached's marker — clicking any
+  // card always calls onSelectRun so the runtime seam's single-open accordion
+  // logic (close whichever stream is active, then attach the new one) can run,
+  // including re-clicking the currently-attached card to collapse it.
+  it('clicking B after A → B stream-attach transition still calls onSelectRun (expand/collapse toggle owns activation now)', async () => {
     const onSelectRun = vi.fn()
     const runIdA = 'run-lifecycle-suppress-A'
     const runIdB = 'run-lifecycle-suppress-B'
@@ -870,7 +875,7 @@ describe('markRunStreamAttached — A → B clears A, only B is inert', () => {
     markRunStreamAttached(runIdB)
 
     cardB.dispatchEvent({type: 'click'})
-    expect(onSelectRun).not.toHaveBeenCalled()
+    expect(onSelectRun).toHaveBeenCalledWith(runIdB)
   })
 })
 
@@ -1030,7 +1035,10 @@ describe('renderRunCard — keyboard activation (Enter / Space)', () => {
     expect(onSelectRun).not.toHaveBeenCalled()
   })
 
-  it('Enter key does not call onSelectRun when runId is stream-attached', async () => {
+  // Unit 2 note: stream-attached no longer suppresses activation — Enter/Space on
+  // an attached (expanded) card now drives the collapse path, so onSelectRun IS
+  // called (the runtime seam interprets the repeat call as "close this stream").
+  it('Enter key calls onSelectRun when runId is stream-attached (drives collapse)', async () => {
     const onSelectRun = vi.fn()
     const runId = 'run-kbd-attached-001'
 
@@ -1045,10 +1053,10 @@ describe('renderRunCard — keyboard activation (Enter / Space)', () => {
 
     cards[0].dispatchEvent({type: 'keydown', key: 'Enter', preventDefault: vi.fn()})
 
-    expect(onSelectRun).not.toHaveBeenCalled()
+    expect(onSelectRun).toHaveBeenCalledWith(runId)
   })
 
-  it('Space key does not call onSelectRun when runId is stream-attached', async () => {
+  it('Space key calls onSelectRun when runId is stream-attached (drives collapse)', async () => {
     const onSelectRun = vi.fn()
     const runId = 'run-kbd-attached-space-001'
 
@@ -1064,7 +1072,7 @@ describe('renderRunCard — keyboard activation (Enter / Space)', () => {
     const spaceEvent = {type: 'keydown', key: ' ', preventDefault: vi.fn()}
     cards[0].dispatchEvent(spaceEvent)
 
-    expect(onSelectRun).not.toHaveBeenCalled()
+    expect(onSelectRun).toHaveBeenCalledWith(runId)
   })
 })
 
@@ -1429,5 +1437,115 @@ describe('renderRunCard — unified per-card substructure (Unit 1)', () => {
       expect(el.textContent ?? '').not.toContain(repo)
       expect(el.textContent ?? '').not.toContain(runId)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Unit 2 — expansion toggles data-expanded and reveals per-card substructure
+// ---------------------------------------------------------------------------
+
+describe('renderRunCard — expand/collapse toggles data-expanded and substructure visibility (Unit 2)', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('clicking a collapsed card sets data-expanded="true", reveals substructure, and calls onSelectRun', async () => {
+    const onSelectRun = vi.fn()
+    const runId = 'run-expand-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+    const card = cards[0]
+    expect(card.dataset.expanded).toBeUndefined()
+
+    card.dispatchEvent({type: 'click'})
+
+    expect(card.dataset.expanded).toBe('true')
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
+    expect(onSelectRun).toHaveBeenCalledWith(runId)
+    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+      const el = card.querySelector(`[data-role="${role}"]`)
+      expect(el.hidden).toBe(false)
+    }
+  })
+
+  it('clicking an already-expanded card collapses it, hides substructure, and calls onSelectRun again (caller closes the stream)', async () => {
+    const onSelectRun = vi.fn()
+    const runId = 'run-collapse-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+    const card = cards[0]
+
+    card.dispatchEvent({type: 'click'})
+    expect(card.dataset.expanded).toBe('true')
+
+    card.dispatchEvent({type: 'click'})
+
+    expect(card.dataset.expanded).toBe('false')
+    expect(onSelectRun).toHaveBeenCalledTimes(2)
+    expect(onSelectRun).toHaveBeenNthCalledWith(2, runId)
+    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+      const el = card.querySelector(`[data-role="${role}"]`)
+      expect(el.hidden).toBe(true)
+    }
+  })
+
+  it('expanding run A then run B collapses A (hides its substructure) and expands B', async () => {
+    const onSelectRun = vi.fn()
+    const runIdA = 'run-accordion-a'
+    const runIdB = 'run-accordion-b'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({runs: [makeValidSummary({runId: runIdA}), makeValidSummary({runId: runIdB})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+    const [cardA, cardB] = cards
+
+    cardA.dispatchEvent({type: 'click'})
+    expect(cardA.dataset.expanded).toBe('true')
+
+    cardB.dispatchEvent({type: 'click'})
+
+    expect(cardA.dataset.expanded).toBe('false')
+    expect(cardB.dataset.expanded).toBe('true')
+    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+      expect(cardA.querySelector(`[data-role="${role}"]`).hidden).toBe(true)
+      expect(cardB.querySelector(`[data-role="${role}"]`).hidden).toBe(false)
+    }
+    expect(onSelectRun).toHaveBeenCalledTimes(2)
+    expect(onSelectRun).toHaveBeenNthCalledWith(1, runIdA)
+    expect(onSelectRun).toHaveBeenNthCalledWith(2, runIdB)
+  })
+
+  it('keyboard (Enter) expansion mirrors click expansion behavior', async () => {
+    const onSelectRun = vi.fn()
+    const runId = 'run-expand-kbd-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+    const card = cards[0]
+
+    card.dispatchEvent({type: 'keydown', key: 'Enter', preventDefault: vi.fn()})
+
+    expect(card.dataset.expanded).toBe('true')
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
   })
 })

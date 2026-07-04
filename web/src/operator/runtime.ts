@@ -133,6 +133,11 @@ const _runIndexSpecifier = '/static/operator-run-index.js' + '?manual=1'
 // Only one stream is active at a time; switching cards closes the prior handle first.
 let _activeStreamHandle: {close(): void} | null = null
 
+// The runId whose stream is currently attached (mirrors _activeStreamHandle's target).
+// Used by onSelectRun to distinguish "expand a new run" (attach) from "select the
+// already-expanded run again" (collapse) — the single-open accordion's decision point.
+let _activeStreamRunId: string | null = null
+
 function _closeActiveStream(): void {
   if (_activeStreamHandle !== null) {
     try {
@@ -142,6 +147,7 @@ function _closeActiveStream(): void {
     }
     _activeStreamHandle = null
   }
+  _activeStreamRunId = null
 }
 
 async function defaultRuntimeLoader(opts?: {
@@ -191,6 +197,7 @@ async function defaultRuntimeLoader(opts?: {
         fixtureSessionId: opts?.fixtureSessionId,
       })
       _activeStreamHandle = handle
+      _activeStreamRunId = runId
       if (typeof runIndexMod.markRunStreamAttached === 'function') {
         runIndexMod.markRunStreamAttached(runId)
       }
@@ -204,7 +211,21 @@ async function defaultRuntimeLoader(opts?: {
 
   // Build the active-stream coordination callbacks. These are passed to run-index and
   // launch modules so the runtime seam owns the single active stream handle.
+  //
+  // Single-open accordion: the run-index DOM shell calls this on every card
+  // click/keydown activation, whether the card is being expanded or collapsed
+  // (it decides that via data-expanded before calling here). This callback is
+  // the single decision point for "attach" vs "collapse":
+  // - If runId is already the active stream, the card was just collapsed —
+  //   close the stream and attach nothing new.
+  // - Otherwise the card was just expanded — close whichever stream is active
+  //   (if any) and attach the new one. _attachStream already closes the prior
+  //   handle first, so this covers both "nothing was open" and "switching cards."
   const onSelectRun = (runId: string) => {
+    if (_activeStreamRunId === runId) {
+      _closeActiveStream()
+      return
+    }
     // Find the card element for this runId to get its statusEl and noticeEl.
     const card = typeof document !== 'undefined'
       ? document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)

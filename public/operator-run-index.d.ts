@@ -51,13 +51,22 @@ export declare function resetRunIndexState(): void
 
 /**
  * Mark a runId as stream-attached. Called by the runtime seam after attaching a stream.
- * Once marked, card clicks for this runId will not re-trigger onSelectRun.
+ * The marker describes the currently active stream, not historical attachment — it
+ * drives the `data-stream-attached` attribute used for styling/testing, not click
+ * suppression. Card activation (click/Enter/Space) always calls onSelectRun; the
+ * runtime seam's onSelectRun callback decides attach vs collapse.
  */
 export declare function markRunStreamAttached(runId: string): void
 
 export declare function initOperatorRunIndex(opts?: {
   endpointBase?: string
   fixtureSessionId?: string
-  /** Called when a run card is selected. Runtime seam owns stream attachment. */
+  /**
+   * Called when a run card is activated (click/Enter/Space). The DOM shell toggles
+   * the card's `data-expanded` and per-card substructure visibility (single-open:
+   * expanding one card collapses whichever other card was expanded) before calling
+   * this. The runtime seam owns the actual stream attach/close decision — a repeat
+   * call for the currently-attached runId means "collapse and close the stream."
+   */
   onSelectRun?: (runId: string) => void
 }): Promise<void>

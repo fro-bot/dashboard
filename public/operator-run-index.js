@@ -185,6 +185,10 @@ let _runIndexInitialized = false
 // Only this run's card is inert; switching to a new run clears the previous card's state.
 let _activeStreamRunId = null
 
+// Tracks the single runId whose card is currently expanded (single-open accordion).
+// Owned by this DOM shell only — the runtime seam separately owns the stream handle.
+let _expandedRunId = null
+
 function isRunIndexInitStale(generation) {
   return generation !== _runIndexGeneration
 }
@@ -216,6 +220,7 @@ export function resetRunIndexState() {
     if (card !== null) delete card.dataset.streamAttached
   }
   _activeStreamRunId = null
+  _expandedRunId = null
 }
 
 export async function initOperatorRunIndex(opts) {
@@ -338,22 +343,60 @@ function renderRunCard(view, onSelectRun) {
   badgeEl.hidden = true
   card.append(badgeEl)
 
-  // Wire click and keyboard activation to onSelectRun. Guard: skip if already stream-attached.
+  // Wire click and keyboard activation to the expand/collapse toggle.
   if (typeof onSelectRun === 'function') {
     const runId = view.runId
-    card.addEventListener('click', () => {
-      if (_activeStreamRunId === runId) return
-      onSelectRun(runId)
-    })
+    const activate = () => {
+      toggleCardExpansion(card, runId, onSelectRun)
+    }
+    card.addEventListener('click', activate)
     card.addEventListener('keydown', e => {
       if (e.key !== 'Enter' && e.key !== ' ') return
       if (e.key === ' ') e.preventDefault()
-      if (_activeStreamRunId === runId) return
-      onSelectRun(runId)
+      activate()
     })
   }
 
   return card
+}
+
+/**
+ * Toggle a card's expanded state and reveal/hide its per-card substructure.
+ *
+ * Single-open accordion: expanding a card first collapses whichever other card
+ * is currently expanded (hides its substructure, clears its data-expanded)
+ * before expanding the clicked one. Selecting an already-expanded card
+ * collapses it instead. In both cases onSelectRun(runId) is called — the
+ * runtime seam owns the actual stream attach/close; this DOM shell only owns
+ * data-expanded and per-card substructure visibility.
+ *
+ * Safe-DOM only: toggles `hidden` and `dataset.expanded`, never innerHTML.
+ */
+function toggleCardExpansion(card, runId, onSelectRun) {
+  const isExpanded = card.dataset.expanded === 'true'
+
+  if (!isExpanded && _expandedRunId !== null && _expandedRunId !== runId && typeof document !== 'undefined') {
+    const prevCard = document.querySelector(`[data-run-id="${CSS.escape(_expandedRunId)}"]`)
+    if (prevCard !== null && prevCard !== undefined) {
+      prevCard.dataset.expanded = 'false'
+      setSubstructureHidden(prevCard, true)
+    }
+  }
+
+  card.dataset.expanded = isExpanded ? 'false' : 'true'
+  setSubstructureHidden(card, isExpanded)
+  _expandedRunId = isExpanded ? null : runId
+
+  onSelectRun(runId)
+}
+
+/** Show/hide a card's four per-card substructure regions in one place. */
+function setSubstructureHidden(card, hidden) {
+  if (typeof card.querySelector !== 'function') return
+  for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+    const el = card.querySelector(`[data-role="${role}"]`)
+    if (el !== null && el !== undefined) el.hidden = hidden
+  }
 }
 
 const _initOperatorRunIndexOnce = async opts => {
