@@ -1072,17 +1072,6 @@ export function buildApprovalClient(opts) {
  *   'already-settled'   — already_claimed/unavailable: inline settled copy
  */
 
-/**
- * Render a single open approval prompt into a container element.
- * Uses safe DOM (textContent only — never innerHTML or HTML interpolation).
- * Wires once/reject/always/confirm/cancel handlers.
- *
- * @param {object} prompt - An open ApprovalFrameDataOpen object from getOpenApprovals.
- * @param {string} runId - The run ID (for the decision POST).
- * @param {object} approvalClient - The browser-direct approval client.
- * @param {function} _onSettle - Called when the prompt is settled (to trigger DOM cleanup).
- * @returns {HTMLElement} The rendered prompt element.
- */
 export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
   const {requestID, permission, command, filepath} = prompt
 
@@ -1107,18 +1096,17 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
   el.className = 'approval-prompt'
   el.setAttribute('role', 'region')
   el.setAttribute('aria-label', 'Approval prompt')
-  el.style.cssText = 'border:1px solid #f59e0b;border-radius:4px;padding:10px;margin-bottom:8px;background:#fffbeb;'
 
   // Permission label
   const permEl = document.createElement('div')
-  permEl.style.cssText = 'font-size:0.8rem;font-weight:600;color:#92400e;margin-bottom:4px;'
+  permEl.className = 'approval-prompt-permission'
   permEl.textContent = permLabel
   el.append(permEl)
 
   // Gated action — strictly inert textContent, never innerHTML
   if (command !== undefined || filepath !== undefined) {
     const actionEl = document.createElement('pre')
-    actionEl.style.cssText = 'font-size:0.8rem;background:#fef3c7;border:1px solid #fcd34d;border-radius:3px;padding:6px 8px;margin:4px 0;white-space:pre-wrap;word-break:break-all;overflow:hidden;'
+    actionEl.className = 'approval-prompt-action'
     actionEl.setAttribute('aria-label', 'Requested action (read-only)')
     // textContent only — never innerHTML. This is the injection-safety guarantee.
     actionEl.textContent = command === undefined ? (filepath ?? '') : command
@@ -1128,49 +1116,55 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
   // Edit-class caveat
   if (isEditClass) {
     const caveEl = document.createElement('p')
-    caveEl.style.cssText = 'font-size:0.75rem;color:#92400e;margin:2px 0 6px;'
+    caveEl.className = 'approval-prompt-caveat-edit'
     caveEl.textContent = 'File-level only \u2014 contents not previewed.'
     el.append(caveEl)
   }
 
   // Access caveat
   const accessCaveEl = document.createElement('p')
-  accessCaveEl.style.cssText = 'font-size:0.75rem;color:#6b7280;margin:2px 0 6px;'
+  accessCaveEl.className = 'approval-prompt-caveat-access'
   accessCaveEl.textContent = 'Approval requires write access to this run. Unavailable decisions fail safely.'
   el.append(accessCaveEl)
 
   // Status/feedback area (for in-flight, failure, settled states)
   const statusEl = document.createElement('div')
+  statusEl.className = 'approval-prompt-status'
   statusEl.setAttribute('role', 'status')
   statusEl.setAttribute('aria-live', 'polite')
-  statusEl.style.cssText = 'font-size:0.8rem;margin:4px 0;'
   el.append(statusEl)
 
   // Controls area
   const controlsEl = document.createElement('div')
-  controlsEl.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px;'
+  controlsEl.className = 'approval-prompt-controls'
   el.append(controlsEl)
 
   // Always-confirm area (hidden until always first-click)
   const alwaysConfirmEl = document.createElement('div')
+  alwaysConfirmEl.className = 'approval-prompt-always-confirm'
   alwaysConfirmEl.hidden = true
-  alwaysConfirmEl.style.cssText = 'margin-top:6px;padding:8px;background:#fef3c7;border:1px solid #f59e0b;border-radius:4px;'
   el.append(alwaysConfirmEl)
 
   const alwaysConsequenceEl = document.createElement('p')
-  alwaysConsequenceEl.style.cssText = 'font-size:0.8rem;color:#92400e;margin:0 0 8px;'
+  alwaysConsequenceEl.className = 'approval-prompt-always-consequence'
   alwaysConsequenceEl.textContent = 'This installs a standing approval that auto-approves matching requests for the rest of this run, as defined by the gateway\u2019s grant rule.'
   alwaysConfirmEl.append(alwaysConsequenceEl)
 
   const alwaysConfirmBtnsEl = document.createElement('div')
-  alwaysConfirmBtnsEl.style.cssText = 'display:flex;gap:8px;'
+  alwaysConfirmBtnsEl.className = 'approval-prompt-always-btns'
   alwaysConfirmEl.append(alwaysConfirmBtnsEl)
 
   // Interaction state machine
-  let promptState = 'open' // 'open' | 'always-confirm' | 'in-flight' | 'cant-approve' | 'transport-failure' | 'already-settled'
+  let promptState = 'open' // 'open' | 'always-confirm' | 'in-flight' | 'cant-approve' | 'session-expired' | 'transport-failure' | 'already-settled'
+
+  function updateStateAttr() {
+    el.dataset.state = promptState
+  }
+  updateStateAttr()
 
   function setInFlight() {
     promptState = 'in-flight'
+    updateStateAttr()
     statusEl.textContent = 'Sending decision\u2026'
     // Disable all buttons
     for (const btn of el.querySelectorAll('button')) {
@@ -1180,6 +1174,7 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
 
   function setTransportFailure() {
     promptState = 'transport-failure'
+    updateStateAttr()
     // Re-enable controls first (renderControls clears statusEl.textContent),
     // then set the status message so it survives and is visible alongside the controls.
     renderControls()
@@ -1188,6 +1183,7 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
 
   function setCantApprove() {
     promptState = 'cant-approve'
+    updateStateAttr()
     statusEl.textContent = 'You may not have approval access for this run. If you believe this is an error, check your gateway operator session.'
     // Remove controls
     controlsEl.textContent = ''
@@ -1196,7 +1192,17 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
 
   function setAlreadySettled() {
     promptState = 'already-settled'
+    updateStateAttr()
     statusEl.textContent = 'This approval request has already been settled.'
+    controlsEl.textContent = ''
+    alwaysConfirmEl.hidden = true
+  }
+
+  function setSessionFailure() {
+    promptState = 'session-expired'
+    updateStateAttr()
+    statusEl.textContent = 'Your session may have expired \u2014 reload the page to approve.'
+    // Remove controls
     controlsEl.textContent = ''
     alwaysConfirmEl.hidden = true
   }
@@ -1218,24 +1224,17 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
       if (state === 'already_claimed' || state === 'unavailable') {
         setAlreadySettled()
       } else if (state === 'scope_mismatch') {
-        // Terminal non-retryable: the decision was not applied due to a scope mismatch.
-        // Show the label and clear controls (mirrors already-settled behavior).
         promptState = 'already-settled'
+        updateStateAttr()
         statusEl.textContent = 'Approval scope didn\u2019t match \u2014 decision not applied.'
         controlsEl.textContent = ''
         alwaysConfirmEl.hidden = true
       } else if (state === 'failed_to_settle') {
-        // Retryable: the gateway couldn't finalize the decision. Re-enable controls.
-        // Uses transport-failure path so the operator can retry.
         setTransportFailure()
         statusEl.textContent = 'Couldn\u2019t finalize the decision \u2014 please try again.'
       } else if (state === 'pending') {
-        // Defensive: pending shouldn't come back from a decision POST, but if it does
-        // re-enable controls so the operator is not left in a disabled limbo.
         renderControls()
       } else {
-        // claimed / other → treat as in-progress success.
-        // The settle frame will arrive over the stream and remove the prompt via the reducer.
         statusEl.textContent = ''
       }
     } else {
@@ -1243,12 +1242,7 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
       if (error.kind === 'http' && error.status === 404) {
         setCantApprove()
       } else if (error.kind === 'http' && (error.status === 400 || error.status === 401 || error.status === 403)) {
-        // Persistent auth/session failure after CSRF retry — non-retryable loop guard.
-        // Clear controls so the operator cannot loop; instruct them to reload.
-        promptState = 'cant-approve'
-        statusEl.textContent = 'Your session may have expired \u2014 reload the page to approve.'
-        controlsEl.textContent = ''
-        alwaysConfirmEl.hidden = true
+        setSessionFailure()
       } else {
         setTransportFailure()
       }
@@ -1262,8 +1256,8 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
 
     const onceBtn = document.createElement('button')
     onceBtn.type = 'button'
+    onceBtn.className = 'approval-prompt-btn-once'
     onceBtn.textContent = 'Once'
-    onceBtn.style.cssText = 'padding:4px 12px;background:#2563eb;color:#fff;border:none;border-radius:4px;font-size:0.8rem;font-weight:600;cursor:pointer;'
     onceBtn.addEventListener('click', () => {
       handleDecision('once')
     })
@@ -1271,11 +1265,13 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
 
     const alwaysBtn = document.createElement('button')
     alwaysBtn.type = 'button'
+    alwaysBtn.className = 'approval-prompt-btn-always'
     alwaysBtn.textContent = 'Always'
-    alwaysBtn.style.cssText = 'padding:4px 12px;background:#d97706;color:#fff;border:none;border-radius:4px;font-size:0.8rem;font-weight:600;cursor:pointer;'
     alwaysBtn.addEventListener('click', () => {
       if (promptState !== 'open' && promptState !== 'transport-failure') return
       promptState = 'always-confirm'
+      updateStateAttr()
+
       // Suppress once/reject during always-confirm pending
       controlsEl.textContent = ''
       alwaysConfirmEl.hidden = false
@@ -1283,8 +1279,8 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
       // Confirm button
       const confirmBtn = document.createElement('button')
       confirmBtn.type = 'button'
+      confirmBtn.className = 'approval-prompt-btn-confirm'
       confirmBtn.textContent = 'Confirm always'
-      confirmBtn.style.cssText = 'padding:4px 12px;background:#d97706;color:#fff;border:none;border-radius:4px;font-size:0.8rem;font-weight:600;cursor:pointer;'
       confirmBtn.addEventListener('click', () => {
         handleDecision('always')
       })
@@ -1292,10 +1288,11 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
       // Cancel button
       const cancelBtn = document.createElement('button')
       cancelBtn.type = 'button'
+      cancelBtn.className = 'approval-prompt-btn-cancel'
       cancelBtn.textContent = 'Cancel'
-      cancelBtn.style.cssText = 'padding:4px 12px;background:#6b7280;color:#fff;border:none;border-radius:4px;font-size:0.8rem;cursor:pointer;'
       cancelBtn.addEventListener('click', () => {
         promptState = 'open'
+        updateStateAttr()
         renderControls()
       })
 
@@ -1306,8 +1303,8 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
 
     const rejectBtn = document.createElement('button')
     rejectBtn.type = 'button'
+    rejectBtn.className = 'approval-prompt-btn-reject'
     rejectBtn.textContent = 'Reject'
-    rejectBtn.style.cssText = 'padding:4px 12px;background:#dc2626;color:#fff;border:none;border-radius:4px;font-size:0.8rem;font-weight:600;cursor:pointer;'
     rejectBtn.addEventListener('click', () => {
       handleDecision('reject')
     })
@@ -1376,10 +1373,13 @@ export function initOperatorStream(opts) {
   let aborted = false // set by close() to prevent late timer from fetching
 
   function updateDOM() {
-    // Late-frame guard: after close(), do not write to the shared noticeEl.
-    // The noticeEl is shared across cards; a closed stream must not overwrite
-    // the active card's stream state notice after a card switch.
-    if (noticeEl && !aborted) {
+    // Late-frame guard: after close(), no write of any kind (notice, status,
+    // output, coalesced hint, approvals, or badge) may reach the DOM. A late
+    // buffered frame or microtask resolving after close() must not paint stale
+    // state onto a card that may already be collapsed or reused for another run.
+    if (aborted) return
+
+    if (noticeEl) {
       const conn = state.connection
       // Expose the connection state as a machine-readable attribute so agents
       // can query state without text parsing. The value mirrors the connection
@@ -1854,10 +1854,15 @@ export function bootstrapOperatorStreams(opts) {
   const endpointBase = opts?.endpointBase
   const fixtureSessionId = opts?.fixtureSessionId
 
-  const section = document.querySelector('#run-status-section')
+  // Cards (index-created and launch-created) live in the unified run-index
+  // list, not a separate #run-status-section. The shared stream-status notice
+  // lives with the list too. Per-card streams start on expansion, not on
+  // bootstrap discovery — this remains a one-shot fixture/test entry point
+  // that discovers any pre-rendered cards.
+  const section = document.querySelector('[data-role="run-index-list"]')
   if (section === null) return
 
-  const noticeEl = section.querySelector('[data-role="stream-status"]')
+  const noticeEl = document.querySelector('[data-role="stream-status"]')
   const cards = section.querySelectorAll('[data-run-id]')
   const handles = []
 

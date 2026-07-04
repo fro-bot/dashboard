@@ -22,6 +22,13 @@
  * - runId appears only in the data-run-id attribute and the stream URL.
  */
 
+// Mirrors RUN_INDEX_CAP in operator-run-index.js. Not imported directly: this module
+// and operator-run-index.js are loaded as separate dynamic-import instances (each
+// carries its own ?manual=1 query string keyed module identity in the runtime seam),
+// so a static import here would create a second, uncoordinated module instance with
+// its own singleton state rather than sharing the runtime seam's instance.
+const LAUNCH_RUN_INDEX_CAP = 100
+
 // ---------------------------------------------------------------------------
 // Pure: repo item validation
 // ---------------------------------------------------------------------------
@@ -335,6 +342,18 @@ let _launchListenerGeneration = -1
 let _launchStreamHandle = null
 // Idempotency flag: prevents double-init when auto-start fires before DOMContentLoaded.
 let _launchInitialized = false
+// In-flight submit mutex: persists across unmount/remount to prevent double-submit
+// WITHIN the same mount. Guarded by generation (see _launching/_launchingGeneration
+// below) so a submit that never reaches its `finally` (e.g. React tears the
+// component down mid-submit) cannot permanently wedge every future mount.
+let _launching = false
+// The generation that owns the current _launching=true lock, or null when no
+// submit is in flight. resetLaunchState() bumps _launchGeneration on every
+// unmount/remount; a stale lock whose generation no longer matches the current
+// generation is no longer honored, so a fresh mount is never blocked by a
+// torn-down mount's abandoned in-flight submit. A live submit within the SAME
+// mount still blocks a double-fire, because its generation still matches.
+let _launchingGeneration = null
 
 /**
  * Returns true if the given init is no longer the active init.
@@ -465,7 +484,7 @@ export async function initOperatorLaunch(opts) {
 
     if (!reposResult.success) {
       // Failure — classify into a neutral operator failure state.
-      // Never render "No repositories available" for auth/rate-limit/network/protocol failures.
+      // Never render a generic failure message for auth/rate-limit/network/protocol failures.
       // The copy is fixed and coarse — no raw error details, status codes, or paths.
       const error = reposResult.error
       let failureCopy
@@ -516,8 +535,8 @@ export async function initOperatorLaunch(opts) {
 
   const launchForm = document.querySelector('#launch-form')
   const launchError = document.querySelector('#launch-error')
-  const runStatusSection = document.querySelector('#run-status-section')
-  const sharedNoticeEl = runStatusSection?.querySelector('[data-role="stream-status"]') ?? null
+  const runIndexList = document.querySelector('[data-role="run-index-list"]')
+  const sharedNoticeEl = document.querySelector('[data-role="stream-status"]')
 
   if (launchForm !== null) {
     // Create a dedicated AbortController for the submit listener. This is separate
@@ -530,22 +549,22 @@ export async function initOperatorLaunch(opts) {
     _launchListenerController = listenerController
     _launchListenerGeneration = myGeneration
 
-    // In-flight submit mutex: prevents double-launch even when requestSubmit()
-    // bypasses the disabled button (e.g. DevTools or browser extensions).
-    let launching = false
-
     launchForm.addEventListener('submit', async event => {
       event.preventDefault()
 
-      // Mutex guard — re-entry is impossible regardless of how submit is triggered
-      if (launching) return
-      launching = true
+      // Mutex guard — re-entry is impossible regardless of how submit is triggered,
+      // but only within the SAME mount: a lock held by a generation that is no
+      // longer current (its mount was torn down mid-submit, e.g. by resetLaunchState)
+      // is stale and must not block a fresh mount's submits.
+      if (_launching && _launchingGeneration === myGeneration) return
+      _launching = true
+      _launchingGeneration = myGeneration
 
       // Pre-fetch validation: empty prompt
       const formData = new FormData(launchForm)
       const prompt = (formData.get('prompt') ?? '').toString().trim()
       if (prompt === '') {
-        launching = false
+        _launching = false
         if (launchError !== null) {
           launchError.textContent = 'Please enter a prompt before launching.'
           launchError.hidden = false
@@ -557,7 +576,7 @@ export async function initOperatorLaunch(opts) {
       const repoSelectEl = document.querySelector('#launch-repo-select')
       const repo = repoSelectEl?.value ?? formData.get('repo')?.toString() ?? ''
       if (repo === '') {
-        launching = false
+        _launching = false
         if (launchError !== null) {
           launchError.textContent = 'Please select a repository.'
           launchError.hidden = false
@@ -590,30 +609,88 @@ export async function initOperatorLaunch(opts) {
         }
         return
       } finally {
-        // Always re-enable the button and clear the mutex, even on throw
+        // Always re-enable the button and clear the mutex, even on throw — but only
+        // if this generation still owns the lock. If a stale generation somehow
+        // reached this finally (it shouldn't, since isInitStale-guarded code paths
+        // return earlier), it must not clear a newer generation's active lock.
         if (submitBtn !== null) submitBtn.disabled = false
-        launching = false
+        if (_launchingGeneration === myGeneration) {
+          _launching = false
+          _launchingGeneration = null
+        }
       }
 
       if (outcome.kind === 'launched') {
         const {runId} = outcome
 
-        // Insert an optimistic pending card into #run-status-section
-        if (runStatusSection !== null) {
+        // Insert an optimistic pending card into the unified run-index list.
+        // Marked data-optimistic="true" so the run-index diff preserves it
+        // across a background refresh that hasn't indexed this run yet — preservation
+        // is tied to live stream state (this flag + the stream's own terminal
+        // resolution), not to a fetch cycle count. The diff clears this flag itself
+        // once the run appears in a fetched view.
+        if (runIndexList !== null) {
           const card = document.createElement('div')
           card.className = 'run-card'
           card.tabIndex = 0
           card.setAttribute('aria-label', 'New run, status: Pending')
           card.dataset.testid = 'run-card'
           card.dataset.runId = runId
+          card.dataset.optimistic = 'true'
 
           const statusSpan = document.createElement('span')
-          statusSpan.className = 'run-status status-queued'
+          statusSpan.className = 'run-status status-pending'
           statusSpan.dataset.role = 'run-status'
           statusSpan.textContent = 'Pending'
-
           card.append(statusSpan)
-          runStatusSection.append(card)
+
+          // Hidden per-card substructure — same anatomy as renderRunCard, so
+          // operator-stream.js's updateDOM() has targets on a launch-created card.
+          const outputEl = document.createElement('div')
+          outputEl.dataset.role = 'run-output'
+          outputEl.hidden = true
+          card.append(outputEl)
+
+          const coalescedEl = document.createElement('div')
+          coalescedEl.dataset.role = 'run-output-coalesced'
+          coalescedEl.hidden = true
+          card.append(coalescedEl)
+
+          const approvalsEl = document.createElement('div')
+          approvalsEl.dataset.role = 'run-approvals'
+          approvalsEl.hidden = true
+          card.append(approvalsEl)
+
+          const badgeEl = document.createElement('span')
+          badgeEl.dataset.role = 'approval-badge'
+          badgeEl.hidden = true
+          card.append(badgeEl)
+
+          // Prepend — a fresh launch is the newest active run and belongs at the top
+          // of the unified list, ahead of the fetched cards.
+          if (runIndexList.firstChild !== undefined && runIndexList.firstChild !== null) {
+            runIndexList.insertBefore(card, runIndexList.firstChild)
+          } else {
+            runIndexList.append(card)
+          }
+
+          // Cap hygiene: evict the oldest terminal card if we're now over RUN_INDEX_CAP.
+          // Never evict the card we just inserted, and never evict the active-stream card.
+          const allCards = Array.from(runIndexList.children ?? [])
+          if (allCards.length > LAUNCH_RUN_INDEX_CAP) {
+            for (let i = allCards.length - 1; i >= 0; i--) {
+              const candidate = allCards[i]
+              if (candidate === card) continue
+              if (candidate.dataset.streamAttached === 'true') continue
+              const statusEl = candidate.querySelector?.('[data-role="run-status"]')
+              const className = statusEl?.className ?? ''
+              const isTerminal = ['status-succeeded', 'status-failed', 'status-cancelled'].some(c => className.includes(c))
+              if (isTerminal) {
+                candidate.remove()
+                break
+              }
+            }
+          }
 
           if (typeof onRunLaunched === 'function') {
             // Delegate stream attachment to the runtime seam (centralized ownership).
@@ -629,6 +706,12 @@ export async function initOperatorLaunch(opts) {
 
         // Reset the form
         launchForm.reset()
+
+        // Dispatch success event to the form so React components/drawers can react (e.g. close drawer and focus card)
+        launchForm.dispatchEvent(new CustomEvent('launch-success', {
+          bubbles: true,
+          detail: {runId},
+        }))
       } else if (outcome.kind === 'not-found') {
         if (launchError !== null) {
           launchError.textContent = 'The selected repository is not available for launch.'

@@ -8,7 +8,9 @@ import {
   buildRunSafeView,
   FETCH_TIMEOUT_MS,
   fetchRunIndex,
+  formatRelativeTime,
   initOperatorRunIndex,
+  markCardExpandedForLaunch,
   markRunStreamAttached,
   parseRunSummaryItem,
   parseRunSummaryList,
@@ -850,7 +852,12 @@ describe('markRunStreamAttached — A → B clears A, only B is inert', () => {
     expect(onSelectRun).toHaveBeenCalledWith(runIdA)
   })
 
-  it('B remains suppressed after A → B transition', async () => {
+  // Note: the plain click/keydown activation is now expand/collapse-driven
+  // (data-expanded), not gated by markRunStreamAttached's marker — clicking any
+  // card always calls onSelectRun so the runtime seam's single-open accordion
+  // logic (close whichever stream is active, then attach the new one) can run,
+  // including re-clicking the currently-attached card to collapse it.
+  it('clicking B after A → B stream-attach transition still calls onSelectRun (expand/collapse toggle owns activation now)', async () => {
     const onSelectRun = vi.fn()
     const runIdA = 'run-lifecycle-suppress-A'
     const runIdB = 'run-lifecycle-suppress-B'
@@ -870,7 +877,7 @@ describe('markRunStreamAttached — A → B clears A, only B is inert', () => {
     markRunStreamAttached(runIdB)
 
     cardB.dispatchEvent({type: 'click'})
-    expect(onSelectRun).not.toHaveBeenCalled()
+    expect(onSelectRun).toHaveBeenCalledWith(runIdB)
   })
 })
 
@@ -926,8 +933,24 @@ describe('markRunStreamAttached — sets data-stream-attached on matching card',
 function makeElStub() {
   return {
     _listeners: {},
+    _parentList: null,
     className: '', tabIndex: 0, dataset: {}, textContent: '',
     setAttribute() {}, append() {},
+    remove() {
+      if (this._parentList !== null) {
+        const idx = this._parentList.children.indexOf(this)
+        if (idx !== -1) this._parentList.children.splice(idx, 1)
+      }
+    },
+    get nextSibling() {
+      if (this._parentList === null) return null
+      const idx = this._parentList.children.indexOf(this)
+      if (idx === -1) return null
+      return this._parentList.children[idx + 1] ?? null
+    },
+    before(el) {
+      if (this._parentList !== null) this._parentList.insertBefore(el, this)
+    },
     addEventListener(type, fn) {
       this._listeners[type] = this._listeners[type] ?? []
       this._listeners[type].push(fn)
@@ -939,13 +962,38 @@ function makeElStub() {
   }
 }
 
+/**
+ * A minimal mock list container implementing enough of the real DOM API
+ * (children, firstChild, append, insertBefore) for the diffRunIndexList
+ * reconciliation logic to operate on. `children` is the same array reference
+ * passed in by the caller, so existing tests that inspect the `cards` array
+ * directly continue to see the current, reconciled DOM order.
+ */
+function makeMockListUsing(children) {
+  const list = {
+    hidden: true,
+    get children() { return children },
+    get firstChild() { return children[0] ?? null },
+    append(el) {
+      el._parentList = list
+      children.push(el)
+    },
+    insertBefore(el, ref) {
+      el._parentList = list
+      const existingIdx = children.indexOf(el)
+      if (existingIdx !== -1) children.splice(existingIdx, 1)
+      const idx = ref === null || ref === undefined ? children.length : children.indexOf(ref)
+      children.splice(idx === -1 ? children.length : idx, 0, el)
+    },
+    set textContent(v) { if (v === '') children.length = 0 },
+    get textContent() { return '' },
+  }
+  return list
+}
+
 /** Stub document + CSS globals, collect appended cards, return teardown. */
 function stubDOMWithCards(cards) {
-  const mockList = {
-    hidden: true,
-    textContent: '',
-    append(el) { cards.push(el) },
-  }
+  const mockList = makeMockListUsing(cards)
   const mockSection = {dataset: {}}
   vi.stubGlobal('CSS', {escape: s => s})
   vi.stubGlobal('document', {
@@ -1030,7 +1078,10 @@ describe('renderRunCard — keyboard activation (Enter / Space)', () => {
     expect(onSelectRun).not.toHaveBeenCalled()
   })
 
-  it('Enter key does not call onSelectRun when runId is stream-attached', async () => {
+  // Note: stream-attached no longer suppresses activation — Enter/Space on
+  // an attached (expanded) card now drives the collapse path, so onSelectRun IS
+  // called (the runtime seam interprets the repeat call as "close this stream").
+  it('Enter key calls onSelectRun when runId is stream-attached (drives collapse)', async () => {
     const onSelectRun = vi.fn()
     const runId = 'run-kbd-attached-001'
 
@@ -1045,10 +1096,10 @@ describe('renderRunCard — keyboard activation (Enter / Space)', () => {
 
     cards[0].dispatchEvent({type: 'keydown', key: 'Enter', preventDefault: vi.fn()})
 
-    expect(onSelectRun).not.toHaveBeenCalled()
+    expect(onSelectRun).toHaveBeenCalledWith(runId)
   })
 
-  it('Space key does not call onSelectRun when runId is stream-attached', async () => {
+  it('Space key calls onSelectRun when runId is stream-attached (drives collapse)', async () => {
     const onSelectRun = vi.fn()
     const runId = 'run-kbd-attached-space-001'
 
@@ -1064,7 +1115,7 @@ describe('renderRunCard — keyboard activation (Enter / Space)', () => {
     const spaceEvent = {type: 'keydown', key: ' ', preventDefault: vi.fn()}
     cards[0].dispatchEvent(spaceEvent)
 
-    expect(onSelectRun).not.toHaveBeenCalled()
+    expect(onSelectRun).toHaveBeenCalledWith(runId)
   })
 })
 
@@ -1153,7 +1204,8 @@ describe('fetchRunIndex — passes AbortSignal to fetch', () => {
 function stubDOMWithSection() {
   const section = {dataset: {}}
   const loading = {hidden: false}
-  const list = {hidden: true, textContent: '', append() {}}
+  const listCards = []
+  const list = makeMockListUsing(listCards)
   const empty = {hidden: true}
   const unavailable = {hidden: true}
   const cards = []
@@ -1250,5 +1302,858 @@ describe('initOperatorRunIndex — section data-state transitions', () => {
     await initOperatorRunIndex({endpointBase: '/operator'})
 
     expect(section.dataset.state).toBe('unavailable')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Unified card substructure (run-output, run-output-coalesced,
+// run-approvals, approval-badge) + single data-testid="run-card"
+// ---------------------------------------------------------------------------
+
+/** Richer element stub that tracks appended children and dataset.role. */
+function makeSubstructureElStub() {
+  return {
+    _listeners: {},
+    _children: [],
+    _parentList: null,
+    className: '',
+    tabIndex: 0,
+    dataset: {},
+    textContent: '',
+    hidden: false,
+    attributes: {},
+    setAttribute(name, value) { this.attributes[name] = value },
+    append(...els) { this._children.push(...els) },
+    remove() {
+      if (this._parentList !== null) {
+        const idx = this._parentList.children.indexOf(this)
+        if (idx !== -1) this._parentList.children.splice(idx, 1)
+      }
+    },
+    get nextSibling() {
+      if (this._parentList === null) return null
+      const idx = this._parentList.children.indexOf(this)
+      if (idx === -1) return null
+      return this._parentList.children[idx + 1] ?? null
+    },
+    before(el) {
+      if (this._parentList !== null) this._parentList.insertBefore(el, this)
+    },
+    addEventListener(type, fn) {
+      this._listeners[type] = this._listeners[type] ?? []
+      this._listeners[type].push(fn)
+    },
+    dispatchEvent(event) {
+      const fns = this._listeners[event.type] ?? []
+      for (const fn of fns) fn(event)
+    },
+    querySelector(sel) {
+      const roleMatch = sel.match(/^\[data-role="([^"]+)"\]$/)
+      if (roleMatch) {
+        return findByRole(this._children, roleMatch[1])
+      }
+      return null
+    },
+  }
+}
+
+function findByRole(children, role) {
+  for (const child of children) {
+    if (child.dataset?.role === role) return child
+    if (Array.isArray(child._children)) {
+      const found = findByRole(child._children, role)
+      if (found !== null) return found
+    }
+  }
+  return null
+}
+
+/** Stub document + CSS globals for substructure assertions; collects appended cards. */
+function stubDOMWithSubstructureCards(cards) {
+  const mockList = makeMockListUsing(cards)
+  const mockSection = {dataset: {}}
+  vi.stubGlobal('CSS', {escape: s => s})
+  vi.stubGlobal('document', {
+    querySelector(sel) {
+      if (sel === '[data-role="run-index-list"]') return mockList
+      if (sel === '[data-role="run-index"]') return mockSection
+      const runIdMatch = sel.match(/^\[data-run-id="([^"]+)"\]$/)
+      if (runIdMatch) return cards.find(c => c.dataset.runId === runIdMatch[1]) ?? null
+      return null
+    },
+    createElement() { return makeSubstructureElStub() },
+  })
+}
+
+describe('renderRunCard — unified per-card substructure', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('renders a card with a single data-testid="run-card" (no run-index-card)', async () => {
+    const runId = 'run-substructure-testid-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(1)
+    expect(cards[0].dataset.testid).toBe('run-card')
+  })
+
+  it('operator-run-index.js source no longer contains "run-index-card"', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).not.toContain('run-index-card')
+  })
+
+  it('renders the four hidden substructure elements with correct data-role values', async () => {
+    const runId = 'run-substructure-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(1)
+    const card = cards[0]
+
+    const output = card.querySelector('[data-role="run-output"]')
+    const coalesced = card.querySelector('[data-role="run-output-coalesced"]')
+    const approvals = card.querySelector('[data-role="run-approvals"]')
+    const badge = card.querySelector('[data-role="approval-badge"]')
+
+    expect(output).not.toBeNull()
+    expect(coalesced).not.toBeNull()
+    expect(approvals).not.toBeNull()
+    expect(badge).not.toBeNull()
+  })
+
+  it('substructure elements are hidden by default (revealed only on expansion)', async () => {
+    const runId = 'run-substructure-hidden-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    const card = cards[0]
+    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+      const el = card.querySelector(`[data-role="${role}"]`)
+      expect(el.hidden).toBe(true)
+    }
+  })
+
+  it('card with no updatedAt still renders all four hidden substructure elements', async () => {
+    const runId = 'run-substructure-no-updated-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    const card = cards[0]
+    expect(card.querySelector('[data-role="run-output"]')).not.toBeNull()
+    expect(card.querySelector('[data-role="run-output-coalesced"]')).not.toBeNull()
+    expect(card.querySelector('[data-role="run-approvals"]')).not.toBeNull()
+    expect(card.querySelector('[data-role="approval-badge"]')).not.toBeNull()
+  })
+
+  it('source builds substructure via createElement/textContent — never innerHTML', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).not.toMatch(/\.innerHTML\s*=/)
+  })
+
+  it('substructure elements carry no unexpected attributes beyond role/hidden state', async () => {
+    const runId = 'run-substructure-attrs-001'
+    const repo = 'fro-bot/agent'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId, repo})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    const card = cards[0]
+    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+      const el = card.querySelector(`[data-role="${role}"]`)
+      // No run field (repo/runId) leaks into substructure text content.
+      expect(el.textContent ?? '').not.toContain(repo)
+      expect(el.textContent ?? '').not.toContain(runId)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Expansion toggles data-expanded and reveals per-card substructure
+// ---------------------------------------------------------------------------
+
+describe('renderRunCard — expand/collapse toggles data-expanded and substructure visibility', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('clicking a collapsed card sets data-expanded="true", reveals substructure, and calls onSelectRun', async () => {
+    const onSelectRun = vi.fn()
+    const runId = 'run-expand-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+    const card = cards[0]
+    expect(card.dataset.expanded).toBeUndefined()
+
+    card.dispatchEvent({type: 'click'})
+
+    expect(card.dataset.expanded).toBe('true')
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
+    expect(onSelectRun).toHaveBeenCalledWith(runId)
+    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+      const el = card.querySelector(`[data-role="${role}"]`)
+      expect(el.hidden).toBe(false)
+    }
+  })
+
+  it('clicking an already-expanded card collapses it, hides substructure, and calls onSelectRun again (caller closes the stream)', async () => {
+    const onSelectRun = vi.fn()
+    const runId = 'run-collapse-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+    const card = cards[0]
+
+    card.dispatchEvent({type: 'click'})
+    expect(card.dataset.expanded).toBe('true')
+
+    card.dispatchEvent({type: 'click'})
+
+    expect(card.dataset.expanded).toBe('false')
+    expect(onSelectRun).toHaveBeenCalledTimes(2)
+    expect(onSelectRun).toHaveBeenNthCalledWith(2, runId)
+    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+      const el = card.querySelector(`[data-role="${role}"]`)
+      expect(el.hidden).toBe(true)
+    }
+  })
+
+  it('expanding run A then run B collapses A (hides its substructure) and expands B', async () => {
+    const onSelectRun = vi.fn()
+    const runIdA = 'run-accordion-a'
+    const runIdB = 'run-accordion-b'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({runs: [makeValidSummary({runId: runIdA}), makeValidSummary({runId: runIdB})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+    const [cardA, cardB] = cards
+
+    cardA.dispatchEvent({type: 'click'})
+    expect(cardA.dataset.expanded).toBe('true')
+
+    cardB.dispatchEvent({type: 'click'})
+
+    expect(cardA.dataset.expanded).toBe('false')
+    expect(cardB.dataset.expanded).toBe('true')
+    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+      expect(cardA.querySelector(`[data-role="${role}"]`).hidden).toBe(true)
+      expect(cardB.querySelector(`[data-role="${role}"]`).hidden).toBe(false)
+    }
+    expect(onSelectRun).toHaveBeenCalledTimes(2)
+    expect(onSelectRun).toHaveBeenNthCalledWith(1, runIdA)
+    expect(onSelectRun).toHaveBeenNthCalledWith(2, runIdB)
+  })
+
+  it('keyboard (Enter) expansion mirrors click expansion behavior', async () => {
+    const onSelectRun = vi.fn()
+    const runId = 'run-expand-kbd-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+    const card = cards[0]
+
+    card.dispatchEvent({type: 'keydown', key: 'Enter', preventDefault: vi.fn()})
+
+    expect(card.dataset.expanded).toBe('true')
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// markCardExpandedForLaunch — launch handoff presents as already-expanded
+// ---------------------------------------------------------------------------
+
+describe('markCardExpandedForLaunch — launch handoff marks a card expanded (not a toggle)', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('marks a launch-created card expanded and reveals its substructure, and the FIRST subsequent click collapses it (not a silent double-close)', async () => {
+    const onSelectRun = vi.fn()
+    const runId = 'run-launch-expand-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+    const card = cards[0]
+
+    // Card starts collapsed after the fetch/render (no click has happened yet).
+    expect(card.dataset.expanded).toBeUndefined()
+    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+      expect(card.querySelector(`[data-role="${role}"]`).hidden).toBe(true)
+    }
+
+    // Simulate the launch handoff: the runtime seam attaches the stream and
+    // calls markCardExpandedForLaunch — mirroring onRunLaunched in runtime.ts.
+    markCardExpandedForLaunch(runId)
+
+    expect(card.dataset.expanded).toBe('true')
+    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+      expect(card.querySelector(`[data-role="${role}"]`).hidden).toBe(false)
+    }
+    // markCardExpandedForLaunch itself never calls onSelectRun — it's not a click.
+    expect(onSelectRun).not.toHaveBeenCalled()
+
+    // The operator's FIRST click on the now-already-expanded card must collapse
+    // it (matching toggleCardExpansion's isExpanded branch) — not be misread as
+    // an "expand" that races the runtime seam's onSelectRun into closing twice.
+    card.dispatchEvent({type: 'click'})
+
+    expect(card.dataset.expanded).toBe('false')
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
+    expect(onSelectRun).toHaveBeenCalledWith(runId)
+    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+      expect(card.querySelector(`[data-role="${role}"]`).hidden).toBe(true)
+    }
+  })
+
+  it('is idempotent — calling it twice on an already-expanded card is a no-op', async () => {
+    const runId = 'run-launch-expand-002'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    const card = cards[0]
+
+    markCardExpandedForLaunch(runId)
+    expect(card.dataset.expanded).toBe('true')
+    expect(() => markCardExpandedForLaunch(runId)).not.toThrow()
+    expect(card.dataset.expanded).toBe('true')
+  })
+
+  it('collapses any other already-expanded card first (single-open accordion)', async () => {
+    const runIdA = 'run-launch-accordion-a'
+    const runIdB = 'run-launch-accordion-b'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({runs: [makeValidSummary({runId: runIdA}), makeValidSummary({runId: runIdB})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    const [cardA, cardB] = cards
+
+    cardA.dispatchEvent({type: 'click'})
+    expect(cardA.dataset.expanded).toBe('true')
+
+    markCardExpandedForLaunch(runIdB)
+
+    expect(cardA.dataset.expanded).toBe('false')
+    expect(cardB.dataset.expanded).toBe('true')
+  })
+
+  it('does nothing when the card is not found', () => {
+    resetRunIndexState()
+    vi.stubGlobal('document', {querySelector: () => null})
+    vi.stubGlobal('CSS', {escape: s => s})
+    expect(() => markCardExpandedForLaunch('run-does-not-exist')).not.toThrow()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Reload-restore must not stomp a user click that happened during the fetch
+// ---------------------------------------------------------------------------
+
+describe('initOperatorRunIndex — reload-restore does not override an in-flight user selection', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('a card click (stream attach) during the delayed /operator/runs fetch wins — restore is skipped, the user selection stays open', async () => {
+    const restoreRunId = 'run-restore-target'
+    const userSelectedRunId = 'run-user-selected'
+
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    // First, an initial (fast) fetch renders both runs so real card stubs exist
+    // in the DOM before the restore-triggering init runs — mirroring how a run
+    // the user can click is already present in the list.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({runs: [makeValidSummary({runId: restoreRunId}), makeValidSummary({runId: userSelectedRunId})]}),
+    }))
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    resetRunIndexState() // simulate remount — cards stay in the DOM stub, only module state resets
+
+    // Now the reload-restore init runs with a delayed fetch.
+    let resolveFetch
+    const delayedFetch = new Promise(resolve => {
+      resolveFetch = resolve
+    })
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => delayedFetch))
+
+    const onRestoreRun = vi.fn()
+    const onRestoreMiss = vi.fn()
+    const initPromise = initOperatorRunIndex({
+      endpointBase: '/operator',
+      restoreRunId,
+      onRestoreRun,
+      onRestoreMiss,
+    })
+
+    // Simulate a user click DURING the fetch await window: the runtime seam
+    // attaches a stream for a DIFFERENT run via markRunStreamAttached (the
+    // exact seam call onSelectRun/onRunLaunched make after _attachStream
+    // succeeds) before the delayed fetch resolves.
+    markRunStreamAttached(userSelectedRunId)
+
+    resolveFetch({
+      ok: true,
+      status: 200,
+      json: async () => ({runs: [makeValidSummary({runId: restoreRunId}), makeValidSummary({runId: userSelectedRunId})]}),
+    })
+
+    await initPromise
+
+    // The restore-target card must NOT have been force-expanded, and neither
+    // restore callback fired — the user's in-flight selection wins outright.
+    const restoreCard = cards.find(c => c.dataset.runId === restoreRunId)
+    expect(restoreCard?.dataset.expanded).not.toBe('true')
+    expect(onRestoreRun).not.toHaveBeenCalled()
+    expect(onRestoreMiss).not.toHaveBeenCalled()
+
+    // The user's card is still marked stream-attached — restore did not clear it.
+    const userCard = cards.find(c => c.dataset.runId === userSelectedRunId)
+    expect(userCard?.dataset.streamAttached).toBe('true')
+  })
+
+  it('with no competing user selection, restore proceeds normally after the fetch resolves', async () => {
+    const restoreRunId = 'run-restore-normal'
+    const onRestoreRun = vi.fn()
+
+    let resolveFetch
+    const delayedFetch = new Promise(resolve => {
+      resolveFetch = resolve
+    })
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => delayedFetch))
+
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    const initPromise = initOperatorRunIndex({
+      endpointBase: '/operator',
+      restoreRunId,
+      onRestoreRun,
+    })
+
+    resolveFetch({
+      ok: true,
+      status: 200,
+      json: async () => ({runs: [makeValidSummary({runId: restoreRunId})]}),
+    })
+
+    await initPromise
+
+    const restoreCard = cards.find(c => c.dataset.runId === restoreRunId)
+    expect(restoreCard?.dataset.expanded).toBe('true')
+    expect(onRestoreRun).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// In-place diff reconciliation on refresh (background/refresh re-fetch)
+// ---------------------------------------------------------------------------
+
+describe('initOperatorRunIndex — in-place diff reconciliation (background refresh)', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('happy path: refresh with new + existing runs updates existing cards in place and inserts new ones', async () => {
+    const runIdExisting = 'run-diff-existing-001'
+    const runIdNew = 'run-diff-new-001'
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({runs: [makeValidSummary({runId: runIdExisting, status: 'running'})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    expect(cards).toHaveLength(1)
+    const firstCardRef = cards[0]
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({runs: [
+        makeValidSummary({runId: runIdNew, status: 'queued'}),
+        makeValidSummary({runId: runIdExisting, status: 'succeeded'}),
+      ]}),
+    }))
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(2)
+    // The existing card's element identity is preserved (adopted, not replaced).
+    expect(cards.find(c => c.dataset.runId === runIdExisting)).toBe(firstCardRef)
+    // Its status was updated in place.
+    const existingStatusEl = firstCardRef.querySelector('[data-role="run-status"]')
+    expect(existingStatusEl.className).toContain('status-succeeded')
+    // A new card was inserted for the new runId.
+    expect(cards.some(c => c.dataset.runId === runIdNew)).toBe(true)
+  })
+
+  it('CRITICAL: refresh while run X is expanded+streaming leaves node identity, substructure text, and stream intact — diff writes nothing inside [data-run-id=X] [data-role]', async () => {
+    const runId = 'run-diff-active-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({runs: [makeValidSummary({runId, status: 'running'})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    const card = cards[0]
+
+    // Simulate the runtime seam attaching a stream to this card.
+    markRunStreamAttached(runId)
+    expect(card.dataset.streamAttached).toBe('true')
+
+    // Simulate updateDOM having written live stream substructure content.
+    const outputEl = card.querySelector('[data-role="run-output"]')
+    outputEl.textContent = 'live streamed output text'
+    outputEl.hidden = false
+    const statusEl = card.querySelector('[data-role="run-status"]')
+    statusEl.textContent = 'Running'
+    statusEl.className = 'run-status status-running'
+
+    // Refresh returns the same run, now reported as succeeded in the fetch —
+    // the diff must NOT overwrite the active card's substructure or status.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({runs: [makeValidSummary({runId, status: 'succeeded'})]}),
+    }))
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    // Node identity preserved.
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toBe(card)
+    // Substructure untouched — still the stream-written text, not diff-overwritten.
+    expect(outputEl.textContent).toBe('live streamed output text')
+    expect(outputEl.hidden).toBe(false)
+    // Status span untouched by the diff — updateDOM is the sole writer.
+    expect(statusEl.textContent).toBe('Running')
+    expect(statusEl.className).toBe('run-status status-running')
+  })
+
+  it('CRITICAL: launch a run, then refresh before it appears in the index — the optimistic card is preserved (stream still active), no duplicate when it later appears', async () => {
+    const runId = 'run-diff-optimistic-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    // No fetch yet needed for this test — simulate the launch-created card directly,
+    // mirroring what operator-launch.js inserts (marked data-optimistic="true").
+    const optimisticCard = renderRunCardForTest(cards, {runId, status: 'queued', statusLabel: 'Pending'})
+    optimisticCard.dataset.optimistic = 'true'
+    // Its own status element still shows the non-terminal Pending/queued class.
+    optimisticCard.querySelector('[data-role="run-status"]').className = 'run-status status-queued'
+
+    // Refresh runs before the gateway's GET /operator/runs lists it — empty summaries.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({runs: []}),
+    }))
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    // Preserved — not removed as a ghost.
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toBe(optimisticCard)
+    expect(optimisticCard.dataset.optimistic).toBe('true')
+
+    // Now the run appears in the fetch — no duplicate card should be created,
+    // and the optimistic flag should clear.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({runs: [makeValidSummary({runId, status: 'running'})]}),
+    }))
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toBe(optimisticCard)
+    expect(optimisticCard.dataset.optimistic).toBeUndefined()
+  })
+
+  it('edge case: a launched run whose stream closes terminal while still absent from the index resolves to terminal (not a perpetual ghost)', async () => {
+    const runId = 'run-diff-optimistic-terminal-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    const optimisticCard = renderRunCardForTest(cards, {runId, status: 'queued', statusLabel: 'Pending'})
+    optimisticCard.dataset.optimistic = 'true'
+    optimisticCard.querySelector('[data-role="run-status"]').className = 'run-status status-queued'
+
+    // Simulate the stream having resolved the card to a terminal status (updateDOM's write),
+    // while the gateway's index fetch still doesn't list it (indexer lag that never resolves).
+    const statusEl = optimisticCard.querySelector('[data-role="run-status"]')
+    statusEl.className = 'run-status status-failed'
+    statusEl.textContent = 'Failed'
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({runs: []}),
+    }))
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    // No longer protected — removed rather than left as a perpetual ghost.
+    expect(cards).toHaveLength(0)
+  })
+
+  it('CRITICAL: an expanded active run that receives a terminal status update does NOT change list position (re-sort lock); re-sorts only after collapse', async () => {
+    const runIdA = 'run-diff-lock-A'
+    const runIdB = 'run-diff-lock-B'
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({runs: [
+        makeValidSummary({runId: runIdA, status: 'running'}),
+        makeValidSummary({runId: runIdB, status: 'running'}),
+      ]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    const onSelectRun = vi.fn()
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+
+    // Expand A (single-open accordion — sets _expandedRunId to A).
+    const cardA = cards.find(c => c.dataset.runId === runIdA)
+    cardA.dispatchEvent({type: 'click'})
+    markRunStreamAttached(runIdA)
+    expect(cardA.dataset.expanded).toBe('true')
+
+    // Refresh reports A as terminal now, and reorders A after B in the fetch
+    // (mirroring "terminal sorts below active" resting-order logic upstream).
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({runs: [
+        makeValidSummary({runId: runIdB, status: 'running'}),
+        makeValidSummary({runId: runIdA, status: 'succeeded'}),
+      ]}),
+    }))
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    // Position lock: A must still be BEFORE B in DOM order (frozen), not moved to
+    // the back to match the fetched order, because A is the expanded/active card.
+    const idxA = cards.indexOf(cardA)
+    const idxB = cards.findIndex(c => c.dataset.runId === runIdB)
+    expect(idxA).toBeLessThan(idxB)
+
+    // Collapse A — releases the re-sort lock.
+    cardA.dispatchEvent({type: 'click'})
+    expect(cardA.dataset.expanded).toBe('false')
+
+    // Next refresh may now reposition freely.
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    const idxA2 = cards.indexOf(cardA)
+    const idxB2 = cards.findIndex(c => c.dataset.runId === runIdB)
+    expect(idxB2).toBeLessThan(idxA2)
+  })
+
+  it('happy path: launch prepends a Pending card and hands off — exactly one stream opens, no duplicate', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).toContain('onRunLaunched')
+    expect(src).toContain('status-pending')
+  })
+
+  it('security: the diff sets no attribute outside {data-run-id, data-expanded, datetime, className}; no data-repo/data-status; consumes safe-views only', async () => {
+    const runId = 'run-diff-security-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({runs: [makeValidSummary({runId, status: 'running', repo: 'fro-bot/agent'})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({runs: [makeValidSummary({runId, status: 'succeeded', repo: 'fro-bot/agent'})]}),
+    }))
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    const card = cards[0]
+    expect('repo' in card.attributes || card.dataset.repo !== undefined).toBe(false)
+    expect(card.dataset.status).toBeUndefined()
+
+    // Source-level guard: the diff/update helpers must not construct data-repo/data-status.
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).not.toMatch(/dataset\.repo\s*=/)
+    expect(src).not.toMatch(/dataset\.status\s*=/)
+    expect(src).not.toMatch(/setAttribute\(\s*['"]data-repo['"]/)
+    expect(src).not.toMatch(/setAttribute\(\s*['"]data-status['"]/)
+  })
+
+  it('security: diff drives on buildRunSafeView output — source has no path from raw fetch json to card update', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).toContain('diffRunIndexList')
+    expect(src).toMatch(/summaries\.map\(buildRunSafeView\)/)
+  })
+
+  it('does not clear the container wholesale (no textContent = \'\' reset of the list on refresh)', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    // The wholesale clear must be gone from the fetch-then-render path.
+    expect(src).not.toMatch(/runIndexList\.textContent\s*=\s*['"]{2}/)
+  })
+})
+
+/** Helper: build and insert a card via renderRunCard, mirroring the launch-created shape. */
+function renderRunCardForTest(cards, summaryLike) {
+  const view = buildRunSafeView({
+    runId: summaryLike.runId,
+    repo: summaryLike.repo ?? 'fro-bot/agent',
+    status: summaryLike.status,
+    createdAt: summaryLike.createdAt ?? '2026-07-03T00:00:00.000Z',
+  })
+  const list = makeMockListUsing(cards)
+  const card = document.createElement('div')
+  card.dataset.runId = view.runId
+  card.dataset.testid = 'run-card'
+  card.setAttribute('aria-label', `Run, status: ${summaryLike.statusLabel ?? view.statusLabel}`)
+  const statusSpan = document.createElement('div')
+  statusSpan.dataset.role = 'run-status'
+  statusSpan.textContent = summaryLike.statusLabel ?? view.statusLabel
+  card.append(statusSpan)
+  for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+    const el = document.createElement('div')
+    el.dataset.role = role
+    el.hidden = true
+    card.append(el)
+  }
+  list.append(card)
+  return card
+}
+
+describe('CSS selector ↔ status emitter agreement', () => {
+  it('has a .status-<value> selector in web/src/index.css for every valid status', async () => {
+    const fs = await import('node:fs/promises')
+    const cssPath = new URL('../web/src/index.css', import.meta.url).pathname
+    const cssContent = await fs.readFile(cssPath, 'utf8')
+
+    // All core index statuses plus the optimistic pending state
+    const coreStatuses = Array.from(VALID_RUN_SUMMARY_STATUSES)
+    const requiredStatuses = [...coreStatuses, 'pending', 'blocked', 'waiting_for_approval']
+
+    for (const status of requiredStatuses) {
+      const expectedSelector = `.status-${status}`
+      expect(cssContent).toContain(expectedSelector)
+    }
+
+    // Explicitly verify the old wrong ones are GONE
+    expect(cssContent).not.toContain('.status-success')
+    expect(cssContent).not.toContain('.status-failure')
+    expect(cssContent).not.toContain('.status-error')
+    expect(cssContent).not.toContain('.status-in_progress')
+  })
+})
+
+describe('formatRelativeTime — coarse relative time formatting', () => {
+  it('handles missing or invalid input safely', () => {
+    expect(formatRelativeTime(undefined)).toBe('')
+    expect(formatRelativeTime(null)).toBe('')
+    expect(formatRelativeTime('')).toBe('')
+    expect(formatRelativeTime('not-a-date')).toBe('')
+  })
+
+  it('formats "just now" for times < 1 minute', () => {
+    const now = 1000000000000
+    expect(formatRelativeTime(new Date(now).toISOString(), now)).toBe('just now')
+    expect(formatRelativeTime(new Date(now - 59999).toISOString(), now)).toBe('just now')
+    // Handles future/drift by clamping to 0
+    expect(formatRelativeTime(new Date(now + 10000).toISOString(), now)).toBe('just now')
+  })
+
+  it('formats "N minute(s) ago" for times < 1 hour', () => {
+    const now = 1000000000000
+    expect(formatRelativeTime(new Date(now - 60000).toISOString(), now)).toBe('1 minute ago')
+    expect(formatRelativeTime(new Date(now - 119999).toISOString(), now)).toBe('1 minute ago')
+    expect(formatRelativeTime(new Date(now - 120000).toISOString(), now)).toBe('2 minutes ago')
+    expect(formatRelativeTime(new Date(now - 3599000).toISOString(), now)).toBe('59 minutes ago')
+  })
+
+  it('formats "N hour(s) ago" for times < 24 hours', () => {
+    const now = 1000000000000
+    expect(formatRelativeTime(new Date(now - 3600000).toISOString(), now)).toBe('1 hour ago')
+    expect(formatRelativeTime(new Date(now - 7199000).toISOString(), now)).toBe('1 hour ago')
+    expect(formatRelativeTime(new Date(now - 7200000).toISOString(), now)).toBe('2 hours ago')
+    expect(formatRelativeTime(new Date(now - 86399000).toISOString(), now)).toBe('23 hours ago')
+  })
+
+  it('formats "N day(s) ago" for times >= 24 hours', () => {
+    const now = 1000000000000
+    expect(formatRelativeTime(new Date(now - 86400000).toISOString(), now)).toBe('1 day ago')
+    expect(formatRelativeTime(new Date(now - 172799000).toISOString(), now)).toBe('1 day ago')
+    expect(formatRelativeTime(new Date(now - 172800000).toISOString(), now)).toBe('2 days ago')
+    expect(formatRelativeTime(new Date(now - 864000000).toISOString(), now)).toBe('10 days ago')
   })
 })

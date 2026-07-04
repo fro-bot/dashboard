@@ -546,16 +546,73 @@ describe('Operator — recent-runs section', () => {
     expect(unavailableHook).not.toBeNull()
   })
 
-  it('launch form is still present below recent-runs section', () => {
+  it('renders a persistent launch trigger button in ready state', () => {
     render(<Operator state="ready" />)
-    const launchForm = document.querySelector('#launch-form')
-    expect(launchForm).not.toBeNull()
+    const triggerBtn = screen.getByTestId('launch-trigger-btn')
+    expect(triggerBtn).toBeInTheDocument()
   })
 
-  it('run-status section is still present', () => {
+  it('opening the persistent affordance reveals the launch controls', async () => {
+    const {act} = await import('react')
     render(<Operator state="ready" />)
-    const runStatusSection = document.querySelector('#run-status-section')
-    expect(runStatusSection).not.toBeNull()
+    const drawer = screen.getByTestId('launch-drawer')
+    expect(drawer).toHaveStyle({display: 'none'})
+
+    const triggerBtn = screen.getByTestId('launch-trigger-btn')
+    await act(async () => {
+      triggerBtn.click()
+    })
+
+    expect(drawer).toHaveStyle({display: 'block'})
+    const launchForm = document.querySelector('#launch-form')
+    expect(launchForm).toBeInTheDocument()
+  })
+
+  it('submit path is still reachable when drawer is open', async () => {
+    const {act} = await import('react')
+    render(<Operator state="ready" />)
+    const triggerBtn = screen.getByTestId('launch-trigger-btn')
+    await act(async () => {
+      triggerBtn.click()
+    })
+
+    const launchForm = document.querySelector('#launch-form')
+    expect(launchForm).not.toBeNull()
+    const submitBtn = launchForm?.querySelector('[type="submit"]')
+    expect(submitBtn).not.toBeNull()
+  })
+
+  it('the standalone stacked launch section is gone and no duplicate launch form exists', () => {
+    render(<Operator state="ready" />)
+    // Check there is exactly one launch-form
+    const forms = document.querySelectorAll('#launch-form')
+    expect(forms).toHaveLength(1)
+
+    // The form is inside the drawer, not in a direct sibling section of the body
+    const drawer = screen.getByTestId('launch-drawer')
+    const formInsideDrawer = drawer.querySelector('#launch-form')
+    expect(formInsideDrawer).not.toBeNull()
+
+    // No stacked section panel named "Launch" in the page content
+    const sections = document.querySelectorAll('section')
+    for (const section of Array.from(sections)) {
+      const heading = section.querySelector('h2')
+      if (heading) {
+        expect(heading.textContent).not.toBe('Launch')
+      }
+    }
+  })
+
+  it('the unified run list is the single content region — no separate run-status section', () => {
+    render(<Operator state="ready" />)
+    expect(document.querySelector('#run-status-section')).toBeNull()
+  })
+
+  it('the shared stream-status notice lives with the unified list', () => {
+    render(<Operator state="ready" />)
+    const section = document.querySelector('[data-testid="recent-runs-section"]')
+    const notice = section?.querySelector('[data-role="stream-status"]')
+    expect(notice).not.toBeNull()
   })
 
   it('recent-runs section is NOT rendered in non-ready states', () => {
@@ -651,4 +708,139 @@ describe('Operator — fixture-absence: no sensitive fixture values in root shel
     const html = document.body.innerHTML
     expect(html).not.toContain('run-fixture')
   })
+})
+
+describe('Operator — drawer close is unified across close button, backdrop, and Escape', () => {
+  it('close button closes the drawer and returns focus to the trigger', async () => {
+    const {act} = await import('react')
+    render(<Operator state="ready" />)
+    const triggerBtn = screen.getByTestId('launch-trigger-btn')
+    await act(async () => { triggerBtn.click() })
+
+    const drawer = screen.getByTestId('launch-drawer')
+    expect(drawer).toHaveStyle({display: 'block'})
+
+    const closeBtn = screen.getByTestId('close-drawer-btn')
+    await act(async () => { closeBtn.click() })
+
+    expect(drawer).toHaveStyle({display: 'none'})
+    expect(document.activeElement).toBe(triggerBtn)
+  })
+
+  it('clicking the backdrop closes the drawer and returns focus to the trigger', async () => {
+    const {act} = await import('react')
+    render(<Operator state="ready" />)
+    const triggerBtn = screen.getByTestId('launch-trigger-btn')
+    await act(async () => { triggerBtn.click() })
+
+    const drawer = screen.getByTestId('launch-drawer')
+    const backdrop = drawer.querySelector('.operator-drawer-backdrop') as HTMLElement
+    expect(backdrop).not.toBeNull()
+
+    await act(async () => { backdrop.click() })
+
+    expect(drawer).toHaveStyle({display: 'none'})
+    expect(document.activeElement).toBe(triggerBtn)
+  })
+
+  it('pressing Escape closes the drawer and returns focus to the trigger', async () => {
+    const {act} = await import('react')
+    render(<Operator state="ready" />)
+    const triggerBtn = screen.getByTestId('launch-trigger-btn')
+    await act(async () => { triggerBtn.click() })
+
+    const drawer = screen.getByTestId('launch-drawer')
+    expect(drawer).toHaveStyle({display: 'block'})
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))
+    })
+
+    expect(drawer).toHaveStyle({display: 'none'})
+    expect(document.activeElement).toBe(triggerBtn)
+  })
+})
+
+describe('Operator — post-launch focus-steal guard', () => {
+  it('moves focus to the new run card when focus was still on the submit button at launch success', async () => {
+    const {act} = await import('react')
+    render(<Operator state="ready" />)
+    const triggerBtn = screen.getByTestId('launch-trigger-btn')
+    await act(async () => { triggerBtn.click() })
+
+    const runIndexList = document.querySelector('[data-role="run-index-list"]') as HTMLElement
+    const card = document.createElement('div')
+    card.dataset.testid = 'run-card'
+    card.tabIndex = 0
+    runIndexList.append(card)
+
+    const form = document.querySelector('#launch-form') as HTMLFormElement
+    const submitBtn = form.querySelector('[type="submit"]') as HTMLButtonElement
+    submitBtn.focus()
+    expect(document.activeElement).toBe(submitBtn)
+
+    await act(async () => {
+      form.dispatchEvent(new CustomEvent('launch-success', {bubbles: true, detail: {runId: 'run-1'}}))
+    })
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 60))
+    })
+
+    expect(document.activeElement).toBe(card)
+  })
+
+  it('does NOT steal focus from an element the operator already moved to before launch-success fires', async () => {
+    const {act} = await import('react')
+    render(<Operator state="ready" />)
+    const triggerBtn = screen.getByTestId('launch-trigger-btn')
+    await act(async () => { triggerBtn.click() })
+
+    const runIndexList = document.querySelector('[data-role="run-index-list"]') as HTMLElement
+    const card = document.createElement('div')
+    card.dataset.testid = 'run-card'
+    card.tabIndex = 0
+    runIndexList.append(card)
+
+    const form = document.querySelector('#launch-form') as HTMLFormElement
+
+    // Operator has already moved focus elsewhere (e.g. clicked some unrelated
+    // element) by the time the launch-success event fires.
+    const elsewhere = document.createElement('button')
+    document.body.append(elsewhere)
+    elsewhere.focus()
+    expect(document.activeElement).toBe(elsewhere)
+
+    await act(async () => {
+      form.dispatchEvent(new CustomEvent('launch-success', {bubbles: true, detail: {runId: 'run-1'}}))
+    })
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 60))
+    })
+
+    // Focus must remain on the element the operator moved to — not stolen by the card.
+    expect(document.activeElement).toBe(elsewhere)
+    elsewhere.remove()
+  })
+})
+
+describe('Operator — failure state distinct treatments', () => {
+  const failureStates: ('auth-required' | 'rate-limited' | 'offline' | 'unavailable')[] = [
+    'auth-required',
+    'rate-limited',
+    'offline',
+    'unavailable',
+  ]
+
+  for (const state of failureStates) {
+    it(`renders its distinct failure state treatment for ${state} with disabled actions`, () => {
+      render(<Operator state={state} />)
+      const shell = screen.getByTestId('operator-shell')
+      expect(shell).toHaveAttribute('data-state', state)
+
+      const reasonEl = screen.getByTestId('operator-action-reason')
+      expect(reasonEl).toHaveClass(`operator-failure-state-${state}`)
+      expect(reasonEl).toHaveClass('operator-warning-panel')
+      expect(reasonEl.textContent?.trim().length).toBeGreaterThan(0)
+    })
+  }
 })

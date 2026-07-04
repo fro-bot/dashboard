@@ -18,9 +18,64 @@
  * - Repo-list failures use the canonical operator state classifier — never renders
  *   "No repositories available" for auth/rate-limit/network/protocol failures.
  * - All Gateway data flows through safe text paths only.
+ * - Reload restore reads location.hash only to (a) check list-container membership
+ *   and (b) build a fetch URL via encodeURIComponent; it never reaches textContent,
+ *   innerHTML, a logger, or any DOM attribute other than data-run-id (setAttribute).
+ *   A hash value over MAX_HASH_ID_LENGTH is rejected before any further processing.
  */
 
+import {validateDynamicId} from '../../../src/gateway/operator-client.ts'
 import type {OperatorState} from './state.ts'
+
+/**
+ * Hard cap on a location.hash-sourced runId, matching the run-summary parser's
+ * MAX_ID_LENGTH (public/operator-run-index.js). location.hash is reachable via a
+ * crafted/shared link, so this cap is enforced BEFORE validateDynamicId or any
+ * decode/encode call — a megabyte-long hash must not reach those paths.
+ */
+export const MAX_HASH_ID_LENGTH = 512
+
+/**
+ * Discover the per-card render targets for a run's stream (output, coalesced
+ * output hint, approval prompt, approval badge). Without these, a stream
+ * handle's DOM updates only ever touch statusEl/noticeEl, leaving the card's
+ * core content (output + approvals) blank.
+ *
+ * Exported so both production (`_attachStream`) and tests exercise the exact
+ * same discovery logic — a test that re-implements this lookup proves nothing
+ * about whether production actually wires the elements.
+ */
+export function discoverCardStreamTargets(runId: string): {
+  outputEl: Element | null
+  coalescedEl: Element | null
+  approvalsEl: Element | null
+  badgeEl: Element | null
+} {
+  const card = typeof document !== 'undefined'
+    ? document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
+    : null
+  return {
+    outputEl: card?.querySelector('[data-role="run-output"]') ?? null,
+    coalescedEl: card?.querySelector('[data-role="run-output-coalesced"]') ?? null,
+    approvalsEl: card?.querySelector('[data-role="run-approvals"]') ?? null,
+    badgeEl: card?.querySelector('[data-role="approval-badge"]') ?? null,
+  }
+}
+
+/**
+ * Sanitize a raw location.hash fragment (with or without the leading '#') into a
+ * safe runId, or null if it is absent/oversized/malformed.
+ *
+ * Order matters: the length cap runs first, before validateDynamicId (which itself
+ * calls decodeURIComponent). Never call encodeURIComponent/decodeURIComponent on a
+ * value that hasn't passed the length cap.
+ */
+export function sanitizeRunIdFromHash(rawHash: string): string | null {
+  const candidate = rawHash.startsWith('#') ? rawHash.slice(1) : rawHash
+  if (candidate.length === 0 || candidate.length > MAX_HASH_ID_LENGTH) return null
+  if (!validateDynamicId(candidate)) return null
+  return candidate
+}
 
 export interface RepoListError {
   readonly kind: 'http' | 'network' | 'protocol'
@@ -133,6 +188,36 @@ const _runIndexSpecifier = '/static/operator-run-index.js' + '?manual=1'
 // Only one stream is active at a time; switching cards closes the prior handle first.
 let _activeStreamHandle: {close(): void} | null = null
 
+// The runId whose stream is currently attached (mirrors _activeStreamHandle's target).
+// Used by onSelectRun to distinguish "expand a new run" (attach) from "select the
+// already-expanded run again" (collapse) — the single-open accordion's decision point.
+let _activeStreamRunId: string | null = null
+
+/**
+ * Write the expanded runId to location.hash. runId is used ONLY for setting the
+ * hash fragment here — never interpolated into HTML, textContent, or a logger.
+ */
+function _writeRunHash(runId: string): void {
+  if (typeof location === 'undefined') return
+  try {
+    location.hash = runId
+  } catch {
+    // ignore — hash write failures are non-fatal (e.g. unsupported environment)
+  }
+}
+
+/** Clear location.hash on collapse or restore-miss. */
+function _clearRunHash(): void {
+  if (typeof location === 'undefined') return
+  try {
+    if (location.hash !== '') {
+      history.replaceState(null, '', location.pathname + location.search)
+    }
+  } catch {
+    // ignore
+  }
+}
+
 function _closeActiveStream(): void {
   if (_activeStreamHandle !== null) {
     try {
@@ -142,6 +227,14 @@ function _closeActiveStream(): void {
     }
     _activeStreamHandle = null
   }
+  // Clear the stale-eviction-protection marker on the previously-active card so a
+  // collapsed card doesn't keep looking stream-attached until some future
+  // markRunStreamAttached call happens to overwrite it (or never does).
+  if (_activeStreamRunId !== null && typeof document !== 'undefined') {
+    const card = document.querySelector(`[data-run-id="${CSS.escape(_activeStreamRunId)}"]`)
+    if (card !== null) delete (card as HTMLElement).dataset.streamAttached
+  }
+  _activeStreamRunId = null
 }
 
 async function defaultRuntimeLoader(opts?: {
@@ -150,11 +243,22 @@ async function defaultRuntimeLoader(opts?: {
   getScenario?: () => string
   onSelectRun?: (runId: string) => void
   onRunLaunched?: (runId: string, card: HTMLElement) => void
+  onStateChange?: (state: OperatorState) => void
 }): Promise<() => void> {
   const streamMod = await import(/* @vite-ignore */ _streamSpecifier) as {
     bootstrapOperatorStreams?: (opts?: {endpointBase?: string; fixtureSessionId?: string}) => void
     resetBootstrapState?: () => void
-    initOperatorStream?: (opts: {runId: string; statusEl?: Element | null; noticeEl?: Element | null; endpointBase?: string; fixtureSessionId?: string}) => {close(): void}
+    initOperatorStream?: (opts: {
+      runId: string
+      statusEl?: Element | null
+      noticeEl?: Element | null
+      outputEl?: Element | null
+      coalescedEl?: Element | null
+      approvalsEl?: Element | null
+      badgeEl?: Element | null
+      endpointBase?: string
+      fixtureSessionId?: string
+    }) => {close(): void}
   }
   if (typeof streamMod.resetBootstrapState === 'function') {
     streamMod.resetBootstrapState()
@@ -167,9 +271,18 @@ async function defaultRuntimeLoader(opts?: {
   }
 
   const runIndexMod = await import(/* @vite-ignore */ _runIndexSpecifier) as {
-    initOperatorRunIndex?: (opts?: {endpointBase?: string; fixtureSessionId?: string; onSelectRun?: (runId: string) => void}) => Promise<void>
+    initOperatorRunIndex?: (opts?: {
+      endpointBase?: string
+      fixtureSessionId?: string
+      onSelectRun?: (runId: string) => void
+      restoreRunId?: string
+      onRestoreRun?: (runId: string, card: Element, status: string) => void
+      onRestoreMiss?: () => void
+      onAuthRequired?: () => void
+    }) => Promise<void>
     resetRunIndexState?: () => void
     markRunStreamAttached?: (runId: string) => void
+    markCardExpandedForLaunch?: (runId: string) => void
   }
 
   const launchMod = await import(/* @vite-ignore */ _launchSpecifier) as {
@@ -182,15 +295,24 @@ async function defaultRuntimeLoader(opts?: {
 
     if (typeof streamMod.initOperatorStream !== 'function') return
 
+    // Discover the per-card render targets so live output, coalescing hints,
+    // approval prompts, and the approval badge all render — not just status.
+    const {outputEl, coalescedEl, approvalsEl, badgeEl} = discoverCardStreamTargets(runId)
+
     try {
       const handle = streamMod.initOperatorStream({
         runId,
         statusEl,
         noticeEl,
+        outputEl,
+        coalescedEl,
+        approvalsEl,
+        badgeEl,
         endpointBase: opts?.endpointBase,
         fixtureSessionId: opts?.fixtureSessionId,
       })
       _activeStreamHandle = handle
+      _activeStreamRunId = runId
       if (typeof runIndexMod.markRunStreamAttached === 'function') {
         runIndexMod.markRunStreamAttached(runId)
       }
@@ -204,7 +326,22 @@ async function defaultRuntimeLoader(opts?: {
 
   // Build the active-stream coordination callbacks. These are passed to run-index and
   // launch modules so the runtime seam owns the single active stream handle.
+  //
+  // Single-open accordion: the run-index DOM shell calls this on every card
+  // click/keydown activation, whether the card is being expanded or collapsed
+  // (it decides that via data-expanded before calling here). This callback is
+  // the single decision point for "attach" vs "collapse":
+  // - If runId is already the active stream, the card was just collapsed —
+  //   close the stream and attach nothing new.
+  // - Otherwise the card was just expanded — close whichever stream is active
+  //   (if any) and attach the new one. _attachStream already closes the prior
+  //   handle first, so this covers both "nothing was open" and "switching cards."
   const onSelectRun = (runId: string) => {
+    if (_activeStreamRunId === runId) {
+      _closeActiveStream()
+      _clearRunHash()
+      return
+    }
     // Find the card element for this runId to get its statusEl and noticeEl.
     const card = typeof document !== 'undefined'
       ? document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
@@ -214,6 +351,45 @@ async function defaultRuntimeLoader(opts?: {
       ? document.querySelector('[data-role="stream-status"]')
       : null
     _attachStream(runId, statusEl, noticeEl)
+    _writeRunHash(runId)
+  }
+
+  // Reload restore: a hash-restored run is expanded via a distinct, non-toggle DOM
+  // entry point (expandCardForRestore in operator-run-index.js), never onSelectRun —
+  // onSelectRun's toggle semantics assume a prior click (re-select = collapse), which
+  // a cold-boot restore is not.
+  //
+  // Terminal vs. non-terminal restores attach the stream the same way on purpose:
+  // the "no reconnect for a terminal run" guarantee already lives in
+  // initOperatorStream's own state machine (nextStreamState transitions to
+  // connection: 'closed' with shouldReconnect: false once a terminal status frame
+  // arrives, and the reader loop stops re-invoking itself once closed) — not in this
+  // seam. A restored terminal run still opens one connection to receive the
+  // replay/final frame, then closes without ever scheduling a reconnect. There is
+  // nothing terminal-specific for this callback to special-case, so TERMINAL_RUN_STATUSES
+  // is retained only for tests/documentation of that contract, not a branch here.
+  const onRestoreRun = (runId: string, card: Element, _status: string) => {
+    const statusEl = card.querySelector('[data-role="run-status"]') ?? null
+    const noticeEl = typeof document !== 'undefined'
+      ? document.querySelector('[data-role="stream-status"]')
+      : null
+    _attachStream(runId, statusEl, noticeEl)
+  }
+
+  const onRestoreMiss = () => {
+    _clearRunHash()
+    const noticeEl = typeof document !== 'undefined'
+      ? document.querySelector('[data-role="stream-status"]')
+      : null
+    if (noticeEl instanceof HTMLElement) {
+      // Fixed copy — no runId echoed.
+      noticeEl.textContent = 'The selected run is no longer in recent history.'
+      noticeEl.hidden = false
+    }
+  }
+
+  const onAuthRequired = () => {
+    opts?.onStateChange?.('auth-required')
   }
 
   const onRunLaunched = (runId: string, card: HTMLElement) => {
@@ -222,15 +398,33 @@ async function defaultRuntimeLoader(opts?: {
       ? document.querySelector('[data-role="stream-status"]')
       : null
     _attachStream(runId, statusEl, noticeEl)
+    _writeRunHash(runId)
+    // A launched run's card must present as already-expanded/observed the moment
+    // its stream attaches — otherwise the operator's first click on it is
+    // misread by onSelectRun as "collapse the active stream" instead of "expand."
+    if (typeof runIndexMod.markCardExpandedForLaunch === 'function') {
+      runIndexMod.markCardExpandedForLaunch(runId)
+    }
   }
 
   if (typeof runIndexMod.resetRunIndexState === 'function') {
     runIndexMod.resetRunIndexState()
   }
   if (typeof runIndexMod.initOperatorRunIndex === 'function') {
+    // The hash is actually read HERE, synchronously, before initOperatorRunIndex is
+    // called — it is only consulted (as restoreRunId) after that function's internal
+    // /operator/runs fetch resolves. So a user click that attaches a stream during
+    // the await window can race this pre-captured value; the run-index module
+    // guards against that by checking for an already-attached stream for a
+    // different run before honoring the restore (see initOperatorRunIndex). The
+    // raw hash is sanitized here — length cap before validateDynamicId — before it
+    // crosses into the run-index module at all.
+    const restoreRunId = typeof location !== 'undefined'
+      ? sanitizeRunIdFromHash(location.hash) ?? undefined
+      : undefined
     const runIndexOpts = opts?.endpointBase !== undefined
-      ? {endpointBase: opts.endpointBase, fixtureSessionId: opts.fixtureSessionId, onSelectRun}
-      : {onSelectRun}
+      ? {endpointBase: opts.endpointBase, fixtureSessionId: opts.fixtureSessionId, onSelectRun, restoreRunId, onRestoreRun, onRestoreMiss, onAuthRequired}
+      : {onSelectRun, restoreRunId, onRestoreRun, onRestoreMiss, onAuthRequired}
     await runIndexMod.initOperatorRunIndex(runIndexOpts)
   }
 
@@ -298,7 +492,13 @@ export function createOperatorRuntime(opts: OperatorRuntimeOptions): OperatorRun
     },
   }
 
-  const loader = _runtimeLoader ?? defaultRuntimeLoader
+  // onStateChange is bound onto the default loader only (via a thin wrapper), never
+  // added to loaderOpts — existing tests assert loaderOpts is `undefined` when
+  // fixtureMode is off, and an injectable test _runtimeLoader shouldn't gain an
+  // unrequested field. The default loader needs it independent of fixture mode so
+  // a stale-auth reload (auth re-classification on the /operator/runs restore fetch)
+  // can report auth-required back to the shell.
+  const loader = _runtimeLoader ?? ((loaderOpts?: Parameters<typeof defaultRuntimeLoader>[0]) => defaultRuntimeLoader({...loaderOpts, onStateChange}))
 
   // Build loader options: only pass fixture context in fixture mode (dev builds only).
   // Production bundles must not contain fixture route strings.

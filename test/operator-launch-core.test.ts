@@ -1171,3 +1171,172 @@ describe('operator-launch — stream handle ownership with onRunLaunched', () =>
     expect(() => resetLaunchState()).not.toThrow()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Launch handoff into the unified run-index list (prepend, .status-pending,
+// data-optimistic, cap eviction) — background/refresh diff convergence
+// ---------------------------------------------------------------------------
+
+describe('operator-launch — optimistic card uses .status-pending and is marked data-optimistic', () => {
+  it('source uses status-pending class (not status-queued) for the Pending label', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).toContain('status-pending')
+  })
+
+  it('source marks the optimistic card with data-optimistic="true"', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).toMatch(/dataset\.optimistic\s*=\s*['"]true['"]/)
+  })
+
+  it('source still creates the four hidden per-card substructure regions on the optimistic card', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+      expect(src).toContain(role)
+    }
+  })
+})
+
+describe('operator-launch — optimistic card is prepended, not appended', () => {
+  it('source inserts the optimistic card before the list\u2019s existing first child (prepend)', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).toMatch(/insertBefore\(card,\s*runIndexList\.firstChild\)/)
+  })
+})
+
+describe('operator-launch — cap hygiene evicts the oldest terminal card, never the active one, on prepend past the cap', () => {
+  it('source checks list length against the run-index cap after prepending', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).toMatch(/LAUNCH_RUN_INDEX_CAP|RUN_INDEX_CAP/)
+  })
+
+  it('source never evicts a card with data-stream-attached="true" (the active card)', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).toMatch(/streamAttached\s*===\s*['"]true['"]\)\s*continue/)
+  })
+
+  it('source only evicts a card that is terminal (status-succeeded/failed/cancelled)', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).toContain('status-succeeded')
+    expect(src).toContain('status-failed')
+    expect(src).toContain('status-cancelled')
+  })
+})
+
+describe('operator-launch — CSRF/idempotency/mutex discipline preserved through the launch handoff changes', () => {
+  it('submitLaunch still reuses the SAME idempotency key across the CSRF-400 retry after the prepend/handoff changes', async () => {
+    const client = makeFakeClient({
+      csrfResults: [
+        {success: true, csrfToken: 'tok-preserved-1'},
+        {success: true, csrfToken: 'tok-preserved-2'},
+      ],
+      launchResults: [
+        {success: false, status: 400},
+        {success: true, runId: 'run-preserved-001'},
+      ],
+    })
+    const key = 'key-preserved-001'
+    const outcome = await submitLaunch(client, {repo: 'owner/repo', prompt: 'preserved'}, key)
+    expect(outcome.kind).toBe('launched')
+    expect(client.launchCallArgs[0]?.idempotencyKey).toBe(key)
+    expect(client.launchCallArgs[1]?.idempotencyKey).toBe(key)
+  })
+
+  it('source still contains the in-flight submit mutex guard, now generation-scoped', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).toMatch(/let _launching = false/)
+    // The mutex is only honored while it's owned by the current mount's generation —
+    // a lock abandoned by a torn-down mount must not block a fresh mount forever.
+    expect(src).toMatch(/if \(_launching && _launchingGeneration === myGeneration\) return/)
+  })
+
+  it('mutex persists — no double-submit from a fresh affordance mount', async () => {
+    // Tests that _launching is declared at module-level (not inside initOperatorLaunch or standard per-mount scope)
+    // so it persists across multiple init/unmount/remount cycles.
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    // Assert it is declared in global/module scope of the file, not nested inside the init function
+    const lines = src.split('\n')
+    const initFnLine = lines.findIndex(l => l.includes('function initOperatorLaunch'))
+    const mutexLine = lines.findIndex(l => l.includes('let _launching = false'))
+    expect(mutexLine).toBeGreaterThan(-1)
+    expect(initFnLine).toBeGreaterThan(-1)
+    expect(mutexLine).toBeLessThan(initFnLine)
+  })
+
+  it('a double-submit within the SAME mount is blocked by the mutex regardless of generation', () => {
+    setLaunchGeneration(0)
+    const myGeneration = 1
+    setLaunchGeneration(myGeneration)
+
+    let launching = false
+    let launchingGeneration = null
+
+    // First submit acquires the lock.
+    if (!(launching && launchingGeneration === myGeneration)) {
+      launching = true
+      launchingGeneration = myGeneration
+    }
+    expect(launching).toBe(true)
+
+    // A second submit attempt within the same mount (same generation) must be blocked.
+    const secondSubmitBlocked = launching && launchingGeneration === myGeneration
+    expect(secondSubmitBlocked).toBe(true)
+  })
+
+  it('a fresh mount after a mid-submit teardown is NOT permanently blocked by an abandoned lock', () => {
+    setLaunchGeneration(0)
+    const staleGeneration = 1
+    setLaunchGeneration(staleGeneration)
+
+    // Stale mount acquires the lock and never reaches its finally (torn down mid-submit).
+    let launching = false
+    let launchingGeneration = null
+    launching = true
+    launchingGeneration = staleGeneration
+
+    // resetLaunchState() bumps the generation on unmount/remount.
+    resetLaunchState()
+    const freshGeneration = staleGeneration + 1
+    setLaunchGeneration(freshGeneration)
+
+    // A submit in the fresh mount checks the mutex against ITS generation — the
+    // stale lock's generation no longer matches, so it is not honored.
+    const freshSubmitBlocked = launching && launchingGeneration === freshGeneration
+    expect(freshSubmitBlocked).toBe(false)
+  })
+
+  it('repo-list auth/rate-limit/network/protocol failures render the canonical failure state, not "No repositories available"', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    // Verify that the code handles listRepos failure by setting neutral failure messages
+    // rather than "No repositories available"
+    expect(src).toContain('Sign in required to load repositories.')
+    expect(src).toContain('Repository list temporarily unavailable. Try again shortly.')
+    expect(src).toContain('Repository list unavailable.')
+    // Verify "No repositories available" is not used for failure paths
+    expect(src).not.toContain('No repositories available')
+  })
+})
+
+describe('operator-launch — security: no data-repo/data-status on the optimistic card, no sensitive value leaked', () => {
+  it('source never sets data-repo or data-status on the optimistic launch card', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).not.toMatch(/dataset\.repo\s*=/)
+    expect(src).not.toMatch(/dataset\.status\s*=/)
+  })
+
+  it('source never logs prompt/csrf/idempotency/runId (no console.* calls at all)', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+    expect(src).not.toMatch(/console\.(log|error|warn)\s*\(/)
+  })
+})

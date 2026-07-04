@@ -86,7 +86,7 @@ describe('App', () => {
     await waitFor(() => {
       expect(document.querySelector('#launch-form')).not.toBeNull()
       expect(document.querySelector('#repo-picker-container')).not.toBeNull()
-      expect(document.querySelector('#run-status-section')).not.toBeNull()
+      expect(document.querySelector('[data-role="run-index-list"]')).not.toBeNull()
     })
   })
 
