@@ -27,7 +27,7 @@ export interface RunSafeView {
 
 export type RunIndexResult =
   | {readonly kind: 'loaded'; readonly summaries: ParsedRunSummary[]}
-  | {readonly kind: 'unavailable'}
+  | {readonly kind: 'unavailable'; readonly authFailure?: boolean}
 
 export declare const RUN_INDEX_CAP: 100
 export declare const VALID_RUN_SUMMARY_STATUSES: ReadonlySet<string>
@@ -69,4 +69,29 @@ export declare function initOperatorRunIndex(opts?: {
    * call for the currently-attached runId means "collapse and close the stream."
    */
   onSelectRun?: (runId: string) => void
+  /**
+   * A pre-sanitized runId (length-capped + validateDynamicId-checked by the caller)
+   * to restore on this mount, e.g. from location.hash after a hard refresh. This is
+   * a cold-boot restore, not a click toggle — it is handled by a distinct
+   * expand-only path, never by re-invoking onSelectRun's toggle semantics.
+   */
+  restoreRunId?: string
+  /**
+   * Called once the restore target is confirmed present in the fetched list and has
+   * been expanded. Receives the card element and its safe-view status so the caller
+   * can decide reconnect (non-terminal) vs read-only (terminal) without querying the
+   * DOM for status again.
+   */
+  onRestoreRun?: (runId: string, card: Element, status: RunSummaryStatus) => void
+  /**
+   * Called when restoreRunId is set but absent from the resolved fetch (aged out of
+   * the cap or otherwise gone). The caller is responsible for clearing the hash and
+   * showing a fixed, path-unaware notice — never echoing the runId.
+   */
+  onRestoreMiss?: () => void
+  /**
+   * Called when the /operator/runs fetch itself signals expired/absent auth
+   * (401/403). The caller must reclassify to auth-required and skip any restore.
+   */
+  onAuthRequired?: () => void
 }): Promise<void>

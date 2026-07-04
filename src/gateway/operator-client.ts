@@ -319,8 +319,11 @@ function requireIdempotencyKey(idempotencyKey: string): GatewayValidationError |
  * - any decoded segment equal to `.` or `..` (traversal after percent-decoding)
  *
  * Does NOT log the raw ID value — callers must use the error code only.
+ *
+ * Exported so other same-origin callers (e.g. the operator runtime's URL-hash
+ * restore path) can reuse the same validation without duplicating it.
  */
-function validateDynamicId(id: string): boolean {
+export function validateDynamicId(id: string): boolean {
   if (id.trim() === '') return false
   // Reject literal slash or backslash
   if (id.includes('/') || id.includes('\\')) return false

@@ -152,7 +152,11 @@ export async function fetchRunIndex(opts) {
   }
 
   if (!res.ok) {
-    return {kind: 'unavailable'}
+    // Auth signal: 401/403 means the session has expired or is absent. Surfaced
+    // separately (never as a distinct render path) so a caller can reclassify the
+    // shell state to auth-required instead of resurrecting a stale ready view.
+    const authFailure = res.status === 401 || res.status === 403
+    return {kind: 'unavailable', authFailure}
   }
 
   let body
@@ -229,6 +233,13 @@ export async function initOperatorRunIndex(opts) {
   const endpointBase = opts?.endpointBase ?? '/operator'
   const fixtureSessionId = opts?.fixtureSessionId
   const onSelectRun = opts?.onSelectRun
+  // Reload restore (cold-boot, not a click toggle) — see expandCardForRestore.
+  // restoreRunId is pre-sanitized by the runtime seam (length cap + validateDynamicId)
+  // before it ever reaches here.
+  const restoreRunId = opts?.restoreRunId
+  const onRestoreRun = opts?.onRestoreRun
+  const onRestoreMiss = opts?.onRestoreMiss
+  const onAuthRequired = opts?.onAuthRequired
 
   if (isRunIndexInitStale(myGeneration)) return
   if (typeof document === 'undefined') return
@@ -253,6 +264,13 @@ export async function initOperatorRunIndex(opts) {
   if (runIndexLoading !== null) runIndexLoading.hidden = true
 
   if (result.kind === 'unavailable') {
+    // The /operator/runs fetch itself is the auth re-classification point: a stale
+    // or expired session must not resurrect a restored ready view. Report it and
+    // skip any restore attempt entirely.
+    if (result.authFailure === true && typeof onAuthRequired === 'function') {
+      onAuthRequired()
+      return
+    }
     if (runIndexUnavailable !== null) runIndexUnavailable.hidden = false
     if (runIndexSection !== null) runIndexSection.dataset.state = 'unavailable'
     return
@@ -264,8 +282,9 @@ export async function initOperatorRunIndex(opts) {
   // or still-pending optimistic launch card) is correctly retained or resolved rather
   // than skipped by an early empty-state return.
   let remaining = 0
+  let views = []
   if (runIndexList !== null) {
-    const views = summaries.map(buildRunSafeView)
+    views = summaries.map(buildRunSafeView)
     diffRunIndexList(runIndexList, views, {onSelectRun, activeStreamRunId: _activeStreamRunId})
     remaining = runIndexList.children?.length ?? 0
   }
@@ -274,6 +293,9 @@ export async function initOperatorRunIndex(opts) {
     if (runIndexList !== null) runIndexList.hidden = true
     if (runIndexEmpty !== null) runIndexEmpty.hidden = false
     if (runIndexSection !== null) runIndexSection.dataset.state = 'empty'
+    if (restoreRunId !== undefined && restoreRunId !== null && typeof onRestoreMiss === 'function') {
+      onRestoreMiss()
+    }
     return
   }
 
@@ -283,6 +305,20 @@ export async function initOperatorRunIndex(opts) {
 
   if (runIndexSection !== null) {
     runIndexSection.dataset.state = 'loaded'
+  }
+
+  // Reload restore: only after the list has resolved and been diffed. Presence in
+  // the fetched view list is required — a runId that aged out of the cap or no
+  // longer exists is treated as a miss, never a perpetual attempt.
+  if (restoreRunId !== undefined && restoreRunId !== null) {
+    const matchedView = views.find(v => v.runId === restoreRunId)
+    if (matchedView !== undefined) {
+      expandCardForRestore(restoreRunId, (runId, card) => {
+        if (typeof onRestoreRun === 'function') onRestoreRun(runId, card, matchedView.status)
+      })
+    } else if (typeof onRestoreMiss === 'function') {
+      onRestoreMiss()
+    }
   }
 }
 
@@ -564,6 +600,42 @@ function toggleCardExpansion(card, runId, onSelectRun) {
   _expandedRunId = isExpanded ? null : runId
 
   onSelectRun(runId)
+}
+
+/**
+ * Expand a card as a cold-boot reload restore — NOT a toggle.
+ *
+ * toggleCardExpansion assumes a prior DOM click: re-selecting the already-expanded
+ * card collapses it. A hash-restore on mount has no such prior state to toggle
+ * against, so this is a distinct, idempotent "set expanded" entry point: it always
+ * expands (never collapses) the target card, and does so at most once per mount
+ * (initOperatorRunIndex only calls it after a resolved fetch confirms the runId is
+ * present). Mirrors toggleCardExpansion's single-open bookkeeping (collapsing any
+ * other expanded card first) without reusing its click-toggle branch.
+ *
+ * Safe-DOM only: toggles `hidden` and `dataset.expanded`, never innerHTML. Never
+ * writes to the notice/status DOM directly — that stays initOperatorStream's
+ * responsibility via the onExpand callback's stream-attach decision.
+ */
+function expandCardForRestore(runId, onExpand) {
+  if (typeof document === 'undefined') return
+  const card = document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
+  if (card === null || card === undefined) return
+  if (card.dataset.expanded === 'true') return // already expanded — nothing to do
+
+  if (_expandedRunId !== null && _expandedRunId !== runId) {
+    const prevCard = document.querySelector(`[data-run-id="${CSS.escape(_expandedRunId)}"]`)
+    if (prevCard !== null && prevCard !== undefined) {
+      prevCard.dataset.expanded = 'false'
+      setSubstructureHidden(prevCard, true)
+    }
+  }
+
+  card.dataset.expanded = 'true'
+  setSubstructureHidden(card, false)
+  _expandedRunId = runId
+
+  onExpand(runId, card)
 }
 
 /** Show/hide a card's four per-card substructure regions in one place. */

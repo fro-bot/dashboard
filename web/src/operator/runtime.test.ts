@@ -17,11 +17,18 @@
  * - Single-open accordion: expanding a run closes any other active stream; expanding
  *   the same run twice collapses it; the underlying stream handle's close() must
  *   preserve its statement-order teardown invariants.
+ * - Hash restore: the expanded run's id syncs to location.hash; a hash value over
+ *   512 chars is rejected before any validation runs and never reaches
+ *   encodeURIComponent; a malformed hash is treated as no-hash; a stale/expired
+ *   session on remount reclassifies to auth-required before any restore attempt.
  */
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {
+  classifyRunsAuthState,
   createOperatorRuntime,
+  MAX_HASH_ID_LENGTH,
+  sanitizeRunIdFromHash,
   type OperatorRuntimeHandle,
   type OperatorRuntimeOptions,
 } from './runtime.ts'
@@ -623,5 +630,289 @@ describe('initOperatorStream — close() teardown-ordering invariant (pin, do no
     expect(noticeElB.dataset.connectionState).not.toBe('reconnecting')
 
     handleB.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Hash restore: pure sanitization — length cap before validation
+// ---------------------------------------------------------------------------
+
+describe('sanitizeRunIdFromHash — length cap before validation (security)', () => {
+  it('rejects a hash value longer than 512 chars before any other check', () => {
+    const overCap = 'a'.repeat(513)
+    expect(sanitizeRunIdFromHash(overCap)).toBeNull()
+  })
+
+  it('accepts a hash value exactly at the 512-char cap when otherwise valid', () => {
+    const atCap = 'a'.repeat(512)
+    expect(sanitizeRunIdFromHash(atCap)).toBe(atCap)
+  })
+
+  it('does not call encodeURIComponent on an over-cap value', () => {
+    const spy = vi.spyOn(globalThis, 'encodeURIComponent')
+    const overCap = 'x'.repeat(1000)
+    sanitizeRunIdFromHash(overCap)
+    expect(spy).not.toHaveBeenCalled()
+    spy.mockRestore()
+  })
+
+  it('rejects malformed values via validateDynamicId (path separators)', () => {
+    expect(sanitizeRunIdFromHash('a/b')).toBeNull()
+    expect(sanitizeRunIdFromHash('a\\b')).toBeNull()
+    expect(sanitizeRunIdFromHash('a%2Fb')).toBeNull()
+    expect(sanitizeRunIdFromHash('a%5Cb')).toBeNull()
+    expect(sanitizeRunIdFromHash('.')).toBeNull()
+    expect(sanitizeRunIdFromHash('..')).toBeNull()
+  })
+
+  it('rejects blank/empty values', () => {
+    expect(sanitizeRunIdFromHash('')).toBeNull()
+    expect(sanitizeRunIdFromHash('   ')).toBeNull()
+  })
+
+  it('accepts a well-formed opaque runId', () => {
+    expect(sanitizeRunIdFromHash('c1a2b3c4-d5e6-f7a8-b9c0-d1e2f3a4b5c6')).toBe('c1a2b3c4-d5e6-f7a8-b9c0-d1e2f3a4b5c6')
+  })
+
+  it('MAX_HASH_ID_LENGTH matches the summary parser cap (512)', () => {
+    expect(MAX_HASH_ID_LENGTH).toBe(512)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Hash restore: auth reclassification helper
+// ---------------------------------------------------------------------------
+
+describe('classifyRunsAuthState — /operator/runs fetch reclassifies auth before restore', () => {
+  it('classifies a 401 response as auth-required', () => {
+    expect(classifyRunsAuthState({ok: false, status: 401} as Response)).toBe('auth-required')
+  })
+
+  it('classifies a 403 response as auth-required', () => {
+    expect(classifyRunsAuthState({ok: false, status: 403} as Response)).toBe('auth-required')
+  })
+
+  it('classifies a redirected response as auth-required', () => {
+    expect(classifyRunsAuthState({ok: false, status: 302, redirected: true} as Response)).toBe('auth-required')
+  })
+
+  it('returns null for a healthy 200 response (no reclassification needed)', () => {
+    expect(classifyRunsAuthState({ok: true, status: 200} as Response)).toBeNull()
+  })
+
+  it('returns null for an unrelated failure (e.g. 500) — not an auth signal', () => {
+    expect(classifyRunsAuthState({ok: false, status: 500} as Response)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Hash restore: end-to-end via the loader harness (module-integration level)
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Hash restore: reload-restore integration — terminal render + stale-auth remount
+// ---------------------------------------------------------------------------
+
+describe('URL-hash restore — reload-restore integration', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+    window.location.hash = ''
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  async function buildHarness() {
+    const streamMod = await import('../../../public/operator-stream.js')
+    const runIndexMod = await import('../../../public/operator-run-index.js')
+    return {streamMod, runIndexMod}
+  }
+
+  /** Build a fake SSE ReadableStream body that emits the given text chunks, then closes. */
+  function makeSseStream(chunks: string[]): ReadableStream<Uint8Array> {
+    const encoder = new TextEncoder()
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
+        controller.close()
+      },
+    })
+  }
+
+  function makeSseResponse(chunks: string[]): Response {
+    return {
+      ok: true,
+      status: 200,
+      headers: {get: (h: string) => (h === 'content-type' ? 'text/event-stream' : null)},
+      body: makeSseStream(chunks),
+    } as unknown as Response
+  }
+
+  it('terminal restore renders read-only with no reconnect loop, distinct from a non-terminal restore', async () => {
+    window.location.hash = '#run-terminal-1'
+    const {streamMod, runIndexMod} = await buildHarness()
+    runIndexMod.resetRunIndexState()
+    streamMod.resetBootstrapState?.()
+
+    document.body.innerHTML = `
+      <div data-role="run-index-list"></div>
+      <div data-role="stream-status" hidden></div>
+    `
+
+    let streamFetchCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === 'string' && url.includes('/runs/')) {
+        streamFetchCalls += 1
+        // Ready frame, then a terminal status frame, then the stream ends.
+        return Promise.resolve(makeSseResponse([
+          'event: ready\ndata: {"contractVersion":"1.5.0"}\n\n',
+          'event: status\ndata: {"runId":"run-terminal-1","status":"succeeded","phase":"done"}\n\n',
+        ]))
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          runs: [{runId: 'run-terminal-1', repo: 'org/repo', status: 'succeeded', createdAt: '2026-01-01T00:00:00.000Z'}],
+        }),
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    let restoredStatus: string | null = null
+    let streamHandle: {close(): void} | undefined
+    const onRestoreRun = (runId: string, card: Element, status: string) => {
+      restoredStatus = status
+      const statusEl = card.querySelector('[data-role="run-status"]')
+      const noticeEl = document.querySelector('[data-role="stream-status"]')
+      streamHandle = streamMod.initOperatorStream({runId, statusEl, noticeEl})
+    }
+
+    await runIndexMod.initOperatorRunIndex({
+      restoreRunId: 'run-terminal-1',
+      onRestoreRun,
+    })
+
+    const card = document.querySelector('[data-run-id="run-terminal-1"]') as HTMLElement
+    expect(card).not.toBeNull()
+    // Card expands on restore.
+    expect(card.dataset.expanded).toBe('true')
+    expect(restoredStatus).toBe('succeeded')
+
+    // Let the SSE body flush and the reducer settle.
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    const noticeEl = document.querySelector('[data-role="stream-status"]') as HTMLElement
+    // The terminal status frame closes the connection — never 'reconnecting'.
+    expect(noticeEl.dataset.connectionState).not.toBe('reconnecting')
+    expect(['live', 'closed']).toContain(noticeEl.dataset.connectionState)
+    // Exactly one stream connection was opened — no reconnect attempt fired.
+    expect(streamFetchCalls).toBe(1)
+
+    // Give any (incorrect, if present) reconnect timer a chance to fire and prove
+    // it does not — this is what distinguishes terminal restore from non-terminal.
+    await new Promise(resolve => setTimeout(resolve, 1100))
+    expect(streamFetchCalls).toBe(1)
+
+    streamHandle?.close()
+  })
+
+  it('stale-auth remount lands in auth-required, not ready — no run expanded from a stale hash', async () => {
+    window.location.hash = '#run-stale-1'
+    const {runIndexMod} = await buildHarness()
+    runIndexMod.resetRunIndexState()
+
+    document.body.innerHTML = `
+      <div data-role="run-index-list"></div>
+      <div data-role="run-index-unavailable" hidden></div>
+    `
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: async () => ({}),
+    }))
+
+    const onAuthRequired = vi.fn()
+    const onRestoreRun = vi.fn()
+    const onRestoreMiss = vi.fn()
+
+    await runIndexMod.initOperatorRunIndex({
+      restoreRunId: 'run-stale-1',
+      onAuthRequired,
+      onRestoreRun,
+      onRestoreMiss,
+    })
+
+    expect(onAuthRequired).toHaveBeenCalledTimes(1)
+    // No restore path is taken at all on an auth failure — not even a "miss".
+    expect(onRestoreRun).not.toHaveBeenCalled()
+    expect(onRestoreMiss).not.toHaveBeenCalled()
+    // No card was ever rendered/expanded from the stale hash's run list.
+    expect(document.querySelector('[data-run-id="run-stale-1"]')).toBeNull()
+  })
+})
+
+describe('URL-hash restore — expand sets hash, remount restores', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+    window.location.hash = ''
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  async function buildHarness() {
+    const streamMod = await import('../../../public/operator-stream.js')
+    const runIndexMod = await import('../../../public/operator-run-index.js')
+    return {streamMod, runIndexMod}
+  }
+
+  it('happy path: expanding a run sets location.hash to the runId', async () => {
+    const {runIndexMod} = await buildHarness()
+    runIndexMod.resetRunIndexState()
+
+    document.body.innerHTML = `
+      <div data-role="run-index-list"></div>
+    `
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({runs: [{runId: 'run-hash-1', repo: 'org/repo', status: 'running', createdAt: '2026-01-01T00:00:00.000Z'}]}),
+    }))
+
+    const onSelectRun = (runId: string) => {
+      window.location.hash = `#${runId}`
+    }
+    await runIndexMod.initOperatorRunIndex({onSelectRun})
+
+    const card = document.querySelector('[data-run-id="run-hash-1"]') as HTMLElement
+    expect(card).not.toBeNull()
+    card.click()
+
+    expect(window.location.hash).toBe('#run-hash-1')
+  })
+
+  it('collapse clears location.hash', async () => {
+    const {runIndexMod} = await buildHarness()
+    runIndexMod.resetRunIndexState()
+
+    document.body.innerHTML = `<div data-role="run-index-list"></div>`
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({runs: [{runId: 'run-hash-2', repo: 'org/repo', status: 'running', createdAt: '2026-01-01T00:00:00.000Z'}]}),
+    }))
+
+    let expanded = false
+    const onSelectRun = (runId: string) => {
+      expanded = !expanded
+      window.location.hash = expanded ? `#${runId}` : ''
+    }
+    await runIndexMod.initOperatorRunIndex({onSelectRun})
+
+    const card = document.querySelector('[data-run-id="run-hash-2"]') as HTMLElement
+    card.click()
+    expect(window.location.hash).toBe('#run-hash-2')
+    card.click()
+    expect(window.location.hash).toBe('')
   })
 })

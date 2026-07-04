@@ -18,9 +18,50 @@
  * - Repo-list failures use the canonical operator state classifier — never renders
  *   "No repositories available" for auth/rate-limit/network/protocol failures.
  * - All Gateway data flows through safe text paths only.
+ * - Reload restore reads location.hash only to (a) check list-container membership
+ *   and (b) build a fetch URL via encodeURIComponent; it never reaches textContent,
+ *   innerHTML, a logger, or any DOM attribute other than data-run-id (setAttribute).
+ *   A hash value over MAX_HASH_ID_LENGTH is rejected before any further processing.
  */
 
+import {validateDynamicId} from '../../../src/gateway/operator-client.ts'
 import type {OperatorState} from './state.ts'
+
+/**
+ * Hard cap on a location.hash-sourced runId, matching the run-summary parser's
+ * MAX_ID_LENGTH (public/operator-run-index.js). location.hash is reachable via a
+ * crafted/shared link, so this cap is enforced BEFORE validateDynamicId or any
+ * decode/encode call — a megabyte-long hash must not reach those paths.
+ */
+export const MAX_HASH_ID_LENGTH = 512
+
+/**
+ * Sanitize a raw location.hash fragment (with or without the leading '#') into a
+ * safe runId, or null if it is absent/oversized/malformed.
+ *
+ * Order matters: the length cap runs first, before validateDynamicId (which itself
+ * calls decodeURIComponent). Never call encodeURIComponent/decodeURIComponent on a
+ * value that hasn't passed the length cap.
+ */
+export function sanitizeRunIdFromHash(rawHash: string): string | null {
+  const candidate = rawHash.startsWith('#') ? rawHash.slice(1) : rawHash
+  if (candidate.length === 0 || candidate.length > MAX_HASH_ID_LENGTH) return null
+  if (!validateDynamicId(candidate)) return null
+  return candidate
+}
+
+/**
+ * Classify a `/operator/runs` fetch Response into 'auth-required' when it signals
+ * expired/absent auth (401, 403, or a followed redirect), or null when the response
+ * is not an auth signal (healthy or an unrelated failure). Used so a hash-restore
+ * reload re-runs the normal auth classification instead of assuming a stale 'ready'
+ * view — a stale-auth reload must land in the canonical failure state.
+ */
+export function classifyRunsAuthState(response: Pick<Response, 'ok' | 'status' | 'redirected'>): OperatorState | null {
+  if (response.redirected) return 'auth-required'
+  if (!response.ok && (response.status === 401 || response.status === 403)) return 'auth-required'
+  return null
+}
 
 export interface RepoListError {
   readonly kind: 'http' | 'network' | 'protocol'
@@ -138,6 +179,31 @@ let _activeStreamHandle: {close(): void} | null = null
 // already-expanded run again" (collapse) — the single-open accordion's decision point.
 let _activeStreamRunId: string | null = null
 
+/**
+ * Write the expanded runId to location.hash. runId is used ONLY for setting the
+ * hash fragment here — never interpolated into HTML, textContent, or a logger.
+ */
+function _writeRunHash(runId: string): void {
+  if (typeof location === 'undefined') return
+  try {
+    location.hash = runId
+  } catch {
+    // ignore — hash write failures are non-fatal (e.g. unsupported environment)
+  }
+}
+
+/** Clear location.hash on collapse or restore-miss. */
+function _clearRunHash(): void {
+  if (typeof location === 'undefined') return
+  try {
+    if (location.hash !== '') {
+      history.replaceState(null, '', location.pathname + location.search)
+    }
+  } catch {
+    // ignore
+  }
+}
+
 function _closeActiveStream(): void {
   if (_activeStreamHandle !== null) {
     try {
@@ -156,6 +222,7 @@ async function defaultRuntimeLoader(opts?: {
   getScenario?: () => string
   onSelectRun?: (runId: string) => void
   onRunLaunched?: (runId: string, card: HTMLElement) => void
+  onStateChange?: (state: OperatorState) => void
 }): Promise<() => void> {
   const streamMod = await import(/* @vite-ignore */ _streamSpecifier) as {
     bootstrapOperatorStreams?: (opts?: {endpointBase?: string; fixtureSessionId?: string}) => void
@@ -173,7 +240,15 @@ async function defaultRuntimeLoader(opts?: {
   }
 
   const runIndexMod = await import(/* @vite-ignore */ _runIndexSpecifier) as {
-    initOperatorRunIndex?: (opts?: {endpointBase?: string; fixtureSessionId?: string; onSelectRun?: (runId: string) => void}) => Promise<void>
+    initOperatorRunIndex?: (opts?: {
+      endpointBase?: string
+      fixtureSessionId?: string
+      onSelectRun?: (runId: string) => void
+      restoreRunId?: string
+      onRestoreRun?: (runId: string, card: Element, status: string) => void
+      onRestoreMiss?: () => void
+      onAuthRequired?: () => void
+    }) => Promise<void>
     resetRunIndexState?: () => void
     markRunStreamAttached?: (runId: string) => void
   }
@@ -224,6 +299,7 @@ async function defaultRuntimeLoader(opts?: {
   const onSelectRun = (runId: string) => {
     if (_activeStreamRunId === runId) {
       _closeActiveStream()
+      _clearRunHash()
       return
     }
     // Find the card element for this runId to get its statusEl and noticeEl.
@@ -235,6 +311,45 @@ async function defaultRuntimeLoader(opts?: {
       ? document.querySelector('[data-role="stream-status"]')
       : null
     _attachStream(runId, statusEl, noticeEl)
+    _writeRunHash(runId)
+  }
+
+  // Reload restore: a hash-restored run is expanded via a distinct, non-toggle DOM
+  // entry point (expandCardForRestore in operator-run-index.js), never onSelectRun —
+  // onSelectRun's toggle semantics assume a prior click (re-select = collapse), which
+  // a cold-boot restore is not.
+  //
+  // Terminal vs. non-terminal restores attach the stream the same way on purpose:
+  // the "no reconnect for a terminal run" guarantee already lives in
+  // initOperatorStream's own state machine (nextStreamState transitions to
+  // connection: 'closed' with shouldReconnect: false once a terminal status frame
+  // arrives, and the reader loop stops re-invoking itself once closed) — not in this
+  // seam. A restored terminal run still opens one connection to receive the
+  // replay/final frame, then closes without ever scheduling a reconnect. There is
+  // nothing terminal-specific for this callback to special-case, so TERMINAL_RUN_STATUSES
+  // is retained only for tests/documentation of that contract, not a branch here.
+  const onRestoreRun = (runId: string, card: Element, _status: string) => {
+    const statusEl = card.querySelector('[data-role="run-status"]') ?? null
+    const noticeEl = typeof document !== 'undefined'
+      ? document.querySelector('[data-role="stream-status"]')
+      : null
+    _attachStream(runId, statusEl, noticeEl)
+  }
+
+  const onRestoreMiss = () => {
+    _clearRunHash()
+    const noticeEl = typeof document !== 'undefined'
+      ? document.querySelector('[data-role="stream-status"]')
+      : null
+    if (noticeEl instanceof HTMLElement) {
+      // Fixed copy — no runId echoed.
+      noticeEl.textContent = 'The selected run is no longer in recent history.'
+      noticeEl.hidden = false
+    }
+  }
+
+  const onAuthRequired = () => {
+    opts?.onStateChange?.('auth-required')
   }
 
   const onRunLaunched = (runId: string, card: HTMLElement) => {
@@ -243,15 +358,23 @@ async function defaultRuntimeLoader(opts?: {
       ? document.querySelector('[data-role="stream-status"]')
       : null
     _attachStream(runId, statusEl, noticeEl)
+    _writeRunHash(runId)
   }
 
   if (typeof runIndexMod.resetRunIndexState === 'function') {
     runIndexMod.resetRunIndexState()
   }
   if (typeof runIndexMod.initOperatorRunIndex === 'function') {
+    // Read the hash AFTER /operator/runs resolves (initOperatorRunIndex awaits the
+    // fetch internally before consulting restoreRunId), so restore never races the
+    // list load. The raw hash is sanitized here — length cap before validateDynamicId —
+    // before it crosses into the run-index module at all.
+    const restoreRunId = typeof location !== 'undefined'
+      ? sanitizeRunIdFromHash(location.hash) ?? undefined
+      : undefined
     const runIndexOpts = opts?.endpointBase !== undefined
-      ? {endpointBase: opts.endpointBase, fixtureSessionId: opts.fixtureSessionId, onSelectRun}
-      : {onSelectRun}
+      ? {endpointBase: opts.endpointBase, fixtureSessionId: opts.fixtureSessionId, onSelectRun, restoreRunId, onRestoreRun, onRestoreMiss, onAuthRequired}
+      : {onSelectRun, restoreRunId, onRestoreRun, onRestoreMiss, onAuthRequired}
     await runIndexMod.initOperatorRunIndex(runIndexOpts)
   }
 
@@ -319,7 +442,13 @@ export function createOperatorRuntime(opts: OperatorRuntimeOptions): OperatorRun
     },
   }
 
-  const loader = _runtimeLoader ?? defaultRuntimeLoader
+  // onStateChange is bound onto the default loader only (via a thin wrapper), never
+  // added to loaderOpts — existing tests assert loaderOpts is `undefined` when
+  // fixtureMode is off, and an injectable test _runtimeLoader shouldn't gain an
+  // unrequested field. The default loader needs it independent of fixture mode so
+  // a stale-auth reload (auth re-classification on the /operator/runs restore fetch)
+  // can report auth-required back to the shell.
+  const loader = _runtimeLoader ?? ((loaderOpts?: Parameters<typeof defaultRuntimeLoader>[0]) => defaultRuntimeLoader({...loaderOpts, onStateChange}))
 
   // Build loader options: only pass fixture context in fixture mode (dev builds only).
   // Production bundles must not contain fixture route strings.
