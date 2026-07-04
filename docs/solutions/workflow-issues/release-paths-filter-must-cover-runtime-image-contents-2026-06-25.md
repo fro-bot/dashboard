@@ -81,4 +81,5 @@ The bug: a push touching only `public/operator-stream.js` was filtered out by th
 ## Related
 
 - `docs/solutions/workflow-issues/unit-green-is-not-feature-done-verify-the-assembled-surface-2026-06-23.md` — the sibling "green ≠ shipped" lesson at the rendered-surface level.
+- `docs/solutions/build-errors/web-bundle-server-import-boundary-2026-07-04.md` — sibling "local green ≠ image build" failure, where a web→src import broke the Docker release build.
 - PR #103 (this fix), PR #97 (the prior Dockerfile/pnpm-workspace release-build gap — the first of the release-config-vs-image pair).
