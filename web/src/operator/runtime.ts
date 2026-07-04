@@ -50,19 +50,6 @@ export function sanitizeRunIdFromHash(rawHash: string): string | null {
   return candidate
 }
 
-/**
- * Classify a `/operator/runs` fetch Response into 'auth-required' when it signals
- * expired/absent auth (401, 403, or a followed redirect), or null when the response
- * is not an auth signal (healthy or an unrelated failure). Used so a hash-restore
- * reload re-runs the normal auth classification instead of assuming a stale 'ready'
- * view — a stale-auth reload must land in the canonical failure state.
- */
-export function classifyRunsAuthState(response: Pick<Response, 'ok' | 'status' | 'redirected'>): OperatorState | null {
-  if (response.redirected) return 'auth-required'
-  if (!response.ok && (response.status === 401 || response.status === 403)) return 'auth-required'
-  return null
-}
-
 export interface RepoListError {
   readonly kind: 'http' | 'network' | 'protocol'
   readonly status?: number
@@ -213,6 +200,13 @@ function _closeActiveStream(): void {
     }
     _activeStreamHandle = null
   }
+  // Clear the stale-eviction-protection marker on the previously-active card so a
+  // collapsed card doesn't keep looking stream-attached until some future
+  // markRunStreamAttached call happens to overwrite it (or never does).
+  if (_activeStreamRunId !== null && typeof document !== 'undefined') {
+    const card = document.querySelector(`[data-run-id="${CSS.escape(_activeStreamRunId)}"]`)
+    if (card !== null) delete (card as HTMLElement).dataset.streamAttached
+  }
   _activeStreamRunId = null
 }
 
@@ -251,6 +245,7 @@ async function defaultRuntimeLoader(opts?: {
     }) => Promise<void>
     resetRunIndexState?: () => void
     markRunStreamAttached?: (runId: string) => void
+    markCardExpandedForLaunch?: (runId: string) => void
   }
 
   const launchMod = await import(/* @vite-ignore */ _launchSpecifier) as {
@@ -359,16 +354,26 @@ async function defaultRuntimeLoader(opts?: {
       : null
     _attachStream(runId, statusEl, noticeEl)
     _writeRunHash(runId)
+    // A launched run's card must present as already-expanded/observed the moment
+    // its stream attaches — otherwise the operator's first click on it is
+    // misread by onSelectRun as "collapse the active stream" instead of "expand."
+    if (typeof runIndexMod.markCardExpandedForLaunch === 'function') {
+      runIndexMod.markCardExpandedForLaunch(runId)
+    }
   }
 
   if (typeof runIndexMod.resetRunIndexState === 'function') {
     runIndexMod.resetRunIndexState()
   }
   if (typeof runIndexMod.initOperatorRunIndex === 'function') {
-    // Read the hash AFTER /operator/runs resolves (initOperatorRunIndex awaits the
-    // fetch internally before consulting restoreRunId), so restore never races the
-    // list load. The raw hash is sanitized here — length cap before validateDynamicId —
-    // before it crosses into the run-index module at all.
+    // The hash is actually read HERE, synchronously, before initOperatorRunIndex is
+    // called — it is only consulted (as restoreRunId) after that function's internal
+    // /operator/runs fetch resolves. So a user click that attaches a stream during
+    // the await window can race this pre-captured value; the run-index module
+    // guards against that by checking for an already-attached stream for a
+    // different run before honoring the restore (see initOperatorRunIndex). The
+    // raw hash is sanitized here — length cap before validateDynamicId — before it
+    // crosses into the run-index module at all.
     const restoreRunId = typeof location !== 'undefined'
       ? sanitizeRunIdFromHash(location.hash) ?? undefined
       : undefined

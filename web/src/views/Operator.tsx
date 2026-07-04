@@ -78,13 +78,20 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
   const drawerRef = useRef<HTMLDivElement>(null)
   const formRef = useRef<HTMLFormElement>(null)
 
+  // Single source of truth for closing the drawer and returning focus to the
+  // trigger button — used by the close button, the backdrop, and Escape alike
+  // so the three affordances can't drift out of sync.
+  const closeDrawer = () => {
+    setIsLaunchOpen(false)
+    triggerBtnRef.current?.focus()
+  }
+
   // Escape to close drawer
   useEffect(() => {
     if (!isLaunchOpen) return
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        setIsLaunchOpen(false)
-        triggerBtnRef.current?.focus()
+        closeDrawer()
       }
     }
     window.addEventListener('keydown', handleKeyDown)
@@ -138,8 +145,17 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
     const form = formRef.current
     if (!form) return
     const handleSuccess = () => {
+      // Capture focus-eligibility BEFORE the drawer closes and steals focus itself —
+      // otherwise activeElement would always read as something inside the (about
+      // to be hidden) drawer by the time the timeout fires.
+      const submitBtn = form.querySelector('[type="submit"]')
+      const focusWasOnLaunchAffordance =
+        document.activeElement === submitBtn || document.activeElement === triggerBtnRef.current
       setIsLaunchOpen(false)
       setTimeout(() => {
+        // Focus-steal guard: only move focus to the new card if the operator
+        // hasn't already moved on to something else since submitting.
+        if (!focusWasOnLaunchAffordance) return
         const topCard = document.querySelector('[data-role="run-index-list"] [data-testid="run-card"]') as HTMLElement | null
         if (topCard) {
           topCard.focus()
@@ -307,10 +323,7 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
             {/* Backdrop */}
             <div
               className="operator-drawer-backdrop"
-              onClick={() => {
-                setIsLaunchOpen(false)
-                triggerBtnRef.current?.focus()
-              }}
+              onClick={closeDrawer}
             />
 
             {/* Panel */}
@@ -328,10 +341,7 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
                   type="button"
                   data-testid="close-drawer-btn"
                   className="operator-drawer-close"
-                  onClick={() => {
-                    setIsLaunchOpen(false)
-                    triggerBtnRef.current?.focus()
-                  }}
+                  onClick={closeDrawer}
                   aria-label="Close launch panel"
                 >
                   ✕

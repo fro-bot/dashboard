@@ -5272,6 +5272,93 @@ describe('initOperatorStream — late-frame guard: closed stream does not mutate
     // statusEl should not have been updated to a stream-derived label after close
     expect(statusEl.textContent).toBe(statusBefore)
   })
+
+  it('after close(), a late buffered frame writes to no DOM target at all (output/coalesced/approvals/badge/notice/status)', async () => {
+    // A single early `aborted` guard at the top of updateDOM must cover every
+    // write block, not just noticeEl/statusEl — this pins that regression.
+    const noticeEl = {textContent: '', hidden: false, dataset: {connectionState: ''}}
+    const statusEl = {textContent: 'Pending', className: '', classList: {add: () => {}}, dataset: {}, hidden: false}
+    const outputEl = {textContent: '', hidden: true}
+    const coalescedEl = {hidden: true}
+    const approvalsEl = {hidden: true, append: () => {}}
+    const badgeEl = {textContent: '', hidden: true}
+
+    const encoder = new TextEncoder()
+    const readyFrame = 'event: ready\ndata: {"contractVersion":"1.5.0"}\n\n'
+    const outputFrame = `event: output\ndata: ${JSON.stringify({runId: 'run-late-frame', text: 'late output', final: false, seq: 0})}\n\n`
+    const approvalFrame = `event: approval\ndata: ${JSON.stringify({runId: 'run-late-frame', requestID: 'req-late', permission: 'shell', settled: false})}\n\n`
+
+    let readCount = 0
+    // Only the ready frame is delivered before close(); output+approval frames
+    // arrive in a SECOND chunk that resolves only after close() has run.
+    let resolveSecondChunk: ((value: {done: boolean; value?: Uint8Array}) => void) | undefined
+    const secondChunkPromise = new Promise<{done: boolean; value?: Uint8Array}>(resolve => {
+      resolveSecondChunk = resolve
+    })
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (readCount === 0) {
+              readCount++
+              return {done: false, value: encoder.encode(readyFrame)}
+            }
+            if (readCount === 1) {
+              readCount++
+              return secondChunkPromise
+            }
+            return {done: true}
+          },
+        }),
+      },
+    }))
+
+    const handle = initOperatorStream({
+      runId: 'run-late-frame',
+      statusEl,
+      noticeEl,
+      outputEl,
+      coalescedEl,
+      approvalsEl,
+      badgeEl,
+      endpointBase: '/operator',
+    })
+
+    // Let the ready frame process.
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    // Snapshot all targets right after ready (before close, before the late frame).
+    const snapshot = {
+      noticeText: noticeEl.textContent,
+      statusText: statusEl.textContent,
+      outputText: outputEl.textContent,
+      outputHidden: outputEl.hidden,
+      coalescedHidden: coalescedEl.hidden,
+      approvalsHidden: approvalsEl.hidden,
+      badgeText: badgeEl.textContent,
+      badgeHidden: badgeEl.hidden,
+    }
+
+    handle.close()
+
+    // Now deliver the buffered output+approval frame — after close(), this must
+    // not reach any DOM target.
+    resolveSecondChunk?.({done: false, value: encoder.encode(outputFrame + approvalFrame)})
+    await new Promise(resolve => setTimeout(resolve, 30))
+
+    expect(noticeEl.textContent).toBe(snapshot.noticeText)
+    expect(statusEl.textContent).toBe(snapshot.statusText)
+    expect(outputEl.textContent).toBe(snapshot.outputText)
+    expect(outputEl.hidden).toBe(snapshot.outputHidden)
+    expect(coalescedEl.hidden).toBe(snapshot.coalescedHidden)
+    expect(approvalsEl.hidden).toBe(snapshot.approvalsHidden)
+    expect(badgeEl.textContent).toBe(snapshot.badgeText)
+    expect(badgeEl.hidden).toBe(snapshot.badgeHidden)
+  })
 })
 
 describe('initOperatorStream — terminal run: immediate close preserves terminal state', () => {

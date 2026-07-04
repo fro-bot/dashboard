@@ -10,6 +10,7 @@ import {
   fetchRunIndex,
   formatRelativeTime,
   initOperatorRunIndex,
+  markCardExpandedForLaunch,
   markRunStreamAttached,
   parseRunSummaryItem,
   parseRunSummaryList,
@@ -1602,6 +1603,209 @@ describe('renderRunCard — expand/collapse toggles data-expanded and substructu
 
     expect(card.dataset.expanded).toBe('true')
     expect(onSelectRun).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// markCardExpandedForLaunch — launch handoff presents as already-expanded
+// ---------------------------------------------------------------------------
+
+describe('markCardExpandedForLaunch — launch handoff marks a card expanded (not a toggle)', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('marks a launch-created card expanded and reveals its substructure, and the FIRST subsequent click collapses it (not a silent double-close)', async () => {
+    const onSelectRun = vi.fn()
+    const runId = 'run-launch-expand-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+    const card = cards[0]
+
+    // Card starts collapsed after the fetch/render (no click has happened yet).
+    expect(card.dataset.expanded).toBeUndefined()
+    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+      expect(card.querySelector(`[data-role="${role}"]`).hidden).toBe(true)
+    }
+
+    // Simulate the launch handoff: the runtime seam attaches the stream and
+    // calls markCardExpandedForLaunch — mirroring onRunLaunched in runtime.ts.
+    markCardExpandedForLaunch(runId)
+
+    expect(card.dataset.expanded).toBe('true')
+    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+      expect(card.querySelector(`[data-role="${role}"]`).hidden).toBe(false)
+    }
+    // markCardExpandedForLaunch itself never calls onSelectRun — it's not a click.
+    expect(onSelectRun).not.toHaveBeenCalled()
+
+    // The operator's FIRST click on the now-already-expanded card must collapse
+    // it (matching toggleCardExpansion's isExpanded branch) — not be misread as
+    // an "expand" that races the runtime seam's onSelectRun into closing twice.
+    card.dispatchEvent({type: 'click'})
+
+    expect(card.dataset.expanded).toBe('false')
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
+    expect(onSelectRun).toHaveBeenCalledWith(runId)
+    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+      expect(card.querySelector(`[data-role="${role}"]`).hidden).toBe(true)
+    }
+  })
+
+  it('is idempotent — calling it twice on an already-expanded card is a no-op', async () => {
+    const runId = 'run-launch-expand-002'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    const card = cards[0]
+
+    markCardExpandedForLaunch(runId)
+    expect(card.dataset.expanded).toBe('true')
+    expect(() => markCardExpandedForLaunch(runId)).not.toThrow()
+    expect(card.dataset.expanded).toBe('true')
+  })
+
+  it('collapses any other already-expanded card first (single-open accordion)', async () => {
+    const runIdA = 'run-launch-accordion-a'
+    const runIdB = 'run-launch-accordion-b'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({runs: [makeValidSummary({runId: runIdA}), makeValidSummary({runId: runIdB})]}),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    const [cardA, cardB] = cards
+
+    cardA.dispatchEvent({type: 'click'})
+    expect(cardA.dataset.expanded).toBe('true')
+
+    markCardExpandedForLaunch(runIdB)
+
+    expect(cardA.dataset.expanded).toBe('false')
+    expect(cardB.dataset.expanded).toBe('true')
+  })
+
+  it('does nothing when the card is not found', () => {
+    resetRunIndexState()
+    vi.stubGlobal('document', {querySelector: () => null})
+    vi.stubGlobal('CSS', {escape: s => s})
+    expect(() => markCardExpandedForLaunch('run-does-not-exist')).not.toThrow()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Reload-restore must not stomp a user click that happened during the fetch
+// ---------------------------------------------------------------------------
+
+describe('initOperatorRunIndex — reload-restore does not override an in-flight user selection', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('a card click (stream attach) during the delayed /operator/runs fetch wins — restore is skipped, the user selection stays open', async () => {
+    const restoreRunId = 'run-restore-target'
+    const userSelectedRunId = 'run-user-selected'
+
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    // First, an initial (fast) fetch renders both runs so real card stubs exist
+    // in the DOM before the restore-triggering init runs — mirroring how a run
+    // the user can click is already present in the list.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({runs: [makeValidSummary({runId: restoreRunId}), makeValidSummary({runId: userSelectedRunId})]}),
+    }))
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    resetRunIndexState() // simulate remount — cards stay in the DOM stub, only module state resets
+
+    // Now the reload-restore init runs with a delayed fetch.
+    let resolveFetch
+    const delayedFetch = new Promise(resolve => {
+      resolveFetch = resolve
+    })
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => delayedFetch))
+
+    const onRestoreRun = vi.fn()
+    const onRestoreMiss = vi.fn()
+    const initPromise = initOperatorRunIndex({
+      endpointBase: '/operator',
+      restoreRunId,
+      onRestoreRun,
+      onRestoreMiss,
+    })
+
+    // Simulate a user click DURING the fetch await window: the runtime seam
+    // attaches a stream for a DIFFERENT run via markRunStreamAttached (the
+    // exact seam call onSelectRun/onRunLaunched make after _attachStream
+    // succeeds) before the delayed fetch resolves.
+    markRunStreamAttached(userSelectedRunId)
+
+    resolveFetch({
+      ok: true,
+      status: 200,
+      json: async () => ({runs: [makeValidSummary({runId: restoreRunId}), makeValidSummary({runId: userSelectedRunId})]}),
+    })
+
+    await initPromise
+
+    // The restore-target card must NOT have been force-expanded, and neither
+    // restore callback fired — the user's in-flight selection wins outright.
+    const restoreCard = cards.find(c => c.dataset.runId === restoreRunId)
+    expect(restoreCard?.dataset.expanded).not.toBe('true')
+    expect(onRestoreRun).not.toHaveBeenCalled()
+    expect(onRestoreMiss).not.toHaveBeenCalled()
+
+    // The user's card is still marked stream-attached — restore did not clear it.
+    const userCard = cards.find(c => c.dataset.runId === userSelectedRunId)
+    expect(userCard?.dataset.streamAttached).toBe('true')
+  })
+
+  it('with no competing user selection, restore proceeds normally after the fetch resolves', async () => {
+    const restoreRunId = 'run-restore-normal'
+    const onRestoreRun = vi.fn()
+
+    let resolveFetch
+    const delayedFetch = new Promise(resolve => {
+      resolveFetch = resolve
+    })
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => delayedFetch))
+
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    const initPromise = initOperatorRunIndex({
+      endpointBase: '/operator',
+      restoreRunId,
+      onRestoreRun,
+    })
+
+    resolveFetch({
+      ok: true,
+      status: 200,
+      json: async () => ({runs: [makeValidSummary({runId: restoreRunId})]}),
+    })
+
+    await initPromise
+
+    const restoreCard = cards.find(c => c.dataset.runId === restoreRunId)
+    expect(restoreCard?.dataset.expanded).toBe('true')
+    expect(onRestoreRun).toHaveBeenCalledTimes(1)
   })
 })
 

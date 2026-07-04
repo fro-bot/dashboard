@@ -342,8 +342,18 @@ let _launchListenerGeneration = -1
 let _launchStreamHandle = null
 // Idempotency flag: prevents double-init when auto-start fires before DOMContentLoaded.
 let _launchInitialized = false
-// In-flight submit mutex: persists across unmount/remount to prevent double-submit.
+// In-flight submit mutex: persists across unmount/remount to prevent double-submit
+// WITHIN the same mount. Guarded by generation (see _launching/_launchingGeneration
+// below) so a submit that never reaches its `finally` (e.g. React tears the
+// component down mid-submit) cannot permanently wedge every future mount.
 let _launching = false
+// The generation that owns the current _launching=true lock, or null when no
+// submit is in flight. resetLaunchState() bumps _launchGeneration on every
+// unmount/remount; a stale lock whose generation no longer matches the current
+// generation is no longer honored, so a fresh mount is never blocked by a
+// torn-down mount's abandoned in-flight submit. A live submit within the SAME
+// mount still blocks a double-fire, because its generation still matches.
+let _launchingGeneration = null
 
 /**
  * Returns true if the given init is no longer the active init.
@@ -542,9 +552,13 @@ export async function initOperatorLaunch(opts) {
     launchForm.addEventListener('submit', async event => {
       event.preventDefault()
 
-      // Mutex guard — re-entry is impossible regardless of how submit is triggered
-      if (_launching) return
+      // Mutex guard — re-entry is impossible regardless of how submit is triggered,
+      // but only within the SAME mount: a lock held by a generation that is no
+      // longer current (its mount was torn down mid-submit, e.g. by resetLaunchState)
+      // is stale and must not block a fresh mount's submits.
+      if (_launching && _launchingGeneration === myGeneration) return
       _launching = true
+      _launchingGeneration = myGeneration
 
       // Pre-fetch validation: empty prompt
       const formData = new FormData(launchForm)
@@ -595,9 +609,15 @@ export async function initOperatorLaunch(opts) {
         }
         return
       } finally {
-        // Always re-enable the button and clear the mutex, even on throw
+        // Always re-enable the button and clear the mutex, even on throw — but only
+        // if this generation still owns the lock. If a stale generation somehow
+        // reached this finally (it shouldn't, since isInitStale-guarded code paths
+        // return earlier), it must not clear a newer generation's active lock.
         if (submitBtn !== null) submitBtn.disabled = false
-        _launching = false
+        if (_launchingGeneration === myGeneration) {
+          _launching = false
+          _launchingGeneration = null
+        }
       }
 
       if (outcome.kind === 'launched') {

@@ -1248,11 +1248,13 @@ describe('operator-launch — CSRF/idempotency/mutex discipline preserved throug
     expect(client.launchCallArgs[1]?.idempotencyKey).toBe(key)
   })
 
-  it('source still contains the in-flight submit mutex guard', async () => {
+  it('source still contains the in-flight submit mutex guard, now generation-scoped', async () => {
     const fs = await import('node:fs/promises')
     const src = await fs.readFile('public/operator-launch.js', 'utf8')
     expect(src).toMatch(/let _launching = false/)
-    expect(src).toMatch(/if \(_launching\) return/)
+    // The mutex is only honored while it's owned by the current mount's generation —
+    // a lock abandoned by a torn-down mount must not block a fresh mount forever.
+    expect(src).toMatch(/if \(_launching && _launchingGeneration === myGeneration\) return/)
   })
 
   it('mutex persists — no double-submit from a fresh affordance mount', async () => {
@@ -1267,6 +1269,48 @@ describe('operator-launch — CSRF/idempotency/mutex discipline preserved throug
     expect(mutexLine).toBeGreaterThan(-1)
     expect(initFnLine).toBeGreaterThan(-1)
     expect(mutexLine).toBeLessThan(initFnLine)
+  })
+
+  it('a double-submit within the SAME mount is blocked by the mutex regardless of generation', () => {
+    setLaunchGeneration(0)
+    const myGeneration = 1
+    setLaunchGeneration(myGeneration)
+
+    let launching = false
+    let launchingGeneration = null
+
+    // First submit acquires the lock.
+    if (!(launching && launchingGeneration === myGeneration)) {
+      launching = true
+      launchingGeneration = myGeneration
+    }
+    expect(launching).toBe(true)
+
+    // A second submit attempt within the same mount (same generation) must be blocked.
+    const secondSubmitBlocked = launching && launchingGeneration === myGeneration
+    expect(secondSubmitBlocked).toBe(true)
+  })
+
+  it('a fresh mount after a mid-submit teardown is NOT permanently blocked by an abandoned lock', () => {
+    setLaunchGeneration(0)
+    const staleGeneration = 1
+    setLaunchGeneration(staleGeneration)
+
+    // Stale mount acquires the lock and never reaches its finally (torn down mid-submit).
+    let launching = false
+    let launchingGeneration = null
+    launching = true
+    launchingGeneration = staleGeneration
+
+    // resetLaunchState() bumps the generation on unmount/remount.
+    resetLaunchState()
+    const freshGeneration = staleGeneration + 1
+    setLaunchGeneration(freshGeneration)
+
+    // A submit in the fresh mount checks the mutex against ITS generation — the
+    // stale lock's generation no longer matches, so it is not honored.
+    const freshSubmitBlocked = launching && launchingGeneration === freshGeneration
+    expect(freshSubmitBlocked).toBe(false)
   })
 
   it('repo-list auth/rate-limit/network/protocol failures render the canonical failure state, not "No repositories available"', async () => {

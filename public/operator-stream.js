@@ -1373,10 +1373,13 @@ export function initOperatorStream(opts) {
   let aborted = false // set by close() to prevent late timer from fetching
 
   function updateDOM() {
-    // Late-frame guard: after close(), do not write to the shared noticeEl.
-    // The noticeEl is shared across cards; a closed stream must not overwrite
-    // the active card's stream state notice after a card switch.
-    if (noticeEl && !aborted) {
+    // Late-frame guard: after close(), no write of any kind (notice, status,
+    // output, coalesced hint, approvals, or badge) may reach the DOM. A late
+    // buffered frame or microtask resolving after close() must not paint stale
+    // state onto a card that may already be collapsed or reused for another run.
+    if (aborted) return
+
+    if (noticeEl) {
       const conn = state.connection
       // Expose the connection state as a machine-readable attribute so agents
       // can query state without text parsing. The value mirrors the connection

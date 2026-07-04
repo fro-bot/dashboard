@@ -332,14 +332,28 @@ export async function initOperatorRunIndex(opts) {
   // Reload restore: only after the list has resolved and been diffed. Presence in
   // the fetched view list is required — a runId that aged out of the cap or no
   // longer exists is treated as a miss, never a perpetual attempt.
+  //
+  // Race guard: the operator can click a card (attaching a stream via the runtime
+  // seam, which sets _activeStreamRunId) while this fetch is still in flight. A
+  // restore that fires after such a click must never stomp that user selection —
+  // check for a card already marked data-stream-attached="true" for a DIFFERENT
+  // runId than the one being restored, and skip the restore entirely if found.
   if (restoreRunId !== undefined && restoreRunId !== null) {
-    const matchedView = views.find(v => v.runId === restoreRunId)
-    if (matchedView !== undefined) {
-      expandCardForRestore(restoreRunId, (runId, card) => {
-        if (typeof onRestoreRun === 'function') onRestoreRun(runId, card, matchedView.status)
-      })
-    } else if (typeof onRestoreMiss === 'function') {
-      onRestoreMiss()
+    const userSelectedDuringFetch =
+      _activeStreamRunId !== null &&
+      _activeStreamRunId !== restoreRunId &&
+      typeof document !== 'undefined' &&
+      document.querySelector(`[data-run-id="${CSS.escape(_activeStreamRunId)}"]`)?.dataset.streamAttached === 'true'
+
+    if (!userSelectedDuringFetch) {
+      const matchedView = views.find(v => v.runId === restoreRunId)
+      if (matchedView !== undefined) {
+        expandCardForRestore(restoreRunId, (runId, card) => {
+          if (typeof onRestoreRun === 'function') onRestoreRun(runId, card, matchedView.status)
+        })
+      } else if (typeof onRestoreMiss === 'function') {
+        onRestoreMiss()
+      }
     }
   }
 }
@@ -622,6 +636,45 @@ function toggleCardExpansion(card, runId, onSelectRun) {
   _expandedRunId = isExpanded ? null : runId
 
   onSelectRun(runId)
+}
+
+/**
+ * Mark a card as expanded because a launch (or restore) just attached its stream —
+ * NOT a click toggle.
+ *
+ * A freshly-launched run's card is inserted collapsed by operator-launch.js, then
+ * its stream is attached immediately via the runtime seam's onRunLaunched handoff.
+ * Without this entry point, the card would look collapsed while its stream is
+ * already live, and the operator's first click on it would be misread by
+ * onSelectRun as "collapse the active stream" instead of "expand." Calling this
+ * right after the stream attaches keeps the DOM shell's _expandedRunId bookkeeping
+ * and the card's revealed substructure consistent with the runtime seam's active
+ * stream state, so the first real click correctly collapses instead of the stream
+ * silently closing on attach.
+ *
+ * Idempotent and non-toggling: it only ever expands the target card (mirrors
+ * expandCardForRestore's single-open bookkeeping) and does nothing if the card is
+ * already expanded.
+ *
+ * Safe-DOM only: toggles `hidden` and `dataset.expanded`, never innerHTML.
+ */
+export function markCardExpandedForLaunch(runId) {
+  if (typeof document === 'undefined') return
+  const card = document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
+  if (card === null || card === undefined) return
+  if (card.dataset.expanded === 'true') return // already expanded — nothing to do
+
+  if (_expandedRunId !== null && _expandedRunId !== runId) {
+    const prevCard = document.querySelector(`[data-run-id="${CSS.escape(_expandedRunId)}"]`)
+    if (prevCard !== null && prevCard !== undefined) {
+      prevCard.dataset.expanded = 'false'
+      setSubstructureHidden(prevCard, true)
+    }
+  }
+
+  card.dataset.expanded = 'true'
+  setSubstructureHidden(card, false)
+  _expandedRunId = runId
 }
 
 /**

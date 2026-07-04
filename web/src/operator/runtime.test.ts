@@ -25,7 +25,6 @@
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {
-  classifyRunsAuthState,
   createOperatorRuntime,
   MAX_HASH_ID_LENGTH,
   sanitizeRunIdFromHash,
@@ -682,28 +681,6 @@ describe('sanitizeRunIdFromHash — length cap before validation (security)', ()
 // ---------------------------------------------------------------------------
 // Hash restore: auth reclassification helper
 // ---------------------------------------------------------------------------
-
-describe('classifyRunsAuthState — /operator/runs fetch reclassifies auth before restore', () => {
-  it('classifies a 401 response as auth-required', () => {
-    expect(classifyRunsAuthState({ok: false, status: 401} as Response)).toBe('auth-required')
-  })
-
-  it('classifies a 403 response as auth-required', () => {
-    expect(classifyRunsAuthState({ok: false, status: 403} as Response)).toBe('auth-required')
-  })
-
-  it('classifies a redirected response as auth-required', () => {
-    expect(classifyRunsAuthState({ok: false, status: 302, redirected: true} as Response)).toBe('auth-required')
-  })
-
-  it('returns null for a healthy 200 response (no reclassification needed)', () => {
-    expect(classifyRunsAuthState({ok: true, status: 200} as Response)).toBeNull()
-  })
-
-  it('returns null for an unrelated failure (e.g. 500) — not an auth signal', () => {
-    expect(classifyRunsAuthState({ok: false, status: 500} as Response)).toBeNull()
-  })
-})
 
 // ---------------------------------------------------------------------------
 // Hash restore: end-to-end via the loader harness (module-integration level)
