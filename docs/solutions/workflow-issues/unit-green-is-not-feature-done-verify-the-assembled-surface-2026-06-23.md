@@ -72,3 +72,7 @@ What passed vs. what was true on the operator page:
   runs to attach to.
 
 The prevention is one line in the definition of done: **open the page.**
+
+## Related
+
+- [CSS selectors must match the classes vanilla JS actually emits](./css-selector-emitter-mismatch-2026-07-04.md) — a concrete sub-class where the assembled page renders but styling silently no-ops because a CSS selector drifted from the JS-emitted class name.
