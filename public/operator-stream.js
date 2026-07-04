@@ -1854,11 +1854,11 @@ export function bootstrapOperatorStreams(opts) {
   const endpointBase = opts?.endpointBase
   const fixtureSessionId = opts?.fixtureSessionId
 
-  // Unit 1: cards (index-created and launch-created) live in the unified
-  // run-index list, not a separate #run-status-section (removed). The shared
-  // stream-status notice now lives with the list too. Per-card streams start
-  // on expansion (Unit 2), not on bootstrap discovery — this remains a one-shot
-  // fixture/test entry point that discovers any pre-rendered cards.
+  // Cards (index-created and launch-created) live in the unified run-index
+  // list, not a separate #run-status-section. The shared stream-status notice
+  // lives with the list too. Per-card streams start on expansion, not on
+  // bootstrap discovery — this remains a one-shot fixture/test entry point
+  // that discovers any pre-rendered cards.
   const section = document.querySelector('[data-role="run-index-list"]')
   if (section === null) return
 

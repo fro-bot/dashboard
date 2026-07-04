@@ -22,6 +22,13 @@
  * - runId appears only in the data-run-id attribute and the stream URL.
  */
 
+// Mirrors RUN_INDEX_CAP in operator-run-index.js. Not imported directly: this module
+// and operator-run-index.js are loaded as separate dynamic-import instances (each
+// carries its own ?manual=1 query string keyed module identity in the runtime seam),
+// so a static import here would create a second, uncoordinated module instance with
+// its own singleton state rather than sharing the runtime seam's instance.
+const LAUNCH_RUN_INDEX_CAP = 100
+
 // ---------------------------------------------------------------------------
 // Pure: repo item validation
 // ---------------------------------------------------------------------------
@@ -599,6 +606,11 @@ export async function initOperatorLaunch(opts) {
         const {runId} = outcome
 
         // Insert an optimistic pending card into the unified run-index list.
+        // Marked data-optimistic="true" so the run-index diff preserves it
+        // across a background refresh that hasn't indexed this run yet — preservation
+        // is tied to live stream state (this flag + the stream's own terminal
+        // resolution), not to a fetch cycle count. The diff clears this flag itself
+        // once the run appears in a fetched view.
         if (runIndexList !== null) {
           const card = document.createElement('div')
           card.className = 'run-card'
@@ -606,9 +618,10 @@ export async function initOperatorLaunch(opts) {
           card.setAttribute('aria-label', 'New run, status: Pending')
           card.dataset.testid = 'run-card'
           card.dataset.runId = runId
+          card.dataset.optimistic = 'true'
 
           const statusSpan = document.createElement('span')
-          statusSpan.className = 'run-status status-queued'
+          statusSpan.className = 'run-status status-pending'
           statusSpan.dataset.role = 'run-status'
           statusSpan.textContent = 'Pending'
           card.append(statusSpan)
@@ -635,7 +648,31 @@ export async function initOperatorLaunch(opts) {
           badgeEl.hidden = true
           card.append(badgeEl)
 
-          runIndexList.append(card)
+          // Prepend — a fresh launch is the newest active run and belongs at the top
+          // of the unified list, ahead of the fetched cards.
+          if (runIndexList.firstChild !== undefined && runIndexList.firstChild !== null) {
+            runIndexList.insertBefore(card, runIndexList.firstChild)
+          } else {
+            runIndexList.append(card)
+          }
+
+          // Cap hygiene: evict the oldest terminal card if we're now over RUN_INDEX_CAP.
+          // Never evict the card we just inserted, and never evict the active-stream card.
+          const allCards = Array.from(runIndexList.children ?? [])
+          if (allCards.length > LAUNCH_RUN_INDEX_CAP) {
+            for (let i = allCards.length - 1; i >= 0; i--) {
+              const candidate = allCards[i]
+              if (candidate === card) continue
+              if (candidate.dataset.streamAttached === 'true') continue
+              const statusEl = candidate.querySelector?.('[data-role="run-status"]')
+              const className = statusEl?.className ?? ''
+              const isTerminal = ['status-succeeded', 'status-failed', 'status-cancelled'].some(c => className.includes(c))
+              if (isTerminal) {
+                candidate.remove()
+                break
+              }
+            }
+          }
 
           if (typeof onRunLaunched === 'function') {
             // Delegate stream attachment to the runtime seam (centralized ownership).

@@ -260,7 +260,18 @@ export async function initOperatorRunIndex(opts) {
 
   const {summaries} = result
 
-  if (summaries.length === 0) {
+  // Always diff — even with zero fetched summaries — so a protected card (active-stream
+  // or still-pending optimistic launch card) is correctly retained or resolved rather
+  // than skipped by an early empty-state return.
+  let remaining = 0
+  if (runIndexList !== null) {
+    const views = summaries.map(buildRunSafeView)
+    diffRunIndexList(runIndexList, views, {onSelectRun, activeStreamRunId: _activeStreamRunId})
+    remaining = runIndexList.children?.length ?? 0
+  }
+
+  if (remaining === 0) {
+    if (runIndexList !== null) runIndexList.hidden = true
     if (runIndexEmpty !== null) runIndexEmpty.hidden = false
     if (runIndexSection !== null) runIndexSection.dataset.state = 'empty'
     return
@@ -268,22 +279,187 @@ export async function initOperatorRunIndex(opts) {
 
   if (runIndexList !== null) {
     runIndexList.hidden = false
-    runIndexList.textContent = ''
-
-    for (const summary of summaries) {
-      const view = buildRunSafeView(summary)
-
-      // Skip if a card for this runId already exists (e.g. launch-created optimistic card).
-      const existing = document.querySelector(`[data-run-id="${CSS.escape(view.runId)}"]`)
-      if (existing !== null) continue
-
-      const card = renderRunCard(view, onSelectRun)
-      runIndexList.append(card)
-    }
   }
 
   if (runIndexSection !== null) {
     runIndexSection.dataset.state = 'loaded'
+  }
+}
+
+/** Terminal run-summary statuses — a card in one of these will not progress further. */
+const TERMINAL_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
+
+/**
+ * Reconcile the run-index list in place, keyed by runId.
+ *
+ * Never clears the container wholesale. Existing cards are updated or adopted;
+ * missing runIds are removed unless protected (see below); new runIds get a
+ * freshly rendered card inserted at the fetched position.
+ *
+ * Active-card ownership boundary: the card whose runId matches opts.activeStreamRunId
+ * (corroborated by data-stream-attached="true") is treated as a write-protected black
+ * box — no attribute or text write of any kind, and it is never replaced, only possibly
+ * repositioned via a Node move that preserves element identity. updateDOM (operator-stream.js)
+ * is the sole writer to that card's substructure.
+ *
+ * Re-sort lock: the currently expanded card (_expandedRunId) is never repositioned by
+ * this diff, even if its status flips to terminal mid-stream. Its position is frozen
+ * until it collapses.
+ *
+ * Protected-card identification (optimistic launch): a DOM card absent from the fetched
+ * view list is preserved when it is the active-stream card, OR when it carries
+ * data-optimistic="true" and its own run-status element does not yet show a terminal
+ * status class (i.e. the stream has not resolved it to terminal). Once a launch-created
+ * card's stream resolves to terminal while still absent from the fetch, it is no longer
+ * protected and is removed on the next diff — it is never left as a perpetual ghost.
+ *
+ * Allowed attribute mutations for a non-active, non-protected-absent card are a closed
+ * set: data-run-id (immutable, set once at create), datetime (on <time>, from the
+ * length-capped updatedAt already validated by parseRunSummaryItem), className
+ * (allowlist-gated `.status-*` only), and textContent on the safe-view text children
+ * (run-status label, run-repo text, run-updated-at text). No data-repo/data-status or
+ * other run-metadata attribute is ever created.
+ */
+function diffRunIndexList(list, views, opts) {
+  const onSelectRun = opts?.onSelectRun
+  const activeStreamRunId = opts?.activeStreamRunId ?? null
+
+  // Snapshot existing DOM order and cards by runId before mutating anything.
+  const existingOrder = []
+  const existingCards = new Map()
+  for (const child of Array.from(list.children ?? [])) {
+    const runId = child.dataset?.runId
+    if (typeof runId === 'string') {
+      existingCards.set(runId, child)
+      existingOrder.push(runId)
+    }
+  }
+
+  const fetchedIds = new Set(views.map(v => v.runId))
+
+  // Removal pass: drop cards absent from the fetch unless protected.
+  for (const [runId, card] of existingCards) {
+    if (fetchedIds.has(runId)) continue
+
+    const isActive = runId === activeStreamRunId && card.dataset.streamAttached === 'true'
+    if (isActive) continue // active-stream card is always protected, even if absent
+
+    const isOptimistic = card.dataset.optimistic === 'true'
+    if (isOptimistic && !cardShowsTerminalStatus(card)) continue // stream still active — keep
+
+    // Neither active-stream nor a still-pending optimistic card: safe to remove.
+    card.remove()
+    existingCards.delete(runId)
+  }
+
+  // Re-sort lock: the currently expanded card (if it still exists) must not move
+  // relative to its siblings, even though the fetched order may rank it elsewhere
+  // (e.g. it flipped to terminal and would otherwise sort below active runs).
+  // Compute a target order that respects the fetch order for every OTHER card,
+  // but reinserts the frozen runId back at its current relative DOM index.
+  const frozenRunId = _expandedRunId
+  const frozenCardStillPresent = frozenRunId !== null && existingCards.has(frozenRunId)
+
+  let targetOrder = views.map(v => v.runId)
+  if (frozenCardStillPresent) {
+    // Position among the cards that survived removal, in their original relative order.
+    const survivingOriginalOrder = existingOrder.filter(id => existingCards.has(id))
+    const frozenIndexAmongSurvivors = survivingOriginalOrder.indexOf(frozenRunId)
+
+    const withoutFrozen = targetOrder.filter(id => id !== frozenRunId)
+    // Clamp so a frozen card at/after the end of the surviving list still lands validly.
+    const insertAt = Math.min(frozenIndexAmongSurvivors, withoutFrozen.length)
+    withoutFrozen.splice(insertAt < 0 ? withoutFrozen.length : insertAt, 0, frozenRunId)
+    targetOrder = withoutFrozen
+  }
+
+  const viewsByRunId = new Map(views.map(v => [v.runId, v]))
+
+  // Update/create/reposition pass, walking the computed target order.
+  let cursor = list.firstChild
+  for (const runId of targetOrder) {
+    const view = viewsByRunId.get(runId)
+    let card = existingCards.get(runId)
+
+    if (card === undefined) {
+      // New card — view is guaranteed to exist here (targetOrder only contains
+      // fetched runIds plus, at most, the still-present frozen runId).
+      card = renderRunCard(view, onSelectRun)
+      if (cursor === null || cursor === undefined) {
+        list.append(card)
+      } else {
+        cursor.before(card)
+      }
+      continue
+    }
+
+    const isActive = runId === activeStreamRunId && card.dataset.streamAttached === 'true'
+    const isFrozen = runId === frozenRunId
+
+    if (!isActive && view !== undefined) {
+      // Non-active card with a fetched view: normal in-place attribute update is
+      // safe (no concurrent writer). A frozen-but-fetched card is still updated
+      // in place (status/label/time) — only its DOM position is locked.
+      updateCardInPlace(card, view)
+      if (card.dataset.optimistic === 'true') delete card.dataset.optimistic
+    }
+    // Active card, or a frozen card absent from the fetch: write-protected —
+    // updateDOM (or the prior state) remains the substructure's sole writer.
+
+    if (isFrozen) {
+      // Never reposition the frozen card itself, but do advance the cursor past
+      // it so subsequent cards in this pass are inserted after its fixed slot.
+      cursor = card.nextSibling
+      continue
+    }
+
+    if (card === cursor) {
+      cursor = cursor.nextSibling
+    } else if (cursor === null || cursor === undefined) {
+      list.append(card)
+    } else {
+      cursor.before(card)
+    }
+  }
+}
+
+/** True iff a card's own run-status element already shows a terminal status class. */
+function cardShowsTerminalStatus(card) {
+  if (typeof card.querySelector !== 'function') return false
+  const statusEl = card.querySelector('[data-role="run-status"]')
+  if (statusEl === null || statusEl === undefined) return false
+  const className = typeof statusEl.className === 'string' ? statusEl.className : ''
+  for (const status of TERMINAL_RUN_STATUSES) {
+    if (className.includes(`status-${status}`)) return true
+  }
+  return false
+}
+
+/**
+ * Update a card's safe-view-derived fields in place. Closed attribute-mutation set:
+ * className (status-* only), textContent (safe-view text children), datetime (on <time>).
+ * Never touches data-run-id, data-expanded, or creates any new attribute.
+ */
+function updateCardInPlace(card, view) {
+  card.setAttribute('aria-label', `Run, status: ${view.statusLabel}`)
+
+  if (typeof card.querySelector === 'function') {
+    const statusEl = card.querySelector('[data-role="run-status"]')
+    if (statusEl !== null && statusEl !== undefined) {
+      statusEl.className = `run-status status-${view.status}`
+      statusEl.textContent = view.statusLabel
+    }
+
+    const repoEl = card.querySelector('[data-role="run-repo"]')
+    if (repoEl !== null && repoEl !== undefined) {
+      repoEl.textContent = view.repo
+    }
+
+    const timeEl = card.querySelector('[data-role="run-updated-at"]')
+    if ('updatedAt' in view && view.updatedAt !== undefined && timeEl !== null && timeEl !== undefined) {
+      timeEl.setAttribute('datetime', view.updatedAt)
+      timeEl.textContent = view.updatedAt
+    }
   }
 }
 
@@ -320,7 +496,7 @@ function renderRunCard(view, onSelectRun) {
   }
 
   // Hidden per-card substructure — targets for operator-stream.js's updateDOM().
-  // Revealed on expansion (Unit 2). Safe-DOM only: createElement + textContent/
+  // Revealed on expansion. Safe-DOM only: createElement + textContent/
   // hidden/dataset, never innerHTML. No run field beyond the closed safe-view
   // reaches these elements at creation time.
   const outputEl = document.createElement('div')
