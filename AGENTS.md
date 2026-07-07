@@ -1,8 +1,10 @@
 # AGENTS.md
 
-Read-only Fro Bot monitoring dashboard. Single Hono + JSX SSR Node 24 process,
-no build step, native TS. Authenticated single-operator view of Fro Bot's
-cross-repo footprint.
+Read-only Fro Bot monitoring dashboard. Two parts in one repo: a Node 24
+native-TS Hono server (`src/`, strip-only, no backend build step) that serves the
+API + GitHub OAuth, and a Vite + React 19 + Tailwind v4 PWA client (`web/`, built
+via `pnpm build:web` → `web/dist`, served at `/`). Authenticated single-operator
+view of Fro Bot's cross-repo footprint.
 
 ## Critical security invariants
 
@@ -24,11 +26,15 @@ cross-repo footprint.
 
 ## Conventions
 
-- pnpm, Node 24 native TS (strip-only): no enums, namespaces, parameter
-  properties, or TS import aliases (`erasableSyntaxOnly` lint enforces this).
+- pnpm. Server (`src/`, `test/`, `scripts/`) is Node 24 native TS (strip-only): no
+  enums, namespaces, parameter properties, or TS import aliases (`erasableSyntaxOnly`
+  lint enforces this). The client (`web/`) is a full-TS Vite + React 19 workspace with
+  its own `web/tsconfig.json` — excluded from the strip-only lint.
 - `as unknown as X` for Octokit boundary casts; never `any`.
 - `Result<T,E>` error-return shape for the app client (extraction seam).
-- Gates: `pnpm check-types`, `pnpm lint`, `pnpm test`.
+- Gates: `pnpm check-types` (server + `web/`), `pnpm lint`, `pnpm test` (rebuilds the
+  client via `pretest`, then runs Vitest). Build the client with `pnpm build:web` →
+  `web/dist`; `pnpm dev` serves that prebuilt bundle.
 - `docs/solutions/` — documented solutions to past problems, organized by category
   with YAML frontmatter (`module`, `tags`, `problem_type`). Relevant when
   implementing or debugging in documented areas.
