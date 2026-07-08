@@ -247,7 +247,7 @@ The failure reason is not a new source of truth. It is a safe display supplement
 **Verification:**
 - Browser module tests prove both public parsers and reducers share the same safe reason semantics.
 
-- [ ] **Unit 3: Render reason labels in the run-centric UI**
+- [x] **Unit 3: Render reason labels in the run-centric UI**
 
 **Goal:** Show safe reason labels in compact rows and expanded stream details without layout, accessibility, or no-leak regressions.
 

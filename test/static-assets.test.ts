@@ -816,3 +816,20 @@ describe('CSP invariant — worker-src and manifest-src already cover SW+manifes
     expect(csp).toContain("manifest-src 'self'")
   })
 })
+
+describe('security — raw failure reason codes security invariants', () => {
+  it('production static files do not contain dynamic CSS classes or custom properties derived from raw reason codes', async () => {
+    const fs = await import('node:fs/promises')
+    const files = [
+      'public/operator-stream.js',
+      'public/operator-run-index.js',
+    ]
+    for (const filePath of files) {
+      const src = await fs.readFile(filePath, 'utf8')
+      // Ensure no raw codes are interpolated into classList.add, className, or CSS variables
+      expect(src).not.toMatch(/classList\.add\([^)]*failureKind/)
+      expect(src).not.toMatch(/className[^;\n]*failureKind/)
+      expect(src).not.toMatch(/setProperty\([^)]*failureKind/)
+    }
+  })
+})

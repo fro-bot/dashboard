@@ -308,6 +308,8 @@ export interface InitOptions {
   readonly endpointBase?: string
   /** Fixture session ID (fixture mode only). Appended as query param to stream URL and approval requests. */
   readonly fixtureSessionId?: string
+  /** Secondary status metadata element (data-role="run-reason"). */
+  readonly reasonEl?: Element | null
 }
 
 export declare function initOperatorStream(opts: InitOptions): StreamHandle

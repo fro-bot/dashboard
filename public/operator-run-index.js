@@ -52,16 +52,15 @@ const VALID_FAILURE_KINDS = new Set([
  * Dashboard-owned display labels for known failure reasons — render labels from
  * this map, never the raw failureKind wire string. Must stay identical to the
  * map in public/operator-stream.js (parity is enforced by tests). Every
- * OperatorFailureKind value has an explicit decision (including 'unknown',
- * whose label is intentionally identical to the generic fallback).
+ * OperatorFailureKind value has an explicit display decision.
  */
 export const FAILURE_REASON_LABELS = {
   'inactivity-timeout': 'No recent activity',
-  'max-duration-timeout': 'Exceeded maximum run duration',
-  'stream-ended': 'Stream interrupted',
-  'workspace-unreachable': 'Workspace unreachable',
+  'max-duration-timeout': 'Run timed out',
+  'stream-ended': 'Stream ended early',
+  'workspace-unreachable': 'Workspace unavailable',
   'session-error': 'Session error',
-  unknown: 'Failed',
+  unknown: 'Unknown failure',
 }
 
 /**
@@ -148,7 +147,7 @@ export function parseRunSummaryList(input) {
  * Build a closed safe-view from a parsed run summary. Unknown fields excluded by
  * construction. reasonLabel is a pre-resolved dashboard display label — never the
  * raw failureKind — and is present only for a failed summary carrying a known
- * failureKind (R9: non-failed statuses ignore any failureKind).
+ * failureKind. Non-failed statuses ignore any failureKind.
  */
 export function buildRunSafeView(summary) {
   const statusLabel = STATUS_LABELS[summary.status] ?? summary.status
@@ -577,6 +576,11 @@ function updateCardInPlace(card, view) {
       timeEl.setAttribute('datetime', view.updatedAt)
       timeEl.textContent = formatRelativeTime(view.updatedAt)
     }
+
+    const reasonEl = card.querySelector('[data-role="run-reason"]')
+    if (reasonEl !== null && reasonEl !== undefined) {
+      reasonEl.textContent = view.reasonLabel ?? ''
+    }
   }
 }
 
@@ -590,11 +594,23 @@ function renderRunCard(view, onSelectRun) {
   card.dataset.testid = 'run-card'
   card.dataset.runId = view.runId
 
+  const statusGroup = document.createElement('span')
+  statusGroup.className = 'run-status-group'
+  statusGroup.dataset.role = 'run-status-group'
+
   const statusSpan = document.createElement('span')
   statusSpan.className = `run-status status-${view.status}`
   statusSpan.dataset.role = 'run-status'
   statusSpan.textContent = view.statusLabel
-  card.append(statusSpan)
+  statusGroup.append(statusSpan)
+
+  const reasonSpan = document.createElement('span')
+  reasonSpan.className = 'run-reason'
+  reasonSpan.dataset.role = 'run-reason'
+  reasonSpan.textContent = view.reasonLabel ?? ''
+  statusGroup.append(reasonSpan)
+
+  card.append(statusGroup)
 
   const repoSpan = document.createElement('span')
   repoSpan.className = 'run-repo'

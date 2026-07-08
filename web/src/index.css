@@ -158,8 +158,19 @@
   scrollbar-color: var(--color-border) transparent;
 }
 
-.run-card .run-status {
+.run-card .run-status-group {
   grid-column: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.run-reason {
+  font-family: var(--font-body);
+  font-size: var(--text-body-sm);
+  color: var(--color-text-subtle);
+  font-weight: 400;
 }
 
 .run-card .run-repo {
@@ -810,7 +821,7 @@
     height: auto;
   }
   
-  .run-card .run-status,
+  .run-card .run-status-group,
   .run-card-skeleton .skeleton-pill {
     grid-column: 1;
     grid-row: 1;

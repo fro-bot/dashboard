@@ -2174,16 +2174,31 @@ function renderRunCardForTest(cards, summaryLike) {
     repo: summaryLike.repo ?? 'fro-bot/agent',
     status: summaryLike.status,
     createdAt: summaryLike.createdAt ?? '2026-07-03T00:00:00.000Z',
+    failureKind: summaryLike.failureKind,
   })
   const list = makeMockListUsing(cards)
   const card = document.createElement('div')
   card.dataset.runId = view.runId
   card.dataset.testid = 'run-card'
   card.setAttribute('aria-label', `Run, status: ${summaryLike.statusLabel ?? view.statusLabel}`)
-  const statusSpan = document.createElement('div')
+
+  const statusGroup = document.createElement('span')
+  statusGroup.className = 'run-status-group'
+  statusGroup.dataset.role = 'run-status-group'
+
+  const statusSpan = document.createElement('span')
   statusSpan.dataset.role = 'run-status'
   statusSpan.textContent = summaryLike.statusLabel ?? view.statusLabel
-  card.append(statusSpan)
+  statusGroup.append(statusSpan)
+
+  const reasonSpan = document.createElement('span')
+  reasonSpan.className = 'run-reason'
+  reasonSpan.dataset.role = 'run-reason'
+  reasonSpan.textContent = view.reasonLabel ?? ''
+  statusGroup.append(reasonSpan)
+
+  card.append(statusGroup)
+
   for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
     const el = document.createElement('div')
     el.dataset.role = role
@@ -2289,5 +2304,82 @@ describe('failure reason label coverage gate (contract 1.6.0)', () => {
     for (const key of Object.keys(RUN_INDEX_FAILURE_REASON_LABELS)) {
       expect(isOperatorFailureKind(key)).toBe(true)
     }
+  })
+})
+
+describe('run-index failure reason labels', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('compact failed row shows Failed plus No recent activity as secondary metadata', async () => {
+    const runId = 'run-unit3-failed-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        runs: [
+          makeValidSummary({
+            runId,
+            status: 'failed',
+            failureKind: 'inactivity-timeout',
+          }),
+        ],
+      }),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(1)
+    const card = cards[0]
+    const statusEl = card.querySelector('[data-role="run-status"]')
+    const reasonEl = card.querySelector('[data-role="run-reason"]')
+
+    expect(statusEl?.textContent).toBe('Failed')
+    expect(reasonEl?.textContent).toBe('No recent activity')
+  })
+
+  it('updating a card via updateCardInPlace renders the reason-label properly', () => {
+    const cards = []
+    const card = renderRunCardForTest(cards, {
+      runId: 'run-unit3-update-001',
+      status: 'failed',
+      failureKind: 'max-duration-timeout',
+    })
+
+    const reasonEl = card.querySelector('[data-role="run-reason"]')
+    expect(reasonEl?.textContent).toBe('Run timed out')
+  })
+
+  it('generic non-failed status rows do not render any failure reason label', async () => {
+    const runId = 'run-unit3-running-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        runs: [
+          makeValidSummary({
+            runId,
+            status: 'running',
+            failureKind: 'inactivity-timeout', // should be ignored
+          }),
+        ],
+      }),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(1)
+    const card = cards[0]
+    const statusEl = card.querySelector('[data-role="run-status"]')
+    const reasonEl = card.querySelector('[data-role="run-reason"]')
+
+    expect(statusEl?.textContent).toBe('Running')
+    expect(reasonEl?.textContent).toBe('')
   })
 })

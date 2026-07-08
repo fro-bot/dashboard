@@ -158,16 +158,15 @@ const VALID_FAILURE_KINDS = new Set([
  * Dashboard-owned display labels for known failure reasons — render labels from
  * this map, never the raw failureKind wire string. A missing or unmapped reason
  * has no entry here and falls back to generic 'Failed' at the render boundary.
- * Every OperatorFailureKind value has an explicit decision (including 'unknown',
- * whose label is intentionally identical to the generic fallback).
+ * Every OperatorFailureKind value has an explicit display decision.
  */
 export const FAILURE_REASON_LABELS = {
   'inactivity-timeout': 'No recent activity',
-  'max-duration-timeout': 'Exceeded maximum run duration',
-  'stream-ended': 'Stream interrupted',
-  'workspace-unreachable': 'Workspace unreachable',
+  'max-duration-timeout': 'Run timed out',
+  'stream-ended': 'Stream ended early',
+  'workspace-unreachable': 'Workspace unavailable',
   'session-error': 'Session error',
-  unknown: 'Failed',
+  unknown: 'Unknown failure',
 }
 
 // ---------------------------------------------------------------------------
@@ -444,7 +443,7 @@ export function nextStreamState(current, event) {
       // arrives AFTER the final output frame, so a bare replacement would drop it.
       const prevStatusEntry = current.runs[runId]
       // Reason label is derived only for a failed status carrying a known failureKind.
-      // A non-failed status ignores any failureKind entirely (R9). Once set, the label
+      // A non-failed status ignores any failureKind entirely. Once set, the label
       // is sticky — a later non-terminal frame for the same run (e.g. a stale/duplicate
       // frame) must not clear a previously stored terminal-failure label.
       const derivedReasonLabel =
@@ -1387,7 +1386,7 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
  * - Read-only: GET only for stream; approval decisions are operator-forwarded writes.
  */
 export function initOperatorStream(opts) {
-  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, approvalClient: injectedApprovalClient, endpointBase, fixtureSessionId} = opts
+  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, approvalClient: injectedApprovalClient, endpointBase, fixtureSessionId} = opts
 
   // Build the approval client lazily (only if approvalsEl is present).
   // Pass endpointBase and fixtureSessionId so fixture mode uses the fixture approval routes
@@ -1418,6 +1417,8 @@ export function initOperatorStream(opts) {
   let reconnectTimer = null // track pending reconnect timer
   let firstFrameTimer = null // track pending first-frame timeout
   let aborted = false // set by close() to prevent late timer from fetching
+  let lastStatus = null
+  let announcedFailure = false
 
   function updateDOM() {
     // Late-frame guard: after close(), no write of any kind (notice, status,
@@ -1432,9 +1433,29 @@ export function initOperatorStream(opts) {
       // can query state without text parsing. The value mirrors the connection
       // token from the state machine (e.g. 'live', 'failed', 'not-found').
       noticeEl.dataset.connectionState = conn
+
+      const runEntry = state.runs[runId]
+      const currentStatus = runEntry?.status ?? null
+
+      if (currentStatus === 'failed' && lastStatus !== 'failed' && lastStatus !== null && !announcedFailure) {
+        announcedFailure = true
+        const view = toSafeRunView(runEntry)
+        const reasonPart = view.reasonLabel ? `: ${view.reasonLabel}` : ''
+        noticeEl.textContent = `Run failed${reasonPart}`
+        noticeEl.hidden = false
+      }
+
+      if (currentStatus !== null) {
+        lastStatus = currentStatus
+      }
+
       if (conn === 'live') {
-        noticeEl.textContent = ''
-        noticeEl.hidden = true
+        if (currentStatus === 'failed' && announcedFailure) {
+          // Keep failure announcement
+        } else {
+          noticeEl.textContent = ''
+          noticeEl.hidden = true
+        }
       } else if (conn === 'connecting' || conn === 'reconnecting') {
         noticeEl.textContent = 'Connecting to run stream\u2026'
         noticeEl.hidden = false
@@ -1458,15 +1479,27 @@ export function initOperatorStream(opts) {
         // If the stream closed before the run reached a terminal status, surface a
         // generic path-unaware unavailable notice. This covers malformed/truncated
         // streams that close without emitting a terminal status frame for the run.
-        const runEntry = state.runs[runId]
         const runIsTerminal = runEntry !== undefined && runEntry.terminal === true
         if (runIsTerminal) {
-          noticeEl.textContent = ''
-          noticeEl.hidden = true
+          if (currentStatus === 'failed' && announcedFailure) {
+            // Keep failure announcement
+          } else {
+            noticeEl.textContent = ''
+            noticeEl.hidden = true
+          }
         } else {
           noticeEl.textContent = 'Run stream ended before a result was available.'
           noticeEl.hidden = false
         }
+      }
+    } else {
+      const runEntry = state.runs[runId]
+      const currentStatus = runEntry?.status ?? null
+      if (currentStatus === 'failed' && lastStatus !== 'failed' && lastStatus !== null) {
+        announcedFailure = true
+      }
+      if (currentStatus !== null) {
+        lastStatus = currentStatus
       }
     }
 
@@ -1496,6 +1529,14 @@ export function initOperatorStream(opts) {
             .replaceAll(/\s+/g, ' ')
             .trim()
         }
+      }
+    }
+
+    if (reasonEl) {
+      const runEntry = state.runs[runId]
+      if (runEntry && (state.connection === 'live' || runEntry.terminal)) {
+        const view = toSafeRunView(runEntry)
+        reasonEl.textContent = view.reasonLabel ?? ''
       }
     }
 

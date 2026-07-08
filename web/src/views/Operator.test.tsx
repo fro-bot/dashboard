@@ -878,3 +878,14 @@ describe('Operator — failure state distinct treatments', () => {
     })
   }
 })
+
+describe('Operator — stream and status announcement hooks', () => {
+  it('renders the shared stream-status polite announcement notice element', () => {
+    render(<Operator state="ready" />)
+    const noticeEl = document.querySelector('[data-role="stream-status"]')
+    expect(noticeEl).not.toBeNull()
+    expect(noticeEl).toHaveAttribute('role', 'status')
+    expect(noticeEl).toHaveAttribute('aria-live', 'polite')
+    expect(noticeEl).toHaveClass('operator-stream-status')
+  })
+})

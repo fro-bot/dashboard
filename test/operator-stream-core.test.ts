@@ -788,7 +788,7 @@ describe('nextStreamState — failure reason label (contract 1.6.0)', () => {
       data: {...ACTIVE_STATUS, status: 'failed', phase: 'FAILED', failureKind: 'stream-ended'},
     })
     expect(withFailure.runs['run-abc']?.outputText).toBe('partial answer')
-    expect(withFailure.runs['run-abc']?.reasonLabel).toBe('Stream interrupted')
+    expect(withFailure.runs['run-abc']?.reasonLabel).toBe('Stream ended early')
   })
 })
 
@@ -5784,5 +5784,144 @@ describe('initOperatorStream — statusEl unavailable on stream failure', () => 
     // statusEl must not have been updated to "Unavailable" after close
     expect(statusEl.textContent).toBe(statusBefore)
     expect(statusEl.textContent).not.toBe('Unavailable')
+  })
+})
+
+describe('live failure reason updates and announcements', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('initOperatorStream with a failed status and known failureKind updates reasonEl', async () => {
+    const noticeEl = {textContent: '', hidden: false, dataset: {connectionState: ''}}
+    const statusEl = {textContent: 'Pending', className: '', classList: {add: () => {}, remove: () => {}}, dataset: {}, hidden: false}
+    const reasonEl = {textContent: ''}
+
+    const encoder = new TextEncoder()
+    const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
+    const terminalFrame = `event: status\ndata: ${JSON.stringify({
+      runId: 'run-reason-test-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'FAILED',
+      status: 'failed',
+      startedAt: '2026-06-29T10:00:00Z',
+      stale: false,
+      failureKind: 'inactivity-timeout',
+    })}\n\n`
+
+    let readCount = 0
+    const chunks = [encoder.encode(readyFrame + terminalFrame)]
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (readCount < chunks.length) {
+              return {done: false, value: chunks[readCount++]}
+            }
+            return {done: true}
+          },
+        }),
+      },
+    }))
+
+    const handle = initOperatorStream({
+      runId: 'run-reason-test-001',
+      statusEl,
+      noticeEl,
+      reasonEl,
+      endpointBase: '/operator',
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    expect(statusEl.textContent).toBe('Failed')
+    expect(reasonEl.textContent).toBe('No recent activity')
+    handle.close()
+  })
+
+  it('live terminal failure transitions update the polite noticeEl exactly once', async () => {
+    const noticeEl = {textContent: '', hidden: true, dataset: {connectionState: ''}}
+    const statusEl = {textContent: 'Pending', className: '', classList: {add: () => {}, remove: () => {}}, dataset: {}, hidden: false}
+    const reasonEl = {textContent: ''}
+
+    const encoder = new TextEncoder()
+    const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
+    const runningFrame = `event: status\ndata: ${JSON.stringify({
+      runId: 'run-live-fail-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'EXECUTING',
+      status: 'running',
+      startedAt: '2026-06-29T10:00:00Z',
+      stale: false,
+    })}\n\n`
+    const failedFrame = `event: status\ndata: ${JSON.stringify({
+      runId: 'run-live-fail-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'FAILED',
+      status: 'failed',
+      startedAt: '2026-06-29T10:02:00Z',
+      stale: false,
+      failureKind: 'workspace-unreachable',
+    })}\n\n`
+
+    let readCount = 0
+    let resolveSecondFrame: ((value: {done: boolean; value?: Uint8Array}) => void) | undefined
+    const secondFramePromise = new Promise<{done: boolean; value?: Uint8Array}>(resolve => {
+      resolveSecondFrame = resolve
+    })
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (readCount === 0) {
+              readCount++
+              return {done: false, value: encoder.encode(readyFrame + runningFrame)}
+            }
+            if (readCount === 1) {
+              readCount++
+              return secondFramePromise
+            }
+            return {done: true}
+          },
+        }),
+      },
+    }))
+
+    const handle = initOperatorStream({
+      runId: 'run-live-fail-001',
+      statusEl,
+      noticeEl,
+      reasonEl,
+      endpointBase: '/operator',
+    })
+
+    // Process ready + running
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(statusEl.textContent).toBe('Running')
+    expect(noticeEl.textContent).toBe('') // Hidden while running
+
+    // Transition to failed
+    resolveSecondFrame?.({done: false, value: encoder.encode(failedFrame)})
+    await new Promise(resolve => setTimeout(resolve, 30))
+
+    expect(statusEl.textContent).toBe('Failed')
+    expect(reasonEl.textContent).toBe('Workspace unavailable')
+    // noticeEl must contain the live polite announcement
+    expect(noticeEl.textContent).toBe('Run failed: Workspace unavailable')
+    expect(noticeEl.hidden).toBe(false)
+
+    handle.close()
   })
 })

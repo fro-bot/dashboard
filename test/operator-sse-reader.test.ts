@@ -218,7 +218,7 @@ describe('parseSseChunk — pure parser', () => {
     if (frame?.success && frame.frame.type === 'status') {
       expect(frame.frame.data.status).toBe('running')
       // The parser does not scrub a reason off a non-failed status — that
-      // enforcement belongs to the renderer, which must ignore it (R9).
+      // enforcement belongs to the renderer, which must ignore it.
       expect(frame.frame.data.failureKind).toBe('inactivity-timeout')
     } else {
       expect.fail('expected a status frame')
