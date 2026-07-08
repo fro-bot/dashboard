@@ -295,7 +295,7 @@ The failure reason is not a new source of truth. It is a safe display supplement
 **Verification:**
 - UI tests and CSS selector tests prove label placement, styling contract, accessibility seam, and no raw-code DOM exposure.
 
-- [ ] **Unit 4: Fixture scenarios and assembled browser verification**
+- [x] **Unit 4: Fixture scenarios and assembled browser verification**
 
 **Goal:** Extend the local fixture harness so the assembled PWA proves reason rendering across page-load rows and live terminal streams.
 
@@ -307,9 +307,12 @@ The failure reason is not a new source of truth. It is a safe display supplement
 - Modify: `src/gateway/operator-fixture-sse.ts`
 - Modify: `src/gateway/operator-fixture-routes.ts`
 - Modify: `src/gateway/operator-fixtures.ts`
+- Modify: `src/routes/operator-fixture-harness.ts`
+- Modify: `web/src/views/Operator.tsx`
 - Test: `test/operator-fixture-harness.test.ts`
 - Test: `test/operator-fixture-sanitization.test.ts`
 - Test: `test/static-assets.test.ts`
+- Test: `web/src/views/Operator.test.tsx`
 
 **Approach:**
 - Extend the existing fixture harness with known reason, unknown reason, missing reason, non-failed-with-reason, and live-terminal reason cases.

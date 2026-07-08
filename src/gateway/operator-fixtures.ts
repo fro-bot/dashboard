@@ -102,6 +102,27 @@ export const ALL_FIXTURE_RUNS: readonly RunSnapshotDto[] = [
 ]
 
 // ---------------------------------------------------------------------------
+// Failure-reason (Gateway 1.6.0) fixture constants — shared across the fixture
+// harness route and SSE scenario builders so known/unknown reason values stay
+// in lockstep. See src/gateway/operator-contract/run-status.ts for the
+// canonical OPERATOR_FAILURE_KINDS allowlist.
+// ---------------------------------------------------------------------------
+
+/**
+ * A known Gateway 1.6.0 operator failure-reason code, used by both the
+ * fixture-harness recent-run entries and the live-stream reason scenarios so
+ * a single known-reason case exercises both surfaces with the same value.
+ */
+export const FIXTURE_KNOWN_FAILURE_REASON = 'inactivity-timeout'
+
+/**
+ * A visibly synthetic, fixture-prefixed reason value that is deliberately NOT
+ * in the OPERATOR_FAILURE_KINDS allowlist. Proves unrecognized reason codes
+ * normalize to absent and never reach renderers, logs, or sanitizer output.
+ */
+export const FIXTURE_UNKNOWN_FAILURE_REASON = 'fixture-unrecognized-reason'
+
+// ---------------------------------------------------------------------------
 // Run stream event timeline fixture
 // ---------------------------------------------------------------------------
 

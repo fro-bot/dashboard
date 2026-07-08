@@ -706,6 +706,95 @@ describe('fixture launch — scenario isolation', () => {
   })
 })
 
+async function launchAndStream(scenario: string, idempotencyKey: string) {
+  const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+
+  const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+  const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+  const launchRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+    method: 'POST',
+    headers: {'content-type': 'application/json'},
+    body: JSON.stringify({
+      scenario,
+      idempotencyKey,
+      fixtureSessionId,
+      csrfToken: 'fixture-csrf-placeholder',
+      repo: 'fixture-org/fixture-repo',
+      prompt: '[Fixture prompt]',
+    }),
+  })
+  expect(launchRes.status).toBe(200)
+  const {runId} = await launchRes.json() as {runId: string}
+
+  const streamRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream?fixtureSessionId=${fixtureSessionId}`)
+  expect(streamRes.status).toBe(200)
+  const sseText = await streamRes.text()
+  return {app, runId, sseText}
+}
+
+describe('fixture launch — failure-reason scenarios (Gateway 1.6.0)', () => {
+  it('terminal_failure_known_reason: failed status frame carries the expected reason and preserves final output', async () => {
+    const {sseText} = await launchAndStream(
+      FIXTURE_SCENARIO_NAMES.terminal_failure_known_reason,
+      'fixture-idem-key-known-reason-001',
+    )
+    expect(sseText).toContain('failed')
+    expect(sseText).toContain('inactivity-timeout')
+    expect(sseText).toContain('[Fixture output — synthetic partial result before failure (final)]')
+  })
+
+  it('terminal_failure_unknown_reason: failed status frame carries a visibly synthetic, fixture-prefixed reason', async () => {
+    const {sseText} = await launchAndStream(
+      FIXTURE_SCENARIO_NAMES.terminal_failure_unknown_reason,
+      'fixture-idem-key-unknown-reason-001',
+    )
+    expect(sseText).toContain('failed')
+    expect(sseText).toContain('fixture-unrecognized-reason')
+  })
+
+  it('non_failed_with_reason: a succeeded status frame carries a reason that must be ignored by renderers', async () => {
+    const {sseText} = await launchAndStream(
+      FIXTURE_SCENARIO_NAMES.non_failed_with_reason,
+      'fixture-idem-key-non-failed-reason-001',
+    )
+    expect(sseText).toContain('succeeded')
+    expect(sseText).toContain('inactivity-timeout')
+  })
+
+  it('recent-run index exposes a failed entry with the known reason binding to terminal_failure_known_reason stream data', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const runsRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)
+    expect(runsRes.status).toBe(200)
+    const {runs} = await runsRes.json() as {runs: Record<string, unknown>[]}
+    const reasonRow = runs.find(r => r.runId === 'run-fixture-index-failed-reason-006')
+    expect(reasonRow).toBeDefined()
+    expect(reasonRow?.failureKind).toBe('inactivity-timeout')
+
+    const streamRes = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/runs/run-fixture-index-failed-reason-006/stream?fixtureSessionId=${fixtureSessionId}`,
+    )
+    expect(streamRes.status).toBe(200)
+    const sseText = await streamRes.text()
+    expect(sseText).toContain('inactivity-timeout')
+  })
+
+  it('recent-run index exposes a failed entry with an unknown reason that never appears without the fixture- prefix', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+
+    const runsRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)
+    const {runs} = await runsRes.json() as {runs: Record<string, unknown>[]}
+    const unknownRow = runs.find(r => r.runId === 'run-fixture-index-failed-unknown-reason-007')
+    expect(unknownRow).toBeDefined()
+    expect(String(unknownRow?.failureKind)).toMatch(/^fixture-/)
+  })
+})
+
 describe('fixture launch — scenario validation', () => {
   it('POST with unknown scenario name returns 400 (non-echoing)', async () => {
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
@@ -1060,7 +1149,7 @@ describe('fixture runs index — GET /runs', () => {
   })
 
   it('entries contain only allowed fields (no extra sensitive fields)', async () => {
-    const ALLOWED_FIELDS = new Set(['runId', 'repo', 'status', 'createdAt', 'updatedAt'])
+    const ALLOWED_FIELDS = new Set(['runId', 'repo', 'status', 'createdAt', 'updatedAt', 'failureKind'])
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
     const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
     const {runs: body} = await res.json() as {runs: Record<string, unknown>[]}
