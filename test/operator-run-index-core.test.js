@@ -4,20 +4,10 @@
  */
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {
-  buildRunSafeView,
-  FETCH_TIMEOUT_MS,
-  fetchRunIndex,
-  formatRelativeTime,
-  initOperatorRunIndex,
-  markCardExpandedForLaunch,
-  markRunStreamAttached,
-  parseRunSummaryItem,
-  parseRunSummaryList,
-  resetRunIndexState,
-  RUN_INDEX_CAP,
-  VALID_RUN_SUMMARY_STATUSES,
-} from '../public/operator-run-index.js'
+
+import {buildRunSafeView, FETCH_TIMEOUT_MS, fetchRunIndex, formatRelativeTime, initOperatorRunIndex, markCardExpandedForLaunch, markRunStreamAttached, parseRunSummaryItem, parseRunSummaryList, resetRunIndexState, RUN_INDEX_CAP, FAILURE_REASON_LABELS as RUN_INDEX_FAILURE_REASON_LABELS, VALID_RUN_SUMMARY_STATUSES} from '../public/operator-run-index.js'
+import {FAILURE_REASON_LABELS as STREAM_FAILURE_REASON_LABELS} from '../public/operator-stream.js'
+import {isOperatorFailureKind, OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
 
 function makeValidSummary(overrides = {}) {
   return {
@@ -282,6 +272,116 @@ describe('buildRunSafeView — closed safe-view boundary', () => {
       expect(typeof view.statusLabel).toBe('string')
       expect(view.statusLabel.length).toBeGreaterThan(0)
     }
+  })
+})
+
+describe('parseRunSummaryItem — failureKind (contract 1.6.0)', () => {
+  it('accepts a failed summary with each known failureKind', () => {
+    const kinds = [
+      'inactivity-timeout',
+      'max-duration-timeout',
+      'stream-ended',
+      'workspace-unreachable',
+      'session-error',
+      'unknown',
+    ]
+    for (const failureKind of kinds) {
+      const input = makeValidSummary({status: 'failed', failureKind})
+      const result = parseRunSummaryItem(input)
+      expect(result.success).toBe(true)
+      if (result.success) {
+        expect(result.data.failureKind).toBe(failureKind)
+      }
+    }
+  })
+
+  it('failureKind is absent (key not present) when omitted from input', () => {
+    const input = makeValidSummary({status: 'failed'})
+    const result = parseRunSummaryItem(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(Object.prototype.hasOwnProperty.call(result.data, 'failureKind')).toBe(false)
+    }
+  })
+
+  it('normalizes an unknown failureKind value to absent — does not reject the summary', () => {
+    const input = makeValidSummary({status: 'failed', failureKind: 'some-future-fixture-reason'})
+    const result = parseRunSummaryItem(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.failureKind).toBeUndefined()
+      expect(Object.prototype.hasOwnProperty.call(result.data, 'failureKind')).toBe(false)
+    }
+  })
+
+  it('a non-failed status carrying a failureKind still parses (renderer ignores it)', () => {
+    const input = makeValidSummary({status: 'running', failureKind: 'inactivity-timeout'})
+    const result = parseRunSummaryItem(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.status).toBe('running')
+    }
+  })
+
+  it('missing failureKind does not throw', () => {
+    expect(() => parseRunSummaryItem(makeValidSummary())).not.toThrow()
+  })
+})
+
+describe('buildRunSafeView — reasonLabel (contract 1.6.0)', () => {
+  it('a failed summary with a known failureKind produces a safe view with a display label', () => {
+    const summary = {
+      runId: 'run-abc-001',
+      repo: 'fro-bot/agent',
+      status: 'failed',
+      createdAt: '2026-06-26T12:00:00.000Z',
+      failureKind: 'inactivity-timeout',
+    }
+    const view = buildRunSafeView(summary)
+    expect(typeof view.reasonLabel).toBe('string')
+    expect(view.reasonLabel.length).toBeGreaterThan(0)
+  })
+
+  it('an unknown/absent failureKind produces no reasonLabel — generic Failed fallback remains available', () => {
+    const summary = {
+      runId: 'run-abc-001',
+      repo: 'fro-bot/agent',
+      status: 'failed',
+      createdAt: '2026-06-26T12:00:00.000Z',
+    }
+    const view = buildRunSafeView(summary)
+    expect('reasonLabel' in view).toBe(false)
+    expect(view.statusLabel).toBe('Failed')
+  })
+
+  it('a non-failed status with a failureKind ignores the reason — no reasonLabel', () => {
+    const summary = {
+      runId: 'run-abc-001',
+      repo: 'fro-bot/agent',
+      status: 'running',
+      createdAt: '2026-06-26T12:00:00.000Z',
+      failureKind: 'inactivity-timeout',
+    }
+    const view = buildRunSafeView(summary)
+    expect('reasonLabel' in view).toBe(false)
+  })
+
+  it('safe-view output has an exact allowed key set and never includes raw failureKind', () => {
+    const summary = {
+      runId: 'run-abc-001',
+      repo: 'fro-bot/agent',
+      status: 'failed',
+      createdAt: '2026-06-26T12:00:00.000Z',
+      updatedAt: '2026-06-26T13:00:00.000Z',
+      failureKind: 'session-error',
+    }
+    const view = buildRunSafeView(summary)
+    const allowedKeys = new Set(['runId', 'repo', 'status', 'statusLabel', 'createdAt', 'updatedAt', 'reasonLabel'])
+    for (const key of Object.keys(view)) {
+      expect(allowedKeys.has(key)).toBe(true)
+    }
+    expect('failureKind' in view).toBe(false)
+    expect(JSON.stringify(view)).not.toContain('session-error')
   })
 })
 
@@ -2155,5 +2255,39 @@ describe('formatRelativeTime — coarse relative time formatting', () => {
     expect(formatRelativeTime(new Date(now - 172799000).toISOString(), now)).toBe('1 day ago')
     expect(formatRelativeTime(new Date(now - 172800000).toISOString(), now)).toBe('2 days ago')
     expect(formatRelativeTime(new Date(now - 864000000).toISOString(), now)).toBe('10 days ago')
+  })
+})
+
+describe('failure reason label map parity (stream ↔ run-index)', () => {
+  it('stream and run-index label maps have identical keys', () => {
+    const streamKeys = Object.keys(STREAM_FAILURE_REASON_LABELS).sort()
+    const runIndexKeys = Object.keys(RUN_INDEX_FAILURE_REASON_LABELS).sort()
+    expect(runIndexKeys).toEqual(streamKeys)
+  })
+
+  it('stream and run-index label maps have identical label text for every key', () => {
+    for (const key of Object.keys(STREAM_FAILURE_REASON_LABELS)) {
+      expect(RUN_INDEX_FAILURE_REASON_LABELS[key]).toBe(STREAM_FAILURE_REASON_LABELS[key])
+    }
+  })
+})
+
+describe('failure reason label coverage gate (contract 1.6.0)', () => {
+  it('every vendored upstream OperatorFailureKind has an explicit dashboard label decision', () => {
+    for (const kind of OPERATOR_FAILURE_KINDS) {
+      expect(Object.prototype.hasOwnProperty.call(STREAM_FAILURE_REASON_LABELS, kind)).toBe(true)
+      expect(Object.prototype.hasOwnProperty.call(RUN_INDEX_FAILURE_REASON_LABELS, kind)).toBe(true)
+      expect(typeof STREAM_FAILURE_REASON_LABELS[kind]).toBe('string')
+      expect(STREAM_FAILURE_REASON_LABELS[kind].length).toBeGreaterThan(0)
+    }
+  })
+
+  it('the dashboard label maps contain no keys beyond the vendored allowlist', () => {
+    for (const key of Object.keys(STREAM_FAILURE_REASON_LABELS)) {
+      expect(isOperatorFailureKind(key)).toBe(true)
+    }
+    for (const key of Object.keys(RUN_INDEX_FAILURE_REASON_LABELS)) {
+      expect(isOperatorFailureKind(key)).toBe(true)
+    }
   })
 })

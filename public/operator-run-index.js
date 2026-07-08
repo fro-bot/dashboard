@@ -35,6 +35,36 @@ const STATUS_LABELS = {
 }
 
 /**
+ * Allowlisted OperatorFailureKind values (contract 1.6.0) — out-of-set values
+ * normalize to absent, never parsed through.
+ * Mirrors src/gateway/operator-contract/run-status.ts OPERATOR_FAILURE_KINDS.
+ */
+const VALID_FAILURE_KINDS = new Set([
+  'inactivity-timeout',
+  'max-duration-timeout',
+  'stream-ended',
+  'workspace-unreachable',
+  'session-error',
+  'unknown',
+])
+
+/**
+ * Dashboard-owned display labels for known failure reasons — render labels from
+ * this map, never the raw failureKind wire string. Must stay identical to the
+ * map in public/operator-stream.js (parity is enforced by tests). Every
+ * OperatorFailureKind value has an explicit decision (including 'unknown',
+ * whose label is intentionally identical to the generic fallback).
+ */
+export const FAILURE_REASON_LABELS = {
+  'inactivity-timeout': 'No recent activity',
+  'max-duration-timeout': 'Exceeded maximum run duration',
+  'stream-ended': 'Stream interrupted',
+  'workspace-unreachable': 'Workspace unreachable',
+  'session-error': 'Session error',
+  unknown: 'Failed',
+}
+
+/**
  * Parse a single run summary item from the Gateway response.
  * Error strings are fixed — never echo or interpolate any part of the input.
  */
@@ -69,6 +99,10 @@ export function parseRunSummaryItem(input) {
     return {success: false, error: 'invalid run summary shape'}
   }
 
+  // failureKind is optional and allowlist-gated; an unrecognized or absent
+  // value normalizes to omitted — it never fails validity of the summary.
+  const failureKind = VALID_FAILURE_KINDS.has(candidate.failureKind) ? candidate.failureKind : undefined
+
   // Closed DTO — copy only declared fields; never spread input.
   const summary = {
     runId: candidate.runId,
@@ -76,6 +110,7 @@ export function parseRunSummaryItem(input) {
     status: candidate.status,
     createdAt: candidate.createdAt,
     ...('updatedAt' in candidate ? {updatedAt: candidate.updatedAt} : {}),
+    ...(failureKind === undefined ? {} : {failureKind}),
   }
 
   return {success: true, data: summary}
@@ -109,9 +144,18 @@ export function parseRunSummaryList(input) {
   return {success: true, data: valid}
 }
 
-/** Build a closed safe-view from a parsed run summary. Unknown fields excluded by construction. */
+/**
+ * Build a closed safe-view from a parsed run summary. Unknown fields excluded by
+ * construction. reasonLabel is a pre-resolved dashboard display label — never the
+ * raw failureKind — and is present only for a failed summary carrying a known
+ * failureKind (R9: non-failed statuses ignore any failureKind).
+ */
 export function buildRunSafeView(summary) {
   const statusLabel = STATUS_LABELS[summary.status] ?? summary.status
+  const reasonLabel =
+    summary.status === 'failed' && summary.failureKind !== undefined
+      ? FAILURE_REASON_LABELS[summary.failureKind]
+      : undefined
 
   return {
     runId: summary.runId,
@@ -120,6 +164,7 @@ export function buildRunSafeView(summary) {
     statusLabel,
     createdAt: summary.createdAt,
     ...('updatedAt' in summary ? {updatedAt: summary.updatedAt} : {}),
+    ...(reasonLabel === undefined ? {} : {reasonLabel}),
   }
 }
 

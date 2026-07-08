@@ -29,7 +29,7 @@
 // ---------------------------------------------------------------------------
 
 /** Contract version this client expects on the ready frame. */
-export const PINNED_CONTRACT_VERSION = '1.5.0'
+export const PINNED_CONTRACT_VERSION = '1.6.0'
 
 /** Base delay in milliseconds for exponential backoff. */
 export const RETRY_BASE_MS = 1000
@@ -140,6 +140,36 @@ const STATUS_LABELS = {
   cancelled: 'Cancelled',
 }
 
+/**
+ * Allowlisted OperatorFailureKind values (contract 1.6.0) — out-of-set values
+ * normalize to absent, never parsed through.
+ * Mirrors src/gateway/operator-contract/run-status.ts OPERATOR_FAILURE_KINDS.
+ */
+const VALID_FAILURE_KINDS = new Set([
+  'inactivity-timeout',
+  'max-duration-timeout',
+  'stream-ended',
+  'workspace-unreachable',
+  'session-error',
+  'unknown',
+])
+
+/**
+ * Dashboard-owned display labels for known failure reasons — render labels from
+ * this map, never the raw failureKind wire string. A missing or unmapped reason
+ * has no entry here and falls back to generic 'Failed' at the render boundary.
+ * Every OperatorFailureKind value has an explicit decision (including 'unknown',
+ * whose label is intentionally identical to the generic fallback).
+ */
+export const FAILURE_REASON_LABELS = {
+  'inactivity-timeout': 'No recent activity',
+  'max-duration-timeout': 'Exceeded maximum run duration',
+  'stream-ended': 'Stream interrupted',
+  'workspace-unreachable': 'Workspace unreachable',
+  'session-error': 'Session error',
+  unknown: 'Failed',
+}
+
 // ---------------------------------------------------------------------------
 // CRLF normalization
 // ---------------------------------------------------------------------------
@@ -243,6 +273,9 @@ export function parseSseFrame(record) {
     if (!VALID_SURFACES.has(parsed.surface)) {
       return {success: false, error: 'status frame surface value not in allowlist'}
     }
+    // failureKind is optional and allowlist-gated; an unrecognized or absent
+    // value normalizes to omitted — it never fails validity of the status frame.
+    const failureKind = VALID_FAILURE_KINDS.has(parsed.failureKind) ? parsed.failureKind : undefined
     return {
       success: true,
       frame: {
@@ -255,6 +288,7 @@ export function parseSseFrame(record) {
           status: parsed.status,
           startedAt: parsed.startedAt,
           stale: parsed.stale,
+          ...(failureKind === undefined ? {} : {failureKind}),
         },
       },
     }
@@ -402,13 +436,20 @@ export function nextStreamState(current, event) {
       if (current.connection !== 'live') {
         return current
       }
-      const {runId, status, phase, startedAt, stale} = event.data
+      const {runId, status, phase, startedAt, stale, failureKind} = event.data
       const isTerminal = TERMINAL_STATUSES.has(status)
       // Use a null-prototype object to guard against __proto__ key pollution.
       // Spread the prior entry so accumulated output fields (outputText/outputSeq/
       // outputFinal/outputCoalesced) survive a status update — a terminal status frame
       // arrives AFTER the final output frame, so a bare replacement would drop it.
       const prevStatusEntry = current.runs[runId]
+      // Reason label is derived only for a failed status carrying a known failureKind.
+      // A non-failed status ignores any failureKind entirely (R9). Once set, the label
+      // is sticky — a later non-terminal frame for the same run (e.g. a stale/duplicate
+      // frame) must not clear a previously stored terminal-failure label.
+      const derivedReasonLabel =
+        status === 'failed' && failureKind !== undefined ? FAILURE_REASON_LABELS[failureKind] : undefined
+      const reasonLabel = derivedReasonLabel ?? prevStatusEntry?.reasonLabel
       // On terminal status, clear all open approval prompts for this run.
       // Terminal is absorbing for approvals: once terminal, no open prompt can reappear.
       // Tombstones are preserved so that any late open frames are still ignored.
@@ -431,6 +472,7 @@ export function nextStreamState(current, event) {
           startedAt,
           stale,
           terminal: isTerminal,
+          ...(reasonLabel === undefined ? {} : {reasonLabel}),
         },
       })
       // If all observed runs are terminal, close the stream
@@ -822,10 +864,14 @@ export function nextStreamState(current, event) {
 /**
  * Map a run status object to the safe render model.
  *
- * Returns ONLY: { runId, status, phase, startedAt, stale }
+ * Returns ONLY: { runId, status, phase, startedAt, stale, reasonLabel? }
  *
  * Explicitly excluded: entityRef, surface, output, tool, path, repoName,
- * and any other field not in the safe set. This is a whitelist, not a blacklist.
+ * failureKind, and any other field not in the safe set. This is a whitelist,
+ * not a blacklist. reasonLabel is a pre-resolved dashboard display label —
+ * never the raw failureKind wire value — and is present only when the run
+ * entry carries one (set by nextStreamState on a failed status with a known
+ * failureKind, and sticky across later frames for the same run).
  */
 export function toSafeRunView(runStatus) {
   return {
@@ -834,6 +880,7 @@ export function toSafeRunView(runStatus) {
     phase: runStatus.phase,
     startedAt: runStatus.startedAt,
     stale: runStatus.stale,
+    ...(runStatus.reasonLabel === undefined ? {} : {reasonLabel: runStatus.reasonLabel}),
   }
 }
 

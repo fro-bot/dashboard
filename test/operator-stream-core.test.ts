@@ -153,6 +153,45 @@ describe('parseSseFrame — pure parser', () => {
     expect(result?.success).toBe(false)
   })
 
+  it('parses a failed status frame with each known failureKind', () => {
+    const kinds = [
+      'inactivity-timeout',
+      'max-duration-timeout',
+      'stream-ended',
+      'workspace-unreachable',
+      'session-error',
+      'unknown',
+    ]
+    for (const failureKind of kinds) {
+      const payload = {...ACTIVE_STATUS, status: 'failed', phase: 'FAILED', failureKind}
+      const text = `event: status\ndata: ${JSON.stringify(payload)}\n\n`
+      const result = parseSseFrame(text)
+      expect(result?.success).toBe(true)
+      if (result?.success && result.frame.type === 'status') {
+        expect(result.frame.data.failureKind).toBe(failureKind)
+      }
+    }
+  })
+
+  it('failureKind is absent on a status frame when omitted from input', () => {
+    const text = `event: status\ndata: ${JSON.stringify(ACTIVE_STATUS)}\n\n`
+    const result = parseSseFrame(text)
+    expect(result?.success).toBe(true)
+    if (result?.success && result.frame.type === 'status') {
+      expect('failureKind' in result.frame.data).toBe(false)
+    }
+  })
+
+  it('normalizes an unknown failureKind on a status frame to absent — does not reject the frame', () => {
+    const payload = {...ACTIVE_STATUS, status: 'failed', phase: 'FAILED', failureKind: 'some-future-fixture-reason'}
+    const text = `event: status\ndata: ${JSON.stringify(payload)}\n\n`
+    const result = parseSseFrame(text)
+    expect(result?.success).toBe(true)
+    if (result?.success && result.frame.type === 'status') {
+      expect('failureKind' in result.frame.data).toBe(false)
+    }
+  })
+
   it('returns a failure for an unknown event name', () => {
     const text = 'event: unknown-event\ndata: {"foo":"bar"}\n\n'
     const result = parseSseFrame(text)
@@ -686,6 +725,73 @@ describe('nextStreamState — status frame', () => {
   })
 })
 
+describe('nextStreamState — failure reason label (contract 1.6.0)', () => {
+  const live = (): StreamState =>
+    nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+
+  it('a failed status with a known failureKind stores a safe reasonLabel for the run', () => {
+    const state = nextStreamState(live(), {
+      type: 'status',
+      data: {...ACTIVE_STATUS, status: 'failed', phase: 'FAILED', failureKind: 'inactivity-timeout'},
+    })
+    expect(state.runs['run-abc']?.reasonLabel).toBe('No recent activity')
+  })
+
+  it('an unknown failureKind on a failed status leaves reasonLabel absent — generic Failed fallback remains available', () => {
+    const state = nextStreamState(live(), {
+      type: 'status',
+      data: {...ACTIVE_STATUS, status: 'failed', phase: 'FAILED'},
+    })
+    expect(state.runs['run-abc']?.reasonLabel).toBeUndefined()
+    expect(state.runs['run-abc']?.status).toBe('failed')
+  })
+
+  it('a missing failureKind on a failed status does not throw and leaves reasonLabel absent', () => {
+    expect(() =>
+      nextStreamState(live(), {
+        type: 'status',
+        data: {...ACTIVE_STATUS, status: 'failed', phase: 'FAILED'},
+      }),
+    ).not.toThrow()
+  })
+
+  it('a non-failed status with a failureKind ignores the reason — no reasonLabel stored', () => {
+    const state = nextStreamState(live(), {
+      type: 'status',
+      data: {...ACTIVE_STATUS, failureKind: 'inactivity-timeout'},
+    })
+    expect(state.runs['run-abc']?.reasonLabel).toBeUndefined()
+  })
+
+  it('a late non-terminal status after a terminal failure does not clear the stored reasonLabel', () => {
+    const withFailure = nextStreamState(live(), {
+      type: 'status',
+      data: {...ACTIVE_STATUS, status: 'failed', phase: 'FAILED', failureKind: 'session-error'},
+    })
+    expect(withFailure.runs['run-abc']?.reasonLabel).toBe('Session error')
+
+    // A late, non-terminal frame for the same run arrives after the terminal failure.
+    const withLateFrame = nextStreamState(withFailure, {
+      type: 'status',
+      data: ACTIVE_STATUS,
+    })
+    expect(withLateFrame.runs['run-abc']?.reasonLabel).toBe('Session error')
+  })
+
+  it('terminal failed status with a reason preserves already-rendered output text', () => {
+    const withOutput = nextStreamState(live(), {
+      type: 'output',
+      data: {runId: 'run-abc', text: 'partial answer', final: false, seq: 0},
+    })
+    const withFailure = nextStreamState(withOutput, {
+      type: 'status',
+      data: {...ACTIVE_STATUS, status: 'failed', phase: 'FAILED', failureKind: 'stream-ended'},
+    })
+    expect(withFailure.runs['run-abc']?.outputText).toBe('partial answer')
+    expect(withFailure.runs['run-abc']?.reasonLabel).toBe('Stream interrupted')
+  })
+})
+
 describe('nextStreamState — reset frame', () => {
   it('transitions to reconnecting and sets shouldReconnect on reset', () => {
     const liveState = nextStreamState(INITIAL_STATE, {
@@ -872,6 +978,35 @@ describe('toSafeRunView — safe render model', () => {
   })
 })
 
+describe('toSafeRunView — reasonLabel (contract 1.6.0)', () => {
+  it('includes reasonLabel when the run entry carries one', () => {
+    const view = toSafeRunView({...ACTIVE_STATUS, status: 'failed', reasonLabel: 'No recent activity'})
+    expect(view.reasonLabel).toBe('No recent activity')
+  })
+
+  it('omits reasonLabel when the run entry has none', () => {
+    const view = toSafeRunView(ACTIVE_STATUS)
+    expect('reasonLabel' in view).toBe(false)
+  })
+
+  it('never exposes reason, failureKind, or a raw code — only the allowed key set', () => {
+    const dangerousInput = {
+      ...ACTIVE_STATUS,
+      status: 'failed',
+      failureKind: 'workspace-unreachable',
+      reason: 'workspace-unreachable',
+      reasonLabel: 'Workspace unreachable',
+    }
+    const view = toSafeRunView(dangerousInput)
+    const allowedKeys = new Set(['runId', 'status', 'phase', 'startedAt', 'stale', 'reasonLabel'])
+    for (const key of Object.keys(view)) {
+      expect(allowedKeys.has(key)).toBe(true)
+    }
+    expect('failureKind' in view).toBe(false)
+    expect('reason' in view).toBe(false)
+  })
+})
+
 describe('no-leak: render model contains no sensitive fields', () => {
   it('a full sequence produces a render model with no repo name or entityRef', () => {
     const liveState = nextStreamState(INITIAL_STATE, {
@@ -940,8 +1075,8 @@ describe('backoff constants', () => {
     expect(Number.isInteger(RETRY_MAX_COUNT)).toBe(true)
   })
 
-  it('PINNED_CONTRACT_VERSION is 1.5.0', () => {
-    expect(PINNED_CONTRACT_VERSION).toBe('1.5.0')
+  it('PINNED_CONTRACT_VERSION is 1.6.0', () => {
+    expect(PINNED_CONTRACT_VERSION).toBe('1.6.0')
   })
 })
 
@@ -5284,7 +5419,7 @@ describe('initOperatorStream — late-frame guard: closed stream does not mutate
     const badgeEl = {textContent: '', hidden: true}
 
     const encoder = new TextEncoder()
-    const readyFrame = 'event: ready\ndata: {"contractVersion":"1.5.0"}\n\n'
+    const readyFrame = 'event: ready\ndata: {"contractVersion":"1.6.0"}\n\n'
     const outputFrame = `event: output\ndata: ${JSON.stringify({runId: 'run-late-frame', text: 'late output', final: false, seq: 0})}\n\n`
     const approvalFrame = `event: approval\ndata: ${JSON.stringify({runId: 'run-late-frame', requestID: 'req-late', permission: 'shell', settled: false})}\n\n`
 
@@ -5370,7 +5505,7 @@ describe('initOperatorStream — terminal run: immediate close preserves termina
     const noticeEl = {textContent: '', hidden: false, dataset: {connectionState: ''}}
 
     const encoder = new TextEncoder()
-    const readyFrame = 'event: ready\ndata: {"contractVersion":"1.5.0"}\n\n'
+    const readyFrame = 'event: ready\ndata: {"contractVersion":"1.6.0"}\n\n'
     const terminalFrame = `event: status\ndata: ${JSON.stringify({
       runId: 'run-terminal-001',
       entityRef: 'fro-bot/agent',

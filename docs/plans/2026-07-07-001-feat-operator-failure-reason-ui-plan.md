@@ -200,7 +200,7 @@ The failure reason is not a new source of truth. It is a safe display supplement
 **Verification:**
 - Server-side contract tests prove `1.6.0` parity, reason allowlisting, additive status acceptance, and drift behavior.
 
-- [ ] **Unit 2: Browser parser and state parity**
+- [x] **Unit 2: Browser parser and state parity**
 
 **Goal:** Update the public browser modules to parse, store, and normalize reason codes consistently with the TypeScript contract.
 
