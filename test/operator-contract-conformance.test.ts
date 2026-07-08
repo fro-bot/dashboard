@@ -179,7 +179,7 @@ describe('OPERATOR_CONTRACT_VERSION', () => {
 })
 
 // ---------------------------------------------------------------------------
-// OperatorFailureKind (contract 1.6.0)
+// OperatorFailureKind
 // ---------------------------------------------------------------------------
 
 describe('OperatorFailureKind', () => {
@@ -936,7 +936,7 @@ describe('parseRunSummary', () => {
   })
 
   // -------------------------------------------------------------------------
-  // failureKind (contract 1.6.0)
+  // failureKind
   // -------------------------------------------------------------------------
 
   it('accepts a failed summary with each known failureKind', () => {
@@ -1001,7 +1001,7 @@ describe('parseRunSummary', () => {
     expect(result.success).toBe(true)
     if (result.success) {
       // Contract layer is permissive; it parses the field. Renderer-level
-      // ignoring of non-failed reasons is a browser-module concern (Unit 2/3).
+      // ignoring of non-failed reasons is a browser-module concern.
       expect(result.data.status).toBe('running')
     }
   })

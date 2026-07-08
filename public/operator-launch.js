@@ -638,14 +638,25 @@ export async function initOperatorLaunch(opts) {
           card.dataset.runId = runId
           card.dataset.optimistic = 'true'
 
+          // Same card anatomy as the run-index renderer.
+          const statusGroup = document.createElement('span')
+          statusGroup.className = 'run-status-group'
+          statusGroup.dataset.role = 'run-status-group'
+
           const statusSpan = document.createElement('span')
           statusSpan.className = 'run-status status-pending'
           statusSpan.dataset.role = 'run-status'
           statusSpan.textContent = 'Pending'
-          card.append(statusSpan)
+          statusGroup.append(statusSpan)
 
-          // Hidden per-card substructure — same anatomy as renderRunCard, so
-          // operator-stream.js's updateDOM() has targets on a launch-created card.
+          const reasonSpan = document.createElement('span')
+          reasonSpan.className = 'run-reason'
+          reasonSpan.dataset.role = 'run-reason'
+          statusGroup.append(reasonSpan)
+
+          card.append(statusGroup)
+
+          // Hidden per-card substructure for the stream renderer.
           const outputEl = document.createElement('div')
           outputEl.dataset.role = 'run-output'
           outputEl.hidden = true

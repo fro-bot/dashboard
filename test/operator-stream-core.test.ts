@@ -725,7 +725,7 @@ describe('nextStreamState — status frame', () => {
   })
 })
 
-describe('nextStreamState — failure reason label (contract 1.6.0)', () => {
+describe('nextStreamState — failure reason label', () => {
   const live = (): StreamState =>
     nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
 
@@ -978,7 +978,7 @@ describe('toSafeRunView — safe render model', () => {
   })
 })
 
-describe('toSafeRunView — reasonLabel (contract 1.6.0)', () => {
+describe('toSafeRunView — reasonLabel', () => {
   it('includes reasonLabel when the run entry carries one', () => {
     const view = toSafeRunView({...ACTIVE_STATUS, status: 'failed', reasonLabel: 'No recent activity'})
     expect(view.reasonLabel).toBe('No recent activity')
@@ -4821,6 +4821,77 @@ describe('fixture SSE scenarios — browser reducer: terminal_failure scenario',
   })
 })
 
+describe('fixture SSE scenarios — browser reducer: reason-bearing scenarios', () => {
+  it('terminal_failure_known_reason scenario: failed run carries a resolved reasonLabel', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.terminal_failure_known_reason, FIXTURE_RUN_ID_FOR_TESTS)
+    const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
+
+    const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
+    let state = INITIAL_STATE
+
+    for (const record of records) {
+      const result = parseSseFrame(`${record}\n\n`)
+      if (result !== null && result.success) {
+        state = nextStreamState(state, result.frame)
+      }
+    }
+
+    const failedRun = Object.values(state.runs).find(r => r.status === 'failed')
+    expect(failedRun).toBeDefined()
+    if (failedRun) {
+      const view = toSafeRunView(failedRun)
+      expect(view.reasonLabel).toBeDefined()
+      expect(typeof view.reasonLabel).toBe('string')
+      expect(view.reasonLabel).not.toBe('')
+    }
+  })
+
+  it('terminal_failure_unknown_reason scenario: failed run has no reasonLabel (unrecognized reason normalizes to absent)', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.terminal_failure_unknown_reason, FIXTURE_RUN_ID_FOR_TESTS)
+    const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
+
+    const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
+    let state = INITIAL_STATE
+
+    for (const record of records) {
+      const result = parseSseFrame(`${record}\n\n`)
+      if (result !== null && result.success) {
+        state = nextStreamState(state, result.frame)
+      }
+    }
+
+    const failedRun = Object.values(state.runs).find(r => r.status === 'failed')
+    expect(failedRun).toBeDefined()
+    if (failedRun) {
+      const view = toSafeRunView(failedRun)
+      expect(view.reasonLabel).toBeUndefined()
+    }
+  })
+
+  it('non_failed_with_reason scenario: a non-failed terminal status ignores any reason entirely — reasonLabel absent', () => {
+    const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.non_failed_with_reason, FIXTURE_RUN_ID_FOR_TESTS)
+    const records = sseBytes.split('\n\n').filter(r => r.trim() !== '')
+
+    const INITIAL_STATE: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
+    let state = INITIAL_STATE
+
+    for (const record of records) {
+      const result = parseSseFrame(`${record}\n\n`)
+      if (result !== null && result.success) {
+        state = nextStreamState(state, result.frame)
+      }
+    }
+
+    const runEntries = Object.values(state.runs)
+    expect(runEntries.length).toBeGreaterThan(0)
+    for (const entry of runEntries) {
+      expect(entry.status).not.toBe('failed')
+      const view = toSafeRunView(entry)
+      expect(view.reasonLabel).toBeUndefined()
+    }
+  })
+})
+
 describe('fixture SSE scenarios — browser reducer: contract_drift scenario', () => {
   it('contract_drift scenario drives the browser reducer to drift state', () => {
     const sseBytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.contract_drift, FIXTURE_RUN_ID_FOR_TESTS)
@@ -5921,6 +5992,262 @@ describe('live failure reason updates and announcements', () => {
     // noticeEl must contain the live polite announcement
     expect(noticeEl.textContent).toBe('Run failed: Workspace unavailable')
     expect(noticeEl.hidden).toBe(false)
+
+    handle.close()
+  })
+
+  it('a stream whose very first status frame is already failed with a known reason still announces once', async () => {
+    const noticeEl = {textContent: '', hidden: true, dataset: {connectionState: ''}}
+    const statusEl = {textContent: 'Pending', className: '', classList: {add: () => {}, remove: () => {}}, dataset: {}, hidden: false}
+    const reasonEl = {textContent: ''}
+
+    const encoder = new TextEncoder()
+    const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
+    // The run terminalized before the stream attached — the first (and only)
+    // status frame this stream ever sees is already 'failed'.
+    const failedFrame = `event: status\ndata: ${JSON.stringify({
+      runId: 'run-first-frame-failed-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'FAILED',
+      status: 'failed',
+      startedAt: '2026-06-29T10:02:00Z',
+      stale: false,
+      failureKind: 'session-error',
+    })}\n\n`
+
+    let readCount = 0
+    const chunks = [encoder.encode(readyFrame + failedFrame)]
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (readCount < chunks.length) {
+              return {done: false, value: chunks[readCount++]}
+            }
+            return {done: true}
+          },
+        }),
+      },
+    }))
+
+    const handle = initOperatorStream({
+      runId: 'run-first-frame-failed-001',
+      statusEl,
+      noticeEl,
+      reasonEl,
+      endpointBase: '/operator',
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    expect(statusEl.textContent).toBe('Failed')
+    expect(noticeEl.textContent).toBe('Run failed: Session error')
+    expect(noticeEl.hidden).toBe(false)
+
+    handle.close()
+  })
+
+  it('duplicate failed status frames for the same run do not re-announce', async () => {
+    const noticeEl = {textContent: '', hidden: true, dataset: {connectionState: ''}}
+    const statusEl = {textContent: 'Pending', className: '', classList: {add: () => {}, remove: () => {}}, dataset: {}, hidden: false}
+    const reasonEl = {textContent: ''}
+
+    const encoder = new TextEncoder()
+    const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
+    const failedFrameData = {
+      runId: 'run-dup-failed-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'FAILED',
+      status: 'failed',
+      startedAt: '2026-06-29T10:02:00Z',
+      stale: false,
+      failureKind: 'stream-ended',
+    }
+    const failedFrame = `event: status\ndata: ${JSON.stringify(failedFrameData)}\n\n`
+    // A duplicate/replayed failed frame for the same run — must not re-trigger the announcement.
+    const duplicateFailedFrame = `event: status\ndata: ${JSON.stringify(failedFrameData)}\n\n`
+
+    let readCount = 0
+    const chunks = [encoder.encode(readyFrame + failedFrame + duplicateFailedFrame)]
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (readCount < chunks.length) {
+              return {done: false, value: chunks[readCount++]}
+            }
+            return {done: true}
+          },
+        }),
+      },
+    }))
+
+    const handle = initOperatorStream({
+      runId: 'run-dup-failed-001',
+      statusEl,
+      noticeEl,
+      reasonEl,
+      endpointBase: '/operator',
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    expect(noticeEl.textContent).toBe('Run failed: Stream ended early')
+    // A single announcement — no accumulation/duplication from the repeated frame.
+    expect(noticeEl.textContent).not.toContain('Run failed: Stream ended early Run failed')
+
+    handle.close()
+  })
+
+  it('a page-load reason already painted on reasonEl survives a running/replay frame that carries no reasonLabel of its own', async () => {
+    const noticeEl = {textContent: '', hidden: true, dataset: {connectionState: ''}}
+    const statusEl = {textContent: 'Failed', className: 'run-status status-failed', classList: {add: () => {}, remove: () => {}}, dataset: {}, hidden: false}
+    const reasonEl = {textContent: 'No recent activity', dataset: {reasonState: 'present'}}
+
+    const encoder = new TextEncoder()
+    const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
+    const runningFrame = `event: status\ndata: ${JSON.stringify({
+      runId: 'run-reason-persist-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'EXECUTING',
+      status: 'running',
+      startedAt: '2026-06-29T10:00:00Z',
+      stale: false,
+    })}\n\n`
+
+    let readCount = 0
+    const chunks = [encoder.encode(readyFrame + runningFrame)]
+    // Keep the stream open (never resolve `done: true`) after the initial chunk —
+    // this exercises the "still live, mid-stream, no reason on this frame" case,
+    // not a stream that has since closed (closed + non-terminal is its own,
+    // separately-tested clearing case).
+    const pendingRead = new Promise(() => {})
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (readCount < chunks.length) {
+              return {done: false, value: chunks[readCount++]}
+            }
+            return pendingRead
+          },
+        }),
+      },
+    }))
+
+    const handle = initOperatorStream({
+      runId: 'run-reason-persist-001',
+      statusEl,
+      noticeEl,
+      reasonEl,
+      endpointBase: '/operator',
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 30))
+
+    // The pre-existing page-load reason must survive — the running frame carries no
+    // reasonLabel of its own, so it must not clear a previously painted safe label.
+    expect(reasonEl.textContent).toBe('No recent activity')
+    expect(reasonEl.dataset.reasonState).toBe('present')
+
+    handle.close()
+  })
+
+  it('reasonEl clears when the stream enters an unavailable/non-terminal state (e.g. not-found)', async () => {
+    const noticeEl = {textContent: '', hidden: true, dataset: {connectionState: ''}}
+    const statusEl = {textContent: '', className: '', classList: {add: () => {}, remove: () => {}}, dataset: {}, hidden: false}
+    const reasonEl = {textContent: 'No recent activity', dataset: {reasonState: 'present'}}
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      headers: {get: () => null},
+    }))
+
+    const handle = initOperatorStream({
+      runId: 'run-reason-clear-001',
+      statusEl,
+      noticeEl,
+      reasonEl,
+      endpointBase: '/operator',
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 30))
+
+    expect(noticeEl.dataset.connectionState).toBe('not-found')
+    // A stale reason must not linger once the stream can no longer vouch for the run's outcome.
+    expect(reasonEl.textContent).toBe('')
+    expect(reasonEl.dataset.reasonState).toBeUndefined()
+
+    handle.close()
+  })
+
+  it('reasonEl and the notice element both expose data-reason-state / data-connection-state as safe machine-readable tokens, never the raw label or failureKind', async () => {
+    const noticeEl = {textContent: '', hidden: true, dataset: {connectionState: ''}}
+    const statusEl = {textContent: 'Pending', className: '', classList: {add: () => {}, remove: () => {}}, dataset: {}, hidden: false}
+    const reasonEl: {textContent: string; dataset: Record<string, string>} = {textContent: '', dataset: {}}
+
+    const encoder = new TextEncoder()
+    const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
+    const failedFrame = `event: status\ndata: ${JSON.stringify({
+      runId: 'run-reason-state-attr-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'FAILED',
+      status: 'failed',
+      startedAt: '2026-06-29T10:02:00Z',
+      stale: false,
+      failureKind: 'max-duration-timeout',
+    })}\n\n`
+
+    let readCount = 0
+    const chunks = [encoder.encode(readyFrame + failedFrame)]
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (readCount < chunks.length) {
+              return {done: false, value: chunks[readCount++]}
+            }
+            return {done: true}
+          },
+        }),
+      },
+    }))
+
+    const handle = initOperatorStream({
+      runId: 'run-reason-state-attr-001',
+      statusEl,
+      noticeEl,
+      reasonEl,
+      endpointBase: '/operator',
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 30))
+
+    expect(reasonEl.dataset.reasonState).toBe('present')
+    // Never the raw failureKind wire value or the resolved label text in the attribute.
+    expect(reasonEl.dataset.reasonState).not.toBe('max-duration-timeout')
+    expect(reasonEl.dataset.reasonState).not.toBe('Run timed out')
 
     handle.close()
   })

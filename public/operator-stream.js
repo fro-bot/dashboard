@@ -141,8 +141,8 @@ const STATUS_LABELS = {
 }
 
 /**
- * Allowlisted OperatorFailureKind values (contract 1.6.0) — out-of-set values
- * normalize to absent, never parsed through.
+ * Allowlisted OperatorFailureKind values — out-of-set values normalize to
+ * absent, never parsed through.
  * Mirrors src/gateway/operator-contract/run-status.ts OPERATOR_FAILURE_KINDS.
  */
 const VALID_FAILURE_KINDS = new Set([
@@ -1417,7 +1417,6 @@ export function initOperatorStream(opts) {
   let reconnectTimer = null // track pending reconnect timer
   let firstFrameTimer = null // track pending first-frame timeout
   let aborted = false // set by close() to prevent late timer from fetching
-  let lastStatus = null
   let announcedFailure = false
 
   function updateDOM() {
@@ -1437,16 +1436,12 @@ export function initOperatorStream(opts) {
       const runEntry = state.runs[runId]
       const currentStatus = runEntry?.status ?? null
 
-      if (currentStatus === 'failed' && lastStatus !== 'failed' && lastStatus !== null && !announcedFailure) {
+      if (currentStatus === 'failed' && !announcedFailure) {
         announcedFailure = true
         const view = toSafeRunView(runEntry)
         const reasonPart = view.reasonLabel ? `: ${view.reasonLabel}` : ''
         noticeEl.textContent = `Run failed${reasonPart}`
         noticeEl.hidden = false
-      }
-
-      if (currentStatus !== null) {
-        lastStatus = currentStatus
       }
 
       if (conn === 'live') {
@@ -1492,15 +1487,6 @@ export function initOperatorStream(opts) {
           noticeEl.hidden = false
         }
       }
-    } else {
-      const runEntry = state.runs[runId]
-      const currentStatus = runEntry?.status ?? null
-      if (currentStatus === 'failed' && lastStatus !== 'failed' && lastStatus !== null) {
-        announcedFailure = true
-      }
-      if (currentStatus !== null) {
-        lastStatus = currentStatus
-      }
     }
 
     if (statusEl) {
@@ -1534,9 +1520,26 @@ export function initOperatorStream(opts) {
 
     if (reasonEl) {
       const runEntry = state.runs[runId]
-      if (runEntry && (state.connection === 'live' || runEntry.terminal)) {
+      const runIsTerminal = runEntry !== undefined && runEntry.terminal === true
+      if (runEntry && (state.connection === 'live' || runIsTerminal)) {
         const view = toSafeRunView(runEntry)
-        reasonEl.textContent = view.reasonLabel ?? ''
+        if (view.reasonLabel !== undefined) {
+          reasonEl.textContent = view.reasonLabel
+          if (reasonEl.dataset) reasonEl.dataset.reasonState = 'present'
+        }
+      } else if (!aborted) {
+        const conn = state.connection
+        if (
+          !runIsTerminal &&
+          (conn === 'drift' ||
+            conn === 'not-found' ||
+            conn === 'failed' ||
+            conn === 'submitted-unobservable' ||
+            conn === 'closed')
+        ) {
+          reasonEl.textContent = ''
+          if (reasonEl.dataset) delete reasonEl.dataset.reasonState
+        }
       }
     }
 

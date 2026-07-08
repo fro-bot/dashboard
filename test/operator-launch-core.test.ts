@@ -320,6 +320,27 @@ describe('buildPendingCardHooks', () => {
   })
 })
 
+describe('optimistic pending card anatomy — status-group parity with renderRunCard', () => {
+  it('emits the same status-group anatomy as operator-run-index.js renderRunCard: a status-group span wrapping run-status and an initially-empty run-reason span', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-launch.js', 'utf8')
+
+    // The optimistic card must give operator-stream.js's updateDOM() a
+    // data-role="run-reason" target so a live-stream terminal failure with a
+    // reason can render on a launch-created card, not just a fetched one.
+    expect(src).toContain(`'run-status-group'`)
+    expect(src).toContain(`statusGroup.dataset.role = 'run-status-group'`)
+    expect(src).toContain(`reasonSpan.className = 'run-reason'`)
+    expect(src).toContain(`reasonSpan.dataset.role = 'run-reason'`)
+
+    // Existing output/coalesced/approvals/badge hooks must be preserved.
+    expect(src).toContain(`outputEl.dataset.role = 'run-output'`)
+    expect(src).toContain(`coalescedEl.dataset.role = 'run-output-coalesced'`)
+    expect(src).toContain(`approvalsEl.dataset.role = 'run-approvals'`)
+    expect(src).toContain(`badgeEl.dataset.role = 'approval-badge'`)
+  })
+})
+
 describe('validateRepoItem — per-item validation for listRepos', () => {
   it('accepts a valid item with owner and repo strings', () => {
     expect(validateRepoItem({owner: 'fro-bot', repo: 'agent'})).toBe(true)

@@ -6,7 +6,7 @@
 /** Index-only status set. Stream-only statuses (blocked, waiting_for_approval) are excluded. */
 export type RunSummaryStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 
-/** Operator-safe failure-reason code (contract 1.6.0). */
+/** Operator-safe failure-reason code. */
 export type FailureKind =
   | 'inactivity-timeout'
   | 'max-duration-timeout'

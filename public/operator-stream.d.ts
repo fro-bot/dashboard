@@ -25,7 +25,7 @@ export declare const FIRST_FRAME_TIMEOUT_MS: number
  */
 export declare const GATEWAY_PENDING_APPROVALS_CAP: number
 
-/** Operator-safe failure-reason code (contract 1.6.0). */
+/** Operator-safe failure-reason code. */
 export type FailureKind =
   | 'inactivity-timeout'
   | 'max-duration-timeout'
@@ -57,8 +57,8 @@ export interface StatusFrameData {
   readonly status: string
   readonly startedAt: string
   readonly stale: boolean
-  /** Operator-safe failure-reason code (contract 1.6.0). Optional; failed statuses only. */
-  readonly failureKind?: string
+  /** Operator-safe failure-reason code. Optional; failed statuses only. */
+  readonly failureKind?: FailureKind
 }
 
 export interface ResetFrameData {
@@ -239,7 +239,7 @@ export declare function nextStreamState(current: StreamState, event: StreamEvent
 
 /**
  * Map a run status object to the safe render model.
- * Returns ONLY: { runId, status, phase, startedAt, stale }
+ * Returns ONLY: { runId, status, phase, startedAt, stale, reasonLabel? }
  */
 export declare function toSafeRunView(runStatus: {
   readonly runId: string

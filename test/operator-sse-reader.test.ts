@@ -123,7 +123,7 @@ describe('parseSseChunk — pure parser', () => {
   })
 
   // -------------------------------------------------------------------------
-  // failureKind (contract 1.6.0)
+  // failureKind
   // -------------------------------------------------------------------------
 
   it('parses a failed status frame with each known failureKind', () => {

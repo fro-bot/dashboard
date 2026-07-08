@@ -72,14 +72,13 @@ const FIXTURE_RUN_SUMMARIES: readonly RunSummary[] = [
     failureKind: FIXTURE_KNOWN_FAILURE_REASON,
   },
   {
-    // Visibly synthetic, fixture-prefixed value NOT in the OPERATOR_FAILURE_KINDS
-    // allowlist — proves unrecognized reasons never leak to render/log surfaces.
     runId: 'run-fixture-index-failed-unknown-reason-007',
     repo: 'fixture-org/fixture-repo-2',
     status: 'failed',
     createdAt: '2026-06-28T10:00:10Z',
     updatedAt: '2026-06-28T10:00:25Z',
-    failureKind: FIXTURE_UNKNOWN_FAILURE_REASON as RunSummary['failureKind'],
+    // Synthetic out-of-union value for unknown-reason normalization.
+    failureKind: FIXTURE_UNKNOWN_FAILURE_REASON as unknown as RunSummary['failureKind'],
   },
 ]
 

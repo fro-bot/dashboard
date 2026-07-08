@@ -275,7 +275,7 @@ describe('buildRunSafeView — closed safe-view boundary', () => {
   })
 })
 
-describe('parseRunSummaryItem — failureKind (contract 1.6.0)', () => {
+describe('parseRunSummaryItem — failureKind', () => {
   it('accepts a failed summary with each known failureKind', () => {
     const kinds = [
       'inactivity-timeout',
@@ -328,7 +328,7 @@ describe('parseRunSummaryItem — failureKind (contract 1.6.0)', () => {
   })
 })
 
-describe('buildRunSafeView — reasonLabel (contract 1.6.0)', () => {
+describe('buildRunSafeView — reasonLabel', () => {
   it('a failed summary with a known failureKind produces a safe view with a display label', () => {
     const summary = {
       runId: 'run-abc-001',
@@ -2195,6 +2195,7 @@ function renderRunCardForTest(cards, summaryLike) {
   reasonSpan.className = 'run-reason'
   reasonSpan.dataset.role = 'run-reason'
   reasonSpan.textContent = view.reasonLabel ?? ''
+  if (view.reasonLabel !== undefined) reasonSpan.dataset.reasonState = 'present'
   statusGroup.append(reasonSpan)
 
   card.append(statusGroup)
@@ -2229,6 +2230,16 @@ describe('CSS selector ↔ status emitter agreement', () => {
     expect(cssContent).not.toContain('.status-failure')
     expect(cssContent).not.toContain('.status-error')
     expect(cssContent).not.toContain('.status-in_progress')
+  })
+
+  it('has selectors for the run-status-group and run-reason elements emitted by renderRunCard/updateDOM', async () => {
+    const fs = await import('node:fs/promises')
+    const cssPath = new URL('../web/src/index.css', import.meta.url).pathname
+    const cssContent = await fs.readFile(cssPath, 'utf8')
+
+    expect(cssContent).toContain('.run-status-group')
+    expect(cssContent).toContain('.run-reason')
+    expect(cssContent).toContain('.run-reason:empty')
   })
 })
 
@@ -2287,7 +2298,7 @@ describe('failure reason label map parity (stream ↔ run-index)', () => {
   })
 })
 
-describe('failure reason label coverage gate (contract 1.6.0)', () => {
+describe('failure reason label coverage gate', () => {
   it('every vendored upstream OperatorFailureKind has an explicit dashboard label decision', () => {
     for (const kind of OPERATOR_FAILURE_KINDS) {
       expect(Object.prototype.hasOwnProperty.call(STREAM_FAILURE_REASON_LABELS, kind)).toBe(true)
@@ -2352,6 +2363,75 @@ describe('run-index failure reason labels', () => {
 
     const reasonEl = card.querySelector('[data-role="run-reason"]')
     expect(reasonEl?.textContent).toBe('Run timed out')
+  })
+
+  it('renderRunCard sets data-reason-state="present" only when a safe reasonLabel is displayed, never the raw failureKind or label text', async () => {
+    const runId = 'run-unit3-reason-state-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        runs: [
+          makeValidSummary({
+            runId,
+            status: 'failed',
+            failureKind: 'session-error',
+          }),
+        ],
+      }),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    const reasonEl = cards[0].querySelector('[data-role="run-reason"]')
+    expect(reasonEl?.dataset.reasonState).toBe('present')
+    expect(reasonEl?.dataset.reasonState).not.toBe('session-error')
+    expect(reasonEl?.dataset.reasonState).not.toBe('Session error')
+  })
+
+  it('a card rendered with no reasonLabel never sets data-reason-state', () => {
+    const cards = []
+    const card = renderRunCardForTest(cards, {
+      runId: 'run-unit3-reason-state-clear-001',
+      status: 'succeeded',
+    })
+    const reasonEl = card.querySelector('[data-role="run-reason"]')
+    expect(reasonEl?.dataset.reasonState).toBeUndefined()
+  })
+
+  it('a live diff refresh that moves a card from a known reason to no reason clears data-reason-state via updateCardInPlace', async () => {
+    const runId = 'run-unit3-reason-state-transition-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        runs: [makeValidSummary({runId, status: 'failed', failureKind: 'inactivity-timeout'})],
+      }),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    const reasonEl = cards[0].querySelector('[data-role="run-reason"]')
+    expect(reasonEl?.dataset.reasonState).toBe('present')
+
+    // Refresh: the same run is now succeeded — a status the projector never
+    // attaches a failureKind to, so buildRunSafeView emits no reasonLabel.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        runs: [makeValidSummary({runId, status: 'succeeded'})],
+      }),
+    }))
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(1)
+    const reasonElAfter = cards[0].querySelector('[data-role="run-reason"]')
+    expect(reasonElAfter?.textContent).toBe('')
+    expect(reasonElAfter?.dataset.reasonState).toBeUndefined()
   })
 
   it('generic non-failed status rows do not render any failure reason label', async () => {

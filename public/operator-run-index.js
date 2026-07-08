@@ -35,7 +35,7 @@ const STATUS_LABELS = {
 }
 
 /**
- * Allowlisted OperatorFailureKind values (contract 1.6.0) — out-of-set values
+ * Allowlisted OperatorFailureKind values — out-of-set values
  * normalize to absent, never parsed through.
  * Mirrors src/gateway/operator-contract/run-status.ts OPERATOR_FAILURE_KINDS.
  */
@@ -557,7 +557,10 @@ function cardShowsTerminalStatus(card) {
  * Never touches data-run-id, data-expanded, or creates any new attribute.
  */
 function updateCardInPlace(card, view) {
-  card.setAttribute('aria-label', `Run, status: ${view.statusLabel}`)
+  card.setAttribute(
+    'aria-label',
+    `Run, status: ${view.statusLabel}${view.reasonLabel === undefined ? '' : `, reason: ${view.reasonLabel}`}`,
+  )
 
   if (typeof card.querySelector === 'function') {
     const statusEl = card.querySelector('[data-role="run-status"]')
@@ -580,6 +583,11 @@ function updateCardInPlace(card, view) {
     const reasonEl = card.querySelector('[data-role="run-reason"]')
     if (reasonEl !== null && reasonEl !== undefined) {
       reasonEl.textContent = view.reasonLabel ?? ''
+      if (view.reasonLabel === undefined) {
+        if (reasonEl.dataset) delete reasonEl.dataset.reasonState
+      } else if (reasonEl.dataset) {
+        reasonEl.dataset.reasonState = 'present'
+      }
     }
   }
 }
@@ -590,7 +598,10 @@ function renderRunCard(view, onSelectRun) {
   card.className = 'run-card'
   card.tabIndex = 0
   card.setAttribute('role', 'button')
-  card.setAttribute('aria-label', `Run, status: ${view.statusLabel}`)
+  card.setAttribute(
+    'aria-label',
+    `Run, status: ${view.statusLabel}${view.reasonLabel === undefined ? '' : `, reason: ${view.reasonLabel}`}`,
+  )
   card.dataset.testid = 'run-card'
   card.dataset.runId = view.runId
 
@@ -608,6 +619,7 @@ function renderRunCard(view, onSelectRun) {
   reasonSpan.className = 'run-reason'
   reasonSpan.dataset.role = 'run-reason'
   reasonSpan.textContent = view.reasonLabel ?? ''
+  if (view.reasonLabel !== undefined) reasonSpan.dataset.reasonState = 'present'
   statusGroup.append(reasonSpan)
 
   card.append(statusGroup)

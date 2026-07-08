@@ -173,6 +173,10 @@
   font-weight: 400;
 }
 
+.run-reason:empty {
+  display: none;
+}
+
 .run-card .run-repo {
   grid-column: 2;
 }

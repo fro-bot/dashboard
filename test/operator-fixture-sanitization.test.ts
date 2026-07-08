@@ -11,6 +11,7 @@ import {readFileSync} from 'node:fs'
 import {resolve} from 'node:path'
 import process from 'node:process'
 import {describe, expect, it} from 'vitest'
+import {FIXTURE_KNOWN_FAILURE_REASON, FIXTURE_UNKNOWN_FAILURE_REASON} from '../src/gateway/operator-fixtures.ts'
 
 const FIXTURE_FILES = [
   'src/gateway/operator-fixtures.ts',
@@ -272,9 +273,26 @@ describe('fixture no-leak guard — failure-reason values', () => {
     }
   })
 
+  it('the exported fixture reason constants are a known code and a fixture-prefixed synthetic code, respectively', () => {
+    const KNOWN_REASON_CODES = new Set([
+      'inactivity-timeout',
+      'max-duration-timeout',
+      'stream-ended',
+      'workspace-unreachable',
+      'session-error',
+      'unknown',
+    ])
+
+    expect(KNOWN_REASON_CODES.has(FIXTURE_KNOWN_FAILURE_REASON)).toBe(true)
+
+    expect(FIXTURE_UNKNOWN_FAILURE_REASON.startsWith('fixture-')).toBe(true)
+    expect(KNOWN_REASON_CODES.has(FIXTURE_UNKNOWN_FAILURE_REASON)).toBe(false)
+    for (const [label, pattern] of FORBIDDEN_PATTERNS) {
+      expect(pattern.test(FIXTURE_UNKNOWN_FAILURE_REASON), `FIXTURE_UNKNOWN_FAILURE_REASON tripped forbidden pattern "${label}"`).toBe(false)
+    }
+  })
+
   it('committed fixture files only use the fixture-prefixed unknown reason value, never a bare non-fixture unknown string', () => {
-    // Any string literal assigned to failureKind in committed fixture source must
-    // either be a known OPERATOR_FAILURE_KINDS value or start with "fixture-".
     const KNOWN_REASON_CODES = new Set([
       'inactivity-timeout',
       'max-duration-timeout',
