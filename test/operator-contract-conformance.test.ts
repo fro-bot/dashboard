@@ -12,6 +12,7 @@ import type {ApprovalDecisionState, RunStatus} from '../src/gateway/operator-cli
 import type {
   OperatorApprovalFrame,
   OperatorDecisionState,
+  OperatorFailureKind,
   OperatorOutputFrame,
   OperatorRunStatus,
   OperatorWebStatus,
@@ -69,7 +70,7 @@ export {checkRunStatusBidirectional}
 // Using satisfies/export to avoid unused-variable lint while keeping the type constraint.
 
 // ReadyFrame: must accept a literal with contractVersion string
-const checkReadyFrameLiteral: ReadyFrame = {contractVersion: '1.5.0'}
+const checkReadyFrameLiteral: ReadyFrame = {contractVersion: '1.6.0'}
 export {checkReadyFrameLiteral}
 
 // ResetFrameData: must accept a literal with runId + ResetReason
@@ -135,7 +136,7 @@ const checkApprovalFrameSettle: OperatorApprovalFrame = {
 export {checkApprovalFrameSettle}
 
 // RunStreamFrame discriminated union: each variant must be constructable
-const checkReadyFrame: RunStreamFrame = {type: 'ready', data: {contractVersion: '1.5.0'}}
+const checkReadyFrame: RunStreamFrame = {type: 'ready', data: {contractVersion: '1.6.0'}}
 const checkOutputFrame: RunStreamFrame = {
   type: 'output',
   data: {runId: 'run-001', text: 'partial', final: false, seq: 0},
@@ -172,8 +173,50 @@ export {checkApprovalRunStreamFrame, checkReadyFrame, checkResetFrame, checkStat
 // ---------------------------------------------------------------------------
 
 describe('OPERATOR_CONTRACT_VERSION', () => {
-  it('is pinned to 1.5.0', () => {
-    expect(OPERATOR_CONTRACT_VERSION).toBe('1.5.0')
+  it('is pinned to 1.6.0', () => {
+    expect(OPERATOR_CONTRACT_VERSION).toBe('1.6.0')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// OperatorFailureKind (contract 1.6.0)
+// ---------------------------------------------------------------------------
+
+describe('OperatorFailureKind', () => {
+  it('all six known reason codes are assignable to the union', () => {
+    const checkFailureKinds: OperatorFailureKind[] = [
+      'inactivity-timeout',
+      'max-duration-timeout',
+      'stream-ended',
+      'workspace-unreachable',
+      'session-error',
+      'unknown',
+    ]
+    expect(checkFailureKinds).toHaveLength(6)
+  })
+
+  it('OperatorRunStatus accepts an optional failureKind on a failed status', () => {
+    const checkStatusWithFailureKind: OperatorRunStatus = {
+      runId: 'run-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'FAILED',
+      status: 'failed',
+      startedAt: '2026-07-07T00:00:00Z',
+      stale: false,
+      failureKind: 'inactivity-timeout',
+    }
+    const checkStatusWithoutFailureKind: OperatorRunStatus = {
+      runId: 'run-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'FAILED',
+      status: 'failed',
+      startedAt: '2026-07-07T00:00:00Z',
+      stale: false,
+    }
+    expect(checkStatusWithFailureKind.failureKind).toBe('inactivity-timeout')
+    expect(checkStatusWithoutFailureKind.failureKind).toBeUndefined()
   })
 })
 
@@ -485,7 +528,15 @@ const checkRunSummaryWithUpdatedAt: RunSummaryType = {
   createdAt: '2026-06-01T00:00:00.000Z',
   updatedAt: '2026-06-01T01:00:00.000Z',
 }
-export {checkRunSummaryMinimal, checkRunSummaryWithUpdatedAt}
+// RunSummary: must accept a failed summary with an optional failureKind
+const checkRunSummaryWithFailureKind: RunSummaryType = {
+  runId: 'run-abc-123',
+  repo: 'fro-bot/agent',
+  status: 'failed',
+  createdAt: '2026-06-01T00:00:00.000Z',
+  failureKind: 'workspace-unreachable',
+}
+export {checkRunSummaryMinimal, checkRunSummaryWithFailureKind, checkRunSummaryWithUpdatedAt}
 
 // ---------------------------------------------------------------------------
 // RunsListResponse type-level check (compile-time)
@@ -882,6 +933,77 @@ describe('parseRunSummary', () => {
   it('rejects a non-object (string)', () => {
     const result = parseRunSummary('run-abc-123')
     expect(result.success).toBe(false)
+  })
+
+  // -------------------------------------------------------------------------
+  // failureKind (contract 1.6.0)
+  // -------------------------------------------------------------------------
+
+  it('accepts a failed summary with each known failureKind', () => {
+    const kinds = [
+      'inactivity-timeout',
+      'max-duration-timeout',
+      'stream-ended',
+      'workspace-unreachable',
+      'session-error',
+      'unknown',
+    ] as const
+    for (const failureKind of kinds) {
+      const input = {
+        runId: 'run-1',
+        repo: 'fro-bot/agent',
+        status: 'failed',
+        createdAt: '2026-06-01T00:00:00.000Z',
+        failureKind,
+      }
+      const result = parseRunSummary(input)
+      expect(result.success).toBe(true)
+      if (result.success) {
+        expect(result.data.failureKind).toBe(failureKind)
+      }
+    }
+  })
+
+  it('failureKind is absent (key not present) when omitted from input', () => {
+    const input = {runId: 'run-1', repo: 'fro-bot/agent', status: 'failed', createdAt: '2026-06-01T00:00:00.000Z'}
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(Object.prototype.hasOwnProperty.call(result.data, 'failureKind')).toBe(false)
+    }
+  })
+
+  it('normalizes an unknown failureKind value to absent — does not reject the summary', () => {
+    const input = {
+      runId: 'run-1',
+      repo: 'fro-bot/agent',
+      status: 'failed',
+      createdAt: '2026-06-01T00:00:00.000Z',
+      failureKind: 'some-future-fixture-reason',
+    }
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.failureKind).toBeUndefined()
+      expect(Object.prototype.hasOwnProperty.call(result.data, 'failureKind')).toBe(false)
+    }
+  })
+
+  it('a non-failed status carrying a failureKind still parses, leaving failureKind unavailable to renderers is a downstream concern', () => {
+    const input = {
+      runId: 'run-1',
+      repo: 'fro-bot/agent',
+      status: 'running',
+      createdAt: '2026-06-01T00:00:00.000Z',
+      failureKind: 'inactivity-timeout',
+    }
+    const result = parseRunSummary(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      // Contract layer is permissive; it parses the field. Renderer-level
+      // ignoring of non-failed reasons is a browser-module concern (Unit 2/3).
+      expect(result.data.status).toBe('running')
+    }
   })
 })
 

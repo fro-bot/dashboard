@@ -157,7 +157,7 @@ The failure reason is not a new source of truth. It is a safe display supplement
 
 ## Implementation Units
 
-- [ ] **Unit 1: Vendor contract 1.6.0 and parser gates**
+- [x] **Unit 1: Vendor contract 1.6.0 and parser gates**
 
 **Goal:** Bring the TypeScript contract and server-side stream parser up to Gateway `1.6.0`, including failure reason codes and additive web statuses.
 
