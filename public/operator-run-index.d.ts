@@ -6,6 +6,15 @@
 /** Index-only status set. Stream-only statuses (blocked, waiting_for_approval) are excluded. */
 export type RunSummaryStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 
+/** Operator-safe failure-reason code. */
+export type FailureKind =
+  | 'inactivity-timeout'
+  | 'max-duration-timeout'
+  | 'stream-ended'
+  | 'workspace-unreachable'
+  | 'session-error'
+  | 'unknown'
+
 /** Parsed run summary — closed DTO with only declared fields. */
 export interface ParsedRunSummary {
   readonly runId: string
@@ -13,6 +22,7 @@ export interface ParsedRunSummary {
   readonly status: RunSummaryStatus
   readonly createdAt: string
   readonly updatedAt?: string
+  readonly failureKind?: FailureKind
 }
 
 /** Closed safe-view for rendering — adds statusLabel, excludes unknown fields. */
@@ -23,6 +33,8 @@ export interface RunSafeView {
   readonly statusLabel: string
   readonly createdAt: string
   readonly updatedAt?: string
+  /** Pre-resolved dashboard display label for a known failure reason. Never the raw failureKind. */
+  readonly reasonLabel?: string
 }
 
 export type RunIndexResult =
@@ -31,6 +43,13 @@ export type RunIndexResult =
 
 export declare const RUN_INDEX_CAP: 100
 export declare const VALID_RUN_SUMMARY_STATUSES: ReadonlySet<string>
+
+/**
+ * Dashboard-owned display labels for known failure reasons, keyed by FailureKind.
+ * Must stay identical (keys and label values) to the map exported from
+ * public/operator-stream.js — parity is enforced by tests.
+ */
+export declare const FAILURE_REASON_LABELS: Readonly<Record<FailureKind, string>>
 
 export declare function parseRunSummaryItem(
   input: unknown,

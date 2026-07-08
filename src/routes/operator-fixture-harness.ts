@@ -16,7 +16,7 @@ import type {RunSummary} from '../gateway/operator-contract/run-summary.ts'
 import {Hono} from 'hono'
 import {FIXTURE_OPERATOR_PREFIX} from '../gateway/operator-fixture-routes.ts'
 import {FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../gateway/operator-fixture-sse.ts'
-import {FIXTURE_CSRF, FIXTURE_SESSION} from '../gateway/operator-fixtures.ts'
+import {FIXTURE_CSRF, FIXTURE_KNOWN_FAILURE_REASON, FIXTURE_SESSION, FIXTURE_UNKNOWN_FAILURE_REASON} from '../gateway/operator-fixtures.ts'
 import {logger} from '../logger.ts'
 
 // Fixture-prefixed repo list — never real repos.
@@ -63,7 +63,31 @@ const FIXTURE_RUN_SUMMARIES: readonly RunSummary[] = [
     createdAt: '2026-06-28T10:01:00Z',
     updatedAt: '2026-06-28T10:01:10Z',
   },
+  {
+    runId: 'run-fixture-index-failed-reason-006',
+    repo: 'fixture-org/fixture-repo',
+    status: 'failed',
+    createdAt: '2026-06-28T10:00:30Z',
+    updatedAt: '2026-06-28T10:00:50Z',
+    failureKind: FIXTURE_KNOWN_FAILURE_REASON,
+  },
+  {
+    runId: 'run-fixture-index-failed-unknown-reason-007',
+    repo: 'fixture-org/fixture-repo-2',
+    status: 'failed',
+    createdAt: '2026-06-28T10:00:10Z',
+    updatedAt: '2026-06-28T10:00:25Z',
+    // Synthetic out-of-union value for unknown-reason normalization.
+    failureKind: FIXTURE_UNKNOWN_FAILURE_REASON as unknown as RunSummary['failureKind'],
+  },
 ]
+
+// Run IDs bound to a specific reason-bearing stream scenario, distinct from the
+// generic terminal_failure default. Extends the failed→scenario binding below.
+const RUN_ID_TO_REASON_SCENARIO: ReadonlyMap<string, string> = new Map([
+  ['run-fixture-index-failed-reason-006', FIXTURE_SCENARIO_NAMES.terminal_failure_known_reason],
+  ['run-fixture-index-failed-unknown-reason-007', FIXTURE_SCENARIO_NAMES.terminal_failure_unknown_reason],
+])
 
 // In-memory state — scoped by (fixtureSessionId, idempotencyKey). Resets on restart.
 const idempotencyMap = new Map<string, string>() // `${sessionId}:${idemKey}` → runId
@@ -173,10 +197,12 @@ export function buildFixtureHarnessRouter(): Hono {
     if (requestSessionId !== undefined) {
       for (const summary of FIXTURE_RUN_SUMMARIES) {
         if (!runScenarioMap.has(summary.runId)) {
+          const reasonScenario = RUN_ID_TO_REASON_SCENARIO.get(summary.runId)
           const scenario =
-            summary.status === 'failed' || summary.status === 'cancelled'
+            reasonScenario ??
+            (summary.status === 'failed' || summary.status === 'cancelled'
               ? FIXTURE_SCENARIO_NAMES.terminal_failure
-              : FIXTURE_SCENARIO_NAMES.success
+              : FIXTURE_SCENARIO_NAMES.success)
           runScenarioMap.set(summary.runId, scenario)
         }
       }

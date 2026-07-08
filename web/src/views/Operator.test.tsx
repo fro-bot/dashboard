@@ -300,13 +300,13 @@ describe('Operator — fixture scenario selector', () => {
     const selector = document.querySelector('[data-testid="fixture-scenario-select"]') as HTMLSelectElement | null
     expect(selector).not.toBeNull()
     const values = Array.from(selector?.options ?? []).map(o => o.value)
-    // Mirror of FIXTURE_SCENARIO_NAMES in src/gateway/operator-fixture-sse.ts. The web bundle
-    // cannot import from the server tree, so the drawer options are hand-maintained; this test
-    // fails loudly if a harness scenario is added there without surfacing it in the drawer.
     expect(values.sort()).toEqual(
       [
         'success',
         'terminal_failure',
+        'terminal_failure_known_reason',
+        'terminal_failure_unknown_reason',
+        'non_failed_with_reason',
         'contract_drift',
         'malformed_unavailable',
         'no_output',
@@ -877,4 +877,15 @@ describe('Operator — failure state distinct treatments', () => {
       expect(reasonEl.textContent?.trim().length).toBeGreaterThan(0)
     })
   }
+})
+
+describe('Operator — stream and status announcement hooks', () => {
+  it('renders the shared stream-status polite announcement notice element', () => {
+    render(<Operator state="ready" />)
+    const noticeEl = document.querySelector('[data-role="stream-status"]')
+    expect(noticeEl).not.toBeNull()
+    expect(noticeEl).toHaveAttribute('role', 'status')
+    expect(noticeEl).toHaveAttribute('aria-live', 'polite')
+    expect(noticeEl).toHaveClass('operator-stream-status')
+  })
 })

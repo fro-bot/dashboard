@@ -29,7 +29,7 @@
 // ---------------------------------------------------------------------------
 
 /** Contract version this client expects on the ready frame. */
-export const PINNED_CONTRACT_VERSION = '1.5.0'
+export const PINNED_CONTRACT_VERSION = '1.6.0'
 
 /** Base delay in milliseconds for exponential backoff. */
 export const RETRY_BASE_MS = 1000
@@ -140,6 +140,35 @@ const STATUS_LABELS = {
   cancelled: 'Cancelled',
 }
 
+/**
+ * Allowlisted OperatorFailureKind values — out-of-set values normalize to
+ * absent, never parsed through.
+ * Mirrors src/gateway/operator-contract/run-status.ts OPERATOR_FAILURE_KINDS.
+ */
+const VALID_FAILURE_KINDS = new Set([
+  'inactivity-timeout',
+  'max-duration-timeout',
+  'stream-ended',
+  'workspace-unreachable',
+  'session-error',
+  'unknown',
+])
+
+/**
+ * Dashboard-owned display labels for known failure reasons — render labels from
+ * this map, never the raw failureKind wire string. A missing or unmapped reason
+ * has no entry here and falls back to generic 'Failed' at the render boundary.
+ * Every OperatorFailureKind value has an explicit display decision.
+ */
+export const FAILURE_REASON_LABELS = {
+  'inactivity-timeout': 'No recent activity',
+  'max-duration-timeout': 'Run timed out',
+  'stream-ended': 'Stream ended early',
+  'workspace-unreachable': 'Workspace unavailable',
+  'session-error': 'Session error',
+  unknown: 'Unknown failure',
+}
+
 // ---------------------------------------------------------------------------
 // CRLF normalization
 // ---------------------------------------------------------------------------
@@ -243,6 +272,9 @@ export function parseSseFrame(record) {
     if (!VALID_SURFACES.has(parsed.surface)) {
       return {success: false, error: 'status frame surface value not in allowlist'}
     }
+    // failureKind is optional and allowlist-gated; an unrecognized or absent
+    // value normalizes to omitted — it never fails validity of the status frame.
+    const failureKind = VALID_FAILURE_KINDS.has(parsed.failureKind) ? parsed.failureKind : undefined
     return {
       success: true,
       frame: {
@@ -255,6 +287,7 @@ export function parseSseFrame(record) {
           status: parsed.status,
           startedAt: parsed.startedAt,
           stale: parsed.stale,
+          ...(failureKind === undefined ? {} : {failureKind}),
         },
       },
     }
@@ -402,13 +435,20 @@ export function nextStreamState(current, event) {
       if (current.connection !== 'live') {
         return current
       }
-      const {runId, status, phase, startedAt, stale} = event.data
+      const {runId, status, phase, startedAt, stale, failureKind} = event.data
       const isTerminal = TERMINAL_STATUSES.has(status)
       // Use a null-prototype object to guard against __proto__ key pollution.
       // Spread the prior entry so accumulated output fields (outputText/outputSeq/
       // outputFinal/outputCoalesced) survive a status update — a terminal status frame
       // arrives AFTER the final output frame, so a bare replacement would drop it.
       const prevStatusEntry = current.runs[runId]
+      // Reason label is derived only for a failed status carrying a known failureKind.
+      // A non-failed status ignores any failureKind entirely. Once set, the label
+      // is sticky — a later non-terminal frame for the same run (e.g. a stale/duplicate
+      // frame) must not clear a previously stored terminal-failure label.
+      const derivedReasonLabel =
+        status === 'failed' && failureKind !== undefined ? FAILURE_REASON_LABELS[failureKind] : undefined
+      const reasonLabel = derivedReasonLabel ?? prevStatusEntry?.reasonLabel
       // On terminal status, clear all open approval prompts for this run.
       // Terminal is absorbing for approvals: once terminal, no open prompt can reappear.
       // Tombstones are preserved so that any late open frames are still ignored.
@@ -431,6 +471,7 @@ export function nextStreamState(current, event) {
           startedAt,
           stale,
           terminal: isTerminal,
+          ...(reasonLabel === undefined ? {} : {reasonLabel}),
         },
       })
       // If all observed runs are terminal, close the stream
@@ -822,10 +863,14 @@ export function nextStreamState(current, event) {
 /**
  * Map a run status object to the safe render model.
  *
- * Returns ONLY: { runId, status, phase, startedAt, stale }
+ * Returns ONLY: { runId, status, phase, startedAt, stale, reasonLabel? }
  *
  * Explicitly excluded: entityRef, surface, output, tool, path, repoName,
- * and any other field not in the safe set. This is a whitelist, not a blacklist.
+ * failureKind, and any other field not in the safe set. This is a whitelist,
+ * not a blacklist. reasonLabel is a pre-resolved dashboard display label —
+ * never the raw failureKind wire value — and is present only when the run
+ * entry carries one (set by nextStreamState on a failed status with a known
+ * failureKind, and sticky across later frames for the same run).
  */
 export function toSafeRunView(runStatus) {
   return {
@@ -834,6 +879,7 @@ export function toSafeRunView(runStatus) {
     phase: runStatus.phase,
     startedAt: runStatus.startedAt,
     stale: runStatus.stale,
+    ...(runStatus.reasonLabel === undefined ? {} : {reasonLabel: runStatus.reasonLabel}),
   }
 }
 
@@ -1340,7 +1386,7 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
  * - Read-only: GET only for stream; approval decisions are operator-forwarded writes.
  */
 export function initOperatorStream(opts) {
-  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, approvalClient: injectedApprovalClient, endpointBase, fixtureSessionId} = opts
+  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, approvalClient: injectedApprovalClient, endpointBase, fixtureSessionId} = opts
 
   // Build the approval client lazily (only if approvalsEl is present).
   // Pass endpointBase and fixtureSessionId so fixture mode uses the fixture approval routes
@@ -1371,6 +1417,7 @@ export function initOperatorStream(opts) {
   let reconnectTimer = null // track pending reconnect timer
   let firstFrameTimer = null // track pending first-frame timeout
   let aborted = false // set by close() to prevent late timer from fetching
+  let announcedFailure = false
 
   function updateDOM() {
     // Late-frame guard: after close(), no write of any kind (notice, status,
@@ -1385,9 +1432,25 @@ export function initOperatorStream(opts) {
       // can query state without text parsing. The value mirrors the connection
       // token from the state machine (e.g. 'live', 'failed', 'not-found').
       noticeEl.dataset.connectionState = conn
+
+      const runEntry = state.runs[runId]
+      const currentStatus = runEntry?.status ?? null
+
+      if (currentStatus === 'failed' && !announcedFailure) {
+        announcedFailure = true
+        const view = toSafeRunView(runEntry)
+        const reasonPart = view.reasonLabel ? `: ${view.reasonLabel}` : ''
+        noticeEl.textContent = `Run failed${reasonPart}`
+        noticeEl.hidden = false
+      }
+
       if (conn === 'live') {
-        noticeEl.textContent = ''
-        noticeEl.hidden = true
+        if (currentStatus === 'failed' && announcedFailure) {
+          // Keep failure announcement
+        } else {
+          noticeEl.textContent = ''
+          noticeEl.hidden = true
+        }
       } else if (conn === 'connecting' || conn === 'reconnecting') {
         noticeEl.textContent = 'Connecting to run stream\u2026'
         noticeEl.hidden = false
@@ -1411,11 +1474,14 @@ export function initOperatorStream(opts) {
         // If the stream closed before the run reached a terminal status, surface a
         // generic path-unaware unavailable notice. This covers malformed/truncated
         // streams that close without emitting a terminal status frame for the run.
-        const runEntry = state.runs[runId]
         const runIsTerminal = runEntry !== undefined && runEntry.terminal === true
         if (runIsTerminal) {
-          noticeEl.textContent = ''
-          noticeEl.hidden = true
+          if (currentStatus === 'failed' && announcedFailure) {
+            // Keep failure announcement
+          } else {
+            noticeEl.textContent = ''
+            noticeEl.hidden = true
+          }
         } else {
           noticeEl.textContent = 'Run stream ended before a result was available.'
           noticeEl.hidden = false
@@ -1448,6 +1514,31 @@ export function initOperatorStream(opts) {
           statusEl.className = `${statusEl.className.replaceAll(/\bstatus-\S+/g, '')} status-unavailable`
             .replaceAll(/\s+/g, ' ')
             .trim()
+        }
+      }
+    }
+
+    if (reasonEl) {
+      const runEntry = state.runs[runId]
+      const runIsTerminal = runEntry !== undefined && runEntry.terminal === true
+      if (runEntry && (state.connection === 'live' || runIsTerminal)) {
+        const view = toSafeRunView(runEntry)
+        if (view.reasonLabel !== undefined) {
+          reasonEl.textContent = view.reasonLabel
+          if (reasonEl.dataset) reasonEl.dataset.reasonState = 'present'
+        }
+      } else if (!aborted) {
+        const conn = state.connection
+        if (
+          !runIsTerminal &&
+          (conn === 'drift' ||
+            conn === 'not-found' ||
+            conn === 'failed' ||
+            conn === 'submitted-unobservable' ||
+            conn === 'closed')
+        ) {
+          reasonEl.textContent = ''
+          if (reasonEl.dataset) delete reasonEl.dataset.reasonState
         }
       }
     }

@@ -382,6 +382,9 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
                     >
                       <option value="success">Success</option>
                       <option value="terminal_failure">Terminal failure</option>
+                      <option value="terminal_failure_known_reason">Terminal failure, known reason</option>
+                      <option value="terminal_failure_unknown_reason">Terminal failure, unknown reason</option>
+                      <option value="non_failed_with_reason">Non-failed with ignored reason</option>
                       <option value="contract_drift">Contract drift</option>
                       <option value="malformed_unavailable">Malformed / unavailable</option>
                       <option value="no_output">No output</option>

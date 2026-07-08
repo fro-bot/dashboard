@@ -25,6 +25,22 @@ export declare const FIRST_FRAME_TIMEOUT_MS: number
  */
 export declare const GATEWAY_PENDING_APPROVALS_CAP: number
 
+/** Operator-safe failure-reason code. */
+export type FailureKind =
+  | 'inactivity-timeout'
+  | 'max-duration-timeout'
+  | 'stream-ended'
+  | 'workspace-unreachable'
+  | 'session-error'
+  | 'unknown'
+
+/**
+ * Dashboard-owned display labels for known failure reasons, keyed by FailureKind.
+ * Must stay identical (keys and label values) to the map exported from
+ * public/operator-run-index.js — parity is enforced by tests.
+ */
+export declare const FAILURE_REASON_LABELS: Readonly<Record<FailureKind, string>>
+
 // ---------------------------------------------------------------------------
 // Frame types (mirrors src/gateway/operator-contract/sse-frames.ts shapes)
 // ---------------------------------------------------------------------------
@@ -41,6 +57,8 @@ export interface StatusFrameData {
   readonly status: string
   readonly startedAt: string
   readonly stale: boolean
+  /** Operator-safe failure-reason code. Optional; failed statuses only. */
+  readonly failureKind?: FailureKind
 }
 
 export interface ResetFrameData {
@@ -121,6 +139,13 @@ export interface RunEntry {
   /** True if accumulated output exceeded the cap and was truncated. */
   readonly outputTruncated?: boolean
   /**
+   * Pre-resolved dashboard display label for a known failure reason. Set only when
+   * a failed status frame carried a known failureKind; sticky across later frames
+   * for the same run (never cleared by a subsequent non-terminal frame). Never the
+   * raw failureKind wire value.
+   */
+  readonly reasonLabel?: string
+  /**
    * Null-prototype map of open (non-tombstoned) approval prompts, keyed by requestID.
    * Absent until the first approval frame is received for this run.
    * Use `getOpenApprovals(runEntry)` to read; never access directly.
@@ -193,6 +218,8 @@ export interface SafeRunView {
   readonly phase: string
   readonly startedAt: string
   readonly stale: boolean
+  /** Pre-resolved dashboard display label for a known failure reason. Never the raw failureKind. */
+  readonly reasonLabel?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +239,7 @@ export declare function nextStreamState(current: StreamState, event: StreamEvent
 
 /**
  * Map a run status object to the safe render model.
- * Returns ONLY: { runId, status, phase, startedAt, stale }
+ * Returns ONLY: { runId, status, phase, startedAt, stale, reasonLabel? }
  */
 export declare function toSafeRunView(runStatus: {
   readonly runId: string
@@ -220,6 +247,7 @@ export declare function toSafeRunView(runStatus: {
   readonly phase: string
   readonly startedAt: string
   readonly stale: boolean
+  readonly reasonLabel?: string
 }): SafeRunView
 
 /**
@@ -280,6 +308,8 @@ export interface InitOptions {
   readonly endpointBase?: string
   /** Fixture session ID (fixture mode only). Appended as query param to stream URL and approval requests. */
   readonly fixtureSessionId?: string
+  /** Secondary status metadata element (data-role="run-reason"). */
+  readonly reasonEl?: Element | null
 }
 
 export declare function initOperatorStream(opts: InitOptions): StreamHandle

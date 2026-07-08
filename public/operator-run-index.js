@@ -35,6 +35,35 @@ const STATUS_LABELS = {
 }
 
 /**
+ * Allowlisted OperatorFailureKind values — out-of-set values
+ * normalize to absent, never parsed through.
+ * Mirrors src/gateway/operator-contract/run-status.ts OPERATOR_FAILURE_KINDS.
+ */
+const VALID_FAILURE_KINDS = new Set([
+  'inactivity-timeout',
+  'max-duration-timeout',
+  'stream-ended',
+  'workspace-unreachable',
+  'session-error',
+  'unknown',
+])
+
+/**
+ * Dashboard-owned display labels for known failure reasons — render labels from
+ * this map, never the raw failureKind wire string. Must stay identical to the
+ * map in public/operator-stream.js (parity is enforced by tests). Every
+ * OperatorFailureKind value has an explicit display decision.
+ */
+export const FAILURE_REASON_LABELS = {
+  'inactivity-timeout': 'No recent activity',
+  'max-duration-timeout': 'Run timed out',
+  'stream-ended': 'Stream ended early',
+  'workspace-unreachable': 'Workspace unavailable',
+  'session-error': 'Session error',
+  unknown: 'Unknown failure',
+}
+
+/**
  * Parse a single run summary item from the Gateway response.
  * Error strings are fixed — never echo or interpolate any part of the input.
  */
@@ -69,6 +98,10 @@ export function parseRunSummaryItem(input) {
     return {success: false, error: 'invalid run summary shape'}
   }
 
+  // failureKind is optional and allowlist-gated; an unrecognized or absent
+  // value normalizes to omitted — it never fails validity of the summary.
+  const failureKind = VALID_FAILURE_KINDS.has(candidate.failureKind) ? candidate.failureKind : undefined
+
   // Closed DTO — copy only declared fields; never spread input.
   const summary = {
     runId: candidate.runId,
@@ -76,6 +109,7 @@ export function parseRunSummaryItem(input) {
     status: candidate.status,
     createdAt: candidate.createdAt,
     ...('updatedAt' in candidate ? {updatedAt: candidate.updatedAt} : {}),
+    ...(failureKind === undefined ? {} : {failureKind}),
   }
 
   return {success: true, data: summary}
@@ -109,9 +143,18 @@ export function parseRunSummaryList(input) {
   return {success: true, data: valid}
 }
 
-/** Build a closed safe-view from a parsed run summary. Unknown fields excluded by construction. */
+/**
+ * Build a closed safe-view from a parsed run summary. Unknown fields excluded by
+ * construction. reasonLabel is a pre-resolved dashboard display label — never the
+ * raw failureKind — and is present only for a failed summary carrying a known
+ * failureKind. Non-failed statuses ignore any failureKind.
+ */
 export function buildRunSafeView(summary) {
   const statusLabel = STATUS_LABELS[summary.status] ?? summary.status
+  const reasonLabel =
+    summary.status === 'failed' && summary.failureKind !== undefined
+      ? FAILURE_REASON_LABELS[summary.failureKind]
+      : undefined
 
   return {
     runId: summary.runId,
@@ -120,6 +163,7 @@ export function buildRunSafeView(summary) {
     statusLabel,
     createdAt: summary.createdAt,
     ...('updatedAt' in summary ? {updatedAt: summary.updatedAt} : {}),
+    ...(reasonLabel === undefined ? {} : {reasonLabel}),
   }
 }
 
@@ -513,7 +557,10 @@ function cardShowsTerminalStatus(card) {
  * Never touches data-run-id, data-expanded, or creates any new attribute.
  */
 function updateCardInPlace(card, view) {
-  card.setAttribute('aria-label', `Run, status: ${view.statusLabel}`)
+  card.setAttribute(
+    'aria-label',
+    `Run, status: ${view.statusLabel}${view.reasonLabel === undefined ? '' : `, reason: ${view.reasonLabel}`}`,
+  )
 
   if (typeof card.querySelector === 'function') {
     const statusEl = card.querySelector('[data-role="run-status"]')
@@ -532,6 +579,16 @@ function updateCardInPlace(card, view) {
       timeEl.setAttribute('datetime', view.updatedAt)
       timeEl.textContent = formatRelativeTime(view.updatedAt)
     }
+
+    const reasonEl = card.querySelector('[data-role="run-reason"]')
+    if (reasonEl !== null && reasonEl !== undefined) {
+      reasonEl.textContent = view.reasonLabel ?? ''
+      if (view.reasonLabel === undefined) {
+        if (reasonEl.dataset) delete reasonEl.dataset.reasonState
+      } else if (reasonEl.dataset) {
+        reasonEl.dataset.reasonState = 'present'
+      }
+    }
   }
 }
 
@@ -541,15 +598,31 @@ function renderRunCard(view, onSelectRun) {
   card.className = 'run-card'
   card.tabIndex = 0
   card.setAttribute('role', 'button')
-  card.setAttribute('aria-label', `Run, status: ${view.statusLabel}`)
+  card.setAttribute(
+    'aria-label',
+    `Run, status: ${view.statusLabel}${view.reasonLabel === undefined ? '' : `, reason: ${view.reasonLabel}`}`,
+  )
   card.dataset.testid = 'run-card'
   card.dataset.runId = view.runId
+
+  const statusGroup = document.createElement('span')
+  statusGroup.className = 'run-status-group'
+  statusGroup.dataset.role = 'run-status-group'
 
   const statusSpan = document.createElement('span')
   statusSpan.className = `run-status status-${view.status}`
   statusSpan.dataset.role = 'run-status'
   statusSpan.textContent = view.statusLabel
-  card.append(statusSpan)
+  statusGroup.append(statusSpan)
+
+  const reasonSpan = document.createElement('span')
+  reasonSpan.className = 'run-reason'
+  reasonSpan.dataset.role = 'run-reason'
+  reasonSpan.textContent = view.reasonLabel ?? ''
+  if (view.reasonLabel !== undefined) reasonSpan.dataset.reasonState = 'present'
+  statusGroup.append(reasonSpan)
+
+  card.append(statusGroup)
 
   const repoSpan = document.createElement('span')
   repoSpan.className = 'run-repo'

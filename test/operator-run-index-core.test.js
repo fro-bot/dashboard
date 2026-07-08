@@ -4,20 +4,10 @@
  */
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {
-  buildRunSafeView,
-  FETCH_TIMEOUT_MS,
-  fetchRunIndex,
-  formatRelativeTime,
-  initOperatorRunIndex,
-  markCardExpandedForLaunch,
-  markRunStreamAttached,
-  parseRunSummaryItem,
-  parseRunSummaryList,
-  resetRunIndexState,
-  RUN_INDEX_CAP,
-  VALID_RUN_SUMMARY_STATUSES,
-} from '../public/operator-run-index.js'
+
+import {buildRunSafeView, FETCH_TIMEOUT_MS, fetchRunIndex, formatRelativeTime, initOperatorRunIndex, markCardExpandedForLaunch, markRunStreamAttached, parseRunSummaryItem, parseRunSummaryList, resetRunIndexState, RUN_INDEX_CAP, FAILURE_REASON_LABELS as RUN_INDEX_FAILURE_REASON_LABELS, VALID_RUN_SUMMARY_STATUSES} from '../public/operator-run-index.js'
+import {FAILURE_REASON_LABELS as STREAM_FAILURE_REASON_LABELS} from '../public/operator-stream.js'
+import {isOperatorFailureKind, OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
 
 function makeValidSummary(overrides = {}) {
   return {
@@ -282,6 +272,116 @@ describe('buildRunSafeView — closed safe-view boundary', () => {
       expect(typeof view.statusLabel).toBe('string')
       expect(view.statusLabel.length).toBeGreaterThan(0)
     }
+  })
+})
+
+describe('parseRunSummaryItem — failureKind', () => {
+  it('accepts a failed summary with each known failureKind', () => {
+    const kinds = [
+      'inactivity-timeout',
+      'max-duration-timeout',
+      'stream-ended',
+      'workspace-unreachable',
+      'session-error',
+      'unknown',
+    ]
+    for (const failureKind of kinds) {
+      const input = makeValidSummary({status: 'failed', failureKind})
+      const result = parseRunSummaryItem(input)
+      expect(result.success).toBe(true)
+      if (result.success) {
+        expect(result.data.failureKind).toBe(failureKind)
+      }
+    }
+  })
+
+  it('failureKind is absent (key not present) when omitted from input', () => {
+    const input = makeValidSummary({status: 'failed'})
+    const result = parseRunSummaryItem(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(Object.prototype.hasOwnProperty.call(result.data, 'failureKind')).toBe(false)
+    }
+  })
+
+  it('normalizes an unknown failureKind value to absent — does not reject the summary', () => {
+    const input = makeValidSummary({status: 'failed', failureKind: 'some-future-fixture-reason'})
+    const result = parseRunSummaryItem(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.failureKind).toBeUndefined()
+      expect(Object.prototype.hasOwnProperty.call(result.data, 'failureKind')).toBe(false)
+    }
+  })
+
+  it('a non-failed status carrying a failureKind still parses (renderer ignores it)', () => {
+    const input = makeValidSummary({status: 'running', failureKind: 'inactivity-timeout'})
+    const result = parseRunSummaryItem(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.status).toBe('running')
+    }
+  })
+
+  it('missing failureKind does not throw', () => {
+    expect(() => parseRunSummaryItem(makeValidSummary())).not.toThrow()
+  })
+})
+
+describe('buildRunSafeView — reasonLabel', () => {
+  it('a failed summary with a known failureKind produces a safe view with a display label', () => {
+    const summary = {
+      runId: 'run-abc-001',
+      repo: 'fro-bot/agent',
+      status: 'failed',
+      createdAt: '2026-06-26T12:00:00.000Z',
+      failureKind: 'inactivity-timeout',
+    }
+    const view = buildRunSafeView(summary)
+    expect(typeof view.reasonLabel).toBe('string')
+    expect(view.reasonLabel.length).toBeGreaterThan(0)
+  })
+
+  it('an unknown/absent failureKind produces no reasonLabel — generic Failed fallback remains available', () => {
+    const summary = {
+      runId: 'run-abc-001',
+      repo: 'fro-bot/agent',
+      status: 'failed',
+      createdAt: '2026-06-26T12:00:00.000Z',
+    }
+    const view = buildRunSafeView(summary)
+    expect('reasonLabel' in view).toBe(false)
+    expect(view.statusLabel).toBe('Failed')
+  })
+
+  it('a non-failed status with a failureKind ignores the reason — no reasonLabel', () => {
+    const summary = {
+      runId: 'run-abc-001',
+      repo: 'fro-bot/agent',
+      status: 'running',
+      createdAt: '2026-06-26T12:00:00.000Z',
+      failureKind: 'inactivity-timeout',
+    }
+    const view = buildRunSafeView(summary)
+    expect('reasonLabel' in view).toBe(false)
+  })
+
+  it('safe-view output has an exact allowed key set and never includes raw failureKind', () => {
+    const summary = {
+      runId: 'run-abc-001',
+      repo: 'fro-bot/agent',
+      status: 'failed',
+      createdAt: '2026-06-26T12:00:00.000Z',
+      updatedAt: '2026-06-26T13:00:00.000Z',
+      failureKind: 'session-error',
+    }
+    const view = buildRunSafeView(summary)
+    const allowedKeys = new Set(['runId', 'repo', 'status', 'statusLabel', 'createdAt', 'updatedAt', 'reasonLabel'])
+    for (const key of Object.keys(view)) {
+      expect(allowedKeys.has(key)).toBe(true)
+    }
+    expect('failureKind' in view).toBe(false)
+    expect(JSON.stringify(view)).not.toContain('session-error')
   })
 })
 
@@ -2074,16 +2174,32 @@ function renderRunCardForTest(cards, summaryLike) {
     repo: summaryLike.repo ?? 'fro-bot/agent',
     status: summaryLike.status,
     createdAt: summaryLike.createdAt ?? '2026-07-03T00:00:00.000Z',
+    failureKind: summaryLike.failureKind,
   })
   const list = makeMockListUsing(cards)
   const card = document.createElement('div')
   card.dataset.runId = view.runId
   card.dataset.testid = 'run-card'
   card.setAttribute('aria-label', `Run, status: ${summaryLike.statusLabel ?? view.statusLabel}`)
-  const statusSpan = document.createElement('div')
+
+  const statusGroup = document.createElement('span')
+  statusGroup.className = 'run-status-group'
+  statusGroup.dataset.role = 'run-status-group'
+
+  const statusSpan = document.createElement('span')
   statusSpan.dataset.role = 'run-status'
   statusSpan.textContent = summaryLike.statusLabel ?? view.statusLabel
-  card.append(statusSpan)
+  statusGroup.append(statusSpan)
+
+  const reasonSpan = document.createElement('span')
+  reasonSpan.className = 'run-reason'
+  reasonSpan.dataset.role = 'run-reason'
+  reasonSpan.textContent = view.reasonLabel ?? ''
+  if (view.reasonLabel !== undefined) reasonSpan.dataset.reasonState = 'present'
+  statusGroup.append(reasonSpan)
+
+  card.append(statusGroup)
+
   for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
     const el = document.createElement('div')
     el.dataset.role = role
@@ -2114,6 +2230,16 @@ describe('CSS selector ↔ status emitter agreement', () => {
     expect(cssContent).not.toContain('.status-failure')
     expect(cssContent).not.toContain('.status-error')
     expect(cssContent).not.toContain('.status-in_progress')
+  })
+
+  it('has selectors for the run-status-group and run-reason elements emitted by renderRunCard/updateDOM', async () => {
+    const fs = await import('node:fs/promises')
+    const cssPath = new URL('../web/src/index.css', import.meta.url).pathname
+    const cssContent = await fs.readFile(cssPath, 'utf8')
+
+    expect(cssContent).toContain('.run-status-group')
+    expect(cssContent).toContain('.run-reason')
+    expect(cssContent).toContain('.run-reason:empty')
   })
 })
 
@@ -2155,5 +2281,185 @@ describe('formatRelativeTime — coarse relative time formatting', () => {
     expect(formatRelativeTime(new Date(now - 172799000).toISOString(), now)).toBe('1 day ago')
     expect(formatRelativeTime(new Date(now - 172800000).toISOString(), now)).toBe('2 days ago')
     expect(formatRelativeTime(new Date(now - 864000000).toISOString(), now)).toBe('10 days ago')
+  })
+})
+
+describe('failure reason label map parity (stream ↔ run-index)', () => {
+  it('stream and run-index label maps have identical keys', () => {
+    const streamKeys = Object.keys(STREAM_FAILURE_REASON_LABELS).sort()
+    const runIndexKeys = Object.keys(RUN_INDEX_FAILURE_REASON_LABELS).sort()
+    expect(runIndexKeys).toEqual(streamKeys)
+  })
+
+  it('stream and run-index label maps have identical label text for every key', () => {
+    for (const key of Object.keys(STREAM_FAILURE_REASON_LABELS)) {
+      expect(RUN_INDEX_FAILURE_REASON_LABELS[key]).toBe(STREAM_FAILURE_REASON_LABELS[key])
+    }
+  })
+})
+
+describe('failure reason label coverage gate', () => {
+  it('every vendored upstream OperatorFailureKind has an explicit dashboard label decision', () => {
+    for (const kind of OPERATOR_FAILURE_KINDS) {
+      expect(Object.prototype.hasOwnProperty.call(STREAM_FAILURE_REASON_LABELS, kind)).toBe(true)
+      expect(Object.prototype.hasOwnProperty.call(RUN_INDEX_FAILURE_REASON_LABELS, kind)).toBe(true)
+      expect(typeof STREAM_FAILURE_REASON_LABELS[kind]).toBe('string')
+      expect(STREAM_FAILURE_REASON_LABELS[kind].length).toBeGreaterThan(0)
+    }
+  })
+
+  it('the dashboard label maps contain no keys beyond the vendored allowlist', () => {
+    for (const key of Object.keys(STREAM_FAILURE_REASON_LABELS)) {
+      expect(isOperatorFailureKind(key)).toBe(true)
+    }
+    for (const key of Object.keys(RUN_INDEX_FAILURE_REASON_LABELS)) {
+      expect(isOperatorFailureKind(key)).toBe(true)
+    }
+  })
+})
+
+describe('run-index failure reason labels', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('compact failed row shows Failed plus No recent activity as secondary metadata', async () => {
+    const runId = 'run-unit3-failed-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        runs: [
+          makeValidSummary({
+            runId,
+            status: 'failed',
+            failureKind: 'inactivity-timeout',
+          }),
+        ],
+      }),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(1)
+    const card = cards[0]
+    const statusEl = card.querySelector('[data-role="run-status"]')
+    const reasonEl = card.querySelector('[data-role="run-reason"]')
+
+    expect(statusEl?.textContent).toBe('Failed')
+    expect(reasonEl?.textContent).toBe('No recent activity')
+  })
+
+  it('updating a card via updateCardInPlace renders the reason-label properly', () => {
+    const cards = []
+    const card = renderRunCardForTest(cards, {
+      runId: 'run-unit3-update-001',
+      status: 'failed',
+      failureKind: 'max-duration-timeout',
+    })
+
+    const reasonEl = card.querySelector('[data-role="run-reason"]')
+    expect(reasonEl?.textContent).toBe('Run timed out')
+  })
+
+  it('renderRunCard sets data-reason-state="present" only when a safe reasonLabel is displayed, never the raw failureKind or label text', async () => {
+    const runId = 'run-unit3-reason-state-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        runs: [
+          makeValidSummary({
+            runId,
+            status: 'failed',
+            failureKind: 'session-error',
+          }),
+        ],
+      }),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    const reasonEl = cards[0].querySelector('[data-role="run-reason"]')
+    expect(reasonEl?.dataset.reasonState).toBe('present')
+    expect(reasonEl?.dataset.reasonState).not.toBe('session-error')
+    expect(reasonEl?.dataset.reasonState).not.toBe('Session error')
+  })
+
+  it('a card rendered with no reasonLabel never sets data-reason-state', () => {
+    const cards = []
+    const card = renderRunCardForTest(cards, {
+      runId: 'run-unit3-reason-state-clear-001',
+      status: 'succeeded',
+    })
+    const reasonEl = card.querySelector('[data-role="run-reason"]')
+    expect(reasonEl?.dataset.reasonState).toBeUndefined()
+  })
+
+  it('a live diff refresh that moves a card from a known reason to no reason clears data-reason-state via updateCardInPlace', async () => {
+    const runId = 'run-unit3-reason-state-transition-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        runs: [makeValidSummary({runId, status: 'failed', failureKind: 'inactivity-timeout'})],
+      }),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    const reasonEl = cards[0].querySelector('[data-role="run-reason"]')
+    expect(reasonEl?.dataset.reasonState).toBe('present')
+
+    // Refresh: the same run is now succeeded — a status the projector never
+    // attaches a failureKind to, so buildRunSafeView emits no reasonLabel.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        runs: [makeValidSummary({runId, status: 'succeeded'})],
+      }),
+    }))
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(1)
+    const reasonElAfter = cards[0].querySelector('[data-role="run-reason"]')
+    expect(reasonElAfter?.textContent).toBe('')
+    expect(reasonElAfter?.dataset.reasonState).toBeUndefined()
+  })
+
+  it('generic non-failed status rows do not render any failure reason label', async () => {
+    const runId = 'run-unit3-running-001'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        runs: [
+          makeValidSummary({
+            runId,
+            status: 'running',
+            failureKind: 'inactivity-timeout', // should be ignored
+          }),
+        ],
+      }),
+    }))
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(1)
+    const card = cards[0]
+    const statusEl = card.querySelector('[data-role="run-status"]')
+    const reasonEl = card.querySelector('[data-role="run-reason"]')
+
+    expect(statusEl?.textContent).toBe('Running')
+    expect(reasonEl?.textContent).toBe('')
   })
 })

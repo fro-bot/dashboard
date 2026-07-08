@@ -24,6 +24,7 @@
 import type {Logger} from '../logger.ts'
 import type {OperatorApprovalFrame} from './operator-contract/approval-frame.ts'
 import type {ResetReason, RunStreamFrame} from './operator-contract/sse-frames.ts'
+import {isOperatorFailureKind} from './operator-contract/run-status.ts'
 import {OPERATOR_CONTRACT_VERSION} from './operator-contract/version.ts'
 
 // ---------------------------------------------------------------------------
@@ -70,10 +71,7 @@ export type SseParseResult =
 // Pure SSE frame parser
 // ---------------------------------------------------------------------------
 
-/**
- * The set of valid ResetReason values, used for membership checks.
- * Defined as a plain object (not an enum) per project conventions.
- */
+/** Allowlist of valid ResetReason values. */
 const VALID_RESET_REASONS: ReadonlySet<string> = new Set<ResetReason>([
   'no-snapshot',
   'terminal',
@@ -177,6 +175,10 @@ function parseSseRecord(record: string): SseParseResult | null {
     if (!VALID_SURFACES.has(candidate.surface)) {
       return {success: false, error: new Error('status frame surface value not in allowlist')}
     }
+    // failureKind is optional and allowlist-gated. Presence is never required
+    // for a valid status frame — missing or unrecognized values normalize to
+    // absent (never echoed, never surfaced as a raw value).
+    const failureKind = isOperatorFailureKind(candidate.failureKind) ? candidate.failureKind : undefined
     return {
       success: true,
       frame: {
@@ -189,6 +191,7 @@ function parseSseRecord(record: string): SseParseResult | null {
           status: candidate.status as 'queued' | 'blocked' | 'running' | 'waiting_for_approval' | 'succeeded' | 'failed' | 'cancelled',
           startedAt: candidate.startedAt,
           stale: candidate.stale,
+          ...(failureKind === undefined ? {} : {failureKind}),
         },
       },
     }

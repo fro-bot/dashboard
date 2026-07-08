@@ -11,6 +11,7 @@ import {readFileSync} from 'node:fs'
 import {resolve} from 'node:path'
 import process from 'node:process'
 import {describe, expect, it} from 'vitest'
+import {FIXTURE_KNOWN_FAILURE_REASON, FIXTURE_UNKNOWN_FAILURE_REASON} from '../src/gateway/operator-fixtures.ts'
 
 const FIXTURE_FILES = [
   'src/gateway/operator-fixtures.ts',
@@ -244,5 +245,92 @@ describe('fixture no-leak guard — explicit bad-fixture rejection', () => {
     if (bearerPattern) {
       expect(bearerPattern[1].test(goodFixture)).toBe(false)
     }
+  })
+})
+
+describe('fixture no-leak guard — failure-reason values', () => {
+  it('known production reason codes do not trip any forbidden pattern', () => {
+    const KNOWN_REASON_CODES = [
+      'inactivity-timeout',
+      'max-duration-timeout',
+      'stream-ended',
+      'workspace-unreachable',
+      'session-error',
+      'unknown',
+    ]
+    for (const code of KNOWN_REASON_CODES) {
+      const line = `failureKind: '${code}'`
+      for (const [label, pattern] of FORBIDDEN_PATTERNS) {
+        expect(pattern.test(line), `known reason "${code}" tripped forbidden pattern "${label}"`).toBe(false)
+      }
+    }
+  })
+
+  it('visibly synthetic fixture-prefixed unknown reason values do not trip forbidden patterns', () => {
+    const line = "failureKind: 'fixture-unrecognized-reason'"
+    for (const [label, pattern] of FORBIDDEN_PATTERNS) {
+      expect(pattern.test(line), `synthetic unknown reason tripped forbidden pattern "${label}"`).toBe(false)
+    }
+  })
+
+  it('the exported fixture reason constants are a known code and a fixture-prefixed synthetic code, respectively', () => {
+    const KNOWN_REASON_CODES = new Set([
+      'inactivity-timeout',
+      'max-duration-timeout',
+      'stream-ended',
+      'workspace-unreachable',
+      'session-error',
+      'unknown',
+    ])
+
+    expect(KNOWN_REASON_CODES.has(FIXTURE_KNOWN_FAILURE_REASON)).toBe(true)
+
+    expect(FIXTURE_UNKNOWN_FAILURE_REASON.startsWith('fixture-')).toBe(true)
+    expect(KNOWN_REASON_CODES.has(FIXTURE_UNKNOWN_FAILURE_REASON)).toBe(false)
+    for (const [label, pattern] of FORBIDDEN_PATTERNS) {
+      expect(pattern.test(FIXTURE_UNKNOWN_FAILURE_REASON), `FIXTURE_UNKNOWN_FAILURE_REASON tripped forbidden pattern "${label}"`).toBe(false)
+    }
+  })
+
+  it('committed fixture files only use the fixture-prefixed unknown reason value, never a bare non-fixture unknown string', () => {
+    const KNOWN_REASON_CODES = new Set([
+      'inactivity-timeout',
+      'max-duration-timeout',
+      'stream-ended',
+      'workspace-unreachable',
+      'session-error',
+      'unknown',
+    ])
+    const FAILURE_KIND_LITERAL_PATTERN = /failureKind:\s*['"]([^'"]+)['"]/g
+
+    for (const filePath of FIXTURE_FILES) {
+      let source: string
+      try {
+        source = readFixtureFile(filePath)
+      } catch {
+        source = ''
+      }
+      const matches = [...source.matchAll(FAILURE_KIND_LITERAL_PATTERN)]
+      for (const match of matches) {
+        const value = match[1]
+        if (value === undefined) continue
+        const isKnown = KNOWN_REASON_CODES.has(value)
+        const isSynthetic = value.startsWith('fixture-')
+        expect(isKnown || isSynthetic, `failureKind literal "${value}" in ${filePath} is neither a known reason code nor fixture-prefixed`).toBe(true)
+      }
+    }
+  })
+
+  it('an unrecognized non-fixture-prefixed reason value fails the guard (explicit rejection)', () => {
+    const badValue = 'totally-made-up-reason'
+    const KNOWN_REASON_CODES = new Set([
+      'inactivity-timeout',
+      'max-duration-timeout',
+      'stream-ended',
+      'workspace-unreachable',
+      'session-error',
+      'unknown',
+    ])
+    expect(KNOWN_REASON_CODES.has(badValue) || badValue.startsWith('fixture-')).toBe(false)
   })
 })

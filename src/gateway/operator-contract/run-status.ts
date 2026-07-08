@@ -1,35 +1,24 @@
 /**
  * Operator-safe run-status projection.
  *
- * Vendored from fro-bot/agent packages/gateway/src/operator-contract/run-status.ts
- * Import rewrite: @fro-bot/runtime types (RunPhase, Surface, RunState) are INLINED
- * as minimal local boundary type definitions that preserve the exact frozen literal
- * unions. The toOperatorRunStatus helper is omitted because it depends on RunState
- * (an upstream-only coordination type with internal fields). The PUBLIC frozen types
- * (OperatorWebStatus, OperatorRunStatus, RunPhase, Surface) are present and correct.
+ * Mirrors fro-bot/agent's operator-contract/run-status.ts (v0.83.1). The
+ * projection helper (toOperatorRunStatus) and internal error-kind mapping
+ * are intentionally omitted — the dashboard only consumes the closed public
+ * types below directly from the gateway API.
  *
- * Security: OperatorRunStatus carries only operator-safe fields. The internal
- * coordination fields holder_id, thread_id, and details are excluded by construction.
- *
- * Note: toOperatorRunStatus is omitted in this vendored copy — it requires RunState
- * (an upstream-only coordination type). The dashboard does not need the projection
- * helper; it consumes OperatorRunStatus values directly from the gateway API.
+ * Security: OperatorRunStatus carries only operator-safe fields. Internal
+ * coordination fields (holder_id, thread_id, details) are excluded by
+ * construction — they do not appear in this type.
  */
 
 // ---------------------------------------------------------------------------
 // Inlined boundary types from @fro-bot/runtime (minimal, frozen literals only)
 // ---------------------------------------------------------------------------
 
-/**
- * Run lifecycle phases (inlined from @fro-bot/runtime).
- * These are the exact frozen literal values from the upstream contract.
- */
+/** Run lifecycle phases (exact frozen literal values from the upstream contract). */
 export type RunPhase = 'PENDING' | 'ACKNOWLEDGED' | 'EXECUTING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
 
-/**
- * Surface discriminant (inlined from @fro-bot/runtime).
- * Identifies the integration surface that initiated the run.
- */
+/** Surface discriminant — the integration surface that initiated the run. */
 export type Surface = 'github' | 'discord' | 'web'
 
 // ---------------------------------------------------------------------------
@@ -71,4 +60,44 @@ export interface OperatorRunStatus {
   readonly status: OperatorWebStatus
   readonly startedAt: string
   readonly stale: boolean
+  readonly failureKind?: OperatorFailureKind
+}
+
+// ---------------------------------------------------------------------------
+// OperatorFailureKind
+// ---------------------------------------------------------------------------
+
+/**
+ * The operator-facing failure-reason enum.
+ *
+ * A closed allowlist vendored verbatim from upstream (derived from
+ * RunCoreErrorKind, the internal error-kind vocabulary). 'unknown' is the
+ * fallback for any internal kind with no mapping entry (defense-in-depth:
+ * unmapped/future/unrecognized kinds never leak past this gate).
+ */
+export type OperatorFailureKind =
+  | 'inactivity-timeout'
+  | 'max-duration-timeout'
+  | 'stream-ended'
+  | 'workspace-unreachable'
+  | 'session-error'
+  | 'unknown'
+
+/**
+ * Allowlist of OperatorFailureKind values, for gating untrusted input.
+ * 'unknown' is the fallback for any internal kind with no mapping — unmapped
+ * or unrecognized kinds never leak past this gate.
+ */
+export const OPERATOR_FAILURE_KINDS: ReadonlySet<OperatorFailureKind> = new Set([
+  'inactivity-timeout',
+  'max-duration-timeout',
+  'stream-ended',
+  'workspace-unreachable',
+  'session-error',
+  'unknown',
+])
+
+/** Narrow an unknown value to OperatorFailureKind if it's in the allowlist. */
+export function isOperatorFailureKind(value: unknown): value is OperatorFailureKind {
+  return typeof value === 'string' && OPERATOR_FAILURE_KINDS.has(value as OperatorFailureKind)
 }

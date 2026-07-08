@@ -1,15 +1,22 @@
 /**
  * RunSummary type and parse helpers for the operator contract.
  *
- * Mirrors the gateway's RunSummary from fro-bot/agent v0.78.0.
+ * Mirrors the gateway's RunSummary from fro-bot/agent v0.83.1.
  * Error messages are fixed strings — never echo or interpolate input.
  * Extra fields are ignored (permissive structural subtyping).
  * Oversized strings are rejected without logging raw values.
+ *
+ * failureKind: optional operator-safe failure-reason code, populated only
+ * for failed runs. Allowlist-gated against OperatorFailureKind — any
+ * unrecognized string normalizes to absent rather than rejecting the whole
+ * summary (reason codes are a display supplement, never a validity requirement).
  */
 
 import type {Result} from '../../result.ts'
+import type {OperatorFailureKind} from './run-status.ts'
 
 import {err, ok} from '../../result.ts'
+import {isOperatorFailureKind} from './run-status.ts'
 
 /**
  * Index-only status set. 'blocked' and 'waiting_for_approval' are stream-only
@@ -28,6 +35,7 @@ export interface RunSummary {
   readonly status: RunSummaryStatus
   readonly createdAt: string
   readonly updatedAt?: string
+  readonly failureKind?: OperatorFailureKind
 }
 
 /** Maximum valid unique summaries returned by parseRunSummaryList. Matches browser JS RUN_INDEX_CAP. */
@@ -82,9 +90,21 @@ function hasValidRunSummaryShape(value: unknown): value is RunSummary {
 
 /** Parse an unknown value as RunSummary. Returns err with a fixed reason string on failure. */
 export function parseRunSummary(input: unknown): Result<RunSummary, Error> {
+  // Capture the raw failureKind before the shape guard narrows input's type.
+  const rawFailureKind =
+    typeof input === 'object' && input !== null && !Array.isArray(input)
+      ? (input as Record<string, unknown>).failureKind
+      : undefined
+
   if (hasValidRunSummaryShape(input) === false) {
     return err(new Error('invalid run summary shape'))
   }
+
+  // failureKind is optional and allowlist-gated; an unrecognized or absent
+  // value normalizes to omitted — it never fails validity of the summary.
+  const failureKind: OperatorFailureKind | undefined = isOperatorFailureKind(rawFailureKind)
+    ? rawFailureKind
+    : undefined
 
   // Closed DTO — copy only declared fields; never spread input.
   const summary: RunSummary = {
@@ -93,6 +113,7 @@ export function parseRunSummary(input: unknown): Result<RunSummary, Error> {
     status: input.status,
     createdAt: input.createdAt,
     ...('updatedAt' in input ? {updatedAt: input.updatedAt} : {}),
+    ...(failureKind === undefined ? {} : {failureKind}),
   }
 
   return ok(summary)
