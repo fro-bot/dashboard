@@ -13,10 +13,19 @@
  * All colors come from CSS vars (tokens.css). No inline hex.
  */
 
-import {type ReactNode, useCallback, useEffect, useState} from 'react'
+import {type ReactNode, useCallback, useEffect, useRef, useState} from 'react'
 import {InstallPrompt} from '../pwa/InstallPrompt.tsx'
 import {ReloadPrompt} from '../pwa/ReloadPrompt.tsx'
 import {purgeOperatorCache} from '../pwa/logout-purge.ts'
+
+// Fail-closed redirect target for any logout outcome (success or failure).
+// The Gateway session cookie is HttpOnly — it cannot be cleared client-side,
+// so failure paths navigate here too and rely on server-side reauth.
+const AUTH_LOGIN_PATH = '/auth/login'
+
+function redirectToLogin(): void {
+  window.location.href = AUTH_LOGIN_PATH
+}
 
 type Theme = 'dark' | 'light'
 
@@ -37,6 +46,8 @@ interface AppShellProps {
 
 export function AppShell({children}: AppShellProps) {
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
+  const [loggingOut, setLoggingOut] = useState(false)
+  const logoutInFlight = useRef(false)
 
   useEffect(() => {
     applyTheme(theme)
@@ -48,38 +59,54 @@ export function AppShell({children}: AppShellProps) {
   }, [])
 
   /**
-   * Logout: purge operator runtime caches then submit the logout form POST.
-   * The CSRF token is fetched from /auth/logout-csrf (authenticated endpoint)
-   * immediately before submission so it is always fresh.
+   * Logout: purge operator runtime caches, fetch a fresh CSRF token from the
+   * gateway operator session endpoint, then POST the logout with that token.
    */
   const handleLogout = useCallback(async () => {
+    // Guard against rapid double-clicks issuing duplicate CSRF/logout
+    // requests. useRef gives a synchronous check (state updates are async).
+    if (logoutInFlight.current) return
+    logoutInFlight.current = true
+    setLoggingOut(true)
+
     // Purge operator runtime caches before navigating away so a
     // logged-out user cannot see cached operator data offline.
     purgeOperatorCache()
 
     try {
-      const res = await fetch('/auth/logout-csrf', {credentials: 'same-origin'})
-      if (!res.ok) {
-        // If we can't get the CSRF token, fall back to navigating to login.
-        window.location.href = '/auth/login'
+      const csrfRes = await fetch('/operator/session/csrf', {credentials: 'same-origin'})
+      if (!csrfRes.ok) {
+        redirectToLogin()
         return
       }
-      const {csrfToken} = (await res.json()) as {csrfToken: string}
 
-      // Submit a form POST to /auth/logout with the CSRF token.
-      const form = document.createElement('form')
-      form.method = 'POST'
-      form.action = '/auth/logout'
-      const input = document.createElement('input')
-      input.type = 'hidden'
-      input.name = 'csrf_token'
-      input.value = csrfToken
-      form.appendChild(input)
-      document.body.appendChild(form)
-      form.submit()
+      const csrfBody: unknown = await csrfRes.json().catch(() => null)
+      const csrfToken =
+        csrfBody !== null && typeof csrfBody === 'object' && 'csrfToken' in csrfBody
+          ? (csrfBody as {csrfToken: unknown}).csrfToken
+          : undefined
+      if (typeof csrfToken !== 'string' || csrfToken.length === 0) {
+        // Malformed/missing token — fail closed rather than send a
+        // logout POST with an "undefined" csrf header.
+        redirectToLogin()
+        return
+      }
+
+      const logoutRes = await fetch('/operator/auth/logout', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'x-csrf-token': csrfToken},
+      })
+      if (!logoutRes.ok) {
+        redirectToLogin()
+        return
+      }
+
+      await logoutRes.text().catch(() => undefined)
+      redirectToLogin()
     } catch {
       // Network error — fall back to login page.
-      window.location.href = '/auth/login'
+      redirectToLogin()
     }
   }, [])
 
@@ -205,7 +232,8 @@ export function AppShell({children}: AppShellProps) {
               aria-label="Log out"
               data-testid="logout-button"
               onClick={handleLogout}
-              className="flex items-center justify-center w-8 h-8 rounded-md border border-border bg-transparent text-muted cursor-pointer transition-colors duration-fast ease-standard hover:border-accent hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              disabled={loggingOut}
+              className="flex items-center justify-center w-8 h-8 rounded-md border border-border bg-transparent text-muted cursor-pointer transition-colors duration-fast ease-standard hover:border-accent hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
                 <path d="M6 2H3a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />

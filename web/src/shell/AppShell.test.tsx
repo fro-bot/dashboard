@@ -3,6 +3,20 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import * as logoutPurgeModule from '../pwa/logout-purge.ts'
 import {AppShell} from './AppShell.tsx'
 
+// jsdom throws "Not implemented: navigation to another Document" on real
+// `window.location.href =` assignment and never reflects the new value.
+// Stub `location` with a plain object so redirect assertions observe the
+// value the app actually set instead of jsdom's fixed default.
+function stubLocation(): {href: string} {
+  const stub = {href: window.location.href}
+  Object.defineProperty(window, 'location', {
+    writable: true,
+    configurable: true,
+    value: stub,
+  })
+  return stub
+}
+
 // jsdom doesn't implement matchMedia — stub it
 function stubMatchMedia(prefersLight: boolean) {
   Object.defineProperty(window, 'matchMedia', {
@@ -20,6 +34,56 @@ function stubMatchMedia(prefersLight: boolean) {
   })
 }
 
+function requestUrl(input: RequestInfo | URL): string {
+  return typeof input === 'string' ? input : input.toString()
+}
+
+function findFetchCall(fetchMock: ReturnType<typeof vi.fn>, path: string) {
+  return fetchMock.mock.calls.find(([input]) => requestUrl(input).includes(path))
+}
+
+function countFetchCalls(fetchMock: ReturnType<typeof vi.fn>, path: string): number {
+  return fetchMock.mock.calls.filter(([input]) => requestUrl(input).includes(path)).length
+}
+
+function csrfOkResponse(token = 'test-csrf-token') {
+  return new Response(JSON.stringify({csrfToken: token}), {
+    status: 200,
+    headers: {'content-type': 'application/json'},
+  })
+}
+
+function logoutOkResponse() {
+  return new Response(JSON.stringify({ok: true}), {
+    status: 200,
+    headers: {'content-type': 'application/json'},
+  })
+}
+
+function nonOkResponse(status = 500) {
+  return new Response(null, {status})
+}
+
+// Routes fetch to CSRF/logout handlers by URL; anything else throws so an
+// unexpected call fails the test loudly instead of hanging.
+function mockLogoutFetch(routes: {
+  csrf?: () => Response | Promise<Response>
+  logout?: () => Response | Promise<Response>
+}) {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = requestUrl(input)
+    if (url.includes('/operator/session/csrf') && routes.csrf) return routes.csrf()
+    if (url.includes('/operator/auth/logout') && routes.logout) return routes.logout()
+    throw new Error(`unexpected fetch: ${url}`)
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+function spyOnPurgeOperatorCache() {
+  return vi.spyOn(logoutPurgeModule, 'purgeOperatorCache').mockReturnValue(undefined)
+}
+
 describe('AppShell', () => {
   beforeEach(() => {
     // Reset localStorage and data-theme before each test
@@ -30,6 +94,8 @@ describe('AppShell', () => {
 
   afterEach(() => {
     document.documentElement.removeAttribute('data-theme')
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
   })
 
   it('renders a nav/header', () => {
@@ -145,7 +211,7 @@ describe('AppShell', () => {
   it('logout calls purgeOperatorCache, not purgeMonitoringCache', () => {
     // AppShell must call the generalized operator purge on logout,
     // not the monitoring-named cache purge.
-    const purgeSpy = vi.spyOn(logoutPurgeModule, 'purgeOperatorCache').mockReturnValue(undefined)
+    const purgeSpy = spyOnPurgeOperatorCache()
 
     // Stub fetch so logout doesn't make real network calls
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network')))
@@ -154,8 +220,119 @@ describe('AppShell', () => {
     fireEvent.click(screen.getByTestId('logout-button'))
 
     expect(purgeSpy).toHaveBeenCalledTimes(1)
+  })
 
-    vi.unstubAllGlobals()
-    purgeSpy.mockRestore()
+  it('logout fetches CSRF and POSTs logout with the token, then redirects to /auth/login', async () => {
+    const purgeSpy = spyOnPurgeOperatorCache()
+    const location = stubLocation()
+    const fetchMock = mockLogoutFetch({csrf: csrfOkResponse, logout: logoutOkResponse})
+
+    render(<AppShell>content</AppShell>)
+    fireEvent.click(screen.getByTestId('logout-button'))
+
+    await vi.waitFor(() => {
+      const logoutCall = findFetchCall(fetchMock, '/operator/auth/logout')
+      expect(logoutCall).toBeDefined()
+      const [, init] = logoutCall ?? []
+      expect(init?.method).toBe('POST')
+      expect(init?.credentials).toBe('same-origin')
+      expect(new Headers(init?.headers).get('x-csrf-token')).toBe('test-csrf-token')
+    })
+
+    await vi.waitFor(() => {
+      expect(location.href).toBe('/auth/login')
+    })
+
+    expect(purgeSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('disables the button and issues only one CSRF/logout call pair on rapid double-click', async () => {
+    spyOnPurgeOperatorCache()
+
+    let resolveCsrf: ((res: Response) => void) | undefined
+    const fetchMock = mockLogoutFetch({
+      // Hold the CSRF fetch open so we can assert disabled state
+      // and fire the second click while it's still pending.
+      csrf: () => new Promise<Response>((resolve) => (resolveCsrf = resolve)),
+      logout: logoutOkResponse,
+    })
+
+    render(<AppShell>content</AppShell>)
+    const button = screen.getByTestId('logout-button')
+
+    fireEvent.click(button)
+    fireEvent.click(button)
+
+    expect(button).toBeDisabled()
+    expect(countFetchCalls(fetchMock, '/operator/session/csrf')).toBe(1)
+
+    resolveCsrf?.(csrfOkResponse())
+
+    await vi.waitFor(() => {
+      expect(countFetchCalls(fetchMock, '/operator/auth/logout')).toBe(1)
+    })
+  })
+
+  it('redirects to /auth/login and skips the logout POST when the CSRF endpoint is non-ok', async () => {
+    spyOnPurgeOperatorCache()
+    const location = stubLocation()
+    const fetchMock = mockLogoutFetch({csrf: () => nonOkResponse()})
+
+    render(<AppShell>content</AppShell>)
+    fireEvent.click(screen.getByTestId('logout-button'))
+
+    await vi.waitFor(() => {
+      expect(location.href).toBe('/auth/login')
+    })
+
+    expect(findFetchCall(fetchMock, '/operator/auth/logout')).toBeUndefined()
+  })
+
+  it('redirects to /auth/login when the logout POST is non-ok', async () => {
+    spyOnPurgeOperatorCache()
+    const location = stubLocation()
+    mockLogoutFetch({csrf: csrfOkResponse, logout: () => nonOkResponse()})
+
+    render(<AppShell>content</AppShell>)
+    fireEvent.click(screen.getByTestId('logout-button'))
+
+    await vi.waitFor(() => {
+      expect(location.href).toBe('/auth/login')
+    })
+  })
+
+  it('redirects to /auth/login when the fetch rejects (network error)', async () => {
+    spyOnPurgeOperatorCache()
+    const location = stubLocation()
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network')))
+
+    render(<AppShell>content</AppShell>)
+    fireEvent.click(screen.getByTestId('logout-button'))
+
+    await vi.waitFor(() => {
+      expect(location.href).toBe('/auth/login')
+    })
+  })
+
+  it('fails closed without sending a logout POST when the CSRF response body is malformed', async () => {
+    spyOnPurgeOperatorCache()
+    const location = stubLocation()
+    // Missing csrfToken field entirely.
+    const fetchMock = mockLogoutFetch({
+      csrf: () =>
+        new Response(JSON.stringify({unexpected: 'shape'}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    })
+
+    render(<AppShell>content</AppShell>)
+    fireEvent.click(screen.getByTestId('logout-button'))
+
+    await vi.waitFor(() => {
+      expect(location.href).toBe('/auth/login')
+    })
+
+    expect(findFetchCall(fetchMock, '/operator/auth/logout')).toBeUndefined()
   })
 })
