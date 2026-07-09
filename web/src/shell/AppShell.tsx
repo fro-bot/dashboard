@@ -66,9 +66,17 @@ interface AppShellProps {
    * to buildPushClient's default '/operator/push'.
    */
   pushEndpointBase?: string
+  /**
+   * Whether push config (endpoint base / fixture session) is settled and safe
+   * to sweep with. Undefined (existing callers/tests) is treated as ready —
+   * production always renders with this true on first render.
+   */
+  pushConfigReady?: boolean
+  /** Fixture-mode session id, appended as a query param by the push client. */
+  pushFixtureSessionId?: string
 }
 
-export function AppShell({children, pushEndpointBase}: AppShellProps) {
+export function AppShell({children, pushEndpointBase, pushConfigReady, pushFixtureSessionId}: AppShellProps) {
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
   const [loggingOut, setLoggingOut] = useState(false)
   const logoutInFlight = useRef(false)
@@ -293,7 +301,11 @@ export function AppShell({children, pushEndpointBase}: AppShellProps) {
         }}
         className="sm:px-6 md:px-8 lg:px-10"
       >
-        <Notifications pushEndpointBase={pushEndpointBase} />
+        <Notifications
+          pushEndpointBase={pushEndpointBase}
+          pushConfigReady={pushConfigReady}
+          pushFixtureSessionId={pushFixtureSessionId}
+        />
         {children}
       </main>
 

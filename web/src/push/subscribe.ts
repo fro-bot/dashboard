@@ -57,6 +57,7 @@ export interface PushClient {
 
 export interface BuildPushClientOptions {
   readonly endpointBase?: string
+  readonly fixtureSessionId?: string
 }
 
 function hasValidSubscriptionMetadataShape(value: unknown): value is PushSubscriptionMetadata {
@@ -78,6 +79,15 @@ function hasValidSubscriptionMetadataShape(value: unknown): value is PushSubscri
  */
 export function buildPushClient(opts?: BuildPushClientOptions): PushClient {
   const endpointBase = opts?.endpointBase ?? '/operator/push'
+  const {fixtureSessionId} = opts ?? {}
+
+  // Appends fixtureSessionId as a query param, mirroring
+  // public/operator-run-index.js and public/operator-stream.js. No-op in
+  // production (fixtureSessionId undefined) — URLs stay byte-identical to today.
+  const withFixtureSessionId = (url: string): string => {
+    if (fixtureSessionId === undefined) return url
+    return `${url}${url.includes('?') ? '&' : '?'}fixtureSessionId=${encodeURIComponent(fixtureSessionId)}`
+  }
 
   const browserFetch = (input: string, init?: RequestInit): Promise<Response> => {
     const timeoutSignal = AbortSignal.timeout(10_000)
@@ -111,7 +121,7 @@ export function buildPushClient(opts?: BuildPushClientOptions): PushClient {
 
     async getVapidKey() {
       try {
-        const res = await browserFetch(`${endpointBase}/vapid-key`, {
+        const res = await browserFetch(withFixtureSessionId(`${endpointBase}/vapid-key`), {
           headers: {'content-type': 'application/json'},
         })
         if (res.status === 404) return ok({pushDisabled: true, vapidKey: undefined})
@@ -133,7 +143,7 @@ export function buildPushClient(opts?: BuildPushClientOptions): PushClient {
 
     async getPushSubscriptionMetadata() {
       try {
-        const res = await browserFetch(`${endpointBase}/subscriptions`, {
+        const res = await browserFetch(withFixtureSessionId(`${endpointBase}/subscriptions`), {
           headers: {'content-type': 'application/json'},
         })
         if (res.status === 404) return ok({pushDisabled: true, metadata: undefined})
@@ -157,7 +167,7 @@ export function buildPushClient(opts?: BuildPushClientOptions): PushClient {
       if (idempotencyKey.trim() === '') return err({kind: 'validation'})
 
       const post = (token: string): Promise<Response> =>
-        browserFetch(`${endpointBase}/subscriptions`, {
+        browserFetch(withFixtureSessionId(`${endpointBase}/subscriptions`), {
           method: 'POST',
           signal,
           headers: {
@@ -193,7 +203,7 @@ export function buildPushClient(opts?: BuildPushClientOptions): PushClient {
       if (idempotencyKey.trim() === '') return err({kind: 'validation'})
 
       const post = (token: string): Promise<Response> =>
-        browserFetch(`${endpointBase}/subscriptions/unsubscribe`, {
+        browserFetch(withFixtureSessionId(`${endpointBase}/subscriptions/unsubscribe`), {
           method: 'POST',
           headers: {
             'content-type': 'application/json',

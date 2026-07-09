@@ -29,9 +29,25 @@ interface NotificationsProps {
    * stays undefined forever, so the client is still built exactly once).
    */
   pushEndpointBase?: string
+  /**
+   * Whether push config (endpoint base / fixture session) is settled. When
+   * undefined (existing callers/tests), treated as ready immediately —
+   * production always renders ready on first render. In dev fixture mode,
+   * App.tsx passes `false` until fixture detection resolves so the initial
+   * reconcile sweep doesn't run against the wrong (production) endpoint and
+   * poison the sweep cache.
+   */
+  pushConfigReady?: boolean
+  /** Fixture-mode session id, forwarded to buildPushClient as a query param. */
+  pushFixtureSessionId?: string
 }
 
-export function Notifications({pushEndpointBase}: NotificationsProps = {}) {
+export function Notifications({
+  pushEndpointBase,
+  pushConfigReady,
+  pushFixtureSessionId,
+}: NotificationsProps = {}) {
+  const configReady = pushConfigReady ?? true
   const [metaEnabled] = useState<boolean>(readPushEnabledMeta)
   const [currentUiState, setCurrentUiState] = useState<NotificationUiState>('not-requested')
   const [inFlight, setInFlight] = useState(false)
@@ -44,15 +60,18 @@ export function Notifications({pushEndpointBase}: NotificationsProps = {}) {
   const ctaRef = useRef<HTMLButtonElement>(null)
   const headlineRef = useRef<HTMLHeadingElement>(null)
 
+  const pushClientKey = `${pushEndpointBase ?? ''}|${pushFixtureSessionId ?? ''}`
   const pushClientRef = useRef<{
-    base: string | undefined
+    key: string
     client: ReturnType<typeof buildPushClient>
   } | null>(null)
-  if (pushClientRef.current === null || pushClientRef.current.base !== pushEndpointBase) {
+  if (pushClientRef.current === null || pushClientRef.current.key !== pushClientKey) {
     pushClientRef.current = {
-      base: pushEndpointBase,
+      key: pushClientKey,
       client: buildPushClient(
-        pushEndpointBase !== undefined ? {endpointBase: pushEndpointBase} : undefined,
+        pushEndpointBase !== undefined || pushFixtureSessionId !== undefined
+          ? {endpointBase: pushEndpointBase, fixtureSessionId: pushFixtureSessionId}
+          : undefined,
       ),
     }
   }
@@ -165,7 +184,17 @@ export function Notifications({pushEndpointBase}: NotificationsProps = {}) {
   useEffect(() => {
     if (!metaEnabled) return
 
-    void runSweep()
+    // Gate the initial sweep on pushConfigReady (mirrors App.tsx's
+    // fixtureDetectionSettled pattern for Operator). In production
+    // configReady is true immediately. In dev fixture mode, App.tsx passes
+    // pushConfigReady=false until fixture detection resolves — running the
+    // sweep before then would hit the wrong (production) endpoint, derive
+    // push_disabled, and poison the sweep cache via runReconcileSweep's
+    // withinMinInterval guard. When this effect re-runs after configReady
+    // flips true (it's a dependency below), the sweep runs then instead.
+    if (configReady) {
+      void runSweep()
+    }
 
     // visibilitychange and focus both fire on tab activation — debounce so
     // the pair coalesces into a single sweep instead of running it twice.
@@ -202,7 +231,7 @@ export function Notifications({pushEndpointBase}: NotificationsProps = {}) {
         sweepDebounceRef.current = null
       }
     }
-  }, [metaEnabled, runSweep])
+  }, [metaEnabled, runSweep, configReady])
 
   // iOS standalone app installation listener
   useEffect(() => {

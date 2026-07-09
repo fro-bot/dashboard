@@ -73,6 +73,47 @@ describe('Notifications Component', () => {
     expect(buildPushClient).toHaveBeenCalledWith({endpointBase: '/__fixture/operator/push'})
   })
 
+  it('buildPushClient receives fixtureSessionId when pushFixtureSessionId is passed', async () => {
+    addMetaTag()
+    await act(async () => {
+      render(
+        <Notifications
+          pushEndpointBase="/__fixture/operator/push"
+          pushFixtureSessionId="fixture-session-0001"
+        />,
+      )
+    })
+    expect(buildPushClient).toHaveBeenCalledWith({
+      endpointBase: '/__fixture/operator/push',
+      fixtureSessionId: 'fixture-session-0001',
+    })
+  })
+
+  it('does NOT run the initial sweep when pushConfigReady is false, and runs it once ready', async () => {
+    addMetaTag()
+    const {rerender} = render(<Notifications pushConfigReady={false} />)
+
+    // Let any microtasks flush — sweep must not have fired.
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(runReconcileSweep).not.toHaveBeenCalled()
+
+    await act(async () => {
+      rerender(<Notifications pushConfigReady={true} />)
+    })
+
+    expect(runReconcileSweep).toHaveBeenCalledTimes(1)
+  })
+
+  it('runs the initial sweep immediately when pushConfigReady is omitted (default-ready, production parity)', async () => {
+    addMetaTag()
+    await act(async () => {
+      render(<Notifications />)
+    })
+    expect(runReconcileSweep).toHaveBeenCalledTimes(1)
+  })
+
   it('renders nothing when push-enabled meta is absent', () => {
     render(<Notifications />)
     expect(screen.queryByTestId('notifications-settings')).toBeNull()

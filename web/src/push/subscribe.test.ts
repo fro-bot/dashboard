@@ -144,6 +144,67 @@ describe('buildPushClient', () => {
 
     expect(result).toEqual(ok({pushDisabled: false, vapidKey: {publicKey: 'BNc3xVwB', keyVersion: 'v1'}}))
   })
+
+  describe('fixtureSessionId query-param parity', () => {
+    it('getVapidKey: appends fixtureSessionId when provided', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {publicKey: 'BNc3xVwB', keyVersion: 'v1'}))
+      vi.stubGlobal('fetch', fetchMock)
+
+      const client = buildPushClient({fixtureSessionId: 'fixture-session-0001'})
+      await client.getVapidKey()
+
+      const url = fetchMock.mock.calls[0]?.[0] as string
+      expect(url).toBe('/operator/push/vapid-key?fixtureSessionId=fixture-session-0001')
+    })
+
+    it('getPushSubscriptionMetadata: appends fixtureSessionId when provided', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {}))
+      vi.stubGlobal('fetch', fetchMock)
+
+      const client = buildPushClient({
+        endpointBase: '/__fixture/operator/push',
+        fixtureSessionId: 'fixture-session-0001',
+      })
+      await client.getPushSubscriptionMetadata()
+
+      const url = fetchMock.mock.calls[0]?.[0] as string
+      expect(url).toBe('/__fixture/operator/push/subscriptions?fixtureSessionId=fixture-session-0001')
+    })
+
+    it('subscribePush: appends fixtureSessionId when provided (? join, no existing query)', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(new Response(null, {status: 200}))
+      vi.stubGlobal('fetch', fetchMock)
+
+      const client = buildPushClient({fixtureSessionId: 'fixture-session-0001'})
+      await client.subscribePush({endpoint: 'x'}, 'tok', 'idem-key')
+
+      const url = fetchMock.mock.calls[0]?.[0] as string
+      expect(url).toBe('/operator/push/subscriptions?fixtureSessionId=fixture-session-0001')
+    })
+
+    it('unsubscribePush: appends fixtureSessionId when provided', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(new Response(null, {status: 200}))
+      vi.stubGlobal('fetch', fetchMock)
+
+      const client = buildPushClient({fixtureSessionId: 'fixture-session-0001'})
+      await client.unsubscribePush('https://push.example/ep', 'tok', 'idem-key')
+
+      const url = fetchMock.mock.calls[0]?.[0] as string
+      expect(url).toBe('/operator/push/subscriptions/unsubscribe?fixtureSessionId=fixture-session-0001')
+    })
+
+    it('production parity: no fixtureSessionId provided -> no query param on any route', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {publicKey: 'BNc3xVwB', keyVersion: 'v1'}))
+      vi.stubGlobal('fetch', fetchMock)
+
+      const client = buildPushClient()
+      await client.getVapidKey()
+
+      const url = fetchMock.mock.calls[0]?.[0] as string
+      expect(url).toBe('/operator/push/vapid-key')
+      expect(url).not.toContain('fixtureSessionId')
+    })
+  })
 })
 
 describe('subscribeOptIn', () => {
