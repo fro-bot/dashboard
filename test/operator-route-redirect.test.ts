@@ -87,6 +87,18 @@ function makeFakeOperatorClient(
     decideRunApproval: () => {
       throw new Error('decideRunApproval must not be called during redirect')
     },
+    getVapidKey: () => {
+      throw new Error('getVapidKey must not be called during redirect')
+    },
+    getPushSubscriptionMetadata: () => {
+      throw new Error('getPushSubscriptionMetadata must not be called during redirect')
+    },
+    subscribePush: () => {
+      throw new Error('subscribePush must not be called during redirect')
+    },
+    unsubscribePush: () => {
+      throw new Error('unsubscribePush must not be called during redirect')
+    },
   }
 }
 

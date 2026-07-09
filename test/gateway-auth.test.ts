@@ -72,6 +72,18 @@ function makeFakeOperatorClient(
     decideRunApproval: () => {
       throw new Error('decideRunApproval must not be called in auth middleware')
     },
+    getVapidKey: () => {
+      throw new Error('getVapidKey must not be called in auth middleware')
+    },
+    getPushSubscriptionMetadata: () => {
+      throw new Error('getPushSubscriptionMetadata must not be called in auth middleware')
+    },
+    subscribePush: () => {
+      throw new Error('subscribePush must not be called in auth middleware')
+    },
+    unsubscribePush: () => {
+      throw new Error('unsubscribePush must not be called in auth middleware')
+    },
   }
 
   return {client, getCurrentSessionSpy}

@@ -18,9 +18,9 @@
 import type {Logger} from '../logger.ts'
 import type {Result} from '../result.ts'
 import type {PermissionReply} from './operator-contract/approval.ts'
-import type {OperatorCsrfToken, OperatorDecisionState, OperatorSessionInfo, OperatorWebStatus, RepoSummary, RunStreamFrame} from './operator-contract/index.ts'
+import type {OperatorCsrfToken, OperatorDecisionState, OperatorSessionInfo, OperatorWebStatus, PushSubscriptionMetadata, RepoSummary, RunStreamFrame, VapidKeyResponse} from './operator-contract/index.ts'
 import {err, ok} from '../result.ts'
-import {parseOperatorCsrfToken, parseOperatorSessionInfo, parseRepoSummaryList} from './operator-contract/index.ts'
+import {parseOperatorCsrfToken, parseOperatorSessionInfo, parsePushSubscriptionMetadata, parseRepoSummaryList, parseVapidKeyResponse} from './operator-contract/index.ts'
 
 // ---------------------------------------------------------------------------
 // Run status union
@@ -112,6 +112,43 @@ export interface RunApprovalDecisionResponse {
 export type {PermissionReply}
 
 // ---------------------------------------------------------------------------
+// Push DTOs — GET/POST /operator/push/*
+//
+// getVapidKey / getPushSubscriptionMetadata are GET, no CSRF/idempotency,
+// mirroring listRepos. subscribePush / unsubscribePush are POST, mirroring
+// decideRunApproval (CSRF + idempotency + one CSRF-400 retry reusing the
+// same idempotency key).
+//
+// A disabled Gateway push surface returns HTTP 404 for the push routes; both
+// GET methods translate a 404 into a synthetic `push_disabled` success
+// result rather than a protocol/http error. Non-404 non-2xx stays a normal
+// GatewayClientError.
+// ---------------------------------------------------------------------------
+
+/** Result of GET /operator/push/vapid-key: either the VAPID key or a push_disabled signal. */
+export type VapidKeyResult =
+  | {readonly pushDisabled: false; readonly vapidKey: VapidKeyResponse}
+  | {readonly pushDisabled: true}
+
+/** Result of GET /operator/push/subscriptions: safe metadata or a push_disabled signal. */
+export type PushSubscriptionMetadataResult =
+  | {readonly pushDisabled: false; readonly metadata: PushSubscriptionMetadata}
+  | {readonly pushDisabled: true}
+
+/**
+ * Boundary type for the browser's `PushSubscription.toJSON()` shape. This is
+ * a plain readonly object, not a DOM lib type — server code (src/) must not
+ * import DOM lib types.
+ */
+export interface PushSubscriptionJson {
+  readonly endpoint: string
+  readonly keys: {
+    readonly p256dh: string
+    readonly auth: string
+  }
+}
+
+// ---------------------------------------------------------------------------
 // SSE run-stream event type — canonical named frames for /operator/runs/:runId/stream
 //
 // Sourced from the gateway's SSE surface (fro-bot/agent v0.72.0, PRs #961/#962).
@@ -162,6 +199,8 @@ export interface GatewayValidationError {
     | 'invalid_path'
     | 'missing_run_id'
     | 'missing_request_id'
+    | 'invalid_push_subscription'
+    | 'missing_vapid_key'
   readonly message: string
 }
 
@@ -215,6 +254,36 @@ export interface OperatorClient {
     idempotencyKey: string,
     csrfToken: string,
   ) => Promise<Result<RunApprovalDecisionResponse, GatewayClientError>>
+  /**
+   * GET /operator/push/vapid-key — no CSRF/idempotency. A 404 response is
+   * translated into a `{pushDisabled: true}` success result, not an error.
+   */
+  readonly getVapidKey: () => Promise<Result<VapidKeyResult, GatewayClientError>>
+  /**
+   * GET /operator/push/subscriptions — safe subscription metadata. No
+   * CSRF/idempotency. A 404 response is translated into a
+   * `{pushDisabled: true}` success result, not an error.
+   */
+  readonly getPushSubscriptionMetadata: () => Promise<Result<PushSubscriptionMetadataResult, GatewayClientError>>
+  /**
+   * POST /operator/push/subscriptions — register a browser PushSubscription.
+   * CSRF-protected + idempotency-key; one CSRF-400 retry reusing the same key.
+   */
+  readonly subscribePush: (
+    subscription: PushSubscriptionJson,
+    csrfToken: string,
+    idempotencyKey: string,
+  ) => Promise<Result<void, GatewayClientError>>
+  /**
+   * POST /operator/push/subscriptions/unsubscribe — opt-out / logout /
+   * revocation reconcile. CSRF-protected + idempotency-key; one CSRF-400
+   * retry reusing the same key.
+   */
+  readonly unsubscribePush: (
+    endpoint: string,
+    csrfToken: string,
+    idempotencyKey: string,
+  ) => Promise<Result<void, GatewayClientError>>
 }
 
 // ---------------------------------------------------------------------------
@@ -608,6 +677,122 @@ export function createOperatorClient(options: OperatorClientOptions): OperatorCl
     return first
   }
 
+  async function getVapidKey(): Promise<Result<VapidKeyResult, GatewayClientError>> {
+    const raw = await fetchJson<unknown>('/operator/push/vapid-key', '/operator/push/vapid-key')
+    if (!raw.success) {
+      if (raw.error.kind === 'http' && raw.error.status === 404) {
+        return ok({pushDisabled: true})
+      }
+      return raw
+    }
+    const parsed = parseVapidKeyResponse(raw.data)
+    if (!parsed.success) {
+      const protocolErr: GatewayProtocolError = {kind: 'protocol', message: 'Failed to parse vapid key response'}
+      logger?.error('operator-client: vapid key parse error', {route: '/operator/push/vapid-key'})
+      return err(protocolErr)
+    }
+    return ok({pushDisabled: false, vapidKey: parsed.data})
+  }
+
+  async function getPushSubscriptionMetadata(): Promise<Result<PushSubscriptionMetadataResult, GatewayClientError>> {
+    const raw = await fetchJson<unknown>('/operator/push/subscriptions', '/operator/push/subscriptions')
+    if (!raw.success) {
+      if (raw.error.kind === 'http' && raw.error.status === 404) {
+        return ok({pushDisabled: true})
+      }
+      return raw
+    }
+    const parsed = parsePushSubscriptionMetadata(raw.data)
+    if (!parsed.success) {
+      const protocolErr: GatewayProtocolError = {kind: 'protocol', message: 'Failed to parse push subscription metadata'}
+      logger?.error('operator-client: push subscription metadata parse error', {route: '/operator/push/subscriptions'})
+      return err(protocolErr)
+    }
+    return ok({pushDisabled: false, metadata: parsed.data})
+  }
+
+  async function subscribePush(
+    subscription: PushSubscriptionJson,
+    csrfToken: string,
+    idempotencyKey: string,
+  ): Promise<Result<void, GatewayClientError>> {
+    const csrfGuard = requireCsrf(csrfToken)
+    if (csrfGuard !== null) return err(csrfGuard)
+
+    const idemGuard = requireIdempotencyKey(idempotencyKey)
+    if (idemGuard !== null) return err(idemGuard)
+
+    const path = '/operator/push/subscriptions'
+    const route = '/operator/push/subscriptions'
+    const body = JSON.stringify({
+      endpoint: subscription.endpoint,
+      keys: {
+        p256dh: subscription.keys.p256dh,
+        auth: subscription.keys.auth,
+      },
+    })
+    const init: RequestInit = {
+      method: 'POST',
+      redirect: 'error',
+      headers: {
+        'content-type': 'application/json',
+        'x-csrf-token': csrfToken,
+        'idempotency-key': idempotencyKey,
+      },
+      body,
+    }
+
+    const first = await fetchJson<unknown>(path, route, init)
+
+    // One CSRF-400 retry reusing the SAME idempotency key (mirrors decideRunApproval).
+    if (!first.success && first.error.kind === 'http' && first.error.status === 400) {
+      const retry = await fetchJson<unknown>(path, route, init)
+      if (!retry.success) return retry
+      return ok(undefined)
+    }
+
+    if (!first.success) return first
+    return ok(undefined)
+  }
+
+  async function unsubscribePush(
+    endpoint: string,
+    csrfToken: string,
+    idempotencyKey: string,
+  ): Promise<Result<void, GatewayClientError>> {
+    const csrfGuard = requireCsrf(csrfToken)
+    if (csrfGuard !== null) return err(csrfGuard)
+
+    const idemGuard = requireIdempotencyKey(idempotencyKey)
+    if (idemGuard !== null) return err(idemGuard)
+
+    const path = '/operator/push/subscriptions/unsubscribe'
+    const route = '/operator/push/subscriptions/unsubscribe'
+    const body = JSON.stringify({endpoint})
+    const init: RequestInit = {
+      method: 'POST',
+      redirect: 'error',
+      headers: {
+        'content-type': 'application/json',
+        'x-csrf-token': csrfToken,
+        'idempotency-key': idempotencyKey,
+      },
+      body,
+    }
+
+    const first = await fetchJson<unknown>(path, route, init)
+
+    // One CSRF-400 retry reusing the SAME idempotency key (mirrors decideRunApproval).
+    if (!first.success && first.error.kind === 'http' && first.error.status === 400) {
+      const retry = await fetchJson<unknown>(path, route, init)
+      if (!retry.success) return retry
+      return ok(undefined)
+    }
+
+    if (!first.success) return first
+    return ok(undefined)
+  }
+
   return {
     getCurrentSession,
     refreshCsrf,
@@ -617,5 +802,9 @@ export function createOperatorClient(options: OperatorClientOptions): OperatorCl
     connectRunStream,
     listRunApprovals,
     decideRunApproval,
+    getVapidKey,
+    getPushSubscriptionMetadata,
+    subscribePush,
+    unsubscribePush,
   }
 }

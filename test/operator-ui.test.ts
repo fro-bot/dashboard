@@ -95,6 +95,18 @@ function makeFakeOperatorClient(
     decideRunApproval: () => {
       throw new Error('decideRunApproval must not be called during page render')
     },
+    getVapidKey: () => {
+      throw new Error('getVapidKey must not be called during page render')
+    },
+    getPushSubscriptionMetadata: () => {
+      throw new Error('getPushSubscriptionMetadata must not be called during page render')
+    },
+    subscribePush: () => {
+      throw new Error('subscribePush must not be called during page render')
+    },
+    unsubscribePush: () => {
+      throw new Error('unsubscribePush must not be called during page render')
+    },
   }
 }
 

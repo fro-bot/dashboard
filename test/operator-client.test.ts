@@ -2824,3 +2824,470 @@ describe('HTTP error logging uses route templates', () => {
     expect(allLogged).toContain('/operator/runs/:runId/approvals/:requestId/decision')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Push methods — getVapidKey, getPushSubscriptionMetadata, subscribePush,
+// unsubscribePush
+// ---------------------------------------------------------------------------
+
+const FIXTURE_PUSH_SUBSCRIPTION_JSON = {
+  endpoint: 'endpoint-fixture-001',
+  keys: {
+    p256dh: 'fixture-p256dh-value',
+    auth: 'fixture-auth-value',
+  },
+}
+
+function makeCapturingLogger() {
+  const contexts: Record<string, unknown>[] = []
+  const messages: string[] = []
+  return {
+    contexts,
+    messages,
+    logger: {
+      debug: (msg: string, ctx?: Record<string, unknown>) => {
+        messages.push(msg)
+        if (ctx) contexts.push(ctx)
+      },
+      info: (msg: string, ctx?: Record<string, unknown>) => {
+        messages.push(msg)
+        if (ctx) contexts.push(ctx)
+      },
+      warning: (msg: string, ctx?: Record<string, unknown>) => {
+        messages.push(msg)
+        if (ctx) contexts.push(ctx)
+      },
+      error: (msg: string, ctx?: Record<string, unknown>) => {
+        messages.push(msg)
+        if (ctx) contexts.push(ctx)
+      },
+    },
+  }
+}
+
+describe('getVapidKey', () => {
+  it('returns parsed publicKey and keyVersion on success', async () => {
+    const client = createOperatorClient({
+      fetch: makeOkFetch({publicKey: 'fixture-public-key', keyVersion: 'v1'}),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.getVapidKey()
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.pushDisabled).toBe(false)
+      if (!result.data.pushDisabled) {
+        expect(result.data.vapidKey.publicKey).toBe('fixture-public-key')
+        expect(result.data.vapidKey.keyVersion).toBe('v1')
+      }
+    }
+  })
+
+  it('uses relative path /operator/push/vapid-key', async () => {
+    const calls: string[] = []
+    const client = createOperatorClient({
+      fetch: async input => {
+        calls.push(typeof input === 'string' ? input : String(input))
+        return new Response(JSON.stringify({publicKey: 'k', keyVersion: 'v1'}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      },
+      createEventStream: makeEventStream([]),
+    })
+    await client.getVapidKey()
+    expect(calls[0]).toBe('/operator/push/vapid-key')
+  })
+
+  it('translates HTTP 404 into a push_disabled success result', async () => {
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(404),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.getVapidKey()
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.pushDisabled).toBe(true)
+    }
+  })
+
+  it('keeps a non-404 5xx error as a normal http error, not push_disabled', async () => {
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(500),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.getVapidKey()
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('http')
+      if (result.error.kind === 'http') {
+        expect(result.error.status).toBe(500)
+      }
+    }
+  })
+
+  it('never logs the fetched publicKey value', async () => {
+    const {contexts, messages, logger} = makeCapturingLogger()
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(500),
+      createEventStream: makeEventStream([]),
+      logger,
+    })
+    await client.getVapidKey()
+    const all = messages.join(' ') + JSON.stringify(contexts)
+    expect(all).not.toContain('publicKey')
+    for (const ctx of contexts) {
+      expect(Object.keys(ctx)).toEqual(expect.arrayContaining([]))
+      expect(ctx).not.toHaveProperty('endpoint')
+      expect(ctx).not.toHaveProperty('endpointHash')
+      expect(ctx).not.toHaveProperty('p256dh')
+      expect(ctx).not.toHaveProperty('auth')
+      expect(ctx).not.toHaveProperty('csrfToken')
+      expect(ctx).not.toHaveProperty('idempotencyKey')
+      expect(ctx).not.toHaveProperty('body')
+      if (ctx.route !== undefined) {
+        expect(ctx.route).toBe('/operator/push/vapid-key')
+      }
+    }
+  })
+})
+
+describe('getPushSubscriptionMetadata', () => {
+  const FIXTURE_METADATA = {
+    endpointHash: 'a'.repeat(64),
+    keyVersion: 'v1',
+    active: true,
+    createdAt: '2026-07-01T10:00:00Z',
+    updatedAt: '2026-07-01T10:00:00Z',
+  }
+
+  it('returns only safe fields on success', async () => {
+    const client = createOperatorClient({
+      fetch: makeOkFetch(FIXTURE_METADATA),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.getPushSubscriptionMetadata()
+    expect(result.success).toBe(true)
+    if (result.success && !result.data.pushDisabled) {
+      expect(result.data.metadata.endpointHash).toBe(FIXTURE_METADATA.endpointHash)
+      expect(result.data.metadata.keyVersion).toBe('v1')
+      expect(result.data.metadata.active).toBe(true)
+      expect(result.data.metadata).not.toHaveProperty('endpoint')
+      expect(result.data.metadata).not.toHaveProperty('p256dh')
+      expect(result.data.metadata).not.toHaveProperty('auth')
+    }
+  })
+
+  it('uses relative path /operator/push/subscriptions', async () => {
+    const calls: string[] = []
+    const client = createOperatorClient({
+      fetch: async input => {
+        calls.push(typeof input === 'string' ? input : String(input))
+        return new Response(JSON.stringify(FIXTURE_METADATA), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      },
+      createEventStream: makeEventStream([]),
+    })
+    await client.getPushSubscriptionMetadata()
+    expect(calls[0]).toBe('/operator/push/subscriptions')
+  })
+
+  it('translates HTTP 404 into a push_disabled success result', async () => {
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(404),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.getPushSubscriptionMetadata()
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.pushDisabled).toBe(true)
+    }
+  })
+
+  it('keeps a non-404 5xx error as a normal http error, not push_disabled', async () => {
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(503),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.getPushSubscriptionMetadata()
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('http')
+    }
+  })
+
+  it('never logs endpointHash or other metadata fields', async () => {
+    const {contexts, logger} = makeCapturingLogger()
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(500),
+      createEventStream: makeEventStream([]),
+      logger,
+    })
+    await client.getPushSubscriptionMetadata()
+    for (const ctx of contexts) {
+      expect(ctx).not.toHaveProperty('endpointHash')
+      expect(ctx).not.toHaveProperty('endpoint')
+      if (ctx.route !== undefined) {
+        expect(ctx.route).toBe('/operator/push/subscriptions')
+      }
+    }
+  })
+})
+
+describe('subscribePush', () => {
+  it('sends CSRF + idempotency headers, body = subscription JSON, returns success', async () => {
+    const headers: Record<string, string> = {}
+    let capturedBody: unknown
+    const client = createOperatorClient({
+      fetch: async (_input, init) => {
+        const h = init?.headers as Record<string, string> | undefined
+        if (h) Object.assign(headers, h)
+        capturedBody = JSON.parse(init?.body as string)
+        return new Response(JSON.stringify({}), {status: 200, headers: {'content-type': 'application/json'}})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.subscribePush(FIXTURE_PUSH_SUBSCRIPTION_JSON, 'csrf-token-xyz', 'idem-key-abc')
+    expect(result.success).toBe(true)
+    expect(headers['x-csrf-token']).toBe('csrf-token-xyz')
+    expect(headers['idempotency-key']).toBe('idem-key-abc')
+    expect(capturedBody).toEqual(FIXTURE_PUSH_SUBSCRIPTION_JSON)
+  })
+
+  it('uses relative path /operator/push/subscriptions with redirect:error', async () => {
+    let capturedInit: RequestInit | undefined
+    const calls: string[] = []
+    const client = createOperatorClient({
+      fetch: async (input, init) => {
+        calls.push(typeof input === 'string' ? input : String(input))
+        capturedInit = init
+        return new Response(JSON.stringify({}), {status: 200, headers: {'content-type': 'application/json'}})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    await client.subscribePush(FIXTURE_PUSH_SUBSCRIPTION_JSON, 'csrf-token-xyz', 'idem-key-abc')
+    expect(calls[0]).toBe('/operator/push/subscriptions')
+    expect(capturedInit?.redirect).toBe('error')
+  })
+
+  it('rejects before fetch when csrfToken is blank', async () => {
+    let fetchCalled = false
+    const client = createOperatorClient({
+      fetch: async () => {
+        fetchCalled = true
+        return new Response(JSON.stringify({}), {status: 200, headers: {'content-type': 'application/json'}})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.subscribePush(FIXTURE_PUSH_SUBSCRIPTION_JSON, '', 'idem-key-abc')
+    expect(result.success).toBe(false)
+    expect(fetchCalled).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+      if (result.error.kind === 'validation') {
+        expect(result.error.code).toBe('missing_csrf')
+      }
+    }
+  })
+
+  it('rejects before fetch when idempotencyKey is blank', async () => {
+    let fetchCalled = false
+    const client = createOperatorClient({
+      fetch: async () => {
+        fetchCalled = true
+        return new Response(JSON.stringify({}), {status: 200, headers: {'content-type': 'application/json'}})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.subscribePush(FIXTURE_PUSH_SUBSCRIPTION_JSON, 'csrf-token-xyz', '')
+    expect(result.success).toBe(false)
+    expect(fetchCalled).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+      if (result.error.kind === 'validation') {
+        expect(result.error.code).toBe('missing_idempotency_key')
+      }
+    }
+  })
+
+  it('retries exactly once on HTTP 400, reusing the same idempotency key', async () => {
+    let callCount = 0
+    const capturedKeys: string[] = []
+    const client = createOperatorClient({
+      fetch: async (_input, init) => {
+        callCount += 1
+        const h = init?.headers as Record<string, string> | undefined
+        if (h?.['idempotency-key'] !== undefined) capturedKeys.push(h['idempotency-key'])
+        return new Response(JSON.stringify({error: 'bad_request'}), {
+          status: 400,
+          headers: {'content-type': 'application/json'},
+        })
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.subscribePush(FIXTURE_PUSH_SUBSCRIPTION_JSON, 'csrf-token-xyz', 'idem-key-retry-test')
+    expect(result.success).toBe(false)
+    expect(callCount).toBe(2)
+    expect(capturedKeys[0]).toBe('idem-key-retry-test')
+    expect(capturedKeys[1]).toBe('idem-key-retry-test')
+  })
+
+  it('returns a network error on transport failure, never treated as denial', async () => {
+    const client = createOperatorClient({
+      fetch: async () => {
+        throw new Error('transport failure')
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.subscribePush(FIXTURE_PUSH_SUBSCRIPTION_JSON, 'csrf-token-xyz', 'idem-key-abc')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('network')
+    }
+  })
+
+  it('never logs endpoint, p256dh, auth, csrf, idempotency key, or body — including on error paths', async () => {
+    const {contexts, messages, logger} = makeCapturingLogger()
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(500),
+      createEventStream: makeEventStream([]),
+      logger,
+    })
+    await client.subscribePush(FIXTURE_PUSH_SUBSCRIPTION_JSON, 'SECRET_CSRF_VALUE', 'SECRET_IDEMPOTENCY_KEY')
+    const all = messages.join(' ') + JSON.stringify(contexts)
+    expect(all).not.toContain('endpoint-fixture-001')
+    expect(all).not.toContain('fixture-p256dh-value')
+    expect(all).not.toContain('fixture-auth-value')
+    expect(all).not.toContain('SECRET_CSRF_VALUE')
+    expect(all).not.toContain('SECRET_IDEMPOTENCY_KEY')
+    for (const ctx of contexts) {
+      expect(ctx).not.toHaveProperty('endpoint')
+      expect(ctx).not.toHaveProperty('p256dh')
+      expect(ctx).not.toHaveProperty('auth')
+      expect(ctx).not.toHaveProperty('body')
+      if (ctx.route !== undefined) {
+        expect(ctx.route).toBe('/operator/push/subscriptions')
+      }
+    }
+  })
+})
+
+describe('unsubscribePush', () => {
+  it('sends CSRF + idempotency headers, body = {endpoint}, returns success', async () => {
+    const headers: Record<string, string> = {}
+    let capturedBody: unknown
+    const client = createOperatorClient({
+      fetch: async (_input, init) => {
+        const h = init?.headers as Record<string, string> | undefined
+        if (h) Object.assign(headers, h)
+        capturedBody = JSON.parse(init?.body as string)
+        return new Response(JSON.stringify({}), {status: 200, headers: {'content-type': 'application/json'}})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.unsubscribePush('endpoint-fixture-001', 'csrf-token-xyz', 'idem-key-abc')
+    expect(result.success).toBe(true)
+    expect(headers['x-csrf-token']).toBe('csrf-token-xyz')
+    expect(headers['idempotency-key']).toBe('idem-key-abc')
+    expect(capturedBody).toEqual({endpoint: 'endpoint-fixture-001'})
+  })
+
+  it('uses relative path /operator/push/subscriptions/unsubscribe', async () => {
+    const calls: string[] = []
+    const client = createOperatorClient({
+      fetch: async input => {
+        calls.push(typeof input === 'string' ? input : String(input))
+        return new Response(JSON.stringify({}), {status: 200, headers: {'content-type': 'application/json'}})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    await client.unsubscribePush('endpoint-fixture-001', 'csrf-token-xyz', 'idem-key-abc')
+    expect(calls[0]).toBe('/operator/push/subscriptions/unsubscribe')
+  })
+
+  it('rejects before fetch when csrfToken is blank', async () => {
+    let fetchCalled = false
+    const client = createOperatorClient({
+      fetch: async () => {
+        fetchCalled = true
+        return new Response(JSON.stringify({}), {status: 200, headers: {'content-type': 'application/json'}})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.unsubscribePush('endpoint-fixture-001', '', 'idem-key-abc')
+    expect(result.success).toBe(false)
+    expect(fetchCalled).toBe(false)
+  })
+
+  it('rejects before fetch when idempotencyKey is blank', async () => {
+    let fetchCalled = false
+    const client = createOperatorClient({
+      fetch: async () => {
+        fetchCalled = true
+        return new Response(JSON.stringify({}), {status: 200, headers: {'content-type': 'application/json'}})
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.unsubscribePush('endpoint-fixture-001', 'csrf-token-xyz', '')
+    expect(result.success).toBe(false)
+    expect(fetchCalled).toBe(false)
+  })
+
+  it('retries exactly once on HTTP 400, reusing the same idempotency key', async () => {
+    let callCount = 0
+    const capturedKeys: string[] = []
+    const client = createOperatorClient({
+      fetch: async (_input, init) => {
+        callCount += 1
+        const h = init?.headers as Record<string, string> | undefined
+        if (h?.['idempotency-key'] !== undefined) capturedKeys.push(h['idempotency-key'])
+        return new Response(JSON.stringify({error: 'bad_request'}), {
+          status: 400,
+          headers: {'content-type': 'application/json'},
+        })
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.unsubscribePush('endpoint-fixture-001', 'csrf-token-xyz', 'idem-key-retry-test')
+    expect(result.success).toBe(false)
+    expect(callCount).toBe(2)
+    expect(capturedKeys[0]).toBe('idem-key-retry-test')
+    expect(capturedKeys[1]).toBe('idem-key-retry-test')
+  })
+
+  it('returns a network error on transport failure, never treated as denial', async () => {
+    const client = createOperatorClient({
+      fetch: async () => {
+        throw new Error('transport failure')
+      },
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.unsubscribePush('endpoint-fixture-001', 'csrf-token-xyz', 'idem-key-abc')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('network')
+    }
+  })
+
+  it('never logs endpoint, csrf, or idempotency key — including on error paths', async () => {
+    const {contexts, messages, logger} = makeCapturingLogger()
+    const client = createOperatorClient({
+      fetch: makeErrorFetch(500),
+      createEventStream: makeEventStream([]),
+      logger,
+    })
+    await client.unsubscribePush('endpoint-fixture-001', 'SECRET_CSRF_VALUE', 'SECRET_IDEMPOTENCY_KEY')
+    const all = messages.join(' ') + JSON.stringify(contexts)
+    expect(all).not.toContain('endpoint-fixture-001')
+    expect(all).not.toContain('SECRET_CSRF_VALUE')
+    expect(all).not.toContain('SECRET_IDEMPOTENCY_KEY')
+    for (const ctx of contexts) {
+      expect(ctx).not.toHaveProperty('endpoint')
+      expect(ctx).not.toHaveProperty('body')
+      if (ctx.route !== undefined) {
+        expect(ctx.route).toBe('/operator/push/subscriptions/unsubscribe')
+      }
+    }
+  })
+})
