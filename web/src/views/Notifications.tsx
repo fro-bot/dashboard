@@ -103,7 +103,12 @@ export function Notifications() {
           if (sub) {
             await sub.unsubscribe().catch(() => false)
           }
-          setCurrentUiState('unsupported')
+          // Honor the state reconcile derived — `cleanup` fires for
+          // push_disabled (→ unsupported), denied-without-subscription
+          // (→ denied), and granted-but-drifted (→ not-requested). Hardcoding
+          // one of them mislabels the other two (e.g. a blocked browser showing
+          // "Unsupported" instead of "Blocked").
+          setCurrentUiState(result.uiState ?? 'not-requested')
         } else if (result.action === 'cleanup-and-unsubscribe') {
           await unsubscribeOptOut({
             getLocalSubscription: () =>

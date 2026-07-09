@@ -110,6 +110,44 @@ describe('Notifications Component', () => {
     expect(screen.queryByTestId('notifications-cta')).toBeNull()
   })
 
+  it('cleanup action honors reconcile uiState (denied → Blocked, not Unsupported)', async () => {
+    addMetaTag()
+    // The `cleanup` action fires for push_disabled, denied-without-subscription,
+    // AND granted-but-drifted — each with a different correct uiState. The
+    // handler must honor result.uiState, not hardcode 'unsupported'. Regression:
+    // a blocked browser rendered "Alerts Unsupported" instead of "Alerts Blocked".
+    const originalSw = Object.getOwnPropertyDescriptor(globalThis.navigator, 'serviceWorker')
+    const swStub = {
+      ready: Promise.resolve({pushManager: {getSubscription: async () => null}}),
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    }
+    Object.defineProperty(globalThis.navigator, 'serviceWorker', {
+      value: swStub,
+      configurable: true,
+    })
+    vi.mocked(runReconcileSweep).mockResolvedValue({
+      skipped: false,
+      action: 'cleanup',
+      uiState: 'denied',
+      nextCache: {} as any,
+    })
+
+    try {
+      await act(async () => {
+        render(<Notifications />)
+      })
+      expect(screen.getByTestId('notifications-headline')).toHaveTextContent('Alerts Blocked')
+    } finally {
+      if (originalSw) {
+        Object.defineProperty(globalThis.navigator, 'serviceWorker', originalSw)
+      } else {
+        // Remove the stub we added so it can't leak into sibling tests.
+        Reflect.deleteProperty(globalThis.navigator, 'serviceWorker')
+      }
+    }
+  })
+
   it('handles state: subscribed', async () => {
     addMetaTag()
     vi.mocked(runReconcileSweep).mockResolvedValue({
