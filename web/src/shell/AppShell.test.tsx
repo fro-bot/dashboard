@@ -360,7 +360,7 @@ describe('AppShell', () => {
     expect(findFetchCall(fetchMock, '/operator/auth/logout')).toBeUndefined()
   })
 
-  describe('push teardown on logout (U7)', () => {
+  describe('push teardown on logout', () => {
     afterEach(() => {
       Reflect.deleteProperty(navigator, 'serviceWorker')
     })

@@ -113,7 +113,7 @@ describe('getPushSupport', () => {
   // environment — `'ontouchend' in document` is always true under jsdom.
   // Real desktop Safari/Chrome (no touchscreen) correctly omit it, which is
   // what production relies on; that path is covered by the browser
-  // verification pass (U8), not a unit test.
+  // verification pass, not a unit test.
 })
 
 describe('getNotificationPermission', () => {

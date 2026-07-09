@@ -306,6 +306,68 @@ describe('Notifications Component', () => {
     expect(screen.getByTestId('notifications-headline')).toHaveTextContent('Push Alerts')
   })
 
+  it('cleanup-and-unsubscribe honors reconcile uiState (denied → Blocked, not not-requested)', async () => {
+    addMetaTag()
+    // Regression guard for the same bug class as the `cleanup` branch above:
+    // the handler must use result.uiState, not re-derive from raw permission.
+    const originalSw = Object.getOwnPropertyDescriptor(globalThis.navigator, 'serviceWorker')
+    const swStub = {
+      ready: Promise.resolve({pushManager: {getSubscription: async () => null}}),
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    }
+    Object.defineProperty(globalThis.navigator, 'serviceWorker', {
+      value: swStub,
+      configurable: true,
+    })
+    vi.mocked(runReconcileSweep).mockResolvedValue({
+      skipped: false,
+      action: 'cleanup-and-unsubscribe',
+      uiState: 'denied',
+      nextCache: {} as any,
+    })
+
+    try {
+      await act(async () => {
+        render(<Notifications />)
+      })
+      expect(unsubscribeOptOut).toHaveBeenCalledTimes(1)
+      expect(screen.getByTestId('notifications-headline')).toHaveTextContent('Alerts Blocked')
+    } finally {
+      if (originalSw) {
+        Object.defineProperty(globalThis.navigator, 'serviceWorker', originalSw)
+      } else {
+        Reflect.deleteProperty(globalThis.navigator, 'serviceWorker')
+      }
+    }
+  })
+
+  it('handleEnable ignores a second click while the first is in flight', async () => {
+    addMetaTag()
+    let resolveSubscribe: (outcome: {kind: 'subscribed'}) => void = () => undefined
+    vi.mocked(subscribeOptIn).mockImplementation(
+      () => new Promise(resolve => {
+        resolveSubscribe = resolve
+      }),
+    )
+
+    await act(async () => {
+      render(<Notifications />)
+    })
+
+    const cta = screen.getByTestId('notifications-cta')
+    fireEvent.click(cta)
+    fireEvent.click(cta)
+    fireEvent.click(cta)
+
+    await act(async () => {
+      resolveSubscribe({kind: 'subscribed'})
+      await Promise.resolve()
+    })
+
+    expect(subscribeOptIn).toHaveBeenCalledTimes(1)
+  })
+
   it('handles focus placement and aria-live announcements during state transitions', async () => {
     addMetaTag()
     render(<Notifications />)

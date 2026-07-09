@@ -19,7 +19,7 @@ import type {HandoffState, PushSubscriptionMetadata} from './push-types.ts'
  *
  * `pushDisabled: true` is the caller's translation of a Gateway 404 into the
  * synthetic push_disabled signal (HTTP status alone, never response-body
- * shape) — see U2's `getPushSubscriptionMetadata`. When set, it always wins
+ * shape) — see `getPushSubscriptionMetadata`. When set, it always wins
  * over `metadata`.
  */
 export interface DeriveHandoffStateInput {

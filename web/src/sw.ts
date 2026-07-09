@@ -112,7 +112,7 @@ addEventListener('message', (event: Event) => {
       ),
     )
   }
-  // Dev-only synthetic push: the notifications consent surface (U6) posts
+  // Dev-only synthetic push: the notifications consent surface posts
   // {type:'MOCK_SYNTHETIC_PUSH', payload} to the SW for visual verification
   // without a real push subscription/relay round-trip. Routed through the
   // same safe-copy mapping as a real push — never renders raw payload text.
@@ -224,7 +224,7 @@ addEventListener('notificationclick', (event: Event) => {
 
 /**
  * `pushsubscriptionchange`: best-effort only. Push is a non-authoritative
- * channel — the page-driven reconcile (U5) owns correctness. No durable
+ * channel — the page-driven reconcile owns correctness. No durable
  * queue: the postMessage hint is in-memory only and is simply dropped if no
  * client is open. The SW persists nothing about the subscription. Never
  * throws — any failure here is recovered by the page's next load/visibility

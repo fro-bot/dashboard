@@ -1,8 +1,5 @@
 import {useCallback, useEffect, useRef, useState} from 'react'
-import {
-  getNotificationPermission,
-  getPushSupport,
-} from '../push/capability.ts'
+import {getPushSupport} from '../push/capability.ts'
 import {getLogoutAbortSignal} from '../push/logout-abort.ts'
 import {
   INITIAL_RECONCILE_SWEEP_CACHE,
@@ -37,7 +34,15 @@ export function Notifications() {
   const ctaRef = useRef<HTMLButtonElement>(null)
   const headlineRef = useRef<HTMLHeadingElement>(null)
 
-  const pushClient = buildPushClient()
+  const pushClientRef = useRef<ReturnType<typeof buildPushClient> | null>(null)
+  if (pushClientRef.current === null) {
+    pushClientRef.current = buildPushClient()
+  }
+  const pushClient = pushClientRef.current
+
+  const enableInFlightRef = useRef(false)
+  const disableInFlightRef = useRef(false)
+  const sweepDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Run pure sweep and execute reconcile actions
   const runSweep = useCallback(async () => {
@@ -115,8 +120,7 @@ export function Notifications() {
               navigator.serviceWorker.ready.then((r) => r.pushManager.getSubscription()),
             pushClient,
           })
-          const perm = getNotificationPermission()
-          setCurrentUiState(perm === 'denied' ? 'denied' : 'not-requested')
+          setCurrentUiState(result.uiState ?? 'not-requested')
         }
       } catch {
         setCurrentUiState('subscribe-failed')
@@ -145,12 +149,20 @@ export function Notifications() {
 
     void runSweep()
 
-    const handleVisibilityOrFocus = () => {
-      void runSweep()
+    // visibilitychange and focus both fire on tab activation — debounce so
+    // the pair coalesces into a single sweep instead of running it twice.
+    const scheduleSweep = () => {
+      if (sweepDebounceRef.current !== null) {
+        clearTimeout(sweepDebounceRef.current)
+      }
+      sweepDebounceRef.current = setTimeout(() => {
+        sweepDebounceRef.current = null
+        void runSweep()
+      }, 250)
     }
 
-    window.addEventListener('visibilitychange', handleVisibilityOrFocus)
-    window.addEventListener('focus', handleVisibilityOrFocus)
+    window.addEventListener('visibilitychange', scheduleSweep)
+    window.addEventListener('focus', scheduleSweep)
 
     const handleMessage = (e: MessageEvent) => {
       if (e.data && e.data.type === 'PUSH_SUBSCRIPTION_CHANGE') {
@@ -162,10 +174,14 @@ export function Notifications() {
     }
 
     return () => {
-      window.removeEventListener('visibilitychange', handleVisibilityOrFocus)
-      window.removeEventListener('focus', handleVisibilityOrFocus)
+      window.removeEventListener('visibilitychange', scheduleSweep)
+      window.removeEventListener('focus', scheduleSweep)
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.removeEventListener('message', handleMessage)
+      }
+      if (sweepDebounceRef.current !== null) {
+        clearTimeout(sweepDebounceRef.current)
+        sweepDebounceRef.current = null
       }
     }
   }, [metaEnabled, runSweep])
@@ -202,37 +218,49 @@ export function Notifications() {
   const copy = getNotificationCopy(currentUiState)
 
   const handleEnable = async () => {
+    if (enableInFlightRef.current) return
+    enableInFlightRef.current = true
     setInFlight(true)
-    const outcome = await subscribeOptIn({
-      serviceWorkerReady: () => navigator.serviceWorker.ready as unknown as Promise<MinimalServiceWorkerRegistration>,
-      requestPermission: () => Notification.requestPermission(),
-      pushClient,
-      signal: getLogoutAbortSignal(),
-    })
-    setInFlight(false)
+    try {
+      const outcome = await subscribeOptIn({
+        serviceWorkerReady: () => navigator.serviceWorker.ready as unknown as Promise<MinimalServiceWorkerRegistration>,
+        requestPermission: () => Notification.requestPermission(),
+        pushClient,
+        signal: getLogoutAbortSignal(),
+      })
 
-    if (outcome.kind === 'subscribed') {
-      setCurrentUiState('subscribed')
-    } else if (outcome.kind === 'subscribe-failed') {
-      setCurrentUiState('subscribe-failed')
-    } else if (outcome.kind === 'sw-not-ready') {
-      setCurrentUiState('sw-not-ready')
-    } else if (outcome.kind === 'dismissed') {
-      setCurrentUiState('dismissed')
-    } else if (outcome.kind === 'denied') {
-      setCurrentUiState('denied')
+      if (outcome.kind === 'subscribed') {
+        setCurrentUiState('subscribed')
+      } else if (outcome.kind === 'subscribe-failed') {
+        setCurrentUiState('subscribe-failed')
+      } else if (outcome.kind === 'sw-not-ready') {
+        setCurrentUiState('sw-not-ready')
+      } else if (outcome.kind === 'dismissed') {
+        setCurrentUiState('dismissed')
+      } else if (outcome.kind === 'denied') {
+        setCurrentUiState('denied')
+      }
+    } finally {
+      setInFlight(false)
+      enableInFlightRef.current = false
     }
   }
 
   const handleDisable = async () => {
+    if (disableInFlightRef.current) return
+    disableInFlightRef.current = true
     setInFlight(true)
-    await unsubscribeOptOut({
-      getLocalSubscription: () =>
-        navigator.serviceWorker.ready.then((r) => r.pushManager.getSubscription()),
-      pushClient,
-    })
-    setInFlight(false)
-    setCurrentUiState('not-requested')
+    try {
+      await unsubscribeOptOut({
+        getLocalSubscription: () =>
+          navigator.serviceWorker.ready.then((r) => r.pushManager.getSubscription()),
+        pushClient,
+      })
+      setCurrentUiState('not-requested')
+    } finally {
+      setInFlight(false)
+      disableInFlightRef.current = false
+    }
   }
 
   const handleDismissCard = () => {

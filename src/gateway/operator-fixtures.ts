@@ -6,7 +6,6 @@ import type {CsrfDto, LaunchRunRequest, LaunchRunResponse, RunApprovalDecisionRe
  * - Fixture data must NOT contain real prompts, tool args, workspace paths,
  *   internal URLs, tokens, session cookies, or CSRF values.
  */
-import type {PushSubscriptionMetadata, VapidKeyResponse} from './operator-contract/index.ts'
 
 // ---------------------------------------------------------------------------
 // Session fixtures
@@ -239,27 +238,3 @@ export const FIXTURE_VAPID_PUBLIC_KEY =
   'BNfixture-VapidPublicKey0123456789-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY'
 
 export const FIXTURE_VAPID_KEY_VERSION = 'fixture-vapid-v1'
-
-export const FIXTURE_VAPID_KEY_RESPONSE: VapidKeyResponse = {
-  publicKey: FIXTURE_VAPID_PUBLIC_KEY,
-  keyVersion: FIXTURE_VAPID_KEY_VERSION,
-}
-
-/**
- * Safe subscription metadata fixture — mirrors GET /operator/push/subscriptions.
- * endpointHash is a synthetic 64-char hex string (never a real sha256 of a
- * real endpoint); the real endpoint value never appears in fixtures.
- */
-export const FIXTURE_PUSH_SUBSCRIPTION_RECORD: PushSubscriptionMetadata = {
-  endpointHash: 'f'.repeat(64),
-  keyVersion: FIXTURE_VAPID_KEY_VERSION,
-  active: true,
-  createdAt: '2026-07-01T10:00:00Z',
-  updatedAt: '2026-07-01T10:00:00Z',
-}
-
-/**
- * A synthetic endpoint-fixture-* value for tests that need a plausible
- * (never real) PushSubscription endpoint string.
- */
-export const FIXTURE_PUSH_ENDPOINT = 'endpoint-fixture-001'

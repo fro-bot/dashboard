@@ -30,7 +30,14 @@ export interface PushClientError {
 
 export interface PushClient {
   refreshCsrf(): Promise<Result<string, PushClientError>>
-  getVapidKey(): Promise<Result<VapidKeyResponse, PushClientError>>
+  /**
+   * `pushDisabled: true` is set only when the Gateway route returned HTTP
+   * 404 — the synthetic push_disabled signal driven by status alone, never
+   * response-body shape. A non-404 error stays a normal `PushClientError`.
+   */
+  getVapidKey(): Promise<
+    Result<{readonly pushDisabled: boolean; readonly vapidKey: VapidKeyResponse | undefined}, PushClientError>
+  >
   /**
    * `pushDisabled: true` is set only when the Gateway route returned HTTP
    * 404 — the synthetic push_disabled signal driven by status alone, never
@@ -72,12 +79,18 @@ function hasValidSubscriptionMetadataShape(value: unknown): value is PushSubscri
 export function buildPushClient(opts?: BuildPushClientOptions): PushClient {
   const endpointBase = opts?.endpointBase ?? '/operator/push'
 
-  const browserFetch = (input: string, init?: RequestInit): Promise<Response> =>
-    globalThis.fetch(input, {
+  const browserFetch = (input: string, init?: RequestInit): Promise<Response> => {
+    const timeoutSignal = AbortSignal.timeout(10_000)
+    const combinedSignal = init?.signal !== undefined && init.signal !== null
+      ? AbortSignal.any([init.signal, timeoutSignal])
+      : timeoutSignal
+    return globalThis.fetch(input, {
       ...init,
+      signal: combinedSignal,
       credentials: 'include',
       redirect: 'error',
     })
+  }
 
   return {
     async refreshCsrf() {
@@ -101,7 +114,7 @@ export function buildPushClient(opts?: BuildPushClientOptions): PushClient {
         const res = await browserFetch(`${endpointBase}/vapid-key`, {
           headers: {'content-type': 'application/json'},
         })
-        if (res.status === 404) return err({kind: 'protocol'})
+        if (res.status === 404) return ok({pushDisabled: true, vapidKey: undefined})
         if (!res.ok) return err({kind: 'http', status: res.status})
         const data = (await res.json()) as unknown
         if (
@@ -112,7 +125,7 @@ export function buildPushClient(opts?: BuildPushClientOptions): PushClient {
         ) {
           return err({kind: 'protocol'})
         }
-        return ok(data as VapidKeyResponse)
+        return ok({pushDisabled: false, vapidKey: data as VapidKeyResponse})
       } catch {
         return err({kind: 'network'})
       }
@@ -142,21 +155,35 @@ export function buildPushClient(opts?: BuildPushClientOptions): PushClient {
     async subscribePush(subscriptionJson, csrfToken, idempotencyKey, signal) {
       if (csrfToken.trim() === '') return err({kind: 'validation'})
       if (idempotencyKey.trim() === '') return err({kind: 'validation'})
-      try {
-        const res = await browserFetch(`${endpointBase}/subscriptions`, {
+
+      const post = (token: string): Promise<Response> =>
+        browserFetch(`${endpointBase}/subscriptions`, {
           method: 'POST',
           signal,
           headers: {
             'content-type': 'application/json',
-            'x-csrf-token': csrfToken,
+            'x-csrf-token': token,
             'idempotency-key': idempotencyKey,
           },
           body: JSON.stringify(subscriptionJson),
         })
+
+      try {
+        const res = await post(csrfToken)
         if (res.ok) return ok(undefined)
-        return err({kind: 'http', status: res.status})
-      } catch {
+
+        if (res.status !== 400) return err({kind: 'http', status: res.status})
+
+        // 400 → refresh CSRF once and retry ONCE reusing the SAME idempotency key.
+        const retryCsrfResult = await this.refreshCsrf()
+        if (!retryCsrfResult.success) return retryCsrfResult
+
         if (signal?.aborted === true) return err({kind: 'network'})
+
+        const retryRes = await post(retryCsrfResult.data)
+        if (retryRes.ok) return ok(undefined)
+        return err({kind: 'http', status: retryRes.status})
+      } catch {
         return err({kind: 'network'})
       }
     },
@@ -164,18 +191,31 @@ export function buildPushClient(opts?: BuildPushClientOptions): PushClient {
     async unsubscribePush(endpoint, csrfToken, idempotencyKey) {
       if (csrfToken.trim() === '') return err({kind: 'validation'})
       if (idempotencyKey.trim() === '') return err({kind: 'validation'})
-      try {
-        const res = await browserFetch(`${endpointBase}/subscriptions/unsubscribe`, {
+
+      const post = (token: string): Promise<Response> =>
+        browserFetch(`${endpointBase}/subscriptions/unsubscribe`, {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            'x-csrf-token': csrfToken,
+            'x-csrf-token': token,
             'idempotency-key': idempotencyKey,
           },
           body: JSON.stringify({endpoint}),
         })
+
+      try {
+        const res = await post(csrfToken)
         if (res.ok) return ok(undefined)
-        return err({kind: 'http', status: res.status})
+
+        if (res.status !== 400) return err({kind: 'http', status: res.status})
+
+        // 400 → refresh CSRF once and retry ONCE reusing the SAME idempotency key.
+        const retryCsrfResult = await this.refreshCsrf()
+        if (!retryCsrfResult.success) return retryCsrfResult
+
+        const retryRes = await post(retryCsrfResult.data)
+        if (retryRes.ok) return ok(undefined)
+        return err({kind: 'http', status: retryRes.status})
       } catch {
         return err({kind: 'network'})
       }
@@ -293,6 +333,9 @@ export async function subscribeOptIn(deps: SubscribeDeps): Promise<SubscribeOutc
 
   const vapidResult = await deps.pushClient.getVapidKey()
   if (!vapidResult.success) return {kind: 'subscribe-failed'}
+  if (vapidResult.data.pushDisabled) return {kind: 'unsupported'}
+  const vapidKey = vapidResult.data.vapidKey
+  if (vapidKey === undefined) return {kind: 'subscribe-failed'}
 
   if (deps.signal?.aborted) return {kind: 'aborted'}
 
@@ -300,7 +343,7 @@ export async function subscribeOptIn(deps: SubscribeDeps): Promise<SubscribeOutc
   try {
     subscription = await registration.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey: urlB64ToUint8Array(vapidResult.data.publicKey),
+      applicationServerKey: urlB64ToUint8Array(vapidKey.publicKey),
     })
   } catch {
     return {kind: 'subscribe-failed'}
@@ -354,6 +397,9 @@ export async function resubscribeStaleKey(deps: SubscribeDeps): Promise<Subscrib
 
   const vapidResult = await deps.pushClient.getVapidKey()
   if (!vapidResult.success) return {kind: 'subscribe-failed'}
+  if (vapidResult.data.pushDisabled) return {kind: 'unsupported'}
+  const vapidKey = vapidResult.data.vapidKey
+  if (vapidKey === undefined) return {kind: 'subscribe-failed'}
 
   const existing = await registration.pushManager.getSubscription()
   if (existing !== null) {
@@ -366,7 +412,7 @@ export async function resubscribeStaleKey(deps: SubscribeDeps): Promise<Subscrib
   try {
     subscription = await registration.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey: urlB64ToUint8Array(vapidResult.data.publicKey),
+      applicationServerKey: urlB64ToUint8Array(vapidKey.publicKey),
     })
   } catch {
     return {kind: 'subscribe-failed'}
@@ -418,11 +464,15 @@ export async function unsubscribeOptOut(deps: UnsubscribeDeps): Promise<{readonl
   const {endpoint} = subscription
   await subscription.unsubscribe().catch(() => false)
 
-  const csrfResult = await deps.pushClient.refreshCsrf()
-  if (!csrfResult.success) return {gatewayUnsubscribeCalled: false}
+  try {
+    const csrfResult = await deps.pushClient.refreshCsrf()
+    if (!csrfResult.success) return {gatewayUnsubscribeCalled: false}
 
-  await deps.pushClient.unsubscribePush(endpoint, csrfResult.data, mintKey())
-  return {gatewayUnsubscribeCalled: true}
+    await deps.pushClient.unsubscribePush(endpoint, csrfResult.data, mintKey())
+    return {gatewayUnsubscribeCalled: true}
+  } catch {
+    return {gatewayUnsubscribeCalled: false}
+  }
 }
 
 // ---------------------------------------------------------------------------

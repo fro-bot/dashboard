@@ -8,6 +8,7 @@ import type {
   ReconcileSweepCache,
 } from './subscribe.ts'
 import {
+  buildPushClient,
   INITIAL_RECONCILE_SWEEP_CACHE,
   resubscribeStaleKey,
   runReconcileSweep,
@@ -45,13 +46,105 @@ function fakeRegistration(subscription: MinimalPushSubscription): MinimalService
 function fakePushClient(overrides: Partial<PushClient> = {}): PushClient {
   return {
     refreshCsrf: vi.fn().mockResolvedValue(ok('csrf-token')),
-    getVapidKey: vi.fn().mockResolvedValue(ok(VAPID)),
+    getVapidKey: vi.fn().mockResolvedValue(ok({pushDisabled: false, vapidKey: VAPID})),
     getPushSubscriptionMetadata: vi.fn().mockResolvedValue(ok({pushDisabled: false, metadata: undefined})),
     subscribePush: vi.fn().mockResolvedValue(ok(undefined)),
     unsubscribePush: vi.fn().mockResolvedValue(ok(undefined)),
     ...overrides,
   }
 }
+
+describe('buildPushClient', () => {
+  function jsonResponse(status: number, body: unknown): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: {'content-type': 'application/json'},
+    })
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('subscribePush: 400 refreshes CSRF once and retries once reusing the same idempotency key', async () => {
+    const fetchMock = vi.fn()
+    // 1: initial POST -> 400
+    fetchMock.mockResolvedValueOnce(jsonResponse(400, {}))
+    // 2: refreshCsrf -> new token
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {csrfToken: 'fresh-token'}))
+    // 3: retry POST -> success
+    fetchMock.mockResolvedValueOnce(new Response(null, {status: 200}))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = buildPushClient()
+    const result = await client.subscribePush({endpoint: 'x'}, 'stale-token', 'idem-key-1')
+
+    expect(result.success).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+
+    const firstCallInit = fetchMock.mock.calls[0]?.[1] as RequestInit
+    const retryCallInit = fetchMock.mock.calls[2]?.[1] as RequestInit
+    const firstHeaders = firstCallInit.headers as Record<string, string>
+    const retryHeaders = retryCallInit.headers as Record<string, string>
+
+    expect(firstHeaders['idempotency-key']).toBe('idem-key-1')
+    expect(retryHeaders['idempotency-key']).toBe('idem-key-1')
+    expect(retryHeaders['x-csrf-token']).toBe('fresh-token')
+  })
+
+  it('subscribePush: CSRF-refresh 401/403 surfaces as {kind:"http",status}, not {kind:"network"}', async () => {
+    const fetchMock = vi.fn()
+    fetchMock.mockResolvedValueOnce(jsonResponse(400, {}))
+    fetchMock.mockResolvedValueOnce(new Response(null, {status: 401}))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = buildPushClient()
+    const result = await client.subscribePush({endpoint: 'x'}, 'stale-token', 'idem-key-1')
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toEqual({kind: 'http', status: 401})
+    }
+  })
+
+  it('unsubscribePush: 400 refreshes CSRF once and retries once reusing the same idempotency key', async () => {
+    const fetchMock = vi.fn()
+    fetchMock.mockResolvedValueOnce(jsonResponse(400, {}))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {csrfToken: 'fresh-token'}))
+    fetchMock.mockResolvedValueOnce(new Response(null, {status: 200}))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = buildPushClient()
+    const result = await client.unsubscribePush('https://push.example/ep', 'stale-token', 'idem-key-2')
+
+    expect(result.success).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    const retryCallInit = fetchMock.mock.calls[2]?.[1] as RequestInit
+    const retryHeaders = retryCallInit.headers as Record<string, string>
+    expect(retryHeaders['idempotency-key']).toBe('idem-key-2')
+    expect(retryHeaders['x-csrf-token']).toBe('fresh-token')
+  })
+
+  it('getVapidKey: 404 -> pushDisabled success shape', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, {status: 404}))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = buildPushClient()
+    const result = await client.getVapidKey()
+
+    expect(result).toEqual(ok({pushDisabled: true, vapidKey: undefined}))
+  })
+
+  it('getVapidKey: success -> pushDisabled false with the key', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {publicKey: 'BNc3xVwB', keyVersion: 'v1'}))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = buildPushClient()
+    const result = await client.getVapidKey()
+
+    expect(result).toEqual(ok({pushDisabled: false, vapidKey: {publicKey: 'BNc3xVwB', keyVersion: 'v1'}}))
+  })
+})
 
 describe('subscribeOptIn', () => {
   it('happy path: full support + granted + subscribe + POST -> subscribed', async () => {
@@ -180,7 +273,7 @@ describe('subscribeOptIn', () => {
     const pushClient = fakePushClient({
       getVapidKey: vi.fn().mockImplementation(async () => {
         controller.abort()
-        return ok(VAPID)
+        return ok({pushDisabled: false, vapidKey: VAPID})
       }),
     })
 

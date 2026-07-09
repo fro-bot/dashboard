@@ -166,7 +166,7 @@ describe('sw.js build output', () => {
     expect(src).toMatch(/operator\/auth/)
   })
 
-  // Push, notificationclick, pushsubscriptionchange handlers (U4).
+  // Push, notificationclick, pushsubscriptionchange handlers.
 
   it('GUARD: push, notificationclick, and pushsubscriptionchange listeners are registered', () => {
     const content = readSW()
