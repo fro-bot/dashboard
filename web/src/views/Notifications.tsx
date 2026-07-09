@@ -3,6 +3,7 @@ import {
   getNotificationPermission,
   getPushSupport,
 } from '../push/capability.ts'
+import {getLogoutAbortSignal} from '../push/logout-abort.ts'
 import {
   INITIAL_RECONCILE_SWEEP_CACHE,
   resubscribeStaleKey,
@@ -71,6 +72,7 @@ export function Notifications() {
             serviceWorkerReady: () => navigator.serviceWorker.ready as unknown as Promise<MinimalServiceWorkerRegistration>,
             requestPermission: () => Notification.requestPermission(),
             pushClient,
+            signal: getLogoutAbortSignal(),
           })
           if (outcome.kind === 'subscribed') {
             setCurrentUiState('subscribed')
@@ -86,6 +88,7 @@ export function Notifications() {
             serviceWorkerReady: () => navigator.serviceWorker.ready as unknown as Promise<MinimalServiceWorkerRegistration>,
             requestPermission: () => Notification.requestPermission(),
             pushClient,
+            signal: getLogoutAbortSignal(),
           })
           if (outcome.kind === 'subscribed') {
             setCurrentUiState('subscribed')
@@ -199,6 +202,7 @@ export function Notifications() {
       serviceWorkerReady: () => navigator.serviceWorker.ready as unknown as Promise<MinimalServiceWorkerRegistration>,
       requestPermission: () => Notification.requestPermission(),
       pushClient,
+      signal: getLogoutAbortSignal(),
     })
     setInFlight(false)
 

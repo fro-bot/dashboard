@@ -1,5 +1,6 @@
 import {fireEvent, render, screen} from '@testing-library/react'
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
+import {getLogoutAbortSignal} from '../push/logout-abort.ts'
 import * as logoutPurgeModule from '../pwa/logout-purge.ts'
 import {AppShell} from './AppShell.tsx'
 
@@ -82,6 +83,29 @@ function mockLogoutFetch(routes: {
 
 function spyOnPurgeOperatorCache() {
   return vi.spyOn(logoutPurgeModule, 'purgeOperatorCache').mockReturnValue(undefined)
+}
+
+function stubServiceWorker(getSubscription: () => Promise<unknown>) {
+  Object.defineProperty(navigator, 'serviceWorker', {
+    writable: true,
+    configurable: true,
+    value: {
+      ready: Promise.resolve({
+        pushManager: {getSubscription},
+      }),
+      controller: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    },
+  })
+}
+
+function fakePushSubscription(endpoint = 'https://push.example/abc') {
+  return {
+    endpoint,
+    toJSON: () => ({endpoint}),
+    unsubscribe: vi.fn().mockResolvedValue(true),
+  }
 }
 
 describe('AppShell', () => {
@@ -334,5 +358,81 @@ describe('AppShell', () => {
     })
 
     expect(findFetchCall(fetchMock, '/operator/auth/logout')).toBeUndefined()
+  })
+
+  describe('push teardown on logout (U7)', () => {
+    afterEach(() => {
+      Reflect.deleteProperty(navigator, 'serviceWorker')
+    })
+
+    it('logout calls local unsubscribe() + Gateway unsubscribe, then navigates', async () => {
+      spyOnPurgeOperatorCache()
+      const location = stubLocation()
+      const subscription = fakePushSubscription()
+      stubServiceWorker(() => Promise.resolve(subscription))
+      const fetchMock = mockLogoutFetch({csrf: csrfOkResponse, logout: logoutOkResponse})
+
+      render(<AppShell>content</AppShell>)
+      fireEvent.click(screen.getByTestId('logout-button'))
+
+      await vi.waitFor(() => {
+        expect(subscription.unsubscribe).toHaveBeenCalledTimes(1)
+      })
+
+      await vi.waitFor(() => {
+        // unsubscribeOptOut refetches CSRF for the Gateway unsubscribe POST,
+        // so there are two CSRF calls: one from handleLogout, one from
+        // unsubscribeOptOut's own refreshCsrf().
+        expect(countFetchCalls(fetchMock, '/operator/push/subscriptions/unsubscribe')).toBe(1)
+      })
+
+      await vi.waitFor(() => {
+        expect(location.href).toBe('/auth/login')
+      })
+    })
+
+    it('push teardown failure/timeout still completes logout and navigates', async () => {
+      spyOnPurgeOperatorCache()
+      const location = stubLocation()
+      stubServiceWorker(() => Promise.reject(new Error('sw teardown boom')))
+      mockLogoutFetch({csrf: csrfOkResponse, logout: logoutOkResponse})
+
+      render(<AppShell>content</AppShell>)
+      fireEvent.click(screen.getByTestId('logout-button'))
+
+      await vi.waitFor(() => {
+        expect(location.href).toBe('/auth/login')
+      })
+    })
+
+    it('endpointless case: no local subscription -> no Gateway unsubscribe call, still navigates', async () => {
+      spyOnPurgeOperatorCache()
+      const location = stubLocation()
+      stubServiceWorker(() => Promise.resolve(null))
+      const fetchMock = mockLogoutFetch({csrf: csrfOkResponse, logout: logoutOkResponse})
+
+      render(<AppShell>content</AppShell>)
+      fireEvent.click(screen.getByTestId('logout-button'))
+
+      await vi.waitFor(() => {
+        expect(location.href).toBe('/auth/login')
+      })
+
+      expect(findFetchCall(fetchMock, '/operator/push/subscriptions/unsubscribe')).toBeUndefined()
+    })
+
+    it('logout triggers the shared logout-abort signal so an in-flight subscribe discards its result', () => {
+      spyOnPurgeOperatorCache()
+      stubServiceWorker(() => Promise.resolve(null))
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network')))
+
+      render(<AppShell>content</AppShell>)
+      const signalBefore = getLogoutAbortSignal()
+      expect(signalBefore.aborted).toBe(false)
+
+      fireEvent.click(screen.getByTestId('logout-button'))
+
+      expect(signalBefore.aborted).toBe(true)
+    })
   })
 })
