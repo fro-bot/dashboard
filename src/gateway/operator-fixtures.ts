@@ -230,11 +230,12 @@ export const FIXTURE_LAUNCH_RESPONSE: LaunchRunResponse = {
 // ---------------------------------------------------------------------------
 
 /**
- * A syntactically valid base64url VAPID public key fixture (~87 chars,
- * matching a real uncompressed P-256 point's encoded length). Never a real
- * VAPID key — fixture-only.
+ * A real, valid P-256 VAPID public key (uncompressed point, base64url
+ * encoded). Fixture-only: no corresponding private key is provided, so it
+ * cannot be used to send pushes. VAPID public keys are safe to embed — they
+ * are public by definition.
  */
 export const FIXTURE_VAPID_PUBLIC_KEY =
-  'BNfixture-VapidPublicKey0123456789-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY'
+  'BDHrxCLBc7E1yZoIRd85t_CibuCuzmVTv3LIxlY_JhdXoGM7mhohkKqUE_lXPDzetAdhm8LD_S2xUjveMFWRjl4'
 
 export const FIXTURE_VAPID_KEY_VERSION = 'fixture-vapid-v1'

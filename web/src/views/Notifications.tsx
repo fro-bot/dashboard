@@ -24,8 +24,9 @@ function readPushEnabledMeta(): boolean {
 interface NotificationsProps {
   /**
    * Fixture-mode push endpoint base (e.g. '/__fixture/operator/push').
-   * Read once at first pushClient construction — stable for the page
-   * lifetime, so a later change to this prop won't rebuild the client.
+   * The push client is rebuilt only when this base actually changes (it
+   * transitions at most once: undefined -> fixture base; in production it
+   * stays undefined forever, so the client is still built exactly once).
    */
   pushEndpointBase?: string
 }
@@ -43,13 +44,19 @@ export function Notifications({pushEndpointBase}: NotificationsProps = {}) {
   const ctaRef = useRef<HTMLButtonElement>(null)
   const headlineRef = useRef<HTMLHeadingElement>(null)
 
-  const pushClientRef = useRef<ReturnType<typeof buildPushClient> | null>(null)
-  if (pushClientRef.current === null) {
-    pushClientRef.current = buildPushClient(
-      pushEndpointBase !== undefined ? {endpointBase: pushEndpointBase} : undefined,
-    )
+  const pushClientRef = useRef<{
+    base: string | undefined
+    client: ReturnType<typeof buildPushClient>
+  } | null>(null)
+  if (pushClientRef.current === null || pushClientRef.current.base !== pushEndpointBase) {
+    pushClientRef.current = {
+      base: pushEndpointBase,
+      client: buildPushClient(
+        pushEndpointBase !== undefined ? {endpointBase: pushEndpointBase} : undefined,
+      ),
+    }
   }
-  const pushClient = pushClientRef.current
+  const pushClient = pushClientRef.current.client
 
   const enableInFlightRef = useRef(false)
   const disableInFlightRef = useRef(false)
