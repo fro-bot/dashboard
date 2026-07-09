@@ -2,6 +2,7 @@ import {render, screen, fireEvent, act} from '@testing-library/react'
 import {beforeEach, describe, expect, it, vi} from 'vitest'
 import {getNotificationPermission, getPushSupport} from '../push/capability.ts'
 import {
+  buildPushClient,
   resubscribeStaleKey,
   runReconcileSweep,
   subscribeOptIn,
@@ -54,6 +55,22 @@ describe('Notifications Component', () => {
       uiState: 'not-requested',
       nextCache: {} as any,
     })
+  })
+
+  it('builds the push client with the default endpoint when no pushEndpointBase prop is passed (production)', async () => {
+    addMetaTag()
+    await act(async () => {
+      render(<Notifications />)
+    })
+    expect(buildPushClient).toHaveBeenCalledWith(undefined)
+  })
+
+  it('builds the push client against the fixture endpoint when pushEndpointBase is passed', async () => {
+    addMetaTag()
+    await act(async () => {
+      render(<Notifications pushEndpointBase="/__fixture/operator/push" />)
+    })
+    expect(buildPushClient).toHaveBeenCalledWith({endpointBase: '/__fixture/operator/push'})
   })
 
   it('renders nothing when push-enabled meta is absent', () => {

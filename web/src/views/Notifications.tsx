@@ -21,7 +21,16 @@ function readPushEnabledMeta(): boolean {
   return meta?.getAttribute('content') === 'true'
 }
 
-export function Notifications() {
+interface NotificationsProps {
+  /**
+   * Fixture-mode push endpoint base (e.g. '/__fixture/operator/push').
+   * Read once at first pushClient construction — stable for the page
+   * lifetime, so a later change to this prop won't rebuild the client.
+   */
+  pushEndpointBase?: string
+}
+
+export function Notifications({pushEndpointBase}: NotificationsProps = {}) {
   const [metaEnabled] = useState<boolean>(readPushEnabledMeta)
   const [currentUiState, setCurrentUiState] = useState<NotificationUiState>('not-requested')
   const [inFlight, setInFlight] = useState(false)
@@ -36,7 +45,9 @@ export function Notifications() {
 
   const pushClientRef = useRef<ReturnType<typeof buildPushClient> | null>(null)
   if (pushClientRef.current === null) {
-    pushClientRef.current = buildPushClient()
+    pushClientRef.current = buildPushClient(
+      pushEndpointBase !== undefined ? {endpointBase: pushEndpointBase} : undefined,
+    )
   }
   const pushClient = pushClientRef.current
 

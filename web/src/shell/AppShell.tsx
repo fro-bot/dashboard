@@ -60,9 +60,15 @@ function applyTheme(theme: Theme): void {
 
 interface AppShellProps {
   children: ReactNode
+  /**
+   * Fixture-mode push endpoint base (e.g. '/__fixture/operator/push').
+   * Undefined in production — Notifications' push client then falls back
+   * to buildPushClient's default '/operator/push'.
+   */
+  pushEndpointBase?: string
 }
 
-export function AppShell({children}: AppShellProps) {
+export function AppShell({children, pushEndpointBase}: AppShellProps) {
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
   const [loggingOut, setLoggingOut] = useState(false)
   const logoutInFlight = useRef(false)
@@ -287,7 +293,7 @@ export function AppShell({children}: AppShellProps) {
         }}
         className="sm:px-6 md:px-8 lg:px-10"
       >
-        <Notifications />
+        <Notifications pushEndpointBase={pushEndpointBase} />
         {children}
       </main>
 

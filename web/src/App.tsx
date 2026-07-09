@@ -45,7 +45,9 @@ export default function App() {
   }, [])
 
   return (
-    <AppShell>
+    <AppShell
+      pushEndpointBase={fixtureState ? `${fixtureState.fixtureEndpointBase}/push` : undefined}
+    >
       <Operator
         state={fixtureDetectionSettled ? operatorState : 'loading'}
         onRuntimeStateChange={setOperatorState}
