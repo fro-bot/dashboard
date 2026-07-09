@@ -18,7 +18,8 @@ import type {OperatorClient, SessionDto} from './gateway/operator-client.ts'
 import type {AggregatorSnapshot} from './github/aggregator.ts'
 import type {MetadataReader} from './github/metadata.ts'
 import {Buffer} from 'node:buffer'
-import {existsSync} from 'node:fs'
+import {existsSync, readFileSync} from 'node:fs'
+import {join} from 'node:path'
 import process from 'node:process'
 import {serve} from '@hono/node-server'
 import {getConnInfo} from '@hono/node-server/conninfo'
@@ -683,19 +684,23 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // When pushNotificationsEnabled, inject a <meta name="push-enabled" content="true">
   // tag so the SPA can render the push consent surface without a separate flag fetch.
   if (pushNotificationsEnabled) {
-    app.use('/', async (c, next) => {
-      await next()
-      const contentType = c.res.headers.get('content-type')
-      if (contentType === null || !contentType.includes('text/html')) return
-      const html = await c.res.text()
-      if (html.includes('<meta name="push-enabled"')) return
-      const injected = html.includes('</head>')
-        ? html.replace('</head>', '<meta name="push-enabled" content="true"></head>')
-        : html
-      c.res = new Response(injected, {status: c.res.status, headers: c.res.headers})
+    // Serve the SPA shell inline (not via serveStatic) so the injected body's
+    // length is computed correctly. Post-processing a streamed serveStatic
+    // response leaves a stale Content-Length that truncates the injected HTML
+    // and drops the <div id="root"> mount target. Reading + injecting + c.html()
+    // recomputes the length. Fall through to serveStatic if the file is missing.
+    const indexHtmlPath = join(webDistRoot, 'index.html')
+    app.get('/', async c => {
+      if (!existsSync(indexHtmlPath)) return c.notFound()
+      const html = readFileSync(indexHtmlPath, 'utf8')
+      const injected = html.includes('<meta name="push-enabled"')
+        ? html
+        : html.replace('</head>', '<meta name="push-enabled" content="true"></head>')
+      return c.html(injected)
     })
+  } else {
+    app.get('/', serveStatic({root: webDistRoot, path: 'index.html'}))
   }
-  app.get('/', serveStatic({root: webDistRoot, path: 'index.html'}))
 
   // ── /operator and /operator/ → / redirect (unconditional, flag-independent) ──
   // / is the canonical operator launch route. Old /operator and /operator/ links

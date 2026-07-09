@@ -114,6 +114,7 @@ interface TestAppOpts {
   operatorUiEnabled: boolean
   gatewayOperatorSessionEnabled?: boolean
   operatorClient?: OperatorClient
+  pushNotificationsEnabled?: boolean
 }
 
 async function buildTestApp(opts: TestAppOpts | boolean) {
@@ -130,6 +131,7 @@ async function buildTestApp(opts: TestAppOpts | boolean) {
     operatorUiEnabled: resolved.operatorUiEnabled,
     gatewayOperatorSessionEnabled: resolved.gatewayOperatorSessionEnabled,
     operatorClient: resolved.operatorClient,
+    pushNotificationsEnabled: resolved.pushNotificationsEnabled,
   })
 }
 
@@ -895,4 +897,35 @@ describe('push routes — no-dashboard-proxy 404 invariant', () => {
       })
     }
   }
+})
+
+describe('push-enabled meta injection — served SPA shell integrity', () => {
+  it('serves a COMPLETE index.html (root mount target present) with the injected meta when push is enabled', async () => {
+    const app = await buildTestApp({operatorUiEnabled: true, pushNotificationsEnabled: true})
+    const res = await authedGet(app, '/')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // The injected meta must be present...
+    expect(body).toContain('<meta name="push-enabled" content="true">')
+    // ...AND the response must NOT be truncated: the React mount target must
+    // survive injection. A stale Content-Length after injection dropped the
+    // tail of the document (regression: blank page / "Root element not found").
+    expect(body).toContain('<div id="root">')
+    expect(body).toContain('</html>')
+    // Content-Length, when present, must match the actual (post-injection) body
+    // byte length — a mismatch is exactly what truncated the served shell.
+    const contentLength = res.headers.get('content-length')
+    if (contentLength !== null) {
+      expect(Number(contentLength)).toBe(Buffer.byteLength(body))
+    }
+  })
+
+  it('does not inject the meta when push is disabled', async () => {
+    const app = await buildTestApp({operatorUiEnabled: true, pushNotificationsEnabled: false})
+    const res = await authedGet(app, '/')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).not.toContain('push-enabled')
+    expect(body).toContain('<div id="root">')
+  })
 })
