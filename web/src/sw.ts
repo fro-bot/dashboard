@@ -34,6 +34,10 @@ import {cleanupOutdatedCaches, createHandlerBoundToURL, precacheAndRoute} from '
 import {NavigationRoute, registerRoute} from 'workbox-routing'
 import {NetworkOnly} from 'workbox-strategies'
 import {OPERATOR_RUNTIME_CACHE} from './pwa/cache-names.ts'
+// The only non-Workbox import in this file: a pure payload→safe-notification
+// mapping module. Any future non-Workbox import here should be a conscious
+// decision (the no-server-imports guard does not cover new web-side imports).
+import {buildNotification} from './push/sw-notification.ts'
 
 declare const self: ServiceWorkerGlobalScope
 
@@ -100,11 +104,160 @@ const LEGACY_MONITORING_CACHE = 'monitoring-v1'
 
 addEventListener('message', (event: Event) => {
   const e = event as SWMessageEvent
-  if ((e.data as {type?: string} | null)?.type === 'PURGE_RUNTIME') {
+  const messageType = (e.data as {type?: string} | null)?.type
+  if (messageType === 'PURGE_RUNTIME') {
     e.waitUntil(
       Promise.all([caches.delete(OPERATOR_RUNTIME_CACHE), caches.delete(LEGACY_MONITORING_CACHE)]).then(
         () => undefined,
       ),
     )
   }
+  // Dev-only synthetic push: the notifications consent surface (U6) posts
+  // {type:'MOCK_SYNTHETIC_PUSH', payload} to the SW for visual verification
+  // without a real push subscription/relay round-trip. Routed through the
+  // same safe-copy mapping as a real push — never renders raw payload text.
+  if (messageType === 'MOCK_SYNTHETIC_PUSH') {
+    const {title, body, data} = buildNotification((e.data as {payload?: unknown} | null)?.payload)
+    e.waitUntil(registration.showNotification(title, {body, data}))
+  }
+})
+
+// Push, notificationclick, and pushsubscriptionchange handlers.
+//
+// Touch NO cache — these are notification-lifecycle concerns, orthogonal to
+// the fetch/cache routing above. Registered after the message handler per
+// plan ordering; does not affect the load-bearing precache/navigation order.
+//
+// Type note: PushEvent, NotificationEvent, PushSubscriptionChangeEvent, and
+// the Clients/WindowClient/ServiceWorkerRegistration.pushManager surface are
+// WebWorker-lib types (not DOM). Minimal inline interfaces — same pattern as
+// SWMessageEvent above — avoid adding the WebWorker lib to tsconfig
+// (conflicting globals with the DOM lib this file otherwise uses).
+
+interface SWPushEvent extends Event {
+  readonly data: {json(): unknown} | null
+  waitUntil(f: Promise<unknown>): void
+}
+
+interface SWWindowClient {
+  readonly focused: boolean
+  readonly visibilityState: string
+  focus(): Promise<unknown>
+  postMessage(message: unknown): void
+}
+
+interface SWClients {
+  matchAll(options: {type: 'window'; includeUncontrolled?: boolean}): Promise<SWWindowClient[]>
+  openWindow(url: string): Promise<unknown>
+}
+
+interface SWNotification {
+  close(): void
+}
+
+interface SWNotificationEvent extends Event {
+  readonly notification: SWNotification
+  waitUntil(f: Promise<unknown>): void
+}
+
+interface SWPushSubscription {
+  readonly options: {readonly applicationServerKey: unknown}
+}
+
+interface SWPushManager {
+  getSubscription(): Promise<SWPushSubscription | null>
+  subscribe(options: {userVisibleOnly: boolean; applicationServerKey: unknown}): Promise<unknown>
+}
+
+interface SWPushSubscriptionChangeEvent extends Event {
+  readonly oldSubscription: SWPushSubscription | null
+  waitUntil(f: Promise<unknown>): void
+}
+
+declare const clients: SWClients
+declare const registration: {
+  showNotification(title: string, options: {body: string; data: unknown}): Promise<void>
+  readonly pushManager: SWPushManager
+}
+
+/**
+ * `push`: parse defensively; always show a notification (never silent) via
+ * the fixed safe-copy mapping in `sw-notification.ts`. The SW push handler
+ * is an always-safe fallback — it renders regardless of the dashboard's
+ * consent-UI flag state, because a subscription created during a prior
+ * enablement can outlive a flag flip.
+ */
+addEventListener('push', (event: Event) => {
+  const e = event as SWPushEvent
+  let rawPayload: unknown
+  try {
+    rawPayload = e.data?.json()
+  } catch {
+    rawPayload = undefined
+  }
+
+  const {title, body, data} = buildNotification(rawPayload)
+  e.waitUntil(registration.showNotification(title, {body, data}))
+})
+
+/**
+ * `notificationclick`: neutral click routing. Always opens/focuses the
+ * literal `/` — never reads `notification.data.route` or any payload field
+ * as a navigation target (open-redirect guard). Prefers an existing
+ * focused window, then any visible window, before opening a new one.
+ */
+addEventListener('notificationclick', (event: Event) => {
+  const e = event as SWNotificationEvent
+  e.notification.close()
+  e.waitUntil(
+    clients.matchAll({type: 'window', includeUncontrolled: true}).then(windowClients => {
+      const focused = windowClients.find(client => client.focused)
+      const visible = windowClients.find(client => client.visibilityState === 'visible')
+      const target = focused ?? visible
+      if (target !== undefined) {
+        return target.focus()
+      }
+      return clients.openWindow('/')
+    }),
+  )
+})
+
+/**
+ * `pushsubscriptionchange`: best-effort only. Push is a non-authoritative
+ * channel — the page-driven reconcile (U5) owns correctness. No durable
+ * queue: the postMessage hint is in-memory only and is simply dropped if no
+ * client is open. The SW persists nothing about the subscription. Never
+ * throws — any failure here is recovered by the page's next load/visibility
+ * reconcile, not by retry logic in the SW.
+ */
+addEventListener('pushsubscriptionchange', (event: Event) => {
+  const e = event as SWPushSubscriptionChangeEvent
+  e.waitUntil(
+    (async () => {
+      try {
+        const oldSubscription = e.oldSubscription ?? (await registration.pushManager.getSubscription())
+        const applicationServerKey = oldSubscription?.options.applicationServerKey ?? undefined
+
+        if (applicationServerKey != null) {
+          try {
+            await registration.pushManager.subscribe({
+              userVisibleOnly: true,
+              applicationServerKey,
+            })
+          } catch {
+            // Best-effort resubscribe failed (e.g. VAPID key rotated). No
+            // recovery is attempted here — the page's next load/visibility
+            // reconcile detects stale_key and corrects.
+          }
+        }
+
+        const windowClients = await clients.matchAll({type: 'window'})
+        for (const client of windowClients) {
+          client.postMessage({type: 'PUSH_SUBSCRIPTION_CHANGE'})
+        }
+      } catch {
+        // Best-effort only — never throws out of the event handler.
+      }
+    })(),
+  )
 })

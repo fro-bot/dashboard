@@ -165,4 +165,57 @@ describe('sw.js build output', () => {
     const src = readFileSync(resolve(import.meta.dirname, 'sw.ts'), 'utf8')
     expect(src).toMatch(/operator\/auth/)
   })
+
+  // Push, notificationclick, pushsubscriptionchange handlers (U4).
+
+  it('GUARD: push, notificationclick, and pushsubscriptionchange listeners are registered', () => {
+    const content = readSW()
+    expect(content).toMatch(/addEventListener\(`push`/)
+    expect(content).toMatch(/addEventListener\(`notificationclick`/)
+    expect(content).toMatch(/addEventListener\(`pushsubscriptionchange`/)
+  })
+
+  it('GUARD: push handler references showNotification and touches no cache API', () => {
+    const src = readFileSync(resolve(import.meta.dirname, 'sw.ts'), 'utf8')
+    const pushHandlerStart = src.indexOf("addEventListener('push'")
+    const pushHandlerEnd = src.indexOf("addEventListener('notificationclick'")
+    expect(pushHandlerStart).toBeGreaterThan(-1)
+    expect(pushHandlerEnd).toBeGreaterThan(pushHandlerStart)
+    const pushHandlerSource = src.slice(pushHandlerStart, pushHandlerEnd)
+    expect(pushHandlerSource).toContain('showNotification')
+    expect(pushHandlerSource).not.toContain('caches.')
+    expect(pushHandlerSource).not.toContain('cache.put')
+  })
+
+  it('GUARD: notificationclick handler opens the literal / (open-redirect guard)', () => {
+    const src = readFileSync(resolve(import.meta.dirname, 'sw.ts'), 'utf8')
+    const clickHandlerStart = src.indexOf("addEventListener('notificationclick'")
+    const clickHandlerEnd = src.indexOf("addEventListener('pushsubscriptionchange'")
+    expect(clickHandlerStart).toBeGreaterThan(-1)
+    expect(clickHandlerEnd).toBeGreaterThan(clickHandlerStart)
+    const clickHandlerSource = src.slice(clickHandlerStart, clickHandlerEnd)
+    expect(clickHandlerSource).toContain("openWindow('/')")
+    // Never reads notification.data (or any payload field) as a navigation target.
+    expect(clickHandlerSource).not.toContain('.data.route')
+    expect(clickHandlerSource).not.toContain('notification.data')
+  })
+
+  it('GUARD: pushsubscriptionchange handler posts only {type: PUSH_SUBSCRIPTION_CHANGE} — no endpoint/keys/identity', () => {
+    const src = readFileSync(resolve(import.meta.dirname, 'sw.ts'), 'utf8')
+    const changeHandlerStart = src.indexOf("addEventListener('pushsubscriptionchange'")
+    expect(changeHandlerStart).toBeGreaterThan(-1)
+    const changeHandlerSource = src.slice(changeHandlerStart)
+    expect(changeHandlerSource).toContain('PUSH_SUBSCRIPTION_CHANGE')
+    expect(changeHandlerSource).not.toContain('endpoint')
+    expect(changeHandlerSource).not.toContain('p256dh')
+  })
+
+  it('GUARD: the push/notificationclick/pushsubscriptionchange handlers are registered AFTER the message handler', () => {
+    const src = readFileSync(resolve(import.meta.dirname, 'sw.ts'), 'utf8')
+    const messageHandlerIdx = src.indexOf("addEventListener('message'")
+    const pushHandlerIdx = src.indexOf("addEventListener('push'")
+    expect(messageHandlerIdx).toBeGreaterThan(-1)
+    expect(pushHandlerIdx).toBeGreaterThan(-1)
+    expect(messageHandlerIdx).toBeLessThan(pushHandlerIdx)
+  })
 })
