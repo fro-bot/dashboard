@@ -13,7 +13,7 @@ importers:
         version: 0.1.0
       '@hono/node-server':
         specifier: ^1.14.4
-        version: 1.19.14(hono@4.12.27)
+        version: 1.19.14(hono@4.12.28)
       '@octokit/auth-app':
         specifier: 8.2.0
         version: 8.2.0
@@ -34,7 +34,7 @@ importers:
         version: 3.7.0
       hono:
         specifier: ^4.7.11
-        version: 4.12.27
+        version: 4.12.28
       yaml:
         specifier: 2.9.0
         version: 2.9.0
@@ -2551,8 +2551,8 @@ packages:
     resolution: {integrity: sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A==}
     engines: {node: '>= 0.4'}
 
-  hono@4.12.27:
-    resolution: {integrity: sha512-1yrb/+w6HWQJrUCLkJ2IF5jNIPvvFkblV5RNOYl6bV+OA6p9GLcMpHFFGTosSvHvcAUibuUukRqhlYI4z32C7Q==}
+  hono@4.12.28:
+    resolution: {integrity: sha512-YwUvVpSF7m1yOblFPrU3Hbo8XhPheBoiyfGuII6z19LnOr6JpDnyyp7LFNrfV56wS8tpvtBFGRISHN02pDdLOA==}
     engines: {node: '>=16.9.0'}
 
   html-encoding-sniffer@6.0.0:
@@ -4777,9 +4777,9 @@ snapshots:
 
   '@exodus/bytes@1.15.1': {}
 
-  '@hono/node-server@1.19.14(hono@4.12.27)':
+  '@hono/node-server@1.19.14(hono@4.12.28)':
     dependencies:
-      hono: 4.12.27
+      hono: 4.12.28
 
   '@humanfs/core@0.19.2':
     dependencies:
@@ -6515,7 +6515,7 @@ snapshots:
     dependencies:
       function-bind: 1.1.2
 
-  hono@4.12.27: {}
+  hono@4.12.28: {}
 
   html-encoding-sniffer@6.0.0:
     dependencies:
