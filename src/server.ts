@@ -30,7 +30,12 @@ import {getCookie, setCookie} from 'hono/cookie'
 import {secureHeaders} from 'hono/secure-headers'
 import {fetchGitHubUserLogin, makeGitHubOAuthClient} from './auth/oauth.ts'
 import {createOperatorClient} from './gateway/operator-client.ts'
-import {readGatewayOperatorOrigin, readGatewayOperatorSessionConfig, readOperatorUiConfig} from './gateway/operator-config.ts'
+import {
+  readGatewayOperatorOrigin,
+  readGatewayOperatorSessionConfig,
+  readOperatorUiConfig,
+  readPushNotificationsConfig,
+} from './gateway/operator-config.ts'
 import {readFixtureHarnessConfig} from './gateway/operator-fixture-config.ts'
 import {FIXTURE_OPERATOR_PREFIX} from './gateway/operator-fixture-routes.ts'
 import {createOperatorServerFetch} from './gateway/operator-server-fetch.ts'
@@ -185,6 +190,15 @@ export interface DashboardAppConfig {
    */
   gatewayOperatorSessionEnabled?: boolean | undefined
   /**
+   * Whether the operator push-notifications consent surface is enabled.
+   * If undefined, reads from DASHBOARD_OPERATOR_PUSH_ENABLED env (default: false).
+   * When true, a `<meta name="push-enabled" content="true">` tag is injected
+   * into the `/` HTML response so the SPA can render the consent surface.
+   * The dashboard NEVER mounts /operator/push/* routes regardless of this flag —
+   * those are reverse-proxied to the Gateway (see the no-dashboard-proxy invariant).
+   */
+  pushNotificationsEnabled?: boolean | undefined
+  /**
    * Injectable OperatorClient for the gateway auth branch.
    * If undefined, a real client is built per-request from the server-side fetch adapter.
    * Never constructed when gatewayOperatorSessionEnabled is false.
@@ -307,6 +321,13 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     opts?.gatewayOperatorSessionEnabled === undefined
       ? readGatewayOperatorSessionConfig().enabled
       : opts.gatewayOperatorSessionEnabled
+
+  // Resolve push notifications flag — default OFF (fail-closed). Gates only the
+  // consent-surface meta tag; the dashboard never mounts /operator/push/* routes.
+  const pushNotificationsEnabled =
+    opts?.pushNotificationsEnabled === undefined
+      ? readPushNotificationsConfig().enabled
+      : opts.pushNotificationsEnabled
 
   // Resolve devAutoLogin — DEV-ONLY auth bypass. Default OFF (fail-closed).
   //
@@ -659,6 +680,21 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   app.route('/api', buildApiRouter(getSnapshot))
 
   // Serve the React SPA at /. index.html requires a session; shell assets are public.
+  // When pushNotificationsEnabled, inject a <meta name="push-enabled" content="true">
+  // tag so the SPA can render the push consent surface without a separate flag fetch.
+  if (pushNotificationsEnabled) {
+    app.use('/', async (c, next) => {
+      await next()
+      const contentType = c.res.headers.get('content-type')
+      if (contentType === null || !contentType.includes('text/html')) return
+      const html = await c.res.text()
+      if (html.includes('<meta name="push-enabled"')) return
+      const injected = html.includes('</head>')
+        ? html.replace('</head>', '<meta name="push-enabled" content="true"></head>')
+        : html
+      c.res = new Response(injected, {status: c.res.status, headers: c.res.headers})
+    })
+  }
   app.get('/', serveStatic({root: webDistRoot, path: 'index.html'}))
 
   // ── /operator and /operator/ → / redirect (unconditional, flag-independent) ──

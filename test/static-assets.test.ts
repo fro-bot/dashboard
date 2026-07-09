@@ -581,6 +581,29 @@ describe('production build artifacts — no fixture strings in web/dist JS', () 
       expect(src, `${file} must not contain fixture-runtime-loader`).not.toContain('fixture-runtime-loader')
     }
   })
+
+  it('web/dist JS bundle does not contain push fixture literals', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const assetsDir = 'web/dist/assets'
+    const entries = await fs.readdir(assetsDir)
+    const jsFiles = entries.filter(f => f.endsWith('.js'))
+    const forbidden = ['endpoint-fixture-', '/__fixture/operator/push', 'FIXTURE_VAPID_PUBLIC_KEY', 'MOCK_SYNTHETIC_PUSH']
+    for (const file of jsFiles) {
+      const src = await fs.readFile(path.join(assetsDir, file), 'utf8')
+      for (const literal of forbidden) {
+        expect(src, `${file} must not contain ${literal}`).not.toContain(literal)
+      }
+    }
+  })
+
+  it('web/dist/index.html does not contain push fixture literals', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('web/dist/index.html', 'utf8')
+    for (const literal of ['endpoint-fixture-', '/__fixture/operator/push', 'FIXTURE_VAPID_PUBLIC_KEY', 'MOCK_SYNTHETIC_PUSH']) {
+      expect(src, `index.html must not contain ${literal}`).not.toContain(literal)
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------

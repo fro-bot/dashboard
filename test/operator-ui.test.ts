@@ -853,3 +853,46 @@ describe('operator UI — /operator/ trailing-slash: same behavior as /operator 
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// Push notification routes — no-dashboard-proxy 404 invariant
+//
+// The dashboard depends on these 4 Gateway v1 routes but never mounts them —
+// they are reverse-proxied to the Gateway. Every verb must 404 from
+// buildDashboardApp (HEAD/OPTIONS must not leak existence or allowed methods).
+// ---------------------------------------------------------------------------
+
+describe('push routes — no-dashboard-proxy 404 invariant', () => {
+  const pushPaths = [
+    '/operator/push/vapid-key',
+    '/operator/push/subscriptions',
+    '/operator/push/subscriptions/unsubscribe',
+  ]
+  const verbs: ('GET' | 'POST' | 'HEAD' | 'OPTIONS' | 'PUT' | 'PATCH' | 'DELETE')[] = [
+    'GET',
+    'POST',
+    'HEAD',
+    'OPTIONS',
+    'PUT',
+    'PATCH',
+    'DELETE',
+  ]
+
+  for (const path of pushPaths) {
+    for (const method of verbs) {
+      it(`${method} ${path} returns 404 from buildDashboardApp (not proxied)`, async () => {
+        const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
+        const app = await buildTestApp({
+          operatorUiEnabled: true,
+          gatewayOperatorSessionEnabled: true,
+          operatorClient,
+        })
+        const res = await app.request(path, {
+          method,
+          headers: {cookie: 'gateway_session=test-gateway-cookie'},
+        })
+        expect(res.status).toBe(404)
+      })
+    }
+  }
+})
