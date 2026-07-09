@@ -17,6 +17,7 @@ import {type ReactNode, useCallback, useEffect, useRef, useState} from 'react'
 import {InstallPrompt} from '../pwa/InstallPrompt.tsx'
 import {ReloadPrompt} from '../pwa/ReloadPrompt.tsx'
 import {purgeOperatorCache} from '../pwa/logout-purge.ts'
+import {Notifications} from '../views/Notifications.tsx'
 
 // Fail-closed redirect target for any logout outcome (success or failure).
 // The Gateway session cookie is HttpOnly — it cannot be cleared client-side,
@@ -256,6 +257,7 @@ export function AppShell({children}: AppShellProps) {
         }}
         className="sm:px-6 md:px-8 lg:px-10"
       >
+        <Notifications />
         {children}
       </main>
 
