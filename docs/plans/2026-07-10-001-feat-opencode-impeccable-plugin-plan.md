@@ -83,7 +83,7 @@ Impeccable ships interactive post-tool-use hooks for four harnesses (Claude Code
 
 ## Implementation Units
 
-- [ ] **Unit 1: Registration + pure helpers**
+- [x] **Unit 1: Registration + pure helpers**
 
 **Goal:** Register a repo-local plugin OpenCode will load, and implement the pure, side-effect-free helpers the runtime hook depends on.
 
@@ -114,7 +114,7 @@ Impeccable ships interactive post-tool-use hooks for four harnesses (Claude Code
 
 ---
 
-- [ ] **Unit 2: hook.mjs bridge runtime**
+- [x] **Unit 2: hook.mjs bridge runtime**
 
 **Goal:** Implement the `tool.execute.after` body — invoke `hook.mjs` on the touched file with a timeout, identify the OpenCode harness, and capture its stdout.
 
@@ -148,7 +148,7 @@ Impeccable ships interactive post-tool-use hooks for four harnesses (Claude Code
 
 ---
 
-- [ ] **Unit 3: Surface feedback + fail-loud guard**
+- [x] **Unit 3: Surface feedback + fail-loud guard**
 
 **Goal:** Attach `hook.mjs` findings to what the agent sees, and emit a one-time visible warning when the bridge can't run or parse — never fail silently.
 
@@ -175,7 +175,7 @@ Impeccable ships interactive post-tool-use hooks for four harnesses (Claude Code
 
 ---
 
-- [ ] **Unit 4: Live verification + update-survival check**
+- [x] **Unit 4: Live verification + update-survival check**
 
 **Goal:** Prove the assembled plugin works in a real OpenCode session and survives `npx impeccable update`.
 
