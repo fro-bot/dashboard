@@ -214,7 +214,8 @@ one more missing piece. The checklist:
 5. **Fixture stubs for a security primitive must be real enough for the browser API.** A
    placeholder of the right length is not enough — the browser validates it. The fixture
    VAPID key must be a genuine P-256 public point or `pushManager.subscribe()` rejects it.
-   A *public* key is safe to embed; only the private key can send pushes.
+   A *public* key is safe to embed; only the private key can send pushes. Generate a throwaway
+   keypair for the fixture — never reuse (or let it be confused with) the production VAPID key.
 
 ### Make fixture mode visible
 

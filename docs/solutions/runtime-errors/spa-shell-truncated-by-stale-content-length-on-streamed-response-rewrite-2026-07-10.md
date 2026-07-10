@@ -1,7 +1,7 @@
 ---
 title: Flag-gated meta injection truncated the SPA shell via a stale Content-Length
 date: 2026-07-10
-category: docs/solutions/runtime-errors
+category: runtime-errors
 module: src/server.ts
 problem_type: runtime_error
 component: service_object
