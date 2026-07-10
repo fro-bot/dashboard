@@ -76,3 +76,4 @@ The prevention is one line in the definition of done: **open the page.**
 ## Related
 
 - [CSS selectors must match the classes vanilla JS actually emits](./css-selector-emitter-mismatch-2026-07-04.md) — a concrete sub-class where the assembled page renders but styling silently no-ops because a CSS selector drifted from the JS-emitted class name.
+- [SPA shell truncated by a stale Content-Length](../runtime-errors/spa-shell-truncated-by-stale-content-length-on-streamed-response-rewrite-2026-07-10.md) — the HTTP-transport instance: in-process `app.request()` passed while a real client got a truncated, unmountable page.
