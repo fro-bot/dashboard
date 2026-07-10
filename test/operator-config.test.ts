@@ -7,7 +7,7 @@
  */
 import process from 'node:process'
 import {afterEach, beforeEach, describe, expect, it} from 'vitest'
-import {readGatewayOperatorSessionConfig, readOperatorUiConfig} from '../src/gateway/operator-config.ts'
+import {readGatewayOperatorSessionConfig, readOperatorUiConfig, readPushNotificationsConfig} from '../src/gateway/operator-config.ts'
 
 describe('readOperatorUiConfig', () => {
   const ENV_KEY = 'DASHBOARD_OPERATOR_UI_ENABLED'
@@ -163,5 +163,53 @@ describe('readGatewayOperatorSessionConfig', () => {
       process.env[ENV_KEY] = 'true\ninjected'
       expect(readGatewayOperatorSessionConfig().enabled).toBe(false)
     })
+  })
+})
+
+describe('readPushNotificationsConfig', () => {
+  const ENV_KEY = 'DASHBOARD_OPERATOR_PUSH_ENABLED'
+
+  beforeEach(() => {
+    delete process.env[ENV_KEY]
+    delete process.env[`${ENV_KEY}_FILE`]
+  })
+
+  afterEach(() => {
+    delete process.env[ENV_KEY]
+    delete process.env[`${ENV_KEY}_FILE`]
+  })
+
+  it('returns enabled:false when env var is not set', () => {
+    expect(readPushNotificationsConfig().enabled).toBe(false)
+  })
+
+  it('returns enabled:false for "false"', () => {
+    process.env[ENV_KEY] = 'false'
+    expect(readPushNotificationsConfig().enabled).toBe(false)
+  })
+
+  it('returns enabled:true for "true"', () => {
+    process.env[ENV_KEY] = 'true'
+    expect(readPushNotificationsConfig().enabled).toBe(true)
+  })
+
+  it('returns enabled:true for "TRUE" (case-insensitive)', () => {
+    process.env[ENV_KEY] = 'TRUE'
+    expect(readPushNotificationsConfig().enabled).toBe(true)
+  })
+
+  it('returns enabled:true for "  true  " (trimmed)', () => {
+    process.env[ENV_KEY] = '  true  '
+    expect(readPushNotificationsConfig().enabled).toBe(true)
+  })
+
+  it('returns enabled:false for "1"', () => {
+    process.env[ENV_KEY] = '1'
+    expect(readPushNotificationsConfig().enabled).toBe(false)
+  })
+
+  it('returns enabled:false for "yes"', () => {
+    process.env[ENV_KEY] = 'yes'
+    expect(readPushNotificationsConfig().enabled).toBe(false)
   })
 })

@@ -44,3 +44,5 @@ web/dist-fixture
 .impeccable/live/deferred-svelte-component-accepts.json
 .impeccable/live/*.png
 # impeccable-ignore-end
+my-profile/
+test-results/

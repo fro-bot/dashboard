@@ -20,6 +20,18 @@ inlined boundary types for RunPhase/Surface/RunState).
   contract at v0.73.0, but no upstream parse helper exists). The type definition
   is faithful to the upstream interface; the parse guards follow the same
   hand-rolled type-guard + fixed-reason-string pattern as parse.ts.
+- `push.ts` — locally authored for the dashboard's operator Web Push companion
+  feature (`docs/plans/2026-07-08-001-feat-operator-push-notifications-dashboard-plan.md`).
+  `VapidKeyResponse` mirrors the Gateway's `GET /operator/push/vapid-key`
+  response and deliberately omits any version field beyond `keyVersion` — the
+  Gateway returns only `{publicKey, keyVersion}`, no `contractVersion`.
+  `PushSubscriptionMetadata` mirrors the Gateway's safe-metadata response from
+  `GET /operator/push/subscriptions` (opaque `endpointHash` only — never the
+  raw endpoint, `p256dh`, or `auth` keys). `PushHandoffState` is client-derived,
+  not a wire field: the Gateway exposes no handoff-state route, so the
+  dashboard computes it from subscription metadata plus local browser state.
+  It is defined here so the vendored contract and the web-side duplicate
+  (`web/src/push/push-types.ts`) share one canonical string set.
 
 ## Omissions vs upstream
 

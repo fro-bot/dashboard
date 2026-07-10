@@ -1819,3 +1819,224 @@ describe('fixture runs index — indexed run stream binding', () => {
     expect([400, 404]).toContain(denied.status)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Push notification fixture routes
+// ---------------------------------------------------------------------------
+
+const PUSH_SUBSCRIPTION_BODY = {
+  endpoint: 'endpoint-fixture-push-001',
+  keys: {p256dh: 'fixture-p256dh-key', auth: 'fixture-auth-key'},
+}
+
+async function mintFixtureSessionId(app: Awaited<ReturnType<typeof buildFixtureTestApp>>): Promise<string> {
+  const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+  const {fixtureSessionId} = await res.json() as {fixtureSessionId: string}
+  return fixtureSessionId
+}
+
+describe('fixture push routes — vapid-key', () => {
+  it('GET /push/vapid-key returns exactly {publicKey, keyVersion} with no-store', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/push/vapid-key`)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('cache-control')).toBe('no-store')
+    const body = await res.json() as Record<string, unknown>
+    expect(Object.keys(body).sort()).toEqual(['keyVersion', 'publicKey'])
+    expect(typeof body.publicKey).toBe('string')
+    expect(typeof body.keyVersion).toBe('string')
+  })
+})
+
+describe('fixture push routes — subscribe', () => {
+  it('POST /push/subscriptions requires a valid fixture session', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/push/subscriptions`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json', 'x-csrf-token': 'fixture-csrf', 'idempotency-key': 'key-001'},
+      body: JSON.stringify(PUSH_SUBSCRIPTION_BODY),
+    })
+    expect(res.status).toBe(400)
+    const body = await res.text()
+    expect(body).not.toContain(PUSH_SUBSCRIPTION_BODY.endpoint)
+  })
+
+  it('POST /push/subscriptions requires a CSRF header', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const fixtureSessionId = await mintFixtureSessionId(app)
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/push/subscriptions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-fixture-session-id': fixtureSessionId,
+        'idempotency-key': 'key-002',
+      },
+      body: JSON.stringify(PUSH_SUBSCRIPTION_BODY),
+    })
+    expect(res.status).toBe(400)
+  })
+
+  it('POST /push/subscriptions rejects a wrong-shape body', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const fixtureSessionId = await mintFixtureSessionId(app)
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/push/subscriptions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-fixture-session-id': fixtureSessionId,
+        'x-csrf-token': 'fixture-csrf',
+        'idempotency-key': 'key-003',
+      },
+      body: JSON.stringify({endpoint: 'endpoint-fixture-002'}), // missing keys
+    })
+    expect(res.status).toBe(400)
+    const body = await res.json() as {error: string}
+    expect(body.error).toBe('invalid-request')
+  })
+
+  it('POST /push/subscriptions is idempotent per session+idempotencyKey', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const fixtureSessionId = await mintFixtureSessionId(app)
+    const headers = {
+      'content-type': 'application/json',
+      'x-fixture-session-id': fixtureSessionId,
+      'x-csrf-token': 'fixture-csrf',
+      'idempotency-key': 'key-idem-004',
+    }
+    const r1 = await app.request(`${FIXTURE_OPERATOR_PREFIX}/push/subscriptions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(PUSH_SUBSCRIPTION_BODY),
+    })
+    expect(r1.status).toBe(200)
+    const r2 = await app.request(`${FIXTURE_OPERATOR_PREFIX}/push/subscriptions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(PUSH_SUBSCRIPTION_BODY),
+    })
+    expect(r2.status).toBe(200)
+    const b1 = await r1.json()
+    const b2 = await r2.json()
+    expect(b1).toEqual(b2)
+  })
+})
+
+describe('fixture push routes — subscriptions metadata + unsubscribe', () => {
+  it('GET /push/subscriptions returns not-subscribed shape with no active record', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const fixtureSessionId = await mintFixtureSessionId(app)
+    const res = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/push/subscriptions?fixtureSessionId=${fixtureSessionId}`,
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get('cache-control')).toBe('no-store')
+    const body = await res.json() as Record<string, unknown>
+    expect(body.active).toBeUndefined()
+    expect(body.endpointHash).toBeUndefined()
+  })
+
+  it('GET /push/subscriptions returns safe metadata after subscribe, never raw endpoint/keys', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const fixtureSessionId = await mintFixtureSessionId(app)
+    await app.request(`${FIXTURE_OPERATOR_PREFIX}/push/subscriptions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-fixture-session-id': fixtureSessionId,
+        'x-csrf-token': 'fixture-csrf',
+        'idempotency-key': 'key-meta-005',
+      },
+      body: JSON.stringify(PUSH_SUBSCRIPTION_BODY),
+    })
+
+    const res = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/push/subscriptions?fixtureSessionId=${fixtureSessionId}`,
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json() as Record<string, unknown>
+    expect(body.active).toBe(true)
+    expect(typeof body.endpointHash).toBe('string')
+    expect((body.endpointHash as string)).not.toContain(PUSH_SUBSCRIPTION_BODY.endpoint)
+    expect(body.endpoint).toBeUndefined()
+    expect(body.keys).toBeUndefined()
+    expect(body.p256dh).toBeUndefined()
+    expect(body.auth).toBeUndefined()
+    const rawText = JSON.stringify(body)
+    expect(rawText).not.toContain(PUSH_SUBSCRIPTION_BODY.endpoint)
+    expect(rawText).not.toContain(PUSH_SUBSCRIPTION_BODY.keys.p256dh)
+    expect(rawText).not.toContain(PUSH_SUBSCRIPTION_BODY.keys.auth)
+  })
+
+  it('POST /push/subscriptions/unsubscribe marks the record inactive', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const fixtureSessionId = await mintFixtureSessionId(app)
+    await app.request(`${FIXTURE_OPERATOR_PREFIX}/push/subscriptions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-fixture-session-id': fixtureSessionId,
+        'x-csrf-token': 'fixture-csrf',
+        'idempotency-key': 'key-unsub-006',
+      },
+      body: JSON.stringify(PUSH_SUBSCRIPTION_BODY),
+    })
+
+    const unsubRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/push/subscriptions/unsubscribe`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-fixture-session-id': fixtureSessionId,
+        'x-csrf-token': 'fixture-csrf',
+      },
+      body: JSON.stringify({endpoint: PUSH_SUBSCRIPTION_BODY.endpoint}),
+    })
+    expect(unsubRes.status).toBe(200)
+
+    const metaRes = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/push/subscriptions?fixtureSessionId=${fixtureSessionId}`,
+    )
+    const body = await metaRes.json() as Record<string, unknown>
+    expect(body.active).toBe(false)
+    expect(body.inactiveReason).toBe('unsubscribed')
+  })
+
+  it('POST /push/subscriptions/unsubscribe requires a valid fixture session', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/push/subscriptions/unsubscribe`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json', 'x-csrf-token': 'fixture-csrf'},
+      body: JSON.stringify({endpoint: PUSH_SUBSCRIPTION_BODY.endpoint}),
+    })
+    expect(res.status).toBe(400)
+    const body = await res.text()
+    expect(body).not.toContain(PUSH_SUBSCRIPTION_BODY.endpoint)
+  })
+})
+
+describe('fixture push routes — production guard (each route 404s when any single guard fails)', () => {
+  const pushRoutes: {path: string; method: 'GET' | 'POST'}[] = [
+    {path: '/push/vapid-key', method: 'GET'},
+    {path: '/push/subscriptions', method: 'POST'},
+    {path: '/push/subscriptions', method: 'GET'},
+    {path: '/push/subscriptions/unsubscribe', method: 'POST'},
+  ]
+
+  for (const {path, method} of pushRoutes) {
+    it(`${method} ${path} returns 404 when fixture flag is off`, async () => {
+      const app = await buildFixtureTestApp({fixtureHarnessEnabled: false, bindHost: '127.0.0.1'})
+      const res = await authedGet(app, `${FIXTURE_OPERATOR_PREFIX}${path}`)
+      if (method === 'GET') {
+        expect(res.status).toBe(404)
+      } else {
+        const postRes = await authedPost(app, `${FIXTURE_OPERATOR_PREFIX}${path}`, {})
+        expect(postRes.status).toBe(404)
+      }
+    })
+
+    it(`${method} ${path} returns 404/deny when bind host is non-loopback`, async () => {
+      await expect(
+        buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '0.0.0.0'}),
+      ).rejects.toThrow(/fixture.*loopback|loopback.*fixture/i)
+    })
+  }
+})

@@ -1,3 +1,4 @@
+import type {CsrfDto, LaunchRunRequest, LaunchRunResponse, RunApprovalDecisionResponse, RunApprovalsResponse, RunApprovalSummary, RunSnapshotDto, RunStreamEvent, SessionDto} from './operator-client.ts'
 /**
  * Typed fixtures for the operator UI skeleton.
  *
@@ -5,7 +6,6 @@
  * - Fixture data must NOT contain real prompts, tool args, workspace paths,
  *   internal URLs, tokens, session cookies, or CSRF values.
  */
-import type {CsrfDto, LaunchRunRequest, LaunchRunResponse, RunApprovalDecisionResponse, RunApprovalsResponse, RunApprovalSummary, RunSnapshotDto, RunStreamEvent, SessionDto} from './operator-client.ts'
 
 // ---------------------------------------------------------------------------
 // Session fixtures
@@ -224,3 +224,18 @@ export const FIXTURE_LAUNCH_REQUEST: LaunchRunRequest = {
 export const FIXTURE_LAUNCH_RESPONSE: LaunchRunResponse = {
   runId: 'run-fixture-queued-001',
 }
+
+// ---------------------------------------------------------------------------
+// Push notification fixtures (GET /operator/push/vapid-key, /operator/push/subscriptions)
+// ---------------------------------------------------------------------------
+
+/**
+ * A real, valid P-256 VAPID public key (uncompressed point, base64url
+ * encoded). Fixture-only: no corresponding private key is provided, so it
+ * cannot be used to send pushes. VAPID public keys are safe to embed — they
+ * are public by definition.
+ */
+export const FIXTURE_VAPID_PUBLIC_KEY =
+  'BDHrxCLBc7E1yZoIRd85t_CibuCuzmVTv3LIxlY_JhdXoGM7mhohkKqUE_lXPDzetAdhm8LD_S2xUjveMFWRjl4'
+
+export const FIXTURE_VAPID_KEY_VERSION = 'fixture-vapid-v1'

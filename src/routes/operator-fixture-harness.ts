@@ -13,10 +13,18 @@
  *   require a matching session (query param or x-fixture-session-id header).
  */
 import type {RunSummary} from '../gateway/operator-contract/run-summary.ts'
+import {createHash} from 'node:crypto'
 import {Hono} from 'hono'
 import {FIXTURE_OPERATOR_PREFIX} from '../gateway/operator-fixture-routes.ts'
 import {FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../gateway/operator-fixture-sse.ts'
-import {FIXTURE_CSRF, FIXTURE_KNOWN_FAILURE_REASON, FIXTURE_SESSION, FIXTURE_UNKNOWN_FAILURE_REASON} from '../gateway/operator-fixtures.ts'
+import {
+  FIXTURE_CSRF,
+  FIXTURE_KNOWN_FAILURE_REASON,
+  FIXTURE_SESSION,
+  FIXTURE_UNKNOWN_FAILURE_REASON,
+  FIXTURE_VAPID_KEY_VERSION,
+  FIXTURE_VAPID_PUBLIC_KEY,
+} from '../gateway/operator-fixtures.ts'
 import {logger} from '../logger.ts'
 
 // Fixture-prefixed repo list — never real repos.
@@ -94,6 +102,42 @@ const idempotencyMap = new Map<string, string>() // `${sessionId}:${idemKey}` �
 const runScenarioMap = new Map<string, string>() // runId → scenarioName
 const runSessionMap = new Map<string, string>() // runId → owning fixtureSessionId (launched runs only)
 const validFixtureSessionIds = new Set<string>() // all session IDs minted by GET /session
+
+// Push subscription fixture record. `endpoint` is kept internally ONLY to match
+// unsubscribe requests and compute the synthetic hash — it is never returned
+// in any response.
+interface FixturePushRecord {
+  endpoint: string
+  keyVersion: string
+  active: boolean
+  createdAt: string
+  updatedAt: string
+  inactiveReason?: string
+}
+
+// Idempotency scoping mirrors POST /runs: `${sessionId}:${idemKey}` → record.
+const pushIdempotencyMap = new Map<string, FixturePushRecord>()
+// Current record per fixtureSessionId — the "active subscription" for that
+// session's browser. Overwritten on subscribe, marked inactive on unsubscribe.
+const pushSessionRecordMap = new Map<string, FixturePushRecord>()
+
+// Synthetic, never a real sha256 — deterministic per-endpoint fixture hash.
+function fixtureEndpointHash(endpoint: string): string {
+  return createHash('sha256').update(endpoint).digest('hex')
+}
+
+function isValidPushSubscriptionBody(
+  body: unknown,
+): body is {endpoint: string; keys: {p256dh: string; auth: string}} {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return false
+  const candidate = body as Record<string, unknown>
+  if (typeof candidate.endpoint !== 'string' || candidate.endpoint.trim() === '') return false
+  if (candidate.keys === null || typeof candidate.keys !== 'object' || Array.isArray(candidate.keys)) return false
+  const keys = candidate.keys as Record<string, unknown>
+  if (typeof keys.p256dh !== 'string' || keys.p256dh.trim() === '') return false
+  if (typeof keys.auth !== 'string' || keys.auth.trim() === '') return false
+  return true
+}
 
 let sessionIdCounter = 0
 let runIdCounter = 0
@@ -368,6 +412,170 @@ export function buildFixtureHarnessRouter(): Hono {
     return res
   })
 
+  // GET /push/vapid-key — synthetic VAPID public key. EXACTLY {publicKey, keyVersion}.
+  router.get('/push/vapid-key', c => {
+    logger.debug('fixture-harness: GET /push/vapid-key', {status: 200})
+    const res = c.json({publicKey: FIXTURE_VAPID_PUBLIC_KEY, keyVersion: FIXTURE_VAPID_KEY_VERSION})
+    setNoStore(res.headers)
+    return res
+  })
+
+  // POST /push/subscriptions — synthetic subscribe. Requires fixture session +
+  // CSRF header + idempotency key. Idempotent per `${fixtureSessionId}:${idemKey}`.
+  router.post('/push/subscriptions', async c => {
+    const requestSessionId = extractRequestSessionId(c)
+    if (requestSessionId === undefined) {
+      logger.debug('fixture-harness: POST /push/subscriptions', {status: 400, errorClass: 'invalid-fixture-session'})
+      const res = c.json({error: 'invalid-fixture-session'}, 400)
+      setNoStore(res.headers)
+      return res
+    }
+
+    const csrfToken = c.req.header('x-csrf-token')
+    if (typeof csrfToken !== 'string' || csrfToken.trim() === '') {
+      logger.debug('fixture-harness: POST /push/subscriptions', {status: 400, errorClass: 'missing-csrf'})
+      const res = c.json({error: 'missing-csrf'}, 400)
+      setNoStore(res.headers)
+      return res
+    }
+
+    const idempotencyKey = c.req.header('idempotency-key')
+    if (typeof idempotencyKey !== 'string' || idempotencyKey.trim() === '') {
+      logger.debug('fixture-harness: POST /push/subscriptions', {status: 400, errorClass: 'missing-idempotency-key'})
+      const res = c.json({error: 'missing-idempotency-key'}, 400)
+      setNoStore(res.headers)
+      return res
+    }
+
+    let body: unknown
+    try {
+      body = await c.req.json()
+    } catch {
+      logger.debug('fixture-harness: POST /push/subscriptions', {status: 400, errorClass: 'parse'})
+      const res = c.json({error: 'invalid-request'}, 400)
+      setNoStore(res.headers)
+      return res
+    }
+
+    if (!isValidPushSubscriptionBody(body)) {
+      logger.debug('fixture-harness: POST /push/subscriptions', {status: 400, errorClass: 'validation'})
+      const res = c.json({error: 'invalid-request'}, 400)
+      setNoStore(res.headers)
+      return res
+    }
+
+    const scopedKey = `${requestSessionId}:${idempotencyKey}`
+    const existing = pushIdempotencyMap.get(scopedKey)
+    if (existing !== undefined) {
+      logger.debug('fixture-harness: POST /push/subscriptions idempotent', {status: 200})
+      const res = c.json({ok: true})
+      setNoStore(res.headers)
+      return res
+    }
+
+    const now = new Date().toISOString()
+    const record: FixturePushRecord = {
+      endpoint: body.endpoint,
+      keyVersion: FIXTURE_VAPID_KEY_VERSION,
+      active: true,
+      createdAt: now,
+      updatedAt: now,
+    }
+    pushIdempotencyMap.set(scopedKey, record)
+    pushSessionRecordMap.set(requestSessionId, record)
+
+    logger.debug('fixture-harness: POST /push/subscriptions', {status: 200})
+    const res = c.json({ok: true})
+    setNoStore(res.headers)
+    return res
+  })
+
+  // POST /push/subscriptions/unsubscribe — synthetic unsubscribe. Requires
+  // fixture session + CSRF header. Marks the session's record inactive.
+  router.post('/push/subscriptions/unsubscribe', async c => {
+    const requestSessionId = extractRequestSessionId(c)
+    if (requestSessionId === undefined) {
+      logger.debug('fixture-harness: POST /push/subscriptions/unsubscribe', {status: 400, errorClass: 'invalid-fixture-session'})
+      const res = c.json({error: 'invalid-fixture-session'}, 400)
+      setNoStore(res.headers)
+      return res
+    }
+
+    const csrfToken = c.req.header('x-csrf-token')
+    if (typeof csrfToken !== 'string' || csrfToken.trim() === '') {
+      logger.debug('fixture-harness: POST /push/subscriptions/unsubscribe', {status: 400, errorClass: 'missing-csrf'})
+      const res = c.json({error: 'missing-csrf'}, 400)
+      setNoStore(res.headers)
+      return res
+    }
+
+    let body: unknown
+    try {
+      body = await c.req.json()
+    } catch {
+      logger.debug('fixture-harness: POST /push/subscriptions/unsubscribe', {status: 400, errorClass: 'parse'})
+      const res = c.json({error: 'invalid-request'}, 400)
+      setNoStore(res.headers)
+      return res
+    }
+
+    if (
+      body === null ||
+      typeof body !== 'object' ||
+      Array.isArray(body) ||
+      typeof (body as Record<string, unknown>).endpoint !== 'string'
+    ) {
+      logger.debug('fixture-harness: POST /push/subscriptions/unsubscribe', {status: 400, errorClass: 'validation'})
+      const res = c.json({error: 'invalid-request'}, 400)
+      setNoStore(res.headers)
+      return res
+    }
+
+    const record = pushSessionRecordMap.get(requestSessionId)
+    if (record !== undefined) {
+      record.active = false
+      record.updatedAt = new Date().toISOString()
+      record.inactiveReason = 'unsubscribed'
+    }
+
+    logger.debug('fixture-harness: POST /push/subscriptions/unsubscribe', {status: 200})
+    const res = c.json({ok: true})
+    setNoStore(res.headers)
+    return res
+  })
+
+  // GET /push/subscriptions — safe metadata only for the current fixture
+  // session's active record. Never the raw endpoint/keys.
+  router.get('/push/subscriptions', c => {
+    const requestSessionId = extractRequestSessionId(c)
+    if (requestSessionId === undefined) {
+      logger.debug('fixture-harness: GET /push/subscriptions', {status: 400, errorClass: 'invalid-fixture-session'})
+      const res = c.json({error: 'invalid-fixture-session'}, 400)
+      setNoStore(res.headers)
+      return res
+    }
+
+    const record = pushSessionRecordMap.get(requestSessionId)
+    if (record === undefined) {
+      logger.debug('fixture-harness: GET /push/subscriptions', {status: 200, errorClass: 'not-subscribed'})
+      const res = c.json({})
+      setNoStore(res.headers)
+      return res
+    }
+
+    logger.debug('fixture-harness: GET /push/subscriptions', {status: 200})
+    const res = c.json({
+      endpointHash: fixtureEndpointHash(record.endpoint),
+      keyVersion: record.keyVersion,
+      active: record.active,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      ...(record.inactiveReason === undefined ? {} : {inactiveReason: record.inactiveReason}),
+    })
+    setNoStore(res.headers)
+    return res
+  })
+
   return router
 }
 
@@ -377,6 +585,8 @@ export function resetFixtureHarnessForTesting(): void {
   runScenarioMap.clear()
   runSessionMap.clear()
   validFixtureSessionIds.clear()
+  pushIdempotencyMap.clear()
+  pushSessionRecordMap.clear()
   sessionIdCounter = 0
   runIdCounter = 0
 }

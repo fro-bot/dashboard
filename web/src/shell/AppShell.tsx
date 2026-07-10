@@ -14,9 +14,27 @@
  */
 
 import {type ReactNode, useCallback, useEffect, useRef, useState} from 'react'
+import {triggerLogoutAbort} from '../push/logout-abort.ts'
+import {buildPushClient, unsubscribeOptOut} from '../push/subscribe.ts'
 import {InstallPrompt} from '../pwa/InstallPrompt.tsx'
 import {ReloadPrompt} from '../pwa/ReloadPrompt.tsx'
 import {purgeOperatorCache} from '../pwa/logout-purge.ts'
+import {Notifications} from '../views/Notifications.tsx'
+
+/**
+ * Best-effort push teardown on logout. Runs local `unsubscribe()` + Gateway
+ * unsubscribe via `unsubscribeOptOut` — endpointless case is a no-op
+ * (never persists the endpoint). Swallows all errors: Gateway session
+ * inactivation on logout is the authoritative revocation path, so a
+ * teardown failure must never block navigation to the login page.
+ */
+function teardownPushOnLogout(): Promise<unknown> {
+  return unsubscribeOptOut({
+    getLocalSubscription: () =>
+      navigator.serviceWorker.ready.then((r) => r.pushManager.getSubscription()),
+    pushClient: buildPushClient(),
+  }).catch(() => undefined)
+}
 
 // Fail-closed redirect target for any logout outcome (success or failure).
 // The Gateway session cookie is HttpOnly — it cannot be cleared client-side,
@@ -42,9 +60,23 @@ function applyTheme(theme: Theme): void {
 
 interface AppShellProps {
   children: ReactNode
+  /**
+   * Fixture-mode push endpoint base (e.g. '/__fixture/operator/push').
+   * Undefined in production — Notifications' push client then falls back
+   * to buildPushClient's default '/operator/push'.
+   */
+  pushEndpointBase?: string
+  /**
+   * Whether push config (endpoint base / fixture session) is settled and safe
+   * to sweep with. Undefined (existing callers/tests) is treated as ready —
+   * production always renders with this true on first render.
+   */
+  pushConfigReady?: boolean
+  /** Fixture-mode session id, appended as a query param by the push client. */
+  pushFixtureSessionId?: string
 }
 
-export function AppShell({children}: AppShellProps) {
+export function AppShell({children, pushEndpointBase, pushConfigReady, pushFixtureSessionId}: AppShellProps) {
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
   const [loggingOut, setLoggingOut] = useState(false)
   const logoutInFlight = useRef(false)
@@ -73,6 +105,11 @@ export function AppShell({children}: AppShellProps) {
     // logged-out user cannot see cached operator data offline.
     purgeOperatorCache()
 
+    // Abort any in-flight push subscribe (e.g. started from the Notifications
+    // surface) so it discards its result and never issues a dangling POST
+    // after the operator has logged out.
+    triggerLogoutAbort()
+
     try {
       const csrfRes = await fetch('/operator/session/csrf', {credentials: 'same-origin'})
       if (!csrfRes.ok) {
@@ -92,17 +129,25 @@ export function AppShell({children}: AppShellProps) {
         return
       }
 
-      const logoutRes = await fetch('/operator/auth/logout', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: {'x-csrf-token': csrfToken},
-      })
-      if (!logoutRes.ok) {
+      // Best-effort push teardown runs in parallel with the logout POST.
+      // Bounded by Promise.allSettled: neither its failure nor a hang can
+      // block navigation — Gateway session inactivation on logout is the
+      // authoritative revocation path.
+      const [logoutSettled] = await Promise.allSettled([
+        fetch('/operator/auth/logout', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {'x-csrf-token': csrfToken},
+        }),
+        teardownPushOnLogout(),
+      ])
+
+      if (logoutSettled.status !== 'fulfilled' || !logoutSettled.value.ok) {
         redirectToLogin()
         return
       }
 
-      await logoutRes.text().catch(() => undefined)
+      await logoutSettled.value.text().catch(() => undefined)
       redirectToLogin()
     } catch {
       // Network error — fall back to login page.
@@ -256,6 +301,11 @@ export function AppShell({children}: AppShellProps) {
         }}
         className="sm:px-6 md:px-8 lg:px-10"
       >
+        <Notifications
+          pushEndpointBase={pushEndpointBase}
+          pushConfigReady={pushConfigReady}
+          pushFixtureSessionId={pushFixtureSessionId}
+        />
         {children}
       </main>
 

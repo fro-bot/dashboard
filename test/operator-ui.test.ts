@@ -95,6 +95,18 @@ function makeFakeOperatorClient(
     decideRunApproval: () => {
       throw new Error('decideRunApproval must not be called during page render')
     },
+    getVapidKey: () => {
+      throw new Error('getVapidKey must not be called during page render')
+    },
+    getPushSubscriptionMetadata: () => {
+      throw new Error('getPushSubscriptionMetadata must not be called during page render')
+    },
+    subscribePush: () => {
+      throw new Error('subscribePush must not be called during page render')
+    },
+    unsubscribePush: () => {
+      throw new Error('unsubscribePush must not be called during page render')
+    },
   }
 }
 
@@ -102,6 +114,7 @@ interface TestAppOpts {
   operatorUiEnabled: boolean
   gatewayOperatorSessionEnabled?: boolean
   operatorClient?: OperatorClient
+  pushNotificationsEnabled?: boolean
 }
 
 async function buildTestApp(opts: TestAppOpts | boolean) {
@@ -118,6 +131,7 @@ async function buildTestApp(opts: TestAppOpts | boolean) {
     operatorUiEnabled: resolved.operatorUiEnabled,
     gatewayOperatorSessionEnabled: resolved.gatewayOperatorSessionEnabled,
     operatorClient: resolved.operatorClient,
+    pushNotificationsEnabled: resolved.pushNotificationsEnabled,
   })
 }
 
@@ -839,5 +853,79 @@ describe('operator UI — /operator/ trailing-slash: same behavior as /operator 
     if (res.status === 302 || res.status === 303) {
       expect(res.headers.get('location')).toBe('/')
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Push notification routes — no-dashboard-proxy 404 invariant
+//
+// The dashboard depends on these 4 Gateway v1 routes but never mounts them —
+// they are reverse-proxied to the Gateway. Every verb must 404 from
+// buildDashboardApp (HEAD/OPTIONS must not leak existence or allowed methods).
+// ---------------------------------------------------------------------------
+
+describe('push routes — no-dashboard-proxy 404 invariant', () => {
+  const pushPaths = [
+    '/operator/push/vapid-key',
+    '/operator/push/subscriptions',
+    '/operator/push/subscriptions/unsubscribe',
+  ]
+  const verbs: ('GET' | 'POST' | 'HEAD' | 'OPTIONS' | 'PUT' | 'PATCH' | 'DELETE')[] = [
+    'GET',
+    'POST',
+    'HEAD',
+    'OPTIONS',
+    'PUT',
+    'PATCH',
+    'DELETE',
+  ]
+
+  for (const path of pushPaths) {
+    for (const method of verbs) {
+      it(`${method} ${path} returns 404 from buildDashboardApp (not proxied)`, async () => {
+        const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
+        const app = await buildTestApp({
+          operatorUiEnabled: true,
+          gatewayOperatorSessionEnabled: true,
+          operatorClient,
+        })
+        const res = await app.request(path, {
+          method,
+          headers: {cookie: 'gateway_session=test-gateway-cookie'},
+        })
+        expect(res.status).toBe(404)
+      })
+    }
+  }
+})
+
+describe('push-enabled meta injection — served SPA shell integrity', () => {
+  it('serves a COMPLETE index.html (root mount target present) with the injected meta when push is enabled', async () => {
+    const app = await buildTestApp({operatorUiEnabled: true, pushNotificationsEnabled: true})
+    const res = await authedGet(app, '/')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // The injected meta must be present...
+    expect(body).toContain('<meta name="push-enabled" content="true">')
+    // ...AND the response must NOT be truncated: the React mount target must
+    // survive injection. A stale Content-Length after injection dropped the
+    // tail of the document (regression: blank page / "Root element not found").
+    expect(body).toContain('<div id="root">')
+    expect(body).toContain('</html>')
+    // Content-Length, when present, must match the actual (post-injection) body
+    // byte length — a mismatch is exactly what truncated the served shell.
+    const contentLength = res.headers.get('content-length')
+    if (contentLength !== null) {
+      expect(Number(contentLength)).toBe(Buffer.byteLength(body))
+    }
+  })
+
+  it('does not inject the meta when push is disabled', async () => {
+    const app = await buildTestApp({operatorUiEnabled: true, pushNotificationsEnabled: false})
+    const res = await authedGet(app, '/')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).not.toContain('push-enabled')
+    expect(body).toContain('<div id="root">')
   })
 })

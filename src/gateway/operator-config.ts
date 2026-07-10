@@ -49,6 +49,33 @@ export interface GatewayOperatorSessionConfig {
   readonly enabled: boolean
 }
 
+export interface PushNotificationsConfig {
+  readonly enabled: boolean
+}
+
+/**
+ * Read the operator push-notifications feature flag.
+ *
+ * Fail-closed: only 'true' (case-insensitive, trimmed) enables the flag.
+ * All other values, including null, empty string, 'false', '1', 'yes', disable it.
+ */
+export function readPushNotificationsConfig(): PushNotificationsConfig {
+  let raw: string | null
+  try {
+    raw = readOptionalSecret('DASHBOARD_OPERATOR_PUSH_ENABLED')
+  } catch {
+    // readOptionalSecret throws on embedded newlines — treat as disabled (fail-closed)
+    return {enabled: false}
+  }
+
+  if (raw === null) {
+    return {enabled: false}
+  }
+
+  const trimmed = raw.trim().toLowerCase()
+  return {enabled: trimmed === 'true'}
+}
+
 // ---------------------------------------------------------------------------
 // Gateway operator origin
 // ---------------------------------------------------------------------------
