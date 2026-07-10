@@ -1,7 +1,7 @@
 ---
 title: Operator local fixture harness pattern
 date: 2026-06-30
-last_updated: 2026-07-03
+last_updated: 2026-07-10
 category: best-practices
 module: operator-fixture-harness
 problem_type: best_practice
@@ -27,6 +27,9 @@ related_components:
   - public/operator-stream.js
   - web/vite.config.ts
   - src/server.ts
+  - web/src/push/subscribe.ts
+  - web/src/views/Notifications.tsx
+  - web/src/App.tsx
 ---
 
 # Operator local fixture harness pattern
@@ -161,6 +164,57 @@ The fixture runtime loader belongs behind an `import.meta.env.DEV` guard so Vite
 tree-shakes it out of production builds. Production build tests should assert that
 `web/dist/**`, `sw.js`, and the public operator modules contain no `/__fixture`,
 `dist-fixture`, or `fixture-runtime-loader` strings.
+
+### A new browser client must adopt the same fixture wiring
+
+When you add a *new* browser client to this harness (not just a new scenario on an
+existing one), it must inherit the same fixture-awareness the sibling clients already
+have, or its happy path is unreachable in fixture mode. The operator Web Push client
+was added without it and cost four separate real-browser round-trips, each exposing
+one more missing piece. The checklist:
+
+1. **Derive the endpoint base; do not hardcode `/operator/*`.** Thread the fixture base
+   through the same `App.tsx → AppShell → view` path the other surfaces use, defaulting
+   to the production path when no fixture base is supplied:
+
+   ```tsx
+   <AppShell
+     pushEndpointBase={fixtureState ? `${fixtureState.fixtureEndpointBase}/push` : undefined}
+     pushConfigReady={fixtureDetectionSettled}
+     pushFixtureSessionId={fixtureState?.fixtureSessionId}
+   />
+   ```
+
+2. **Send `fixtureSessionId` on every request**, exactly like the sibling clients, via a
+   single helper so production stays untouched:
+
+   ```ts
+   const withFixtureSessionId = (url: string): string =>
+     fixtureSessionId === undefined
+       ? url
+       : `${url}${url.includes('?') ? '&' : '?'}fixtureSessionId=${encodeURIComponent(fixtureSessionId)}`
+   ```
+
+3. **Fixture-prefix the sibling endpoints too.** A client's CSRF/session calls are part of
+   the same contract — derive the operator base from the client base instead of hardcoding
+   it, so `refreshCsrf()` hits `/__fixture/operator/session/csrf`, not `/operator/session/csrf`:
+
+   ```ts
+   const operatorBase = endpointBase.replace(/\/push$/, '')
+   ```
+
+4. **Gate any on-mount reconcile/sweep on fixture-detection-settled.** Fixture detection
+   resolves asynchronously; a sweep that fires before it settles caches a 404-derived
+   "disabled" state that never re-resolves. Only sweep once the base is known:
+
+   ```ts
+   if (configReady) void runSweep()
+   ```
+
+5. **Fixture stubs for a security primitive must be real enough for the browser API.** A
+   placeholder of the right length is not enough — the browser validates it. The fixture
+   VAPID key must be a genuine P-256 public point or `pushManager.subscribe()` rejects it.
+   A *public* key is safe to embed; only the private key can send pushes.
 
 ### Make fixture mode visible
 
@@ -324,3 +378,4 @@ The active marker should move with the current stream.
 - `docs/solutions/best-practices/authenticated-sse-consumption-fetch-stream-no-leak-2026-06-20.md`
 - PR #132 / release `2026.06.55`
 - PR #137
+- PR #188 (operator Web Push) — the new-browser-client fixture-wiring checklist
