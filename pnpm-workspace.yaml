@@ -1,5 +1,8 @@
 allowBuilds:
   '@swc/core': true
+  # @opencode-ai/plugin is a type-only devDependency (OpenCode runs its own plugin
+  # host); its transitive native accelerator never needs to build here.
+  msgpackr-extract: false
   unrs-resolver: true
 
 shamefullyHoist: true

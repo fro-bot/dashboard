@@ -3,9 +3,9 @@
   "extends": "@bfra.me/tsconfig",
   "compilerOptions": {
     "types": ["node"],
+    "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["**/*.ts"],
-  "exclude": ["node_modules", "dist", "web", ".opencode", "test/operator-runtime.test.ts"]
+  "include": ["**/*.ts"]
 }

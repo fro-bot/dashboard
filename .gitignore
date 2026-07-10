@@ -19,8 +19,10 @@ web/dist-fixture
 # Opencode
 !.opencode/
 .opencode/*
+!.opencode/impeccable/
 !.opencode/themes/
 !.opencode/tui.json
+!.opencode/tsconfig.json
 
 # impeccable-ignore-start
 # Ephemeral output, runtime state, and per-dev overrides.
