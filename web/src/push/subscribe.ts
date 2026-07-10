@@ -79,6 +79,7 @@ function hasValidSubscriptionMetadataShape(value: unknown): value is PushSubscri
  */
 export function buildPushClient(opts?: BuildPushClientOptions): PushClient {
   const endpointBase = opts?.endpointBase ?? '/operator/push'
+  const operatorBase = endpointBase.replace(/\/push$/, '')
   const {fixtureSessionId} = opts ?? {}
 
   // Appends fixtureSessionId as a query param, mirroring
@@ -105,7 +106,7 @@ export function buildPushClient(opts?: BuildPushClientOptions): PushClient {
   return {
     async refreshCsrf() {
       try {
-        const res = await browserFetch('/operator/session/csrf', {
+        const res = await browserFetch(withFixtureSessionId(`${operatorBase}/session/csrf`), {
           headers: {'content-type': 'application/json'},
         })
         if (!res.ok) return err({kind: 'http', status: res.status})

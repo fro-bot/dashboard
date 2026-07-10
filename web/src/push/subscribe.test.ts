@@ -204,6 +204,31 @@ describe('buildPushClient', () => {
       expect(url).toBe('/operator/push/vapid-key')
       expect(url).not.toContain('fixtureSessionId')
     })
+
+    it('refreshCsrf: production defaults -> fetches exact CSRF path with no query param', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {csrfToken: 'tok'}))
+      vi.stubGlobal('fetch', fetchMock)
+
+      const client = buildPushClient()
+      await client.refreshCsrf()
+
+      const url = fetchMock.mock.calls[0]?.[0] as string
+      expect(url).toBe('/operator/session/csrf')
+    })
+
+    it('refreshCsrf: fixture mode -> derives operator base from endpointBase and appends fixtureSessionId', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {csrfToken: 'tok'}))
+      vi.stubGlobal('fetch', fetchMock)
+
+      const client = buildPushClient({
+        endpointBase: '/__fixture/operator/push',
+        fixtureSessionId: 'fixture-session-0009',
+      })
+      await client.refreshCsrf()
+
+      const url = fetchMock.mock.calls[0]?.[0] as string
+      expect(url).toBe('/__fixture/operator/session/csrf?fixtureSessionId=fixture-session-0009')
+    })
   })
 })
 
