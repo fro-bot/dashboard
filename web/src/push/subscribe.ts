@@ -395,7 +395,20 @@ export async function subscribeOptIn(deps: SubscribeDeps): Promise<SubscribeOutc
  * `pushManager.subscribe()`, which rejects `InvalidStateError` if a
  * subscription already exists) → resubscribe → POST. Skips the native
  * permission prompt (only reachable when permission is already granted).
- * Failure → subscribe-failed; retry re-runs this same flow.
+ *
+ * The forced unsubscribe-before-subscribe window is inherent to the browser
+ * API and cannot be fully closed. This narrows it with one bounded retry at
+ * each of the two failure points:
+ *  - `pushManager.subscribe()`: one immediate retry on throw.
+ *  - the Gateway POST: `subscribePush` already retries once internally on a
+ *    CSRF-400 (reusing the same idempotency key). This layer adds one more
+ *    retry on top, reusing the same idempotency key and minting a fresh
+ *    CSRF token first if the failure looks CSRF-shaped. Worst case (a
+ *    persistently CSRF-shaped 400) is bounded: at most 4 POSTs and 3
+ *    `refreshCsrf` calls, all sharing one idempotency key — duplicate-
+ *    subscription risk stays at zero regardless of retry count.
+ *
+ * Final failure -> subscribe-failed; retry re-runs this same flow.
  */
 export async function resubscribeStaleKey(deps: SubscribeDeps): Promise<SubscribeOutcome> {
   const mintKey = deps.mintIdempotencyKey ?? mintIdempotencyKey
@@ -426,7 +439,15 @@ export async function resubscribeStaleKey(deps: SubscribeDeps): Promise<Subscrib
       applicationServerKey: urlB64ToUint8Array(vapidKey.publicKey),
     })
   } catch {
-    return {kind: 'subscribe-failed'}
+    if (deps.signal?.aborted) return {kind: 'aborted'}
+    try {
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlB64ToUint8Array(vapidKey.publicKey),
+      })
+    } catch {
+      return {kind: 'subscribe-failed'}
+    }
   }
 
   if (deps.signal?.aborted) return {kind: 'aborted'}
@@ -437,13 +458,42 @@ export async function resubscribeStaleKey(deps: SubscribeDeps): Promise<Subscrib
     return {kind: 'subscribe-failed'}
   }
 
-  const postResult = await deps.pushClient.subscribePush(subscription.toJSON(), csrfResult.data, mintKey(), deps.signal)
-
   if (deps.signal?.aborted) return {kind: 'aborted'}
 
+  const idempotencyKey = mintKey()
+  const postResult = await deps.pushClient.subscribePush(subscription.toJSON(), csrfResult.data, idempotencyKey, deps.signal)
+
   if (!postResult.success) {
-    await subscription.unsubscribe().catch(() => false)
-    return {kind: 'subscribe-failed'}
+    if (deps.signal?.aborted) return {kind: 'aborted'}
+
+    const csrfShaped = postResult.error.kind === 'http' && postResult.error.status === 400
+    let retryCsrfToken = csrfResult.data
+    if (csrfShaped) {
+      const retryCsrfResult = await deps.pushClient.refreshCsrf()
+      if (!retryCsrfResult.success) {
+        await subscription.unsubscribe().catch(() => false)
+        return {kind: 'subscribe-failed'}
+      }
+      retryCsrfToken = retryCsrfResult.data
+    }
+
+    if (deps.signal?.aborted) return {kind: 'aborted'}
+
+    const retryPostResult = await deps.pushClient.subscribePush(
+      subscription.toJSON(),
+      retryCsrfToken,
+      idempotencyKey,
+      deps.signal,
+    )
+
+    if (deps.signal?.aborted) return {kind: 'aborted'}
+
+    if (!retryPostResult.success) {
+      await subscription.unsubscribe().catch(() => false)
+      return {kind: 'subscribe-failed'}
+    }
+
+    return {kind: 'subscribed'}
   }
 
   return {kind: 'subscribed'}
