@@ -664,6 +664,14 @@ function renderRunCard(view, onSelectRun) {
   badgeEl.hidden = true
   card.append(badgeEl)
 
+  // Cancel control region — a sibling to run-approvals. Populated by
+  // initOperatorStream (operator-stream.js) via the runtime seam once a stream
+  // attaches; gated on non-terminal status there. Safe-DOM only at creation.
+  const cancelEl = document.createElement('div')
+  cancelEl.dataset.role = 'run-cancel'
+  cancelEl.hidden = true
+  card.append(cancelEl)
+
   // Wire click and keyboard activation to the expand/collapse toggle.
   if (typeof onSelectRun === 'function') {
     const runId = view.runId
@@ -789,7 +797,7 @@ function expandCardForRestore(runId, onExpand) {
 /** Show/hide a card's four per-card substructure regions in one place. */
 function setSubstructureHidden(card, hidden) {
   if (typeof card.querySelector !== 'function') return
-  for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
+  for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge', 'run-cancel']) {
     const el = card.querySelector(`[data-role="${role}"]`)
     if (el !== null && el !== undefined) el.hidden = hidden
   }

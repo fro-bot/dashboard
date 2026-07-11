@@ -17,6 +17,7 @@ import {
   bootstrapOperatorStreams,
   buildApprovalClient,
   buildCancelClient,
+  CANCEL_RETRY_MAX_ATTEMPTS,
   FIRST_FRAME_TIMEOUT_MS,
   GATEWAY_PENDING_APPROVALS_CAP,
   getOpenApprovals,
@@ -28,15 +29,17 @@ import {
   MAX_SSE_BUFFER_BYTES,
   nextStreamState,
   parseSseFrame,
+  PHASE_TO_WEB_STATUS,
   PINNED_CONTRACT_VERSION,
   renderApprovalPrompt,
+  renderCancelControl,
   resetBootstrapState,
   RETRY_BASE_MS,
   RETRY_FACTOR,
   RETRY_MAX_COUNT,
   toSafeRunView,
 } from '../public/operator-stream.js'
-import {OPERATOR_CONTRACT_VERSION} from '../src/gateway/operator-contract/index.ts'
+import {OPERATOR_CONTRACT_VERSION, PHASE_TO_WEB_STATUS as VENDORED_PHASE_TO_WEB_STATUS} from '../src/gateway/operator-contract/index.ts'
 import {FIXTURE_RUN_ID_FOR_TESTS, FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../src/gateway/operator-fixture-sse.ts'
 
 const ACTIVE_STATUS = {
@@ -6615,5 +6618,310 @@ describe('live failure reason updates and announcements', () => {
     expect(reasonEl.dataset.reasonState).not.toBe('Run timed out')
 
     handle.close()
+  })
+})
+
+describe('PHASE_TO_WEB_STATUS local mirror — drift parity', () => {
+  it('matches the vendored src/gateway/operator-contract/run-status.ts mapping exactly', () => {
+    expect(PHASE_TO_WEB_STATUS).toEqual(VENDORED_PHASE_TO_WEB_STATUS)
+  })
+
+  it('maps every TerminalPhase to the safe cancelled/succeeded/failed statuses', () => {
+    expect(PHASE_TO_WEB_STATUS.CANCELLED).toBe('cancelled')
+    expect(PHASE_TO_WEB_STATUS.COMPLETED).toBe('succeeded')
+    expect(PHASE_TO_WEB_STATUS.FAILED).toBe('failed')
+  })
+})
+
+interface FakeCancelOutcome {
+  success: boolean
+  data?: {ok: true; runId: string; phase: string}
+  error?: {kind: string; status?: number}
+}
+
+/** Build a fake cancel client for renderCancelControl tests. */
+function makeFakeCancelClient(opts: {
+  cancelResult?: FakeCancelOutcome
+  cancelResults?: FakeCancelOutcome[]
+  refreshCsrfResult?: {success: boolean; data?: {csrfToken: string}; error?: {kind: string; status?: number}}
+} = {}) {
+  const cancelCalls: {runId: string; idempotencyKey: string; csrfToken: string}[] = []
+  let callIndex = 0
+  return {
+    cancelCalls,
+    client: {
+      refreshCsrf: async () => opts.refreshCsrfResult ?? {success: true, data: {csrfToken: 'test-csrf'}},
+      cancelRun: async (runId: string, idempotencyKey: string, csrfToken: string): Promise<FakeCancelOutcome> => {
+        cancelCalls.push({runId, idempotencyKey, csrfToken})
+        if (opts.cancelResults !== undefined) {
+          const result = opts.cancelResults[Math.min(callIndex, opts.cancelResults.length - 1)]
+          callIndex++
+          return result ?? {success: true, data: {ok: true, runId, phase: 'CANCELLED'}}
+        }
+        return opts.cancelResult ?? {success: true, data: {ok: true, runId, phase: 'CANCELLED'}}
+      },
+    } as unknown as Parameters<typeof renderCancelControl>[1],
+  }
+}
+
+function stubCancelRenderEnv() {
+  vi.stubGlobal('document', {
+    createElement: (tag: string) => makeFakeEl(tag),
+    querySelector: () => null,
+    readyState: 'complete',
+    addEventListener: () => {},
+  })
+  vi.stubGlobal('fetch', async () => new Promise<Response>(() => {}))
+  vi.stubGlobal('addEventListener', () => {})
+  vi.stubGlobal('crypto', {randomUUID: () => 'test-uuid-cancel'})
+}
+
+describe('renderCancelControl — two-step confirm interaction', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('happy path: idle renders one Cancel button; click arms Confirm/Dismiss', () => {
+    stubCancelRenderEnv()
+    const {client} = makeFakeCancelClient()
+    const {el} = renderCancelControl('run-001', client, () => {}) as unknown as {el: FakeElement}
+
+    expect(el.dataset.state).toBe('idle')
+    let buttons = findVisibleButtons(el)
+    expect(buttons).toHaveLength(1)
+    expect(buttons[0]?.textContent).toBe('Cancel run')
+
+    buttons[0]?.dispatchEvent({type: 'click'})
+    expect(el.dataset.state).toBe('armed')
+    buttons = findVisibleButtons(el)
+    expect(buttons.map(b => b.textContent).sort()).toEqual(['Confirm cancel', 'Dismiss'])
+  })
+
+  it('happy path: confirm issues cancelRun and dispatches onCancelDispatch, then renders cancelled', async () => {
+    stubCancelRenderEnv()
+    const {client, cancelCalls} = makeFakeCancelClient()
+    const dispatchCalls: string[] = []
+    const {el} = renderCancelControl('run-001', client, runId => {
+      dispatchCalls.push(runId)
+    }) as unknown as {el: FakeElement}
+
+    findVisibleButtons(el).find(b => b.textContent === 'Cancel run')?.dispatchEvent({type: 'click'})
+    findVisibleButtons(el).find(b => b.textContent === 'Confirm cancel')?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    expect(dispatchCalls).toEqual(['run-001'])
+    expect(cancelCalls).toHaveLength(1)
+    expect(el.dataset.state).toBe('cancelled')
+    const statusEl = findStatusElement(el)
+    expect(statusEl?.textContent).toMatch(/stopped/i)
+  })
+
+  it('happy path: already-terminal phase (COMPLETED) is rendered as the benign cancelled state', async () => {
+    stubCancelRenderEnv()
+    const {client} = makeFakeCancelClient({
+      cancelResult: {success: true, data: {ok: true, runId: 'run-001', phase: 'COMPLETED'}},
+    })
+    const {el} = renderCancelControl('run-001', client, () => {}) as unknown as {el: FakeElement}
+
+    findVisibleButtons(el).find(b => b.textContent === 'Cancel run')?.dispatchEvent({type: 'click'})
+    findVisibleButtons(el).find(b => b.textContent === 'Confirm cancel')?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    expect(el.dataset.state).toBe('cancelled')
+    const statusEl = findStatusElement(el)
+    expect(statusEl?.textContent).not.toMatch(/error|unavailable|fail/i)
+  })
+
+  it('edge: dismiss from armed returns to idle with a single Cancel button, no cancelRun call', () => {
+    stubCancelRenderEnv()
+    const {client, cancelCalls} = makeFakeCancelClient()
+    const {el} = renderCancelControl('run-001', client, () => {}) as unknown as {el: FakeElement}
+
+    findVisibleButtons(el).find(b => b.textContent === 'Cancel run')?.dispatchEvent({type: 'click'})
+    findVisibleButtons(el).find(b => b.textContent === 'Dismiss')?.dispatchEvent({type: 'click'})
+
+    expect(el.dataset.state).toBe('idle')
+    const buttons = findVisibleButtons(el)
+    expect(buttons).toHaveLength(1)
+    expect(buttons[0]?.textContent).toBe('Cancel run')
+    expect(cancelCalls).toHaveLength(0)
+  })
+
+  it('edge: a11y status node has role=status and aria-live=polite', () => {
+    stubCancelRenderEnv()
+    const {client} = makeFakeCancelClient()
+    const {el} = renderCancelControl('run-001', client, () => {}) as unknown as {el: FakeElement}
+    const statusEl = findStatusElement(el)
+    expect(statusEl?.attributes.role).toBe('status')
+    expect(statusEl?.attributes['aria-live']).toBe('polite')
+  })
+
+  it('edge: in-flight mutex blocks a second concurrent cancel', async () => {
+    stubCancelRenderEnv()
+    let resolveCancel!: (v: {success: boolean; data: {ok: true; runId: string; phase: string}}) => void
+    const cancelPromise = new Promise<{success: boolean; data: {ok: true; runId: string; phase: string}}>(resolve => {
+      resolveCancel = resolve
+    })
+    const cancelCalls: string[] = []
+    const client = {
+      refreshCsrf: async () => ({success: true, data: {csrfToken: 'csrf'}}),
+      cancelRun: async (runId: string) => {
+        cancelCalls.push(runId)
+        return cancelPromise
+      },
+    }
+    const {el} = renderCancelControl('run-001', client as unknown as Parameters<typeof renderCancelControl>[1], () => {}) as unknown as {el: FakeElement}
+
+    findVisibleButtons(el).find(b => b.textContent === 'Cancel run')?.dispatchEvent({type: 'click'})
+    const confirmBtn = findVisibleButtons(el).find(b => b.textContent === 'Confirm cancel')
+    confirmBtn?.dispatchEvent({type: 'click'})
+    confirmBtn?.dispatchEvent({type: 'click'}) // second confirm while pending must be a no-op (disabled + mutex)
+    resolveCancel({success: true, data: {ok: true, runId: 'run-001', phase: 'CANCELLED'}})
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(cancelCalls).toHaveLength(1)
+  })
+
+  it('error: 404 renders the unavailable state', async () => {
+    stubCancelRenderEnv()
+    const {client} = makeFakeCancelClient({
+      cancelResult: {success: false, error: {kind: 'http', status: 404}},
+    })
+    const {el} = renderCancelControl('run-001', client, () => {}) as unknown as {el: FakeElement}
+    findVisibleButtons(el).find(b => b.textContent === 'Cancel run')?.dispatchEvent({type: 'click'})
+    findVisibleButtons(el).find(b => b.textContent === 'Confirm cancel')?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(el.dataset.state).toBe('unavailable')
+    const statusEl = findStatusElement(el)
+    expect(statusEl?.textContent).toMatch(/unavailable/i)
+  })
+
+  it('error: 503 retries up to CANCEL_RETRY_MAX_ATTEMPTS then falls to unavailable', async () => {
+    vi.useFakeTimers()
+    stubCancelRenderEnv()
+    const results = Array.from({length: CANCEL_RETRY_MAX_ATTEMPTS + 1}, () => ({
+      success: false as const,
+      error: {kind: 'http', status: 503},
+    }))
+    const {client, cancelCalls} = makeFakeCancelClient({cancelResults: results})
+    const {el} = renderCancelControl('run-001', client, () => {}) as unknown as {el: FakeElement}
+
+    findVisibleButtons(el).find(b => b.textContent === 'Cancel run')?.dispatchEvent({type: 'click'})
+    findVisibleButtons(el).find(b => b.textContent === 'Confirm cancel')?.dispatchEvent({type: 'click'})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(el.dataset.state).toBe('retrying')
+
+    for (let i = 0; i < CANCEL_RETRY_MAX_ATTEMPTS; i++) {
+      await vi.advanceTimersByTimeAsync(60_000)
+    }
+
+    expect(el.dataset.state).toBe('unavailable')
+    expect(cancelCalls.length).toBe(CANCEL_RETRY_MAX_ATTEMPTS + 1)
+    vi.useRealTimers()
+  })
+
+  it('error: persistent 400/401/403 renders session-expired, not a retry loop', async () => {
+    stubCancelRenderEnv()
+    const {client, cancelCalls} = makeFakeCancelClient({
+      cancelResult: {success: false, error: {kind: 'http', status: 401}},
+    })
+    const {el} = renderCancelControl('run-001', client, () => {}) as unknown as {el: FakeElement}
+    findVisibleButtons(el).find(b => b.textContent === 'Cancel run')?.dispatchEvent({type: 'click'})
+    findVisibleButtons(el).find(b => b.textContent === 'Confirm cancel')?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(el.dataset.state).toBe('session-expired')
+    expect(cancelCalls).toHaveLength(1) // no loop
+    const statusEl = findStatusElement(el)
+    expect(statusEl?.textContent).toMatch(/session.*expired|reload/i)
+  })
+
+  it('error: network failure renders retryable transport-failure', async () => {
+    stubCancelRenderEnv()
+    const {client} = makeFakeCancelClient({
+      cancelResult: {success: false, error: {kind: 'network'}},
+    })
+    const {el} = renderCancelControl('run-001', client, () => {}) as unknown as {el: FakeElement}
+    findVisibleButtons(el).find(b => b.textContent === 'Cancel run')?.dispatchEvent({type: 'click'})
+    findVisibleButtons(el).find(b => b.textContent === 'Confirm cancel')?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(el.dataset.state).toBe('transport-failure')
+    const buttons = findVisibleButtons(el)
+    expect(buttons.some(b => b.textContent === 'Try again')).toBe(true)
+  })
+
+  it('error: protocol failure falls to the generic unavailable state', async () => {
+    stubCancelRenderEnv()
+    const {client} = makeFakeCancelClient({
+      cancelResult: {success: false, error: {kind: 'protocol'}},
+    })
+    const {el} = renderCancelControl('run-001', client, () => {}) as unknown as {el: FakeElement}
+    findVisibleButtons(el).find(b => b.textContent === 'Cancel run')?.dispatchEvent({type: 'click'})
+    findVisibleButtons(el).find(b => b.textContent === 'Confirm cancel')?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(el.dataset.state).toBe('unavailable')
+  })
+
+  it('integration: no raw runId, phase, or status code reaches rendered text', async () => {
+    stubCancelRenderEnv()
+    const {client} = makeFakeCancelClient({
+      cancelResult: {success: false, error: {kind: 'http', status: 503}},
+    })
+    const {el} = renderCancelControl('run-sensitive-001', client, () => {}) as unknown as {el: FakeElement}
+    findVisibleButtons(el).find(b => b.textContent === 'Cancel run')?.dispatchEvent({type: 'click'})
+    findVisibleButtons(el).find(b => b.textContent === 'Confirm cancel')?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+    const statusEl = findStatusElement(el)
+    expect(statusEl?.textContent).not.toContain('run-sensitive-001')
+    expect(statusEl?.textContent).not.toContain('503')
+    expect(statusEl?.textContent).not.toMatch(/CANCELLED|COMPLETED|FAILED/)
+  })
+
+  it('integration: notifyTerminal stops a pending retry and renders cancelled (terminal-wins)', async () => {
+    vi.useFakeTimers()
+    stubCancelRenderEnv()
+    const {client} = makeFakeCancelClient({
+      cancelResult: {success: false, error: {kind: 'http', status: 503}},
+    })
+    const {el, notifyTerminal} = renderCancelControl('run-001', client, () => {}) as unknown as {
+      el: FakeElement
+      notifyTerminal: () => void
+    }
+    findVisibleButtons(el).find(b => b.textContent === 'Cancel run')?.dispatchEvent({type: 'click'})
+    findVisibleButtons(el).find(b => b.textContent === 'Confirm cancel')?.dispatchEvent({type: 'click'})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(el.dataset.state).toBe('retrying')
+
+    notifyTerminal()
+    expect(el.dataset.state).toBe('cancelled')
+
+    // Advancing timers past the retry delay must not re-arm anything.
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(el.dataset.state).toBe('cancelled')
+    vi.useRealTimers()
+  })
+})
+
+describe('CSS selector ↔ cancel-control state emitter agreement', () => {
+  it('has a rule for every emitted cancel-control class/dataset state token', async () => {
+    const fs = await import('node:fs/promises')
+    const cssPath = new URL('../web/src/index.css', import.meta.url).pathname
+    const cssContent = await fs.readFile(cssPath, 'utf8')
+
+    const requiredClassTokens = [
+      '.run-cancel-control',
+      '.run-cancel-status',
+      '.run-cancel-controls',
+      '.run-cancel-btn-cancel',
+      '.run-cancel-btn-confirm',
+      '.run-cancel-btn-dismiss',
+      '.run-cancel-btn-retry',
+    ]
+    for (const token of requiredClassTokens) {
+      expect(cssContent).toContain(token)
+    }
+
+    const requiredStateTokens = ['idle', 'armed', 'pending', 'retrying', 'cancelled', 'unavailable', 'session-expired', 'transport-failure']
+    for (const state of requiredStateTokens) {
+      expect(cssContent).toContain(`[data-state="${state}"]`)
+    }
   })
 })

@@ -1177,6 +1177,21 @@ function validateDynamicId(id) {
 const VALID_CANCEL_PHASES = new Set(['CANCELLED', 'COMPLETED', 'FAILED'])
 
 /**
+ * Local mirror of src/gateway/operator-contract/run-status.ts PHASE_TO_WEB_STATUS.
+ * Maps the UPPERCASE cancel-response phase to the lowercase render status. Kept in
+ * sync manually (this file cannot import src/ — it ships as a standalone browser
+ * bundle); drift is caught by a conformance test. Never render the raw phase.
+ */
+export const PHASE_TO_WEB_STATUS = {
+  PENDING: 'queued',
+  ACKNOWLEDGED: 'running',
+  EXECUTING: 'running',
+  COMPLETED: 'succeeded',
+  FAILED: 'failed',
+  CANCELLED: 'cancelled',
+}
+
+/**
  * Parse an unknown value as an OperatorCancelResponse ({ok:true, runId, phase}).
  * Mirrors src/gateway/operator-contract/parse.ts parseOperatorCancelResponse.
  * Returns {success:true, data} or {success:false}. No echo of the input.
@@ -1236,6 +1251,33 @@ export function buildCancelClient(opts) {
     })
 
   const ROUTE_TEMPLATE = '/operator/runs/:runId/cancel'
+  const CSRF_ROUTE_TEMPLATE = '/operator/session/csrf'
+
+  /**
+   * Fetch a fresh CSRF token for the cancel POST. Mirrors buildApprovalClient's
+   * refreshCsrf — separate instance because this module cannot share module-level
+   * state with buildApprovalClient's closure.
+   */
+  async function refreshCsrf() {
+    try {
+      const res = await browserFetch(withFixtureParam(`${endpointBase}/session/csrf`), {
+        headers: {'content-type': 'application/json'},
+      })
+      if (!res.ok) {
+        logger?.error('operator-cancel-client: csrf http error', {route: CSRF_ROUTE_TEMPLATE, status: res.status})
+        return {success: false, error: {kind: 'http', status: res.status}}
+      }
+      const data = await res.json()
+      if (data === null || typeof data !== 'object' || typeof data.csrfToken !== 'string') {
+        logger?.error('operator-cancel-client: csrf protocol error', {route: CSRF_ROUTE_TEMPLATE})
+        return {success: false, error: {kind: 'protocol'}}
+      }
+      return {success: true, data: {csrfToken: data.csrfToken}}
+    } catch {
+      logger?.error('operator-cancel-client: csrf network error', {route: CSRF_ROUTE_TEMPLATE})
+      return {success: false, error: {kind: 'network'}}
+    }
+  }
 
   /**
    * POST a cancel request for a run.
@@ -1310,7 +1352,7 @@ export function buildCancelClient(opts) {
     return {success: false, error: {kind: 'http', status: res.status}}
   }
 
-  return {cancelRun}
+  return {cancelRun, refreshCsrf}
 }
 
 // ---------------------------------------------------------------------------
@@ -1571,6 +1613,274 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
   return el
 }
 
+// ---------------------------------------------------------------------------
+// Cancel control interaction state machine (per-run, browser-side)
+// ---------------------------------------------------------------------------
+
+/**
+ * Bounded retry count for a transient (HTTP 503) cancel response. This handler
+ * owns the retry bound — the reducer intentionally does not track attempt counts.
+ * After this many attempts, the control falls to the unavailable state.
+ */
+export const CANCEL_RETRY_MAX_ATTEMPTS = 3
+
+/**
+ * Cancel control interaction states (per-run, browser-side; mirrors the
+ * approval-prompt precedent in renderApprovalPrompt):
+ *   'idle'             — a single Cancel button, no request in flight
+ *   'armed'            — first click armed the Confirm/Dismiss pair
+ *   'pending'          — POST in flight: all controls disabled
+ *   'retrying'         — a transient (503) response is being retried, bounded
+ *   'cancelled'         — benign terminal outcome (any terminal phase, incl. already-terminal)
+ *   'unavailable'      — 404 / protocol / validation / retry-bound-exceeded
+ *   'session-expired'  — persistent 400/401/403: reload affordance, not a retry loop
+ *   'transport-failure' — network error: retryable, "didn't go through"
+ */
+
+/**
+ * Render a Cancel control with an inline two-step confirm for a single run.
+ *
+ * Mirrors renderApprovalPrompt: first click arms a Confirm/Dismiss pair in place;
+ * Confirm issues the cancel POST; Dismiss is the SOLE way back to idle (no Esc,
+ * no click-outside). An in-flight mutex (`canceling`) additionally guards the
+ * handler itself — not just `disabled` — against a second concurrent cancel.
+ *
+ * Rendering is allowlist-only: every visible state comes from the fixed state
+ * union above via textContent/dataset — never a raw phase, wire status, or HTTP
+ * status code reaches the DOM as text, data-*, or class.
+ *
+ * @param {string} runId - The run ID to cancel.
+ * @param {{cancelRun: (runId: string, idempotencyKey: string, csrfToken: string) => Promise<object>, refreshCsrf: () => Promise<object>}} cancelClient
+ * @param {(runId: string) => void} onCancelDispatch - Called once the cancel POST is
+ *   sent, so the caller can dispatch the reducer's `cancel` action (cancelInFlight tracking).
+ * @returns {{el: HTMLElement, notifyTerminal: () => void}} The rendered control element
+ *   and a notifyTerminal() callback the caller invokes on a terminal stream frame.
+ */
+export function renderCancelControl(runId, cancelClient, onCancelDispatch) {
+  const el = document.createElement('div')
+  el.className = 'run-cancel-control'
+  el.setAttribute('role', 'group')
+  el.setAttribute('aria-label', 'Cancel run')
+
+  const statusEl = document.createElement('div')
+  statusEl.className = 'run-cancel-status'
+  statusEl.setAttribute('role', 'status')
+  statusEl.setAttribute('aria-live', 'polite')
+  el.append(statusEl)
+
+  const controlsEl = document.createElement('div')
+  controlsEl.className = 'run-cancel-controls'
+  el.append(controlsEl)
+
+  let controlState = 'idle'
+  let canceling = false
+  let retryAttempt = 0
+  let retryTimer = null
+
+  function updateStateAttr() {
+    el.dataset.state = controlState
+  }
+  updateStateAttr()
+
+  function clearRetryTimer() {
+    if (retryTimer !== null) {
+      clearTimeout(retryTimer)
+      retryTimer = null
+    }
+  }
+
+  let idleCancelBtn = null
+
+  function renderIdle() {
+    controlState = 'idle'
+    updateStateAttr()
+    statusEl.textContent = ''
+    controlsEl.textContent = ''
+
+    const cancelBtn = document.createElement('button')
+    cancelBtn.type = 'button'
+    cancelBtn.className = 'run-cancel-btn-cancel'
+    cancelBtn.textContent = 'Cancel run'
+    cancelBtn.addEventListener('click', () => {
+      renderArmed()
+    })
+    controlsEl.append(cancelBtn)
+    idleCancelBtn = cancelBtn
+  }
+
+  function renderArmed() {
+    controlState = 'armed'
+    updateStateAttr()
+    statusEl.textContent = ''
+    controlsEl.textContent = ''
+
+    const confirmBtn = document.createElement('button')
+    confirmBtn.type = 'button'
+    confirmBtn.className = 'run-cancel-btn-confirm'
+    confirmBtn.textContent = 'Confirm cancel'
+    confirmBtn.addEventListener('click', () => {
+      handleCancel()
+    })
+    controlsEl.append(confirmBtn)
+
+    const dismissBtn = document.createElement('button')
+    dismissBtn.type = 'button'
+    dismissBtn.className = 'run-cancel-btn-dismiss'
+    dismissBtn.textContent = 'Dismiss'
+    dismissBtn.addEventListener('click', () => {
+      renderIdle()
+      cancelBtnFocus()
+    })
+    controlsEl.append(dismissBtn)
+
+    // Focus management: move focus onto the newly-armed Confirm button.
+    if (typeof confirmBtn.focus === 'function') confirmBtn.focus()
+  }
+
+  function cancelBtnFocus() {
+    if (idleCancelBtn !== null && typeof idleCancelBtn.focus === 'function') idleCancelBtn.focus()
+  }
+
+  function setPending() {
+    controlState = 'pending'
+    updateStateAttr()
+    statusEl.textContent = 'Sending cancel request\u2026'
+    for (const btn of el.querySelectorAll('button')) {
+      btn.disabled = true
+    }
+  }
+
+  function setRetrying() {
+    controlState = 'retrying'
+    updateStateAttr()
+    statusEl.textContent = 'Run temporarily unavailable \u2014 retrying cancel\u2026'
+    controlsEl.textContent = ''
+  }
+
+  function setCancelled() {
+    controlState = 'cancelled'
+    updateStateAttr()
+    statusEl.textContent = 'Run stopped.'
+    controlsEl.textContent = ''
+  }
+
+  function setUnavailable() {
+    controlState = 'unavailable'
+    updateStateAttr()
+    statusEl.textContent = 'Cancel is unavailable for this run.'
+    controlsEl.textContent = ''
+  }
+
+  function setSessionExpired() {
+    controlState = 'session-expired'
+    updateStateAttr()
+    statusEl.textContent = 'Your session may have expired \u2014 reload the page to cancel.'
+    controlsEl.textContent = ''
+  }
+
+  function setTransportFailure() {
+    controlState = 'transport-failure'
+    updateStateAttr()
+    statusEl.textContent = 'Cancel request didn\u2019t go through \u2014 try again.'
+    controlsEl.textContent = ''
+
+    const retryBtn = document.createElement('button')
+    retryBtn.type = 'button'
+    retryBtn.className = 'run-cancel-btn-retry'
+    retryBtn.textContent = 'Try again'
+    retryBtn.addEventListener('click', () => {
+      handleCancel()
+    })
+    controlsEl.append(retryBtn)
+  }
+
+  async function issueCancel(idempotencyKey) {
+    const csrfResult = await cancelClient.refreshCsrf()
+    if (!csrfResult.success) {
+      return csrfResult.error.kind === 'http'
+        ? {success: false, error: {kind: 'http', status: csrfResult.error.status}}
+        : {success: false, error: {kind: 'network'}}
+    }
+    return cancelClient.cancelRun(runId, idempotencyKey, csrfResult.data.csrfToken)
+  }
+
+  async function handleCancel() {
+    // In-flight mutex — guards the handler itself, not just `disabled`.
+    if (canceling) return
+    canceling = true
+    clearRetryTimer()
+    retryAttempt = 0
+    setPending()
+
+    const idempotencyKey = (
+      globalThis.crypto !== undefined && typeof globalThis.crypto.randomUUID === 'function'
+        ? globalThis.crypto.randomUUID()
+        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+    )
+
+    if (typeof onCancelDispatch === 'function') onCancelDispatch(runId)
+
+    await attemptCancel(idempotencyKey)
+  }
+
+  async function attemptCancel(idempotencyKey) {
+    const result = await issueCancel(idempotencyKey)
+
+    if (result.success) {
+      canceling = false
+      // Any terminal phase (incl. already-terminal COMPLETED/FAILED) is a benign
+      // success — never rendered as an error.
+      setCancelled()
+      return
+    }
+
+    const {error} = result
+
+    if (error.kind === 'http' && error.status === 503) {
+      if (retryAttempt < CANCEL_RETRY_MAX_ATTEMPTS) {
+        retryAttempt += 1
+        setRetrying()
+        retryTimer = setTimeout(() => {
+          retryTimer = null
+          attemptCancel(idempotencyKey)
+        }, backoffDelay(retryAttempt - 1))
+        return
+      }
+      canceling = false
+      setUnavailable()
+      return
+    }
+
+    canceling = false
+
+    if (error.kind === 'http' && error.status === 404) {
+      setUnavailable()
+    } else if (error.kind === 'http' && (error.status === 400 || error.status === 401 || error.status === 403)) {
+      setSessionExpired()
+    } else if (error.kind === 'network') {
+      setTransportFailure()
+    } else {
+      // protocol / validation / any other http status: generic unavailable.
+      setUnavailable()
+    }
+  }
+
+  /**
+   * Stop any pending retry and mark the control as cancelled (terminal-wins from
+   * the live stream — called by the caller when a terminal status frame arrives
+   * for this run from any source, even mid-retry).
+   */
+  function notifyTerminal() {
+    clearRetryTimer()
+    canceling = false
+    if (controlState !== 'cancelled') setCancelled()
+  }
+
+  renderIdle()
+
+  return {el, notifyTerminal}
+}
+
 /**
  * Initialize the operator run stream for a given run ID.
  *
@@ -1595,7 +1905,7 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
  * - Read-only: GET only for stream; approval decisions are operator-forwarded writes.
  */
 export function initOperatorStream(opts) {
-  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, approvalClient: injectedApprovalClient, endpointBase, fixtureSessionId} = opts
+  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, cancelEl, approvalClient: injectedApprovalClient, cancelClient: injectedCancelClient, endpointBase, fixtureSessionId} = opts
 
   // Build the approval client lazily (only if approvalsEl is present).
   // Pass endpointBase and fixtureSessionId so fixture mode uses the fixture approval routes
@@ -1610,6 +1920,22 @@ export function initOperatorStream(opts) {
             },
       ))
     : null
+
+  // Build the cancel client lazily (only if cancelEl is present).
+  const cancelClient = cancelEl !== undefined && cancelEl !== null
+    ? (injectedCancelClient ?? buildCancelClient(
+        endpointBase === undefined && fixtureSessionId === undefined
+          ? undefined
+          : {
+              ...(endpointBase === undefined ? {} : {endpointBase}),
+              ...(fixtureSessionId === undefined ? {} : {fixtureSessionId}),
+            },
+      ))
+    : null
+
+  // The rendered cancel control instance ({el, notifyTerminal}), created lazily
+  // the first time updateDOM sees a non-terminal run for this stream.
+  let cancelControl = null
 
   // Track rendered prompt elements by requestID so we can remove them on settle
   // without re-rendering the entire list. Map: requestID → DOM element.
@@ -1815,6 +2141,30 @@ export function initOperatorStream(opts) {
           badgeEl.textContent = ''
           badgeEl.hidden = true
         }
+      }
+    }
+
+    // Cancel control (R1/R2): render on non-terminal runs, hide once terminal.
+    // Gated on run status via the reducer's `terminal` flag, not local optimism.
+    if (cancelEl !== undefined && cancelEl !== null && cancelClient !== null) {
+      const runEntry = state.runs[runId]
+      const runIsTerminal = runEntry !== undefined && runEntry.terminal === true
+
+      if (runIsTerminal) {
+        if (cancelControl !== null) {
+          cancelControl.notifyTerminal()
+        }
+        cancelEl.hidden = false
+      } else if (state.connection === 'live' && runEntry !== undefined) {
+        if (cancelControl === null) {
+          cancelControl = renderCancelControl(runId, cancelClient, targetRunId => {
+            dispatch({type: 'cancel', data: {runId: targetRunId}})
+          })
+          cancelEl.append(cancelControl.el)
+        }
+        cancelEl.hidden = false
+      } else {
+        cancelEl.hidden = true
       }
     }
   }

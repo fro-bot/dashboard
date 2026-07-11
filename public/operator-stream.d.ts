@@ -327,6 +327,10 @@ export interface InitOptions {
   readonly fixtureSessionId?: string
   /** Secondary status metadata element (data-role="run-reason"). */
   readonly reasonEl?: Element | null
+  /** Cancel control container element (data-role="run-cancel"). */
+  readonly cancelEl?: (HTMLElement & {hidden: boolean}) | null
+  /** Injectable cancel client for testing. If absent, buildCancelClient() is used. */
+  readonly cancelClient?: CancelClient | null
 }
 
 export declare function initOperatorStream(opts: InitOptions): StreamHandle
@@ -353,6 +357,13 @@ export declare function buildApprovalClient(opts?: {readonly endpointBase?: stri
 
 /** Terminal phase carried by a successful cancel response (UPPERCASE wire values). */
 export type CancelTerminalPhase = 'COMPLETED' | 'FAILED' | 'CANCELLED'
+
+/**
+ * Local mirror of src/gateway/operator-contract/run-status.ts PHASE_TO_WEB_STATUS.
+ * Maps a RunPhase to its lowercase web status. Drift with the vendored TypeScript
+ * source is caught by a conformance test.
+ */
+export declare const PHASE_TO_WEB_STATUS: Readonly<Record<string, string>>
 
 /** Parsed success payload for a cancel response. */
 export interface CancelRunResult {
@@ -394,7 +405,40 @@ export declare function buildCancelClient(opts?: {
   readonly endpointBase?: string
   readonly fixtureSessionId?: string
   readonly logger?: CancelClientLogger
-}): CancelClient
+}): CancelClient & {readonly refreshCsrf: () => Promise<{success: boolean; data?: {csrfToken: string}; error?: {kind: string; status?: number}}>}
+
+/**
+ * Bounded retry count for a transient (HTTP 503) cancel response. This handler
+ * owns the retry bound — the reducer intentionally does not track attempt counts.
+ */
+export declare const CANCEL_RETRY_MAX_ATTEMPTS: number
+
+/** Fixed allowlisted cancel-control interaction states (never a raw wire value). */
+export type CancelControlState =
+  | 'idle'
+  | 'armed'
+  | 'pending'
+  | 'retrying'
+  | 'cancelled'
+  | 'unavailable'
+  | 'session-expired'
+  | 'transport-failure'
+
+export interface CancelControlHandle {
+  readonly el: HTMLElement
+  /** Called when a terminal status frame arrives for this run from any source. */
+  readonly notifyTerminal: () => void
+}
+
+/**
+ * Render a Cancel control with an inline two-step confirm for a single run.
+ * Exported for direct unit testing.
+ */
+export declare function renderCancelControl(
+  runId: string,
+  cancelClient: CancelClient & {readonly refreshCsrf: () => Promise<{success: boolean; data?: {csrfToken: string}; error?: {kind: string; status?: number}}>},
+  onCancelDispatch: (runId: string) => void,
+): CancelControlHandle
 
 /**
  * Render a single open approval prompt into a container element.
