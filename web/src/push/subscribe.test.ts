@@ -415,6 +415,83 @@ describe('resubscribeStaleKey', () => {
     expect(requestPermission).not.toHaveBeenCalled()
     expect(subscription.unsubscribeMock).toHaveBeenCalledTimes(1)
   })
+
+  it('browser subscribe() fails once then succeeds on retry -> subscribed', async () => {
+    const subscription = fakeSubscription()
+    const registration = fakeRegistration(subscription)
+    registration.subscribeMock
+      .mockRejectedValueOnce(new Error('InvalidStateError'))
+      .mockResolvedValueOnce(subscription)
+    const pushClient = fakePushClient()
+
+    const outcome = await resubscribeStaleKey({
+      serviceWorkerReady: () => Promise.resolve(registration),
+      requestPermission: vi.fn(),
+      pushClient,
+    })
+
+    expect(outcome).toEqual({kind: 'subscribed'})
+    expect(registration.subscribeMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('browser subscribe() fails twice -> subscribe-failed, new sub never created', async () => {
+    const subscription = fakeSubscription()
+    const registration = fakeRegistration(subscription)
+    registration.subscribeMock.mockRejectedValue(new Error('InvalidStateError'))
+    const pushClient = fakePushClient()
+
+    const outcome = await resubscribeStaleKey({
+      serviceWorkerReady: () => Promise.resolve(registration),
+      requestPermission: vi.fn(),
+      pushClient,
+    })
+
+    expect(outcome).toEqual({kind: 'subscribe-failed'})
+    expect(registration.subscribeMock).toHaveBeenCalledTimes(2)
+    expect(pushClient.subscribePush).not.toHaveBeenCalled()
+  })
+
+  it('Gateway POST fails once then succeeds on retry, reusing the same idempotency key -> subscribed', async () => {
+    const subscription = fakeSubscription()
+    const registration = fakeRegistration(subscription)
+    const subscribePush = vi.fn().mockResolvedValueOnce(err({kind: 'network'})).mockResolvedValueOnce(ok(undefined))
+    const pushClient = fakePushClient({subscribePush})
+
+    const outcome = await resubscribeStaleKey({
+      serviceWorkerReady: () => Promise.resolve(registration),
+      requestPermission: vi.fn(),
+      pushClient,
+    })
+
+    expect(outcome).toEqual({kind: 'subscribed'})
+    expect(subscribePush).toHaveBeenCalledTimes(2)
+    const firstKey = subscribePush.mock.calls[0]?.[2] as string
+    const secondKey = subscribePush.mock.calls[1]?.[2] as string
+    expect(secondKey).toBe(firstKey)
+    expect(subscription.unsubscribeMock).not.toHaveBeenCalled()
+  })
+
+  it('abort between browser subscribe retries -> aborted', async () => {
+    const controller = new AbortController()
+    const subscription = fakeSubscription()
+    const registration = fakeRegistration(subscription)
+    registration.subscribeMock.mockImplementation(async () => {
+      controller.abort()
+      throw new Error('InvalidStateError')
+    })
+    const pushClient = fakePushClient()
+
+    const outcome = await resubscribeStaleKey({
+      serviceWorkerReady: () => Promise.resolve(registration),
+      requestPermission: vi.fn(),
+      pushClient,
+      signal: controller.signal,
+    })
+
+    expect(outcome).toEqual({kind: 'aborted'})
+    expect(registration.subscribeMock).toHaveBeenCalledTimes(1)
+    expect(pushClient.subscribePush).not.toHaveBeenCalled()
+  })
 })
 
 describe('unsubscribeOptOut', () => {
