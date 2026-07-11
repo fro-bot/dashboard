@@ -330,6 +330,55 @@ export declare function resetBootstrapState(): void
 /** Browser-direct approval client factory. Returns refreshCsrf/decideRunApproval/listRunApprovals. */
 export declare function buildApprovalClient(opts?: {readonly endpointBase?: string; readonly fixtureSessionId?: string}): ApprovalClient
 
+// ---------------------------------------------------------------------------
+// Browser-direct cancel client
+// ---------------------------------------------------------------------------
+
+/** Terminal phase carried by a successful cancel response (UPPERCASE wire values). */
+export type CancelTerminalPhase = 'COMPLETED' | 'FAILED' | 'CANCELLED'
+
+/** Parsed success payload for a cancel response. */
+export interface CancelRunResult {
+  readonly ok: true
+  readonly runId: string
+  readonly phase: CancelTerminalPhase
+}
+
+/** Discriminated failure classes for cancelRun. */
+export type CancelRunError =
+  | {readonly kind: 'validation'; readonly code: string}
+  | {readonly kind: 'http'; readonly status: number}
+  | {readonly kind: 'network'}
+  | {readonly kind: 'protocol'}
+
+export type CancelRunOutcome =
+  | {readonly success: true; readonly data: CancelRunResult}
+  | {readonly success: false; readonly error: CancelRunError}
+
+/** Browser-direct cancel client interface (for testing injection). */
+export interface CancelClient {
+  readonly cancelRun: (runId: string, idempotencyKey: string, csrfToken: string) => Promise<CancelRunOutcome>
+}
+
+/** Optional coarse logger — receives only route template + status, never sensitive values. */
+export interface CancelClientLogger {
+  readonly error: (message: string, meta?: Record<string, unknown>) => void
+}
+
+/**
+ * Browser-direct cancel client factory. Returns cancelRun().
+ *
+ * Mirrors buildApprovalClient's CSRF + idempotency + one-retry-on-400 + no-leak
+ * posture. The optional logger receives only the static route template
+ * ('/operator/runs/:runId/cancel') and a coarse HTTP status — never runId,
+ * csrfToken, idempotencyKey, or response body.
+ */
+export declare function buildCancelClient(opts?: {
+  readonly endpointBase?: string
+  readonly fixtureSessionId?: string
+  readonly logger?: CancelClientLogger
+}): CancelClient
+
 /**
  * Render a single open approval prompt into a container element.
  * Uses safe DOM (textContent only — never innerHTML or HTML interpolation).

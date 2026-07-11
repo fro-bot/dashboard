@@ -16,6 +16,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {
   bootstrapOperatorStreams,
   buildApprovalClient,
+  buildCancelClient,
   FIRST_FRAME_TIMEOUT_MS,
   GATEWAY_PENDING_APPROVALS_CAP,
   getOpenApprovals,
@@ -3155,6 +3156,301 @@ describe('buildApprovalClient — listRunApprovals', () => {
     const client = buildApprovalClient()
     const result = await client.listRunApprovals('run-001')
     expect(result).toEqual({success: false, error: {kind: 'protocol'}})
+  })
+})
+
+describe('buildCancelClient — cancelRun', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('happy path: 200 {ok:true, runId, phase:"CANCELLED"} parses to success', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ok: true, runId: 'run-001', phase: 'CANCELLED'}),
+    }))
+    const client = buildCancelClient()
+    const result = await client.cancelRun('run-001', 'idem-key-abc', 'csrf-token-abc')
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toEqual({ok: true, runId: 'run-001', phase: 'CANCELLED'})
+    }
+  })
+
+  it('happy path: phase "COMPLETED" (already-terminal) parses to success', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ok: true, runId: 'run-001', phase: 'COMPLETED'}),
+    }))
+    const client = buildCancelClient()
+    const result = await client.cancelRun('run-001', 'idem-key-abc', 'csrf-token-abc')
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.phase).toBe('COMPLETED')
+    }
+  })
+
+  it('happy path: phase "FAILED" (already-terminal) parses to success', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ok: true, runId: 'run-001', phase: 'FAILED'}),
+    }))
+    const client = buildCancelClient()
+    const result = await client.cancelRun('run-001', 'idem-key-abc', 'csrf-token-abc')
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.phase).toBe('FAILED')
+    }
+  })
+
+  it('edge: blank csrf token rejects before fetch', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const client = buildCancelClient()
+    const result = await client.cancelRun('run-001', 'idem-key-abc', '')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+    }
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('edge: whitespace-only csrf token rejects before fetch', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const client = buildCancelClient()
+    const result = await client.cancelRun('run-001', 'idem-key-abc', '   ')
+    expect(result.success).toBe(false)
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('edge: blank idempotency key rejects before fetch', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const client = buildCancelClient()
+    const result = await client.cancelRun('run-001', '', 'csrf-token-abc')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+    }
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('edge: invalid runId with slash rejects before fetch', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const client = buildCancelClient()
+    const result = await client.cancelRun('run/001', 'idem-key-abc', 'csrf-token-abc')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('validation')
+    }
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('edge: invalid runId with ".." traversal rejects before fetch', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const client = buildCancelClient()
+    const result = await client.cancelRun('..', 'idem-key-abc', 'csrf-token-abc')
+    expect(result.success).toBe(false)
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('edge: invalid runId with percent-encoded slash rejects before fetch', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const client = buildCancelClient()
+    const result = await client.cancelRun('run%2F001', 'idem-key-abc', 'csrf-token-abc')
+    expect(result.success).toBe(false)
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('error: HTTP 400 triggers exactly ONE retry with the SAME idempotency key', async () => {
+    const fetchCalls: {url: string; init: RequestInit}[] = []
+    let callCount = 0
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      fetchCalls.push({url, init})
+      callCount++
+      if (callCount === 1) {
+        return {ok: false, status: 400, json: async () => ({})}
+      }
+      return {ok: true, status: 200, json: async () => ({ok: true, runId: 'run-001', phase: 'CANCELLED'})}
+    })
+    const client = buildCancelClient()
+    const result = await client.cancelRun('run-001', 'idem-key-abc', 'csrf-token-abc')
+    expect(result.success).toBe(true)
+    expect(fetchCalls).toHaveLength(2)
+    const idemKeys = fetchCalls.map(c => (c.init?.headers as Record<string, string>)['idempotency-key'])
+    expect(idemKeys[0]).toBe('idem-key-abc')
+    expect(idemKeys[1]).toBe('idem-key-abc')
+  })
+
+  it('error: persistent 400 (both attempts) returns the http/400 result once', async () => {
+    const fetchCalls: {url: string; init: RequestInit}[] = []
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      fetchCalls.push({url, init})
+      return {ok: false, status: 400, json: async () => ({})}
+    })
+    const client = buildCancelClient()
+    const result = await client.cancelRun('run-001', 'idem-key-abc', 'csrf-token-abc')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('http')
+      if (result.error.kind === 'http') {
+        expect(result.error.status).toBe(400)
+      }
+    }
+    expect(fetchCalls).toHaveLength(2)
+  })
+
+  it('error: 404 maps to http error class with status 404', async () => {
+    vi.stubGlobal('fetch', async () => ({ok: false, status: 404, json: async () => ({})}))
+    const client = buildCancelClient()
+    const result = await client.cancelRun('run-001', 'idem-key-abc', 'csrf-token-abc')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('http')
+      if (result.error.kind === 'http') {
+        expect(result.error.status).toBe(404)
+      }
+    }
+  })
+
+  it('error: 503 maps to http error class with status 503', async () => {
+    vi.stubGlobal('fetch', async () => ({ok: false, status: 503, json: async () => ({})}))
+    const client = buildCancelClient()
+    const result = await client.cancelRun('run-001', 'idem-key-abc', 'csrf-token-abc')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('http')
+      if (result.error.kind === 'http') {
+        expect(result.error.status).toBe(503)
+      }
+    }
+  })
+
+  it('error: network throw maps to network error class', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('ECONNREFUSED')
+    })
+    const client = buildCancelClient()
+    const result = await client.cancelRun('run-001', 'idem-key-abc', 'csrf-token-abc')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('network')
+    }
+  })
+
+  it('error: malformed 200 body (fails parseOperatorCancelResponse) maps to protocol error class', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ok: true, runId: 'run-001', phase: 'NOT_A_REAL_PHASE'}),
+    }))
+    const client = buildCancelClient()
+    const result = await client.cancelRun('run-001', 'idem-key-abc', 'csrf-token-abc')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('protocol')
+    }
+  })
+
+  it('error: 200 body that is not valid JSON maps to protocol error class', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new Error('invalid json')
+      },
+    }))
+    const client = buildCancelClient()
+    const result = await client.cancelRun('run-001', 'idem-key-abc', 'csrf-token-abc')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('protocol')
+    }
+  })
+
+  it('integration: sets redirect:"error" on the fetch init', async () => {
+    const fetchCalls: {url: string; init: RequestInit}[] = []
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      fetchCalls.push({url, init})
+      return {ok: true, status: 200, json: async () => ({ok: true, runId: 'run-001', phase: 'CANCELLED'})}
+    })
+    const client = buildCancelClient()
+    await client.cancelRun('run-001', 'idem-key-abc', 'csrf-token-abc')
+    expect(fetchCalls[0]?.init?.redirect).toBe('error')
+  })
+
+  it('integration: sends no request body', async () => {
+    const fetchCalls: {url: string; init: RequestInit}[] = []
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      fetchCalls.push({url, init})
+      return {ok: true, status: 200, json: async () => ({ok: true, runId: 'run-001', phase: 'CANCELLED'})}
+    })
+    const client = buildCancelClient()
+    await client.cancelRun('run-001', 'idem-key-abc', 'csrf-token-abc')
+    expect(fetchCalls[0]?.init?.body).toBeUndefined()
+  })
+
+  it('integration: POSTs to the expected path with x-csrf-token and idempotency-key headers', async () => {
+    const fetchCalls: {url: string; init: RequestInit}[] = []
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      fetchCalls.push({url, init})
+      return {ok: true, status: 200, json: async () => ({ok: true, runId: 'run-001', phase: 'CANCELLED'})}
+    })
+    const client = buildCancelClient()
+    await client.cancelRun('run-001', 'idem-key-abc', 'csrf-token-xyz')
+    expect(fetchCalls[0]?.url).toBe('/operator/runs/run-001/cancel')
+    expect(fetchCalls[0]?.init?.method).toBe('POST')
+    const headers = fetchCalls[0]?.init?.headers as Record<string, string>
+    expect(headers['x-csrf-token']).toBe('csrf-token-xyz')
+    expect(headers['idempotency-key']).toBe('idem-key-abc')
+  })
+
+  it('no-leak: injected logger receives only the route template + coarse status, never runId/csrf/idempotency', async () => {
+    vi.stubGlobal('fetch', async () => ({ok: false, status: 404, json: async () => ({})}))
+    const logCalls: {message: string; meta?: Record<string, unknown>}[] = []
+    const logger = {
+      error: (message: string, meta?: Record<string, unknown>) => {
+        logCalls.push({message, meta})
+      },
+    }
+    const client = buildCancelClient({logger})
+    await client.cancelRun('super-secret-run-id', 'super-secret-idem-key', 'super-secret-csrf-token')
+    expect(logCalls.length).toBeGreaterThan(0)
+    for (const call of logCalls) {
+      const serialized = JSON.stringify(call)
+      expect(serialized).not.toContain('super-secret-run-id')
+      expect(serialized).not.toContain('super-secret-idem-key')
+      expect(serialized).not.toContain('super-secret-csrf-token')
+      expect(serialized).toContain('/operator/runs/:runId/cancel')
+    }
+  })
+
+  it('no-leak: logger is called on network error, without leaking sensitive values', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('ECONNREFUSED super-secret-run-id')
+    })
+    const logCalls: {message: string; meta?: Record<string, unknown>}[] = []
+    const logger = {
+      error: (message: string, meta?: Record<string, unknown>) => {
+        logCalls.push({message, meta})
+      },
+    }
+    const client = buildCancelClient({logger})
+    await client.cancelRun('super-secret-run-id', 'super-secret-idem-key', 'super-secret-csrf-token')
+    expect(logCalls.length).toBeGreaterThan(0)
+    for (const call of logCalls) {
+      const serialized = JSON.stringify(call)
+      expect(serialized).not.toContain('super-secret-run-id')
+      expect(serialized).not.toContain('super-secret-idem-key')
+      expect(serialized).not.toContain('super-secret-csrf-token')
+    }
   })
 })
 

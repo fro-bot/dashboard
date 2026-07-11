@@ -1105,6 +1105,182 @@ export function buildApprovalClient(opts) {
 }
 
 // ---------------------------------------------------------------------------
+// Dynamic ID validator (mirrors src/gateway/operator-client.ts validateDynamicId
+// and web/src/operator/validate-dynamic-id.ts — kept in sync manually; this file
+// cannot import from src/ or web/ since it ships as a standalone browser bundle)
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate a dynamic path ID (e.g. runId) before it is embedded in a URL.
+ *
+ * Rejects blank/whitespace-only values, literal `/`/`\`, percent-encoded
+ * slash/backslash, and any decoded segment equal to `.` or `..`.
+ *
+ * Does NOT log the raw ID value — callers must use the error code only.
+ */
+function validateDynamicId(id) {
+  if (id.trim() === '') return false
+  if (id.includes('/') || id.includes('\\')) return false
+  if (/%(?:2f|5c)/i.test(id)) return false
+  let decoded
+  try {
+    decoded = decodeURIComponent(id)
+  } catch {
+    return false
+  }
+  if (decoded === '.' || decoded === '..') return false
+  const segments = decoded.split(/[/\\]/)
+  for (const segment of segments) {
+    if (segment === '.' || segment === '..') return false
+  }
+  return true
+}
+
+// ---------------------------------------------------------------------------
+// Allowlisted cancel-response phase values (mirrors
+// src/gateway/operator-contract/parse.ts VALID_CANCEL_PHASES)
+// ---------------------------------------------------------------------------
+
+const VALID_CANCEL_PHASES = new Set(['CANCELLED', 'COMPLETED', 'FAILED'])
+
+/**
+ * Parse an unknown value as an OperatorCancelResponse ({ok:true, runId, phase}).
+ * Mirrors src/gateway/operator-contract/parse.ts parseOperatorCancelResponse.
+ * Returns {success:true, data} or {success:false}. No echo of the input.
+ */
+function parseOperatorCancelResponse(input) {
+  if (
+    typeof input !== 'object' ||
+    input === null ||
+    Array.isArray(input) ||
+    input.ok !== true ||
+    typeof input.runId !== 'string' ||
+    typeof input.phase !== 'string' ||
+    !VALID_CANCEL_PHASES.has(input.phase)
+  ) {
+    return {success: false}
+  }
+  return {success: true, data: {ok: true, runId: input.runId, phase: input.phase}}
+}
+
+// ---------------------------------------------------------------------------
+// Browser-direct cancel client (same-origin relative /operator/* paths)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a browser-direct cancel client mirroring buildApprovalClient's CSRF +
+ * idempotency + retry + no-leak posture.
+ *
+ * Security:
+ * - Never logs runId, csrfToken, or idempotencyKey — the logger (if provided)
+ *   receives only the static route template and a coarse HTTP status.
+ * - Validates runId with the dynamic-id validator BEFORE any fetch.
+ * - Rejects blank csrfToken/idempotencyKey before any fetch.
+ * - One retry only on HTTP 400, reusing the SAME idempotency key.
+ * - No request body is sent.
+ *
+ * @param {object} [opts] - Optional configuration.
+ * @param {string} [opts.endpointBase] - The endpoint base path. Defaults to '/operator'.
+ * @param {string} [opts.fixtureSessionId] - Fixture session ID (fixture mode only).
+ * @param {{error: (message: string, meta?: object) => void}} [opts.logger] - Optional logger.
+ * @returns {object} An object with a cancelRun() method.
+ */
+export function buildCancelClient(opts) {
+  const endpointBase = opts?.endpointBase ?? '/operator'
+  const fixtureSessionId = opts?.fixtureSessionId
+  const logger = opts?.logger
+
+  const withFixtureParam = url =>
+    fixtureSessionId === undefined
+      ? url
+      : `${url}${url.includes('?') ? '&' : '?'}fixtureSessionId=${encodeURIComponent(fixtureSessionId)}`
+
+  const browserFetch = (input, init) =>
+    globalThis.fetch(input, {
+      ...init,
+      credentials: 'include',
+      redirect: 'error',
+    })
+
+  const ROUTE_TEMPLATE = '/operator/runs/:runId/cancel'
+
+  /**
+   * POST a cancel request for a run.
+   *
+   * Returns:
+   *   {success: true, data: {ok, runId, phase}}  — cancel accepted or run was
+   *     already terminal (idempotent no-op; both are 200 and benign).
+   *   {success: false, error: {kind: 'validation', code}}  — reject-before-fetch
+   *   {success: false, error: {kind: 'http', status}}  — non-200 response
+   *   {success: false, error: {kind: 'network'}}  — transport failure
+   *   {success: false, error: {kind: 'protocol'}}  — malformed 200 body
+   *
+   * One CSRF-400 retry reusing the SAME idempotency key (mirrors decideRunApproval).
+   */
+  async function cancelRun(runId, idempotencyKey, csrfToken) {
+    if (!validateDynamicId(runId)) {
+      return {success: false, error: {kind: 'validation', code: 'invalid_run_id'}}
+    }
+    if (csrfToken.trim() === '') {
+      return {success: false, error: {kind: 'validation', code: 'missing_csrf'}}
+    }
+    if (idempotencyKey.trim() === '') {
+      return {success: false, error: {kind: 'validation', code: 'missing_idempotency_key'}}
+    }
+
+    const path = withFixtureParam(`${endpointBase}/runs/${encodeURIComponent(runId)}/cancel`)
+    const init = {
+      method: 'POST',
+      redirect: 'error',
+      headers: {
+        'content-type': 'application/json',
+        'x-csrf-token': csrfToken,
+        'idempotency-key': idempotencyKey,
+      },
+    }
+
+    let res
+    try {
+      res = await browserFetch(path, init)
+    } catch {
+      logger?.error('operator-cancel-client: network error', {route: ROUTE_TEMPLATE})
+      return {success: false, error: {kind: 'network'}}
+    }
+
+    // One retry only on HTTP 400, reusing the SAME idempotency key and init.
+    if (res.status === 400) {
+      try {
+        res = await browserFetch(path, init)
+      } catch {
+        logger?.error('operator-cancel-client: network error', {route: ROUTE_TEMPLATE})
+        return {success: false, error: {kind: 'network'}}
+      }
+    }
+
+    if (res.ok) {
+      let data
+      try {
+        data = await res.json()
+      } catch {
+        logger?.error('operator-cancel-client: json parse error', {route: ROUTE_TEMPLATE, status: res.status})
+        return {success: false, error: {kind: 'protocol'}}
+      }
+      const parsed = parseOperatorCancelResponse(data)
+      if (!parsed.success) {
+        logger?.error('operator-cancel-client: malformed response body', {route: ROUTE_TEMPLATE, status: res.status})
+        return {success: false, error: {kind: 'protocol'}}
+      }
+      return {success: true, data: parsed.data}
+    }
+
+    logger?.error('operator-cancel-client: http error', {route: ROUTE_TEMPLATE, status: res.status})
+    return {success: false, error: {kind: 'http', status: res.status}}
+  }
+
+  return {cancelRun}
+}
+
+// ---------------------------------------------------------------------------
 // Approval prompt interaction state machine (per-prompt, browser-side)
 // ---------------------------------------------------------------------------
 
