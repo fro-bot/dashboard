@@ -2254,7 +2254,7 @@ interface FakeElement {
   getAttribute: (name: string) => string | null
   classList: {add: (cls: string) => void; remove: (cls: string) => void; contains: (cls: string) => boolean}
   addEventListener: (event: string, handler: (...args: unknown[]) => void) => void
-  dispatchEvent: (event: {type: string}) => void
+  dispatchEvent: (event: {type: string; stopPropagation?: () => void}) => void
 }
 
 function makeFakeEl(tagName = 'div'): FakeElement {
@@ -2328,9 +2328,12 @@ function makeFakeEl(tagName = 'div'): FakeElement {
       if (!el.eventListeners[event]) el.eventListeners[event] = []
       el.eventListeners[event].push(handler)
     },
-    dispatchEvent(event: {type: string}) {
+    dispatchEvent(event: {type: string; stopPropagation?: () => void}) {
+      // Real DOM events always carry stopPropagation; default to a no-op so
+      // callers that dispatch a bare {type: 'click'} still work.
+      const eventWithDefaults = {stopPropagation: () => {}, ...event}
       const handlers = el.eventListeners[event.type] ?? []
-      for (const h of handlers) h(event)
+      for (const h of handlers) h(eventWithDefaults)
     },
   } satisfies FakeElement
   return el
@@ -3341,6 +3344,51 @@ describe('buildCancelClient — cancelRun', () => {
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
+  it('edge: invalid runId with a literal NUL/CR/LF rejects before fetch', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const client = buildCancelClient()
+    for (const bad of ['run\u0000001', 'run\r001', 'run\n001']) {
+      const result = await client.cancelRun(bad, 'idem-key-abc', 'csrf-token-abc')
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error.kind).toBe('validation')
+      }
+    }
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('edge: invalid runId with percent-encoded NUL/CR/LF rejects before fetch', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const client = buildCancelClient()
+    for (const bad of ['run%00001', 'run%0d001', 'run%0D001', 'run%0a001', 'run%0A001']) {
+      const result = await client.cancelRun(bad, 'idem-key-abc', 'csrf-token-abc')
+      expect(result.success).toBe(false)
+    }
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('reliability: a hung fetch (never resolves) hits the client timeout and maps to network error', async () => {
+    vi.stubGlobal('fetch', async (_input: string, init?: RequestInit) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        const err = new Error('The operation was aborted')
+        err.name = 'AbortError'
+        reject(err)
+      })
+    }))
+    const client = buildCancelClient()
+    const resultPromise = client.cancelRun('run-001', 'idem-key-abc', 'csrf-token-abc')
+    // Simulate the timeout firing by aborting via a real AbortController the
+    // fake fetch listens to — buildCancelClient itself wires AbortSignal.timeout,
+    // so here we just confirm the outcome once the underlying signal aborts.
+    const result = await resultPromise
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('network')
+    }
+  }, 15_000)
+
   it('error: HTTP 400 triggers exactly ONE retry with the SAME idempotency key', async () => {
     const fetchCalls: {url: string; init: RequestInit}[] = []
     let callCount = 0
@@ -3359,6 +3407,9 @@ describe('buildCancelClient — cancelRun', () => {
     const idemKeys = fetchCalls.map(c => (c.init?.headers as Record<string, string>)['idempotency-key'])
     expect(idemKeys[0]).toBe('idem-key-abc')
     expect(idemKeys[1]).toBe('idem-key-abc')
+    const csrfTokens = fetchCalls.map(c => (c.init?.headers as Record<string, string>)['x-csrf-token'])
+    expect(csrfTokens[0]).toBe('csrf-token-abc')
+    expect(csrfTokens[1]).toBe('csrf-token-abc')
   })
 
   it('error: persistent 400 (both attempts) returns the http/400 result once', async () => {
@@ -6897,6 +6948,198 @@ describe('renderCancelControl — two-step confirm interaction', () => {
     await vi.advanceTimersByTimeAsync(60_000)
     expect(el.dataset.state).toBe('cancelled')
     vi.useRealTimers()
+  })
+
+  it('terminal-during-pending: notifyTerminal fires while issueCancel is still pending; the pending call later resolving 503 must not re-arm a retry or issue another cancelRun', async () => {
+    stubCancelRenderEnv()
+    let resolveCancel!: (v: {success: boolean; error: {kind: string; status: number}}) => void
+    const pendingResult = new Promise<{success: boolean; error: {kind: string; status: number}}>(resolve => {
+      resolveCancel = resolve
+    })
+    const cancelCalls: string[] = []
+    const client = {
+      refreshCsrf: async () => ({success: true, data: {csrfToken: 'csrf'}}),
+      cancelRun: async (runId: string) => {
+        cancelCalls.push(runId)
+        return pendingResult
+      },
+    }
+    const {el, notifyTerminal} = renderCancelControl(
+      'run-001',
+      client as unknown as Parameters<typeof renderCancelControl>[1],
+      () => {},
+    ) as unknown as {el: FakeElement; notifyTerminal: () => void}
+
+    findVisibleButtons(el).find(b => b.textContent === 'Cancel run')?.dispatchEvent({type: 'click'})
+    findVisibleButtons(el).find(b => b.textContent === 'Confirm cancel')?.dispatchEvent({type: 'click'})
+    // Allow the refreshCsrf microtask to resolve so cancelRun is actually invoked.
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(cancelCalls).toHaveLength(1)
+
+    // Terminal wins from the live stream while the cancel POST is still in flight.
+    notifyTerminal()
+    expect(el.dataset.state).toBe('cancelled')
+
+    // Now the stale cancel resolves with a transient 503 — must be discarded.
+    resolveCancel({success: false, error: {kind: 'http', status: 503}})
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    expect(el.dataset.state).toBe('cancelled')
+    expect(cancelCalls).toHaveLength(1) // no re-issued cancelRun
+  })
+
+  it('terminal-during-pending: notifyTerminal fires while refreshCsrf is still pending — the resolved CSRF must not trigger a cancelRun POST', async () => {
+    stubCancelRenderEnv()
+    let resolveCsrf!: (v: {success: boolean; data: {csrfToken: string}}) => void
+    const pendingCsrf = new Promise<{success: boolean; data: {csrfToken: string}}>(resolve => {
+      resolveCsrf = resolve
+    })
+    const cancelCalls: string[] = []
+    const client = {
+      refreshCsrf: async () => pendingCsrf,
+      cancelRun: async (runId: string) => {
+        cancelCalls.push(runId)
+        return {success: true, data: {ok: true, runId, phase: 'CANCELLED'}}
+      },
+    }
+    const {el, notifyTerminal} = renderCancelControl(
+      'run-001',
+      client as unknown as Parameters<typeof renderCancelControl>[1],
+      () => {},
+    ) as unknown as {el: FakeElement; notifyTerminal: () => void}
+
+    findVisibleButtons(el).find(b => b.textContent === 'Cancel run')?.dispatchEvent({type: 'click'})
+    findVisibleButtons(el).find(b => b.textContent === 'Confirm cancel')?.dispatchEvent({type: 'click'})
+
+    notifyTerminal()
+    expect(el.dataset.state).toBe('cancelled')
+
+    resolveCsrf({success: true, data: {csrfToken: 'csrf-late'}})
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    expect(cancelCalls).toHaveLength(0) // cancelRun must never be sent after terminal won
+    expect(el.dataset.state).toBe('cancelled')
+  })
+
+  it('dispose: after entering the retrying state, dispose() prevents any further refreshCsrf/cancelRun calls when timers advance', async () => {
+    vi.useFakeTimers()
+    stubCancelRenderEnv()
+    const {client, cancelCalls} = makeFakeCancelClient({
+      cancelResult: {success: false, error: {kind: 'http', status: 503}},
+    })
+    const {el, dispose} = renderCancelControl('run-001', client, () => {}) as unknown as {
+      el: FakeElement
+      dispose: () => void
+    }
+    findVisibleButtons(el).find(b => b.textContent === 'Cancel run')?.dispatchEvent({type: 'click'})
+    findVisibleButtons(el).find(b => b.textContent === 'Confirm cancel')?.dispatchEvent({type: 'click'})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(el.dataset.state).toBe('retrying')
+    expect(cancelCalls).toHaveLength(1)
+
+    dispose()
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(cancelCalls).toHaveLength(1) // no further cancelRun calls
+    vi.useRealTimers()
+  })
+
+  it('no-false-stopped: a run that goes terminal without any operator cancel does not show "Run stopped."', () => {
+    stubCancelRenderEnv()
+    const {client} = makeFakeCancelClient()
+    const {el, notifyTerminal} = renderCancelControl('run-001', client, () => {}) as unknown as {
+      el: FakeElement
+      notifyTerminal: () => void
+    }
+
+    // No cancel button was ever clicked — the run simply completes on its own.
+    notifyTerminal()
+
+    const statusEl = findStatusElement(el)
+    expect(statusEl?.textContent ?? '').not.toMatch(/stopped/i)
+  })
+
+  it('thrown client: an injected cancelClient whose cancelRun throws resets the mutex and shows transport-failure', async () => {
+    stubCancelRenderEnv()
+    const client: {refreshCsrf: () => Promise<unknown>; cancelRun: () => Promise<unknown>} = {
+      refreshCsrf: async () => ({success: true, data: {csrfToken: 'csrf'}}),
+      cancelRun: async () => {
+        throw new Error('boom')
+      },
+    }
+    const {el} = renderCancelControl(
+      'run-001',
+      client as Parameters<typeof renderCancelControl>[1],
+      () => {},
+    ) as unknown as {el: FakeElement}
+
+    findVisibleButtons(el).find(b => b.textContent === 'Cancel run')?.dispatchEvent({type: 'click'})
+    findVisibleButtons(el).find(b => b.textContent === 'Confirm cancel')?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    expect(el.dataset.state).toBe('transport-failure')
+
+    // The mutex was reset — a subsequent Try again click issues another attempt.
+    const client2Calls: string[] = []
+    client.cancelRun = async () => {
+      client2Calls.push('called')
+      return {success: true, data: {ok: true, runId: 'run-001', phase: 'CANCELLED'}}
+    }
+    findVisibleButtons(el).find(b => b.textContent === 'Try again')?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(client2Calls).toHaveLength(1)
+    expect(el.dataset.state).toBe('cancelled')
+  })
+
+  it('thrown client: an injected cancelClient whose refreshCsrf throws resets the mutex and shows transport-failure', async () => {
+    stubCancelRenderEnv()
+    const client = {
+      refreshCsrf: async () => {
+        throw new Error('boom')
+      },
+      cancelRun: async (runId: string) => ({success: true, data: {ok: true, runId, phase: 'CANCELLED'}}),
+    }
+    const {el} = renderCancelControl(
+      'run-001',
+      client as unknown as Parameters<typeof renderCancelControl>[1],
+      () => {},
+    ) as unknown as {el: FakeElement}
+
+    findVisibleButtons(el).find(b => b.textContent === 'Cancel run')?.dispatchEvent({type: 'click'})
+    findVisibleButtons(el).find(b => b.textContent === 'Confirm cancel')?.dispatchEvent({type: 'click'})
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    expect(el.dataset.state).toBe('transport-failure')
+  })
+
+  it('card-bubbling: clicking Cancel/Confirm/Dismiss stops propagation so a parent click listener is never invoked', () => {
+    stubCancelRenderEnv()
+    const {client} = makeFakeCancelClient()
+    const {el} = renderCancelControl('run-001', client, () => {}) as unknown as {el: FakeElement}
+
+    // Simulate a parent card whose click listener would run unless stopPropagation halts bubbling.
+    const cancelBtn = findVisibleButtons(el).find(b => b.textContent === 'Cancel run')
+    let propagationStopped = false
+    const clickEvent = {
+      type: 'click',
+      stopPropagation: () => {
+        propagationStopped = true
+      },
+    }
+    cancelBtn?.dispatchEvent(clickEvent)
+    expect(propagationStopped).toBe(true)
+
+    const confirmBtn = findVisibleButtons(el).find(b => b.textContent === 'Confirm cancel')
+    propagationStopped = false
+    confirmBtn?.dispatchEvent(clickEvent)
+    expect(propagationStopped).toBe(true)
+
+    // Re-arm to test Dismiss too.
+    findVisibleButtons(el).find(b => b.textContent === 'Cancel run')?.dispatchEvent({type: 'click', stopPropagation: () => {}})
+    const dismissBtn = findVisibleButtons(el).find(b => b.textContent === 'Dismiss')
+    propagationStopped = false
+    dismissBtn?.dispatchEvent(clickEvent)
+    expect(propagationStopped).toBe(true)
   })
 })
 

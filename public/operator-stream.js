@@ -1147,7 +1147,8 @@ export function buildApprovalClient(opts) {
  * Validate a dynamic path ID (e.g. runId) before it is embedded in a URL.
  *
  * Rejects blank/whitespace-only values, literal `/`/`\`, percent-encoded
- * slash/backslash, and any decoded segment equal to `.` or `..`.
+ * slash/backslash, any decoded segment equal to `.` or `..`, literal
+ * NUL/CR/LF/control chars, and percent-encoded NUL/CR/LF.
  *
  * Does NOT log the raw ID value — callers must use the error code only.
  */
@@ -1155,6 +1156,9 @@ function validateDynamicId(id) {
   if (id.trim() === '') return false
   if (id.includes('/') || id.includes('\\')) return false
   if (/%(?:2f|5c)/i.test(id)) return false
+  // eslint-disable-next-line no-control-regex -- intentional control-char rejection
+  if (/[\u0000-\u001F]/.test(id)) return false
+  if (/%(?:00|0d|0a)/i.test(id)) return false
   let decoded
   try {
     decoded = decodeURIComponent(id)
@@ -1233,6 +1237,10 @@ function parseOperatorCancelResponse(input) {
  * @param {{error: (message: string, meta?: object) => void}} [opts.logger] - Optional logger.
  * @returns {object} An object with a cancelRun() method.
  */
+// Bound on the cancel client's CSRF and cancel-POST fetches — a hung fetch (no
+// server response) must not leave the control stuck pending forever.
+const CANCEL_FETCH_TIMEOUT_MS = 10_000
+
 export function buildCancelClient(opts) {
   const endpointBase = opts?.endpointBase ?? '/operator'
   const fixtureSessionId = opts?.fixtureSessionId
@@ -1248,6 +1256,7 @@ export function buildCancelClient(opts) {
       ...init,
       credentials: 'include',
       redirect: 'error',
+      signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(CANCEL_FETCH_TIMEOUT_MS) : undefined,
     })
 
   const ROUTE_TEMPLATE = '/operator/runs/:runId/cancel'
@@ -1653,8 +1662,9 @@ export const CANCEL_RETRY_MAX_ATTEMPTS = 3
  * @param {{cancelRun: (runId: string, idempotencyKey: string, csrfToken: string) => Promise<object>, refreshCsrf: () => Promise<object>}} cancelClient
  * @param {(runId: string) => void} onCancelDispatch - Called once the cancel POST is
  *   sent, so the caller can dispatch the reducer's `cancel` action (cancelInFlight tracking).
- * @returns {{el: HTMLElement, notifyTerminal: () => void}} The rendered control element
- *   and a notifyTerminal() callback the caller invokes on a terminal stream frame.
+ * @returns {{el: HTMLElement, notifyTerminal: () => void, dispose: () => void}} The
+ *   rendered control element, a notifyTerminal() callback the caller invokes on a
+ *   terminal stream frame, and a dispose() callback the caller invokes on teardown.
  */
 export function renderCancelControl(runId, cancelClient, onCancelDispatch) {
   const el = document.createElement('div')
@@ -1676,6 +1686,19 @@ export function renderCancelControl(runId, cancelClient, onCancelDispatch) {
   let canceling = false
   let retryAttempt = 0
   let retryTimer = null
+
+  // Terminal-wins fence: once the live stream reports this run terminal (or the
+  // control is disposed on stream teardown), no late-resolving cancel attempt
+  // (a pending fetch, a queued retry) may mutate the UI, schedule a retry, or
+  // issue another cancelRun POST. Checked after every await boundary in
+  // issueCancel/attemptCancel.
+  let terminalObserved = false
+  let disposed = false
+
+  // Set true only once handleCancel actually dispatches a cancel POST. Used to
+  // gate the "Run stopped." cancelled copy — a run that goes terminal on its
+  // own (succeeded/failed normally) must not show a cancel-outcome message.
+  let cancelInitiated = false
 
   function updateStateAttr() {
     el.dataset.state = controlState
@@ -1701,7 +1724,8 @@ export function renderCancelControl(runId, cancelClient, onCancelDispatch) {
     cancelBtn.type = 'button'
     cancelBtn.className = 'run-cancel-btn-cancel'
     cancelBtn.textContent = 'Cancel run'
-    cancelBtn.addEventListener('click', () => {
+    cancelBtn.addEventListener('click', e => {
+      e.stopPropagation()
       renderArmed()
     })
     controlsEl.append(cancelBtn)
@@ -1718,7 +1742,8 @@ export function renderCancelControl(runId, cancelClient, onCancelDispatch) {
     confirmBtn.type = 'button'
     confirmBtn.className = 'run-cancel-btn-confirm'
     confirmBtn.textContent = 'Confirm cancel'
-    confirmBtn.addEventListener('click', () => {
+    confirmBtn.addEventListener('click', e => {
+      e.stopPropagation()
       handleCancel()
     })
     controlsEl.append(confirmBtn)
@@ -1727,7 +1752,8 @@ export function renderCancelControl(runId, cancelClient, onCancelDispatch) {
     dismissBtn.type = 'button'
     dismissBtn.className = 'run-cancel-btn-dismiss'
     dismissBtn.textContent = 'Dismiss'
-    dismissBtn.addEventListener('click', () => {
+    dismissBtn.addEventListener('click', e => {
+      e.stopPropagation()
       renderIdle()
       cancelBtnFocus()
     })
@@ -1764,6 +1790,14 @@ export function renderCancelControl(runId, cancelClient, onCancelDispatch) {
     controlsEl.textContent = ''
   }
 
+  /** Neutral terminal rendering for a run that went terminal without an operator cancel. */
+  function setNeutralTerminal() {
+    controlState = 'cancelled'
+    updateStateAttr()
+    statusEl.textContent = ''
+    controlsEl.textContent = ''
+  }
+
   function setUnavailable() {
     controlState = 'unavailable'
     updateStateAttr()
@@ -1788,7 +1822,8 @@ export function renderCancelControl(runId, cancelClient, onCancelDispatch) {
     retryBtn.type = 'button'
     retryBtn.className = 'run-cancel-btn-retry'
     retryBtn.textContent = 'Try again'
-    retryBtn.addEventListener('click', () => {
+    retryBtn.addEventListener('click', e => {
+      e.stopPropagation()
       handleCancel()
     })
     controlsEl.append(retryBtn)
@@ -1796,6 +1831,11 @@ export function renderCancelControl(runId, cancelClient, onCancelDispatch) {
 
   async function issueCancel(idempotencyKey) {
     const csrfResult = await cancelClient.refreshCsrf()
+    // Terminal-wins fence: a terminal frame (or dispose) may have arrived while
+    // refreshCsrf was in flight. Do not POST a cancel after terminal has won.
+    if (terminalObserved || disposed) {
+      return {success: true, data: {ok: true, runId, phase: 'CANCELLED'}}
+    }
     if (!csrfResult.success) {
       return csrfResult.error.kind === 'http'
         ? {success: false, error: {kind: 'http', status: csrfResult.error.status}}
@@ -1808,6 +1848,7 @@ export function renderCancelControl(runId, cancelClient, onCancelDispatch) {
     // In-flight mutex — guards the handler itself, not just `disabled`.
     if (canceling) return
     canceling = true
+    cancelInitiated = true
     clearRetryTimer()
     retryAttempt = 0
     setPending()
@@ -1820,11 +1861,24 @@ export function renderCancelControl(runId, cancelClient, onCancelDispatch) {
 
     if (typeof onCancelDispatch === 'function') onCancelDispatch(runId)
 
-    await attemptCancel(idempotencyKey)
+    try {
+      await attemptCancel(idempotencyKey)
+    } catch {
+      // Unexpected throw from refreshCsrf/cancelRun/onCancelDispatch (not one of
+      // issueCancel's discriminated error results) — reset the mutex so the
+      // control isn't stuck pending, and render a retryable transport failure.
+      canceling = false
+      if (!terminalObserved && !disposed) setTransportFailure()
+    }
   }
 
   async function attemptCancel(idempotencyKey) {
     const result = await issueCancel(idempotencyKey)
+
+    // Terminal-wins fence: after the await above resolves, a terminal frame or
+    // dispose may have landed. Never overwrite the terminal/disposed outcome,
+    // never schedule a retry, never mutate the UI again.
+    if (terminalObserved || disposed) return
 
     if (result.success) {
       canceling = false
@@ -1842,6 +1896,9 @@ export function renderCancelControl(runId, cancelClient, onCancelDispatch) {
         setRetrying()
         retryTimer = setTimeout(() => {
           retryTimer = null
+          // Terminal-wins fence: a terminal frame or dispose may have landed
+          // while this timer was armed. Don't re-arm or re-issue the cancel.
+          if (terminalObserved || disposed) return
           attemptCancel(idempotencyKey)
         }, backoffDelay(retryAttempt - 1))
         return
@@ -1866,19 +1923,40 @@ export function renderCancelControl(runId, cancelClient, onCancelDispatch) {
   }
 
   /**
-   * Stop any pending retry and mark the control as cancelled (terminal-wins from
+   * Stop any pending retry and mark the control terminal (terminal-wins from
    * the live stream — called by the caller when a terminal status frame arrives
-   * for this run from any source, even mid-retry).
+   * for this run from any source, even mid-retry). Sets terminalObserved so any
+   * still-in-flight cancel attempt fences itself off after its next await.
+   *
+   * Only renders the "Run stopped." cancelled copy if a cancel was actually
+   * initiated by the operator; otherwise the control goes neutral (no message
+   * — the run card's own status pill already communicates succeeded/failed).
    */
   function notifyTerminal() {
+    terminalObserved = true
     clearRetryTimer()
     canceling = false
-    if (controlState !== 'cancelled') setCancelled()
+    if (cancelInitiated) {
+      if (controlState !== 'cancelled') setCancelled()
+    } else {
+      setNeutralTerminal()
+    }
+  }
+
+  /**
+   * Tear down the control on stream close/teardown: fences off any in-flight
+   * cancel attempt (same mechanism as notifyTerminal) and clears any pending
+   * retry timer so it can never fire after the caller has moved on.
+   */
+  function dispose() {
+    disposed = true
+    clearRetryTimer()
+    canceling = false
   }
 
   renderIdle()
 
-  return {el, notifyTerminal}
+  return {el, notifyTerminal, dispose}
 }
 
 /**
@@ -2474,6 +2552,11 @@ export function initOperatorStream(opts) {
       clearFirstFrameTimer()
       if (abortController) {
         abortController.abort()
+      }
+      // Dispose the cancel control (if rendered) so a pending retry timer or
+      // in-flight cancel attempt can never fire/mutate after close().
+      if (cancelControl !== null) {
+        cancelControl.dispose()
       }
       state = nextStreamState(state, {type: 'stream-closed'})
     },

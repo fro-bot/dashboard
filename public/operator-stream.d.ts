@@ -330,7 +330,7 @@ export interface InitOptions {
   /** Cancel control container element (data-role="run-cancel"). */
   readonly cancelEl?: (HTMLElement & {hidden: boolean}) | null
   /** Injectable cancel client for testing. If absent, buildCancelClient() is used. */
-  readonly cancelClient?: CancelClient | null
+  readonly cancelClient?: CancelControlClient | null
 }
 
 export declare function initOperatorStream(opts: InitOptions): StreamHandle
@@ -359,11 +359,29 @@ export declare function buildApprovalClient(opts?: {readonly endpointBase?: stri
 export type CancelTerminalPhase = 'COMPLETED' | 'FAILED' | 'CANCELLED'
 
 /**
+ * Run lifecycle phases. Mirrors src/gateway/operator-contract/run-status.ts RunPhase.
+ */
+export type RunPhase = 'PENDING' | 'ACKNOWLEDGED' | 'EXECUTING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+
+/**
+ * The 7-value operator-facing web status set. Mirrors
+ * src/gateway/operator-contract/run-status.ts OperatorWebStatus.
+ */
+export type OperatorWebStatus =
+  | 'queued'
+  | 'blocked'
+  | 'running'
+  | 'waiting_for_approval'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+
+/**
  * Local mirror of src/gateway/operator-contract/run-status.ts PHASE_TO_WEB_STATUS.
  * Maps a RunPhase to its lowercase web status. Drift with the vendored TypeScript
  * source is caught by a conformance test.
  */
-export declare const PHASE_TO_WEB_STATUS: Readonly<Record<string, string>>
+export declare const PHASE_TO_WEB_STATUS: Readonly<Record<RunPhase, OperatorWebStatus>>
 
 /** Parsed success payload for a cancel response. */
 export interface CancelRunResult {
@@ -388,6 +406,15 @@ export interface CancelClient {
   readonly cancelRun: (runId: string, idempotencyKey: string, csrfToken: string) => Promise<CancelRunOutcome>
 }
 
+/**
+ * Cancel client shape used by the cancel control (renderCancelControl) and
+ * InitOptions.cancelClient — includes refreshCsrf, which buildCancelClient's
+ * cancelRun-only CancelClient does not carry on its own.
+ */
+export interface CancelControlClient extends CancelClient {
+  readonly refreshCsrf: () => Promise<{success: boolean; data?: {csrfToken: string}; error?: {kind: string; status?: number}}>
+}
+
 /** Optional coarse logger — receives only route template + status, never sensitive values. */
 export interface CancelClientLogger {
   readonly error: (message: string, meta?: Record<string, unknown>) => void
@@ -405,7 +432,7 @@ export declare function buildCancelClient(opts?: {
   readonly endpointBase?: string
   readonly fixtureSessionId?: string
   readonly logger?: CancelClientLogger
-}): CancelClient & {readonly refreshCsrf: () => Promise<{success: boolean; data?: {csrfToken: string}; error?: {kind: string; status?: number}}>}
+}): CancelControlClient
 
 /**
  * Bounded retry count for a transient (HTTP 503) cancel response. This handler
@@ -428,6 +455,12 @@ export interface CancelControlHandle {
   readonly el: HTMLElement
   /** Called when a terminal status frame arrives for this run from any source. */
   readonly notifyTerminal: () => void
+  /**
+   * Tear down the control: marks it disposed (fencing any in-flight cancel
+   * attempt and its retry timer from ever mutating the UI again) and clears
+   * any pending retry timer. Call on stream close/teardown.
+   */
+  readonly dispose: () => void
 }
 
 /**
@@ -436,7 +469,7 @@ export interface CancelControlHandle {
  */
 export declare function renderCancelControl(
   runId: string,
-  cancelClient: CancelClient & {readonly refreshCsrf: () => Promise<{success: boolean; data?: {csrfToken: string}; error?: {kind: string; status?: number}}>},
+  cancelClient: CancelControlClient,
   onCancelDispatch: (runId: string) => void,
 ): CancelControlHandle
 
