@@ -22,15 +22,35 @@ export type {OperatorApprovalFrame} from './approval-frame.ts'
 export type {OperatorDecisionState, PermissionReply} from './approval.ts'
 export type {OperatorIdentity} from './identity.ts'
 export type {OperatorOutputFrame} from './output.ts'
-export {parseOperatorCsrfToken, parseOperatorError, parseOperatorOk, parseOperatorSessionInfo} from './parse.ts'
+export {
+  parseOperatorCancelResponse,
+  parseOperatorCsrfToken,
+  parseOperatorError,
+  parseOperatorOk,
+  parseOperatorSessionInfo,
+} from './parse.ts'
 export type {PushHandoffState, PushSubscriptionMetadata, VapidKeyResponse} from './push.ts'
 export {parsePushHandoffState, parsePushSubscriptionMetadata, parseVapidKeyResponse} from './push.ts'
 export {assertRedactionApplied, AUTHORIZATION_OBLIGATION, REDACTION_OBLIGATION} from './redaction.ts'
 export type {RedactionContext} from './redaction.ts'
 export type {RepoSummary} from './repo-summary.ts'
 export {parseRepoSummary, parseRepoSummaryList} from './repo-summary.ts'
-export type {OperatorCsrfToken, OperatorError, OperatorOk, OperatorSessionInfo} from './responses.ts'
-export type {OperatorFailureKind, OperatorRunStatus, OperatorWebStatus, RunPhase, Surface} from './run-status.ts'
+export type {
+  OperatorCancelResponse,
+  OperatorCsrfToken,
+  OperatorError,
+  OperatorOk,
+  OperatorSessionInfo,
+} from './responses.ts'
+export {PHASE_TO_WEB_STATUS} from './run-status.ts'
+export type {
+  OperatorFailureKind,
+  OperatorRunStatus,
+  OperatorWebStatus,
+  RunPhase,
+  Surface,
+  TerminalPhase,
+} from './run-status.ts'
 export type {RunsListResponse, RunSummary, RunSummaryStatus} from './run-summary.ts'
 export {parseRunsListResponse, parseRunSummary, parseRunSummaryList, RUN_INDEX_CAP} from './run-summary.ts'
 export type {ReadyFrame, ResetFrameData, ResetReason, RunStreamFrame, StatusFrameData} from './sse-frames.ts'

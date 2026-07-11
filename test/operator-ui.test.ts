@@ -562,6 +562,23 @@ describe('operator UI — no-dashboard-proxy 404 invariant for approval routes',
     expect(res.status).toBe(404)
   })
 
+  it('POST /operator/runs/:id/cancel returns 404 from buildDashboardApp (not proxied)', async () => {
+    const operatorClient = makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION))
+    const app = await buildTestApp({
+      operatorUiEnabled: true,
+      gatewayOperatorSessionEnabled: true,
+      operatorClient,
+    })
+    const res = await app.request('/operator/runs/run-001/cancel', {
+      method: 'POST',
+      headers: {
+        cookie: 'gateway_session=test-gateway-cookie',
+        'content-type': 'application/json',
+      },
+    })
+    expect(res.status).toBe(404)
+  })
+
   it('SSR render does not call listRunApprovals or decideRunApproval', async () => {
     // The throwing fake surfaces any accidental SSR call to these methods.
     // /operator redirects before any SSR, so none of these should be called.

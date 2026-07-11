@@ -51,6 +51,7 @@ export function discoverCardStreamTargets(runId: string): {
   approvalsEl: Element | null
   badgeEl: Element | null
   reasonEl: Element | null
+  cancelEl: Element | null
 } {
   const card = typeof document !== 'undefined'
     ? document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
@@ -61,6 +62,7 @@ export function discoverCardStreamTargets(runId: string): {
     approvalsEl: card?.querySelector('[data-role="run-approvals"]') ?? null,
     badgeEl: card?.querySelector('[data-role="approval-badge"]') ?? null,
     reasonEl: card?.querySelector('[data-role="run-reason"]') ?? null,
+    cancelEl: card?.querySelector('[data-role="run-cancel"]') ?? null,
   }
 }
 
@@ -259,6 +261,7 @@ async function defaultRuntimeLoader(opts?: {
       approvalsEl?: Element | null
       badgeEl?: Element | null
       reasonEl?: Element | null
+      cancelEl?: Element | null
       endpointBase?: string
       fixtureSessionId?: string
     }) => {close(): void}
@@ -300,7 +303,7 @@ async function defaultRuntimeLoader(opts?: {
 
     // Discover the per-card render targets so live output, coalescing hints,
     // approval prompts, and the approval badge all render — not just status.
-    const {outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl} = discoverCardStreamTargets(runId)
+    const {outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, cancelEl} = discoverCardStreamTargets(runId)
 
     try {
       const handle = streamMod.initOperatorStream({
@@ -312,6 +315,7 @@ async function defaultRuntimeLoader(opts?: {
         approvalsEl,
         badgeEl,
         reasonEl,
+        cancelEl,
         endpointBase: opts?.endpointBase,
         fixtureSessionId: opts?.fixtureSessionId,
       })

@@ -12,6 +12,9 @@ export function validateDynamicId(id: string): boolean {
   if (id.trim() === '') return false
   if (id.includes('/') || id.includes('\\')) return false
   if (/%(?:2f|5c)/i.test(id)) return false
+  // eslint-disable-next-line no-control-regex -- intentional control-char rejection
+  if (/[\u0000-\u001F]/.test(id)) return false
+  if (/%(?:00|0d|0a)/i.test(id)) return false
   let decoded: string
   try {
     decoded = decodeURIComponent(id)

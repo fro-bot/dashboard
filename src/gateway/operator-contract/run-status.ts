@@ -18,6 +18,9 @@
 /** Run lifecycle phases (exact frozen literal values from the upstream contract). */
 export type RunPhase = 'PENDING' | 'ACKNOWLEDGED' | 'EXECUTING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
 
+/** Terminal run phases (exact frozen literal values from the upstream contract). */
+export type TerminalPhase = 'COMPLETED' | 'FAILED' | 'CANCELLED'
+
 /** Surface discriminant — the integration surface that initiated the run. */
 export type Surface = 'github' | 'discord' | 'web'
 
@@ -40,6 +43,21 @@ export type OperatorWebStatus =
   | 'succeeded'
   | 'failed'
   | 'cancelled'
+
+/**
+ * Maps a RunPhase to its operator-facing web status.
+ *
+ * 'blocked' and 'waiting_for_approval' are NOT in this map — they are
+ * endpoint-layer overlays, not derivable from RunPhase alone.
+ */
+export const PHASE_TO_WEB_STATUS: Readonly<Record<RunPhase, OperatorWebStatus>> = {
+  PENDING: 'queued',
+  ACKNOWLEDGED: 'running',
+  EXECUTING: 'running',
+  COMPLETED: 'succeeded',
+  FAILED: 'failed',
+  CANCELLED: 'cancelled',
+}
 
 // ---------------------------------------------------------------------------
 // OperatorRunStatus

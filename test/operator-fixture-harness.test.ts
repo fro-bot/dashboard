@@ -1495,6 +1495,240 @@ describe('fixture session ownership — decision requires matching fixtureSessio
 })
 
 // ---------------------------------------------------------------------------
+// POST /runs/:runId/cancel — cancel route
+// ---------------------------------------------------------------------------
+
+async function launchIndexedCancelSession(app: Awaited<ReturnType<typeof buildFixtureTestApp>>): Promise<string> {
+  const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+  const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+  // Seed the indexed runs (mirrors GET /runs).
+  await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)
+  return fixtureSessionId
+}
+
+describe('fixture cancel — POST /runs/:runId/cancel', () => {
+  it('happy path: succeeded indexed run → 200 flat {ok,runId,phase:COMPLETED}', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const fixtureSessionId = await launchIndexedCancelSession(app)
+    const runId = 'run-fixture-index-succeeded-003'
+
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/cancel`, {
+      method: 'POST',
+      headers: {
+        'x-fixture-session-id': fixtureSessionId,
+        'x-csrf-token': 'fixture-csrf-placeholder',
+        'idempotency-key': 'fixture-cancel-key-001',
+      },
+    })
+    expect(res.status).toBe(200)
+    expect(res.headers.get('cache-control')).toBe('no-store')
+    const body = await res.json()
+    expect(body).toEqual({ok: true, runId, phase: 'COMPLETED'})
+  })
+
+  it('happy path: failed indexed run → phase:FAILED', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const fixtureSessionId = await launchIndexedCancelSession(app)
+    const runId = 'run-fixture-index-failed-004'
+
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/cancel`, {
+      method: 'POST',
+      headers: {
+        'x-fixture-session-id': fixtureSessionId,
+        'x-csrf-token': 'fixture-csrf-placeholder',
+        'idempotency-key': 'fixture-cancel-key-002',
+      },
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as {phase: string}
+    expect(body.phase).toBe('FAILED')
+  })
+
+  it('happy path: running indexed run → phase:CANCELLED', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const fixtureSessionId = await launchIndexedCancelSession(app)
+    const runId = 'run-fixture-index-running-002'
+
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/cancel`, {
+      method: 'POST',
+      headers: {
+        'x-fixture-session-id': fixtureSessionId,
+        'x-csrf-token': 'fixture-csrf-placeholder',
+        'idempotency-key': 'fixture-cancel-key-003',
+      },
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as {phase: string}
+    expect(body.phase).toBe('CANCELLED')
+  })
+
+  it('idempotency replay: same session+key returns the same cached body', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const fixtureSessionId = await launchIndexedCancelSession(app)
+    const runId = 'run-fixture-index-succeeded-003'
+    const headers = {
+      'x-fixture-session-id': fixtureSessionId,
+      'x-csrf-token': 'fixture-csrf-placeholder',
+      'idempotency-key': 'fixture-cancel-key-replay-001',
+    }
+
+    const first = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/cancel`, {method: 'POST', headers})
+    const firstBody = await first.json()
+
+    const second = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/cancel`, {method: 'POST', headers})
+    const secondBody = await second.json()
+
+    expect(second.status).toBe(200)
+    expect(secondBody).toEqual(firstBody)
+  })
+
+  it('missing csrf → 400 {error:missing-csrf}', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const fixtureSessionId = await launchIndexedCancelSession(app)
+    const runId = 'run-fixture-index-succeeded-003'
+
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/cancel`, {
+      method: 'POST',
+      headers: {
+        'x-fixture-session-id': fixtureSessionId,
+        'idempotency-key': 'fixture-cancel-key-004',
+      },
+    })
+    expect(res.status).toBe(400)
+    const body = await res.json()
+    expect(body).toEqual({error: 'missing-csrf'})
+    expect(res.headers.get('cache-control')).toBe('no-store')
+  })
+
+  it('missing idempotency-key → 400 {error:missing-idempotency-key}', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const fixtureSessionId = await launchIndexedCancelSession(app)
+    const runId = 'run-fixture-index-succeeded-003'
+
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/cancel`, {
+      method: 'POST',
+      headers: {
+        'x-fixture-session-id': fixtureSessionId,
+        'x-csrf-token': 'fixture-csrf-placeholder',
+      },
+    })
+    expect(res.status).toBe(400)
+    const body = await res.json()
+    expect(body).toEqual({error: 'missing-idempotency-key'})
+  })
+
+  it('unknown/unauthorized run → 404 {error:not-found}', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const fixtureSessionId = await launchIndexedCancelSession(app)
+
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/run-fixture-nonexistent-999/cancel`, {
+      method: 'POST',
+      headers: {
+        'x-fixture-session-id': fixtureSessionId,
+        'x-csrf-token': 'fixture-csrf-placeholder',
+        'idempotency-key': 'fixture-cancel-key-005',
+      },
+    })
+    expect(res.status).toBe(404)
+    const body = await res.json()
+    expect(body).toEqual({error: 'not-found'})
+  })
+
+  it('forced-503 sentinel: idempotency-key "force-503" → 503 {error:unavailable}', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const fixtureSessionId = await launchIndexedCancelSession(app)
+    const runId = 'run-fixture-index-succeeded-003'
+
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/cancel`, {
+      method: 'POST',
+      headers: {
+        'x-fixture-session-id': fixtureSessionId,
+        'x-csrf-token': 'fixture-csrf-placeholder',
+        'idempotency-key': 'force-503',
+      },
+    })
+    expect(res.status).toBe(503)
+    const body = await res.json()
+    expect(body).toEqual({error: 'unavailable'})
+    expect(res.headers.get('cache-control')).toBe('no-store')
+  })
+
+  it('browser-reachable retry fixture run: cancel → 503, second cancel also 503 (not cached)', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const fixtureSessionId = await launchIndexedCancelSession(app)
+    const runId = 'run-fixture-index-cancel-retry-008'
+
+    const first = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/cancel`, {
+      method: 'POST',
+      headers: {
+        'x-fixture-session-id': fixtureSessionId,
+        'x-csrf-token': 'fixture-csrf-placeholder',
+        'idempotency-key': 'fixture-cancel-retry-key-001',
+      },
+    })
+    expect(first.status).toBe(503)
+    expect(await first.json()).toEqual({error: 'unavailable'})
+    expect(first.headers.get('cache-control')).toBe('no-store')
+
+    const second = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/cancel`, {
+      method: 'POST',
+      headers: {
+        'x-fixture-session-id': fixtureSessionId,
+        'x-csrf-token': 'fixture-csrf-placeholder',
+        'idempotency-key': 'fixture-cancel-retry-key-001',
+      },
+    })
+    expect(second.status).toBe(503)
+    expect(await second.json()).toEqual({error: 'unavailable'})
+  })
+
+  it('browser-reachable unavailable fixture run: cancel → 404 {error:not-found}', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const fixtureSessionId = await launchIndexedCancelSession(app)
+    const runId = 'run-fixture-index-cancel-unavailable-009'
+
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/cancel`, {
+      method: 'POST',
+      headers: {
+        'x-fixture-session-id': fixtureSessionId,
+        'x-csrf-token': 'fixture-csrf-placeholder',
+        'idempotency-key': 'fixture-cancel-unavailable-key-001',
+      },
+    })
+    expect(res.status).toBe(404)
+    expect(await res.json()).toEqual({error: 'not-found'})
+    expect(res.headers.get('cache-control')).toBe('no-store')
+  })
+
+  it('production mode returns 404 for POST /runs/:runId/cancel', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: false})
+    const res = await authedPost(
+      app,
+      `${FIXTURE_OPERATOR_PREFIX}/runs/run-fixture-index-succeeded-003/cancel`,
+      {},
+    )
+    expect(res.status).toBe(404)
+  })
+
+  it('GET /runs includes the two browser-reachable cancel-fault fixture runs', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const fixtureSessionId = await launchIndexedCancelSession(app)
+
+    const runsRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)
+    const {runs} = await runsRes.json() as {runs: {runId: string; status: string}[]}
+    const runIds = runs.map(r => r.runId)
+
+    expect(runIds).toContain('run-fixture-index-cancel-retry-008')
+    expect(runIds).toContain('run-fixture-index-cancel-unavailable-009')
+
+    const retryRun = runs.find(r => r.runId === 'run-fixture-index-cancel-retry-008')
+    const unavailableRun = runs.find(r => r.runId === 'run-fixture-index-cancel-unavailable-009')
+    expect(retryRun?.status).toBe('running')
+    expect(unavailableRun?.status).toBe('running')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Cheap hardening: malformed JSON and non-object JSON for POST /runs
 // ---------------------------------------------------------------------------
 

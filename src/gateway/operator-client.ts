@@ -386,6 +386,8 @@ function requireIdempotencyKey(idempotencyKey: string): GatewayValidationError |
  * - any literal `/` or `\` (path separator injection)
  * - any percent-encoded slash (`%2F`, `%2f`) or backslash (`%5C`, `%5c`)
  * - any decoded segment equal to `.` or `..` (traversal after percent-decoding)
+ * - any literal NUL/CR/LF or other control character
+ * - any percent-encoded NUL (`%00`), CR (`%0D`, `%0d`), or LF (`%0A`, `%0a`)
  *
  * Does NOT log the raw ID value — callers must use the error code only.
  *
@@ -398,6 +400,11 @@ export function validateDynamicId(id: string): boolean {
   if (id.includes('/') || id.includes('\\')) return false
   // Reject percent-encoded slash (%2F/%2f) or backslash (%5C/%5c)
   if (/%(?:2f|5c)/i.test(id)) return false
+  // Reject literal control characters (NUL, CR, LF, and other 0x00-0x1f range)
+  // eslint-disable-next-line no-control-regex -- intentional control-char rejection
+  if (/[\u0000-\u001F]/.test(id)) return false
+  // Reject percent-encoded NUL/CR/LF
+  if (/%(?:00|0d|0a)/i.test(id)) return false
   // Reject decoded `.` or `..` segments (after safe percent-decode attempt)
   let decoded: string
   try {

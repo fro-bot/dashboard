@@ -703,6 +703,29 @@ describe('discoverCardStreamTargets', () => {
     expect(result.badgeEl).toBeNull()
   })
 
+  it('returns the cancel control container element when present', () => {
+    const card = document.createElement('div')
+    card.dataset.runId = 'run-with-cancel'
+    const cancelEl = document.createElement('div')
+    cancelEl.dataset.role = 'run-cancel'
+    card.append(cancelEl)
+    document.body.append(card)
+
+    const result = discoverCardStreamTargets('run-with-cancel')
+
+    expect(result.cancelEl).toBe(cancelEl)
+  })
+
+  it('returns null for cancelEl when no cancel control container is present', () => {
+    const card = document.createElement('div')
+    card.dataset.runId = 'run-no-cancel'
+    document.body.append(card)
+
+    const result = discoverCardStreamTargets('run-no-cancel')
+
+    expect(result.cancelEl).toBeNull()
+  })
+
   it('uses CSS.escape so a runId with special characters still resolves', () => {
     const runId = 'run:with[special].chars'
     const card = document.createElement('div')

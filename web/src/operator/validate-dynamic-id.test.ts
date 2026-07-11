@@ -31,6 +31,21 @@ describe('validateDynamicId (web-local copy)', () => {
     expect(validateDynamicId('%zz')).toBe(false)
   })
 
+  it('rejects literal control characters', () => {
+    expect(validateDynamicId('a\u0000b')).toBe(false)
+    expect(validateDynamicId('a\rb')).toBe(false)
+    expect(validateDynamicId('a\nb')).toBe(false)
+    expect(validateDynamicId('a\u001Fb')).toBe(false)
+  })
+
+  it('rejects percent-encoded NUL, CR, and LF', () => {
+    expect(validateDynamicId('a%00b')).toBe(false)
+    expect(validateDynamicId('a%0db')).toBe(false)
+    expect(validateDynamicId('a%0Db')).toBe(false)
+    expect(validateDynamicId('a%0ab')).toBe(false)
+    expect(validateDynamicId('a%0Ab')).toBe(false)
+  })
+
   it('accepts a valid UUID', () => {
     expect(validateDynamicId('550e8400-e29b-41d4-a716-446655440000')).toBe(true)
   })

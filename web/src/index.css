@@ -626,6 +626,154 @@
   gap: var(--space-2);
 }
 
+/* Run Cancel Control — functional styles per emitted state, mirrors approval-prompt. */
+.run-cancel-control {
+  margin-top: var(--space-3);
+  transition: all var(--duration-fast) var(--ease-standard);
+}
+
+/* Deliberate checkpoint layout for armed/pending states */
+.run-cancel-control[data-state="armed"],
+.run-cancel-control[data-state="pending"] {
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border-accent);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+}
+
+.run-cancel-status {
+  font-size: var(--text-body-sm);
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-2);
+}
+
+/* Collapse the status line when empty so idle/armed states don't reserve a gap. */
+.run-cancel-status:empty {
+  display: none;
+}
+
+.run-cancel-controls {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* Shared button base */
+.run-cancel-btn-cancel,
+.run-cancel-btn-confirm,
+.run-cancel-btn-dismiss,
+.run-cancel-btn-retry {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-body-sm);
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+  transition: all var(--duration-fast) var(--ease-standard);
+}
+
+.run-cancel-control button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.run-cancel-control button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-accent);
+}
+
+/* Idle trigger (Cancel Run) - muted secondary */
+.run-cancel-btn-cancel {
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+}
+.run-cancel-btn-cancel:hover:not(:disabled) {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  border-color: var(--color-border-accent);
+}
+.run-cancel-btn-cancel:active:not(:disabled) {
+  background: var(--color-border-muted);
+}
+
+/* Destructive Confirm - calm danger */
+.run-cancel-btn-confirm {
+  color: var(--color-error);
+  border-color: color-mix(in srgb, var(--color-error) 30%, transparent);
+}
+.run-cancel-btn-confirm:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-error) 10%, transparent);
+}
+.run-cancel-btn-confirm:active:not(:disabled) {
+  background: color-mix(in srgb, var(--color-error) 20%, transparent);
+}
+
+/* Safe Back-out (Dismiss) - prominent safe default */
+.run-cancel-btn-dismiss {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+.run-cancel-btn-dismiss:hover:not(:disabled) {
+  background: var(--color-surface-raised);
+  border-color: var(--color-border-accent);
+}
+.run-cancel-btn-dismiss:active:not(:disabled) {
+  background: var(--color-border-muted);
+}
+
+/* Retry */
+.run-cancel-btn-retry {
+  background: var(--color-accent);
+  color: var(--color-bg);
+  border-color: transparent;
+}
+.run-cancel-btn-retry:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+.run-cancel-btn-retry:active:not(:disabled) {
+  background: var(--color-accent-pressed);
+}
+
+/* State text coloring */
+[data-role="run-cancel"][data-state="cancelled"] .run-cancel-status,
+.run-cancel-control[data-state="cancelled"] .run-cancel-status {
+  color: var(--color-success);
+}
+
+[data-role="run-cancel"][data-state="unavailable"] .run-cancel-status,
+.run-cancel-control[data-state="unavailable"] .run-cancel-status,
+[data-role="run-cancel"][data-state="session-expired"] .run-cancel-status,
+.run-cancel-control[data-state="session-expired"] .run-cancel-status {
+  color: var(--color-error);
+}
+
+[data-role="run-cancel"][data-state="retrying"] .run-cancel-status,
+.run-cancel-control[data-state="retrying"] .run-cancel-status,
+[data-role="run-cancel"][data-state="pending"] .run-cancel-status,
+.run-cancel-control[data-state="pending"] .run-cancel-status,
+[data-role="run-cancel"][data-state="transport-failure"] .run-cancel-status,
+.run-cancel-control[data-state="transport-failure"] .run-cancel-status {
+  color: var(--color-warning);
+}
+
+[data-role="run-cancel"][data-state="idle"] .run-cancel-status,
+.run-cancel-control[data-state="idle"] .run-cancel-status,
+[data-role="run-cancel"][data-state="armed"] .run-cancel-status,
+.run-cancel-control[data-state="armed"] .run-cancel-status {
+  color: var(--color-text-muted);
+}
+
+[data-role="run-cancel"][hidden] {
+  display: none;
+}
 /* ─── 9. Operator Persistent Launch Drawer ───────────────────────────────── */
 
 .operator-drawer-container {
