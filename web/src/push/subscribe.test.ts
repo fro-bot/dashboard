@@ -492,6 +492,49 @@ describe('resubscribeStaleKey', () => {
     expect(registration.subscribeMock).toHaveBeenCalledTimes(1)
     expect(pushClient.subscribePush).not.toHaveBeenCalled()
   })
+
+  it('Gateway POST fails with a CSRF-shaped 400, refreshes the token, and retries with it -> subscribed', async () => {
+    const subscription = fakeSubscription()
+    const registration = fakeRegistration(subscription)
+    const subscribePush = vi
+      .fn()
+      .mockResolvedValueOnce(err({kind: 'http', status: 400}))
+      .mockResolvedValueOnce(ok(undefined))
+    const refreshCsrf = vi.fn().mockResolvedValueOnce(ok('csrf-1')).mockResolvedValueOnce(ok('csrf-2'))
+    const pushClient = fakePushClient({subscribePush, refreshCsrf})
+
+    const outcome = await resubscribeStaleKey({
+      serviceWorkerReady: () => Promise.resolve(registration),
+      requestPermission: vi.fn(),
+      pushClient,
+    })
+
+    expect(outcome).toEqual({kind: 'subscribed'})
+    expect(refreshCsrf).toHaveBeenCalledTimes(2)
+    expect(subscribePush).toHaveBeenCalledTimes(2)
+    expect(subscribePush.mock.calls[1]?.[1]).toBe('csrf-2')
+    const firstKey = subscribePush.mock.calls[0]?.[2] as string
+    const secondKey = subscribePush.mock.calls[1]?.[2] as string
+    expect(secondKey).toBe(firstKey)
+  })
+
+  it('CSRF-shaped 400 followed by a failed token refresh aborts cleanly, no orphaned local sub', async () => {
+    const subscription = fakeSubscription()
+    const registration = fakeRegistration(subscription)
+    const subscribePush = vi.fn().mockResolvedValue(err({kind: 'http', status: 400}))
+    const refreshCsrf = vi.fn().mockResolvedValueOnce(ok('csrf-1')).mockResolvedValueOnce(err({kind: 'network'}))
+    const pushClient = fakePushClient({subscribePush, refreshCsrf})
+
+    const outcome = await resubscribeStaleKey({
+      serviceWorkerReady: () => Promise.resolve(registration),
+      requestPermission: vi.fn(),
+      pushClient,
+    })
+
+    expect(outcome).toEqual({kind: 'subscribe-failed'})
+    expect(subscription.unsubscribeMock).toHaveBeenCalledTimes(1)
+    expect(subscribePush).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('unsubscribeOptOut', () => {

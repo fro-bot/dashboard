@@ -401,11 +401,12 @@ export async function subscribeOptIn(deps: SubscribeDeps): Promise<SubscribeOutc
  * each of the two failure points:
  *  - `pushManager.subscribe()`: one immediate retry on throw.
  *  - the Gateway POST: `subscribePush` already retries once internally on a
- *    CSRF-400 (reusing the same idempotency key). That covers CSRF churn but
- *    not a transient network-class failure (fetch throw), which surfaces
- *    here as a plain failure. This layer adds one more retry reusing the
- *    same idempotency key — minting fresh only if the failure looks
- *    CSRF-shaped (needs a new token first).
+ *    CSRF-400 (reusing the same idempotency key). This layer adds one more
+ *    retry on top, reusing the same idempotency key and minting a fresh
+ *    CSRF token first if the failure looks CSRF-shaped. Worst case (a
+ *    persistently CSRF-shaped 400) is bounded: at most 4 POSTs and 3
+ *    `refreshCsrf` calls, all sharing one idempotency key — duplicate-
+ *    subscription risk stays at zero regardless of retry count.
  *
  * Final failure -> subscribe-failed; retry re-runs this same flow.
  */
