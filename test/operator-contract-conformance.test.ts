@@ -11,6 +11,7 @@
 import type {ApprovalDecisionState, RunStatus} from '../src/gateway/operator-client.ts'
 import type {
   OperatorApprovalFrame,
+  OperatorCancelResponse,
   OperatorDecisionState,
   OperatorFailureKind,
   OperatorOutputFrame,
@@ -20,14 +21,17 @@ import type {
   RepoSummary,
   ResetFrameData,
   ResetReason,
+  RunPhase,
   RunsListResponse,
   RunStreamFrame,
   RunSummary as RunSummaryType,
   StatusFrameData,
+  TerminalPhase,
 } from '../src/gateway/operator-contract/index.ts'
 import {describe, expect, it} from 'vitest'
 import {
   OPERATOR_CONTRACT_VERSION,
+  parseOperatorCancelResponse,
   parseOperatorCsrfToken,
   parseOperatorError,
   parseOperatorOk,
@@ -37,6 +41,7 @@ import {
   parseRunsListResponse,
   parseRunSummary,
   parseRunSummaryList,
+  PHASE_TO_WEB_STATUS,
   RUN_INDEX_CAP,
 } from '../src/gateway/operator-contract/index.ts'
 
@@ -1123,5 +1128,130 @@ describe('parseRunSummaryList', () => {
 
   it('RUN_INDEX_CAP matches browser JS constant (parity)', () => {
     expect(RUN_INDEX_CAP).toBe(100)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseOperatorCancelResponse
+// ---------------------------------------------------------------------------
+
+describe('parseOperatorCancelResponse', () => {
+  it('accepts {ok: true, runId, phase: CANCELLED}', () => {
+    const input = {ok: true, runId: 'run-1', phase: 'CANCELLED'}
+    const result = parseOperatorCancelResponse(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.ok).toBe(true)
+      expect(result.data.runId).toBe('run-1')
+      expect(result.data.phase).toBe('CANCELLED')
+    }
+  })
+
+  it('accepts phase: COMPLETED (idempotent no-op cancel of an already-terminal run)', () => {
+    const input = {ok: true, runId: 'run-1', phase: 'COMPLETED'}
+    const result = parseOperatorCancelResponse(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.phase).toBe('COMPLETED')
+    }
+  })
+
+  it('accepts phase: FAILED (idempotent no-op cancel of an already-terminal run)', () => {
+    const input = {ok: true, runId: 'run-1', phase: 'FAILED'}
+    const result = parseOperatorCancelResponse(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.phase).toBe('FAILED')
+    }
+  })
+
+  it('rejects missing ok', () => {
+    const result = parseOperatorCancelResponse({runId: 'run-1', phase: 'CANCELLED'})
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error.message).toBe('invalid operator cancel response shape')
+    }
+  })
+
+  it('rejects ok: false', () => {
+    const result = parseOperatorCancelResponse({ok: false, runId: 'run-1', phase: 'CANCELLED'})
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.message).toBe('invalid operator cancel response shape')
+    }
+  })
+
+  it('rejects non-string runId', () => {
+    const result = parseOperatorCancelResponse({ok: true, runId: 42, phase: 'CANCELLED'})
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects phase not in the UPPERCASE terminal set: EXECUTING', () => {
+    const result = parseOperatorCancelResponse({ok: true, runId: 'run-1', phase: 'EXECUTING'})
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.message).toBe('invalid operator cancel response shape')
+    }
+  })
+
+  it('rejects lowercase phase: cancelled', () => {
+    const result = parseOperatorCancelResponse({ok: true, runId: 'run-1', phase: 'cancelled'})
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.message).toBe('invalid operator cancel response shape')
+    }
+  })
+
+  it('rejects null', () => {
+    const result = parseOperatorCancelResponse(null)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      // Fixed error string — never echoes the input value
+      expect(result.error.message).toBe('invalid operator cancel response shape')
+    }
+  })
+
+  it('rejects an array', () => {
+    const result = parseOperatorCancelResponse([{ok: true, runId: 'run-1', phase: 'CANCELLED'}])
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.message).toBe('invalid operator cancel response shape')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// TerminalPhase / PHASE_TO_WEB_STATUS
+// ---------------------------------------------------------------------------
+
+describe('TerminalPhase and PHASE_TO_WEB_STATUS', () => {
+  it('OperatorCancelResponse.phase accepts each TerminalPhase value', () => {
+    const checkCompleted: OperatorCancelResponse = {ok: true, runId: 'run-1', phase: 'COMPLETED'}
+    const checkFailed: OperatorCancelResponse = {ok: true, runId: 'run-1', phase: 'FAILED'}
+    const checkCancelled: OperatorCancelResponse = {ok: true, runId: 'run-1', phase: 'CANCELLED'}
+    expect(checkCompleted.phase).toBe('COMPLETED')
+    expect(checkFailed.phase).toBe('FAILED')
+    expect(checkCancelled.phase).toBe('CANCELLED')
+  })
+
+  it('maps every TerminalPhase to its documented OperatorWebStatus', () => {
+    const terminalPhases: TerminalPhase[] = ['COMPLETED', 'FAILED', 'CANCELLED']
+    const expected: Record<TerminalPhase, OperatorWebStatus> = {
+      COMPLETED: 'succeeded',
+      FAILED: 'failed',
+      CANCELLED: 'cancelled',
+    }
+    for (const phase of terminalPhases) {
+      expect(PHASE_TO_WEB_STATUS[phase]).toBe(expected[phase])
+    }
+  })
+
+  it('covers all six RunPhase keys', () => {
+    const allPhases: RunPhase[] = ['PENDING', 'ACKNOWLEDGED', 'EXECUTING', 'COMPLETED', 'FAILED', 'CANCELLED']
+    expect(Object.keys(PHASE_TO_WEB_STATUS)).toHaveLength(6)
+    for (const phase of allPhases) {
+      expect(PHASE_TO_WEB_STATUS[phase]).toBeDefined()
+    }
   })
 })
