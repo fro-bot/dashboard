@@ -74,9 +74,23 @@ interface AppShellProps {
   pushConfigReady?: boolean
   /** Fixture-mode session id, appended as a query param by the push client. */
   pushFixtureSessionId?: string
+  /** Current active view */
+  currentView?: 'operator' | 'listener'
+  /** Navigation handler */
+  onNavigate?: (view: 'operator' | 'listener') => void
+  /** Global unread count for listener messages */
+  listenerUnreadCount?: number
 }
 
-export function AppShell({children, pushEndpointBase, pushConfigReady, pushFixtureSessionId}: AppShellProps) {
+export function AppShell({
+  children,
+  pushEndpointBase,
+  pushConfigReady,
+  pushFixtureSessionId,
+  currentView = 'operator',
+  onNavigate,
+  listenerUnreadCount = 0,
+}: AppShellProps) {
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
   const [loggingOut, setLoggingOut] = useState(false)
   const logoutInFlight = useRef(false)
@@ -236,56 +250,117 @@ export function AppShell({children, pushEndpointBase, pushConfigReady, pushFixtu
 
           <nav
             aria-label="Primary navigation"
-            style={{display: 'flex', alignItems: 'center', gap: 'var(--space-2)'}}
+            style={{display: 'flex', alignItems: 'center', gap: 'var(--space-4)'}}
           >
-            <InstallPrompt />
+            <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+              <button
+                type="button"
+                onClick={() => onNavigate?.('operator')}
+                style={{
+                  minHeight: '32px',
+                  padding: 'var(--space-1) var(--space-3)',
+                  background: currentView === 'operator' ? 'var(--color-surface-raised)' : 'transparent',
+                  color: currentView === 'operator' ? 'var(--color-text)' : 'var(--color-text-muted)',
+                  border: 'none',
+                  borderRadius: 'var(--radius-md)',
+                  cursor: 'pointer',
+                  fontSize: 'var(--text-body-sm)',
+                  fontWeight: 600,
+                  transition: 'all var(--duration-fast) var(--ease-standard)'
+                }}
+              >
+                Runs
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigate?.('listener')}
+                style={{
+                  minHeight: '32px',
+                  padding: 'var(--space-1) var(--space-3)',
+                  background: currentView === 'listener' ? 'var(--color-surface-raised)' : 'transparent',
+                  color: currentView === 'listener' ? 'var(--color-text)' : 'var(--color-text-muted)',
+                  border: 'none',
+                  borderRadius: 'var(--radius-md)',
+                  cursor: 'pointer',
+                  fontSize: 'var(--text-body-sm)',
+                  fontWeight: 600,
+                  transition: 'all var(--duration-fast) var(--ease-standard)',
+                  position: 'relative'
+                }}
+              >
+                Inbox
+                {listenerUnreadCount > 0 && (
+                  <span
+                    data-testid="unread-badge"
+                    style={{
+                      position: 'absolute',
+                      top: '-4px',
+                      right: '-8px',
+                      background: 'var(--color-accent)',
+                      color: 'var(--color-bg)',
+                      fontSize: '0.65rem',
+                      fontWeight: 'bold',
+                      padding: '0 4px',
+                      borderRadius: 'var(--radius-full)',
+                      minWidth: '16px',
+                      textAlign: 'center'
+                    }}
+                  >
+                    {listenerUnreadCount > 99 ? '99+' : listenerUnreadCount}
+                  </span>
+                )}
+              </button>
+            </div>
 
-            <button
-              type="button"
-              aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-              data-testid="theme-toggle"
-              onClick={toggleTheme}
-              className="flex items-center justify-center w-8 h-8 rounded-md border border-border bg-transparent text-muted cursor-pointer transition-colors duration-fast ease-standard hover:border-accent hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-            >
-              {theme === 'dark' ? (
-                <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
-                  <circle cx="8" cy="8" r="3" stroke="currentColor" strokeWidth="1.5" />
-                  <line x1="8" y1="1" x2="8" y2="3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                  <line x1="8" y1="13" x2="8" y2="15" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                  <line x1="1" y1="8" x2="3" y2="8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                  <line x1="13" y1="8" x2="15" y2="8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                  <line x1="2.93" y1="2.93" x2="4.34" y2="4.34" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                  <line x1="11.66" y1="11.66" x2="13.07" y2="13.07" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                  <line x1="2.93" y1="13.07" x2="4.34" y2="11.66" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                  <line x1="11.66" y1="4.34" x2="13.07" y2="2.93" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                </svg>
-              ) : (
-                <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
-                  <path
-                    d="M13.5 9.5A6 6 0 0 1 6.5 2.5a6 6 0 1 0 7 7z"
-                    stroke="currentColor"
-                    strokeWidth="1.5"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              )}
-            </button>
+            <div style={{display: 'flex', alignItems: 'center', gap: 'var(--space-2)'}}>
+              <InstallPrompt />
+              <button
+                type="button"
+                aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+                data-testid="theme-toggle"
+                onClick={toggleTheme}
+                className="flex items-center justify-center w-8 h-8 rounded-md border border-border bg-transparent text-muted cursor-pointer transition-colors duration-fast ease-standard hover:border-accent hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              >
+                {theme === 'dark' ? (
+                  <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <circle cx="8" cy="8" r="3" stroke="currentColor" strokeWidth="1.5" />
+                    <line x1="8" y1="1" x2="8" y2="3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                    <line x1="8" y1="13" x2="8" y2="15" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                    <line x1="1" y1="8" x2="3" y2="8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                    <line x1="13" y1="8" x2="15" y2="8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                    <line x1="2.93" y1="2.93" x2="4.34" y2="4.34" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                    <line x1="11.66" y1="11.66" x2="13.07" y2="13.07" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                    <line x1="2.93" y1="13.07" x2="4.34" y2="11.66" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                    <line x1="11.66" y1="4.34" x2="13.07" y2="2.93" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  </svg>
+                ) : (
+                  <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path
+                      d="M13.5 9.5A6 6 0 0 1 6.5 2.5a6 6 0 1 0 7 7z"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                )}
+              </button>
 
-            <button
-              type="button"
-              aria-label="Log out"
-              data-testid="logout-button"
-              onClick={handleLogout}
-              disabled={loggingOut}
-              className="flex items-center justify-center w-8 h-8 rounded-md border border-border bg-transparent text-muted cursor-pointer transition-colors duration-fast ease-standard hover:border-accent hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
-                <path d="M6 2H3a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                <path d="M10 11l3-3-3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                <line x1="13" y1="8" x2="6" y2="8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-              </svg>
-            </button>
+              <button
+                type="button"
+                aria-label="Log out"
+                data-testid="logout-button"
+                onClick={handleLogout}
+                disabled={loggingOut}
+                className="flex items-center justify-center w-8 h-8 rounded-md border border-border bg-transparent text-muted cursor-pointer transition-colors duration-fast ease-standard hover:border-accent hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M6 2H3a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  <path d="M10 11l3-3-3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  <line x1="13" y1="8" x2="6" y2="8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
           </nav>
         </div>
       </header>

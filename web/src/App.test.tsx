@@ -29,6 +29,13 @@ describe('App', () => {
     // ready-state DOM don't have to wait for a real async fetch.
     const fixtureLoader = await import('./operator/fixture-runtime-loader.ts')
     vi.spyOn(fixtureLoader, 'fetchFixtureSession').mockResolvedValue(null)
+    // App polls the listener unread count on mount + interval for the nav badge.
+    // Stub it so the operator-runtime assertions don't race an unmocked fetch.
+    const listenerApi = await import('./api/listener.ts')
+    vi.spyOn(listenerApi, 'fetchListenerMessages').mockResolvedValue({
+      ok: true,
+      data: {messages: [], unreadCount: 0},
+    })
   })
 
   afterEach(() => {
@@ -121,6 +128,13 @@ describe('App — runtime state wiring', () => {
     // Settle fixture detection immediately so runtime mounts in ready state.
     const fixtureLoader = await import('./operator/fixture-runtime-loader.ts')
     vi.spyOn(fixtureLoader, 'fetchFixtureSession').mockResolvedValue(null)
+    // App polls the listener unread count on mount + interval for the nav badge.
+    // Stub it so the operator-runtime assertions don't race an unmocked fetch.
+    const listenerApi = await import('./api/listener.ts')
+    vi.spyOn(listenerApi, 'fetchListenerMessages').mockResolvedValue({
+      ok: true,
+      data: {messages: [], unreadCount: 0},
+    })
   })
 
   afterEach(() => {

@@ -17,6 +17,7 @@ import type {GitHubOAuthClient} from './auth/oauth.ts'
 import type {OperatorClient, SessionDto} from './gateway/operator-client.ts'
 import type {AggregatorSnapshot} from './github/aggregator.ts'
 import type {MetadataReader} from './github/metadata.ts'
+import type {ListenerStore} from './listener/store.ts'
 import {Buffer} from 'node:buffer'
 import {existsSync, readFileSync} from 'node:fs'
 import {join} from 'node:path'
@@ -44,10 +45,13 @@ import {createAggregator} from './github/aggregator.ts'
 import {createDashboardAppClient} from './github/app-client.ts'
 import {buildInstallationsClient, enumerateRepos, mintReadOnlyToken} from './github/installations.ts'
 import {makeNotFoundError, readRepoMetadata} from './github/metadata.ts'
+import {readListenerDbPath, readListenerIngestKey} from './listener/config.ts'
+import {createListenerStore} from './listener/store.ts'
 import {logger, sanitizeErrorMessage} from './logger.ts'
 import {isOk} from './result.ts'
 import {buildApiRouter} from './routes/api.ts'
 import {buildAuthRouter} from './routes/auth.ts'
+import {buildListenerRouter} from './routes/listener.ts'
 import {readOptionalMultilineSecret, readOptionalSecret} from './secrets.ts'
 import {loadCookieKey, SessionManager} from './session.ts'
 
@@ -265,6 +269,18 @@ export interface DashboardAppConfig {
    * Set to './web/dist-fixture' for local fixture verification.
    */
   webDistRoot?: string | undefined
+  /**
+   * Injectable listener message store. When provided, mounts the operator
+   * listener channel router at /api/listener. When undefined, the channel is
+   * not mounted at all (no listener routes exist).
+   */
+  listenerStore?: ListenerStore | undefined
+  /**
+   * Shared HMAC key for the listener ingest path. When null (or undefined),
+   * the /api/listener/ingest sub-route returns 404 (not mounted publicly) —
+   * the read/ack routes still work if listenerStore is provided.
+   */
+  listenerIngestKey?: string | null | undefined
 }
 
 /**
@@ -527,6 +543,11 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     path.startsWith('/icon-') ||
     path === '/sw.js' ||
     path === '/registerSW.js' ||
+    // Listener machine-write path — public-before-session; HMAC-gated by the
+    // route itself (see routes/listener.ts). The read/ack paths
+    // (/api/listener/messages*, /api/listener/ack-all) are intentionally NOT
+    // listed here and stay behind the session auth in both branches.
+    path === '/api/listener/ingest' ||
     // Operator runtime JS modules — always public because root / owns the operator
     // shell and always depends on these assets, regardless of operatorUiEnabled.
     path === '/static/operator-stream.js' ||
@@ -679,6 +700,17 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
 
   // ── API routes ───────────────────────────────────────────────────────────────
   app.route('/api', buildApiRouter(getSnapshot))
+
+  // ── Operator listener channel ───────────────────────────────────────────────
+  // Only mounted when a store is injected. /ingest is public-before-session
+  // (isPublicPath above) and HMAC-gated inside the route; /messages*/ack-all
+  // stay behind the session auth middleware registered above.
+  if (opts?.listenerStore !== undefined) {
+    app.route(
+      '/api/listener',
+      buildListenerRouter({store: opts.listenerStore, ingestKey: opts.listenerIngestKey ?? null}),
+    )
+  }
 
   // Serve the React SPA at /. index.html requires a session; shell assets are public.
   // When pushNotificationsEnabled, inject a <meta name="push-enabled" content="true">
@@ -997,7 +1029,20 @@ async function createDashboardServer(): Promise<ServerType> {
     )
   }
 
-  const app = await buildDashboardApp({cookieKey, getSnapshot})
+  // Wire the operator listener channel. Guarded independently: a failure to
+  // construct the store (e.g. missing /data volume) must not crash the whole
+  // dashboard — fail-closed by leaving the channel unmounted.
+  let listenerStore: ListenerStore | undefined
+  const listenerIngestKey = readListenerIngestKey()
+  try {
+    listenerStore = createListenerStore(readListenerDbPath())
+  } catch (error) {
+    logger.warning('Failed to initialize listener store; operator listener channel disabled', {
+      error: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)),
+    })
+  }
+
+  const app = await buildDashboardApp({cookieKey, getSnapshot, listenerStore, listenerIngestKey})
 
   const {host, port} = readServerBindConfig()
 
