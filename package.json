@@ -15,7 +15,7 @@
     "lint": "eslint",
     "fix": "eslint --fix",
     "pretest": "pnpm build:web",
-    "test": "vitest run"
+    "test": "vitest run && vitest run --config web/vitest.config.ts"
   },
   "dependencies": {
     "@bfra.me/es": "0.1.0",

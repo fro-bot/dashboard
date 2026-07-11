@@ -594,7 +594,7 @@ describe('defaultRuntimeLoader — single-open accordion via onSelectRun/onRunLa
       body: new ReadableStream<Uint8Array>({
         start(controller) {
           const encoder = new TextEncoder()
-          controller.enqueue(encoder.encode('event: ready\ndata: {"contractVersion":"1.5.0"}\n\n'))
+          controller.enqueue(encoder.encode('event: ready\ndata: {"contractVersion":"1.6.0"}\n\n'))
           controller.enqueue(encoder.encode(
             'event: output\ndata: {"runId":"run-out-1","text":"hello from the run","final":true,"seq":0}\n\n',
           ))
@@ -629,7 +629,7 @@ describe('defaultRuntimeLoader — single-open accordion via onSelectRun/onRunLa
           body: new ReadableStream<Uint8Array>({
             start(controller) {
               const encoder = new TextEncoder()
-              controller.enqueue(encoder.encode('event: ready\ndata: {"contractVersion":"1.5.0"}\n\n'))
+              controller.enqueue(encoder.encode('event: ready\ndata: {"contractVersion":"1.6.0"}\n\n'))
               controller.enqueue(encoder.encode(
                 'event: approval\ndata: {"runId":"run-appr-1","requestID":"req-1","permission":"bash","settled":false}\n\n',
               ))
@@ -939,7 +939,7 @@ describe('URL-hash restore — reload-restore integration', () => {
         streamFetchCalls += 1
         // Ready frame, then a terminal status frame, then the stream ends.
         return Promise.resolve(makeSseResponse([
-          'event: ready\ndata: {"contractVersion":"1.5.0"}\n\n',
+          'event: ready\ndata: {"contractVersion":"1.6.0"}\n\n',
           'event: status\ndata: {"runId":"run-terminal-1","status":"succeeded","phase":"done"}\n\n',
         ]))
       }
