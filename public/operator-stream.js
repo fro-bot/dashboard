@@ -471,6 +471,9 @@ export function nextStreamState(current, event) {
           startedAt,
           stale,
           terminal: isTerminal,
+          // Terminal-wins: a terminal status frame from ANY source clears cancelInFlight.
+          // A non-terminal frame preserves whatever the prior entry carried (spread above).
+          ...(isTerminal ? {cancelInFlight: false} : {}),
           ...(reasonLabel === undefined ? {} : {reasonLabel}),
         },
       })
@@ -484,6 +487,36 @@ export function nextStreamState(current, event) {
         connection: allTerminal ? 'closed' : current.connection,
         shouldReconnect: allTerminal ? false : current.shouldReconnect,
       }
+    }
+
+    case 'cancel': {
+      // Dispatched when the browser sends the cancel POST for a run. Marks the run
+      // as having a cancel in flight — an internal-only field, never exposed via
+      // toSafeRunView. Terminal is absorbing: a cancel action on an already-terminal
+      // run entry must never re-open it or set cancelInFlight (terminal-wins).
+      if (current.connection !== 'live') {
+        return current
+      }
+      const {runId} = event.data
+      const prevEntry = current.runs[runId]
+      if (prevEntry !== undefined && prevEntry.terminal) {
+        return current
+      }
+      const base = prevEntry ?? {
+        runId,
+        status: '',
+        phase: '',
+        startedAt: '',
+        stale: false,
+        terminal: false,
+      }
+      const updatedRuns = Object.assign(Object.create(null), current.runs, {
+        [runId]: {
+          ...base,
+          cancelInFlight: true,
+        },
+      })
+      return {...current, runs: updatedRuns}
     }
 
     case 'approval': {

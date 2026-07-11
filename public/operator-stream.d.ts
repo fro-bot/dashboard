@@ -157,6 +157,22 @@ export interface RunEntry {
    * Absent until the first settle frame is received for this run.
    */
   readonly approvalTombstones?: Readonly<Record<string, true>>
+  /**
+   * True while a browser-dispatched cancel POST is outstanding for this run.
+   * Internal-only — set by the `cancel` action, cleared by a terminal status
+   * frame from any source (terminal-wins). Never exposed via toSafeRunView.
+   */
+  readonly cancelInFlight?: boolean
+}
+
+/**
+ * Dispatched when the browser sends the cancel POST for a run. Marks the run
+ * as having a cancel in flight; a terminal status frame from any source clears
+ * it (terminal-wins) and a cancel action on an already-terminal run is a no-op.
+ */
+export interface CancelActionEvent {
+  readonly type: 'cancel'
+  readonly data: {readonly runId: string}
 }
 
 export interface StreamState {
@@ -207,6 +223,7 @@ export type StreamEvent =
   | {readonly type: 'buffer-overflow'}
   | {readonly type: 'first-frame-timeout'}
   | ApprovalReconcileEvent
+  | CancelActionEvent
 
 // ---------------------------------------------------------------------------
 // Safe render model

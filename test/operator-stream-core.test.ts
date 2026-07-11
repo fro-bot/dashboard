@@ -793,6 +793,75 @@ describe('nextStreamState — failure reason label', () => {
   })
 })
 
+describe('nextStreamState — cancel race (terminal-wins)', () => {
+  const live = (): StreamState =>
+    nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+
+  it('a cancel action sets cancelInFlight on the target run entry', () => {
+    const withActive = nextStreamState(live(), {type: 'status', data: ACTIVE_STATUS})
+    const withCancel = nextStreamState(withActive, {type: 'cancel', data: {runId: 'run-abc'}})
+    expect(withCancel.runs['run-abc']?.cancelInFlight).toBe(true)
+  })
+
+  it('cancel-completion terminal status clears cancelInFlight and sets terminal', () => {
+    const withActive = nextStreamState(live(), {type: 'status', data: ACTIVE_STATUS})
+    const withCancel = nextStreamState(withActive, {type: 'cancel', data: {runId: 'run-abc'}})
+    const withTerminal = nextStreamState(withCancel, {
+      type: 'status',
+      data: {...TERMINAL_STATUS, status: 'cancelled', phase: 'CANCELLED'},
+    })
+    expect(withTerminal.runs['run-abc']?.terminal).toBe(true)
+    expect(withTerminal.runs['run-abc']?.cancelInFlight).toBeFalsy()
+  })
+
+  it('terminal-wins: a succeeded status frame clears cancelInFlight even mid-cancel', () => {
+    const withActive = nextStreamState(live(), {type: 'status', data: ACTIVE_STATUS})
+    const withCancel = nextStreamState(withActive, {type: 'cancel', data: {runId: 'run-abc'}})
+    const withTerminal = nextStreamState(withCancel, {type: 'status', data: TERMINAL_STATUS})
+    expect(withTerminal.runs['run-abc']?.terminal).toBe(true)
+    expect(withTerminal.runs['run-abc']?.cancelInFlight).toBeFalsy()
+  })
+
+  it('terminal-wins: a failed status frame clears cancelInFlight even mid-cancel', () => {
+    const withActive = nextStreamState(live(), {type: 'status', data: ACTIVE_STATUS})
+    const withCancel = nextStreamState(withActive, {type: 'cancel', data: {runId: 'run-abc'}})
+    const withTerminal = nextStreamState(withCancel, {
+      type: 'status',
+      data: {...ACTIVE_STATUS, status: 'failed', phase: 'FAILED'},
+    })
+    expect(withTerminal.runs['run-abc']?.terminal).toBe(true)
+    expect(withTerminal.runs['run-abc']?.cancelInFlight).toBeFalsy()
+  })
+
+  it('a late non-terminal status frame preserves cancelInFlight', () => {
+    const withActive = nextStreamState(live(), {type: 'status', data: ACTIVE_STATUS})
+    const withCancel = nextStreamState(withActive, {type: 'cancel', data: {runId: 'run-abc'}})
+    const withLateFrame = nextStreamState(withCancel, {type: 'status', data: ACTIVE_STATUS})
+    expect(withLateFrame.runs['run-abc']?.cancelInFlight).toBe(true)
+    expect(withLateFrame.runs['run-abc']?.terminal).toBe(false)
+  })
+
+  it('a cancel action on an already-terminal run does not re-open it and does not set cancelInFlight', () => {
+    const withTerminal = nextStreamState(live(), {type: 'status', data: TERMINAL_STATUS})
+    const withCancel = nextStreamState(withTerminal, {type: 'cancel', data: {runId: 'run-abc'}})
+    expect(withCancel.runs['run-abc']?.terminal).toBe(true)
+    expect(withCancel.runs['run-abc']?.cancelInFlight).toBeFalsy()
+  })
+
+  it('toSafeRunView does not expose cancelInFlight even when the run entry carries it', () => {
+    const withActive = nextStreamState(live(), {type: 'status', data: ACTIVE_STATUS})
+    const withCancel = nextStreamState(withActive, {type: 'cancel', data: {runId: 'run-abc'}})
+    const entry = withCancel.runs['run-abc']
+    expect(entry).toBeDefined()
+    const view = toSafeRunView(entry as unknown as Parameters<typeof toSafeRunView>[0])
+    expect('cancelInFlight' in view).toBe(false)
+    const allowedKeys = new Set(['runId', 'status', 'phase', 'startedAt', 'stale', 'reasonLabel'])
+    for (const key of Object.keys(view)) {
+      expect(allowedKeys.has(key)).toBe(true)
+    }
+  })
+})
+
 describe('nextStreamState — reset frame', () => {
   it('transitions to reconnecting and sets shouldReconnect on reset', () => {
     const liveState = nextStreamState(INITIAL_STATE, {
