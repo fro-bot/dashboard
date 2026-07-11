@@ -27,14 +27,14 @@ Key fixture fault sentinels on values the browser client actually controls and s
 if (c.req.header('idempotency-key') === 'force-503') { ... }
 
 // Reachable: dedicated fixture runs whose IDs trigger the fault
-const CANCEL_RETRY_RUN_ID = 'run-fixture-cancel-retry-008'
-const CANCEL_UNAVAILABLE_RUN_ID = 'run-fixture-cancel-unavailable-009'
-if (runId === CANCEL_RETRY_RUN_ID) {
-  return c.json({error: 'transient'}, 503, {'Retry-After': '2'})
+const FIXTURE_CANCEL_RETRY_503_RUN_ID = 'run-fixture-index-cancel-retry-008'
+const FIXTURE_CANCEL_UNAVAILABLE_404_RUN_ID = 'run-fixture-index-cancel-unavailable-009'
+if (runId === FIXTURE_CANCEL_RETRY_503_RUN_ID) {
+  return c.json({error: 'unavailable'}, 503)
 }
 ```
 
-Expose the fault-triggering resources in the normal listing route (e.g. the fault runs appear in `GET /runs` as `running`), so the UI renders real controls against them and a human or agent can click through every failure state. Place sentinel checks before any idempotency-replay or cache-write logic so the fault fires on every attempt — a cached first response would break retry-loop verification.
+Expose the fault-triggering resources in the normal listing route (e.g. the fault runs appear in `GET /runs` as `running`), so the UI renders real controls against them and a human or agent can click through every failure state. Ensure fault responses are never written to any idempotency/replay cache, so the fault fires on every attempt — a cached first response would break retry-loop verification. (In the reference implementation the sentinel checks sit after the replay lookup but return before the cache write; since fault responses are never cached, the replay path never captures them.)
 
 ## Why This Matters
 
@@ -48,10 +48,12 @@ The whole point of assembled-page verification is exercising the real client →
 
 ## Examples
 
-In `src/routes/operator-fixture-harness.ts`, the cancel route keys 503/404 faults on two dedicated always-running fixture run IDs surfaced in the run index. Browser verification then confirmed the full ladder live: armed → confirm → retrying (bounded, honors `Retry-After`) → unavailable, and the 404 → unavailable path, with no mocks.
+In `src/routes/operator-fixture-harness.ts`, the cancel route keys 503/404 faults on two dedicated always-running fixture run IDs surfaced in the run index. Browser verification then confirmed the full ladder live: armed → confirm → retrying (bounded attempts with client-side exponential backoff) → unavailable, and the 404 → unavailable path, with no mocks.
+
+The same route still carries the original header-keyed sentinel (`idempotency-key: force-503`) alongside the run-ID-keyed ones. It remains useful for direct HTTP tests (curl/unit) but is unreachable from the assembled UI — exactly the pattern this doc warns about — and is kept only as a test-harness convenience, not as browser-verification coverage.
 
 ## Related
 
 - docs/solutions/best-practices/operator-local-fixture-harness-2026-06-30.md — fixture-mode checklist for new browser clients
 - docs/solutions/best-practices/local-fixture-harness-must-mirror-wire-contract-2026-07-03.md — fixtures must mirror wire shapes byte-for-byte
-- docs/solutions/workflow-issues/unit-green-is-not-feature-done-2026-06-24.md — the broader assembled-page verification lesson
+- docs/solutions/workflow-issues/unit-green-is-not-feature-done-verify-the-assembled-surface-2026-06-23.md — the broader assembled-page verification lesson
