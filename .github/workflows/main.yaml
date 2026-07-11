@@ -59,7 +59,8 @@ jobs:
 
       - name: 🎨 Detect UI anti-patterns
         run: |
-          findings=$(npx --yes impeccable detect --json web/src)
+          # Pinned: an older major ignores .impeccable/config.json ignoreValues and would fail the gate on intentional brand tokens.
+          findings=$(npx --yes impeccable@3.2.1 detect --json web/src)
           if [ "$findings" != "[]" ]; then
             echo "$findings"
             echo "Impeccable detected UI anti-patterns. Address them or, for an intentional brand choice, add a scoped ignore via 'impeccable ignores add-value'."
