@@ -1,6 +1,8 @@
-import {useEffect, useState} from 'react'
+import {useEffect, useState, useCallback} from 'react'
 import {AppShell} from './shell/AppShell.tsx'
 import {Operator} from './views/Operator.tsx'
+import {ListenerChannel} from './views/Listener.tsx'
+import {fetchListenerMessages} from './api/listener.ts'
 import type {OperatorState} from './operator/state.ts'
 
 interface FixtureState {
@@ -12,16 +14,12 @@ interface FixtureState {
 export default function App() {
   const [operatorState, setOperatorState] = useState<OperatorState>('ready')
   const [fixtureState, setFixtureState] = useState<FixtureState | null>(null)
-  // In dev builds, hold the operator runtime in 'loading' until fixture detection
-  // settles. This prevents the race where the non-fixture runtime starts with
-  // /operator endpoints before /__fixture/operator is known.
-  // In production, detection never runs so we start settled immediately.
   const [fixtureDetectionSettled, setFixtureDetectionSettled] = useState(!import.meta.env.DEV)
+  
+  const [currentView, setCurrentView] = useState<'operator' | 'listener'>('operator')
+  const [unreadCount, setUnreadCount] = useState(0)
 
   useEffect(() => {
-    // Fixture detection is dev-only. The import.meta.env.DEV guard ensures
-    // production bundles tree-shake this entire branch including the dynamic
-    // import of fixture-runtime-loader, so no fixture route strings ship in prod.
     if (!import.meta.env.DEV) return
 
     let cancelled = false
@@ -44,19 +42,48 @@ export default function App() {
     }
   }, [])
 
+  const pollUnreadCount = useCallback(async () => {
+    const res = await fetchListenerMessages({ limit: 1, unreadOnly: true })
+    if (res.ok) {
+      setUnreadCount(res.data.unreadCount)
+    }
+  }, [])
+
+  useEffect(() => {
+    void pollUnreadCount()
+    const intervalId = setInterval(() => void pollUnreadCount(), 30000)
+    
+    const handleFocus = () => void pollUnreadCount()
+    window.addEventListener('focus', handleFocus)
+    
+    return () => {
+      clearInterval(intervalId)
+      window.removeEventListener('focus', handleFocus)
+    }
+  }, [pollUnreadCount])
+
   return (
     <AppShell
       pushEndpointBase={fixtureState ? `${fixtureState.fixtureEndpointBase}/push` : undefined}
       pushConfigReady={fixtureDetectionSettled}
       pushFixtureSessionId={fixtureState?.fixtureSessionId}
+      currentView={currentView}
+      onNavigate={setCurrentView}
+      listenerUnreadCount={unreadCount}
     >
-      <Operator
-        state={fixtureDetectionSettled ? operatorState : 'loading'}
-        onRuntimeStateChange={setOperatorState}
-        fixtureMode={fixtureState?.fixtureMode}
-        fixtureEndpointBase={fixtureState?.fixtureEndpointBase}
-        fixtureSessionId={fixtureState?.fixtureSessionId}
-      />
+      <div style={{ display: currentView === 'operator' ? 'block' : 'none' }}>
+        <Operator
+          state={fixtureDetectionSettled ? operatorState : 'loading'}
+          onRuntimeStateChange={setOperatorState}
+          fixtureMode={fixtureState?.fixtureMode}
+          fixtureEndpointBase={fixtureState?.fixtureEndpointBase}
+          fixtureSessionId={fixtureState?.fixtureSessionId}
+        />
+      </div>
+      
+      {currentView === 'listener' && (
+        <ListenerChannel />
+      )}
     </AppShell>
   )
 }
