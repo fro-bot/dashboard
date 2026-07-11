@@ -88,6 +88,24 @@ const FIXTURE_RUN_SUMMARIES: readonly RunSummary[] = [
     // Synthetic out-of-union value for unknown-reason normalization.
     failureKind: FIXTURE_UNKNOWN_FAILURE_REASON as unknown as RunSummary['failureKind'],
   },
+  {
+    // Non-terminal so the Cancel control renders; cancelling this run always
+    // returns 503, browser-reachable without needing the header sentinel.
+    runId: 'run-fixture-index-cancel-retry-008',
+    repo: 'fixture-org/fixture-cancel-retries',
+    status: 'running',
+    createdAt: '2026-06-28T10:00:05Z',
+    updatedAt: '2026-06-28T10:00:15Z',
+  },
+  {
+    // Non-terminal so the Cancel control renders; cancelling this run always
+    // returns 404, browser-reachable without needing the header sentinel.
+    runId: 'run-fixture-index-cancel-unavailable-009',
+    repo: 'fixture-org/fixture-cancel-unavailable',
+    status: 'running',
+    createdAt: '2026-06-28T10:00:02Z',
+    updatedAt: '2026-06-28T10:00:12Z',
+  },
 ]
 
 // Run IDs bound to a specific reason-bearing stream scenario, distinct from the
@@ -102,6 +120,30 @@ const idempotencyMap = new Map<string, string>() // `${sessionId}:${idemKey}` �
 const runScenarioMap = new Map<string, string>() // runId → scenarioName
 const runSessionMap = new Map<string, string>() // runId → owning fixtureSessionId (launched runs only)
 const validFixtureSessionIds = new Set<string>() // all session IDs minted by GET /session
+
+// Cancel idempotency — scoped by `${sessionId}:${idemKey}` → the cached response body.
+const cancelIdempotencyMap = new Map<string, {ok: true; runId: string; phase: 'COMPLETED' | 'FAILED' | 'CANCELLED'}>()
+
+// Documented sentinel: an `idempotency-key` header value of exactly 'force-503' forces
+// a 503 {error:'unavailable'} response on POST /runs/:runId/cancel, so the dashboard's
+// bounded-retry UI state is exercisable against the fixture harness.
+const FIXTURE_FORCE_503_IDEMPOTENCY_KEY = 'force-503'
+
+// Browser-reachable cancel-fault fixtures: keyed on runId (not the header
+// sentinel above) so the assembled UI — which mints its own random
+// idempotency key — can exercise the 503/404 cancel outcomes by simply
+// selecting these runs and clicking Cancel. Both always fault; never cached
+// to a success response.
+const FIXTURE_CANCEL_RETRY_503_RUN_ID = 'run-fixture-index-cancel-retry-008'
+const FIXTURE_CANCEL_UNAVAILABLE_404_RUN_ID = 'run-fixture-index-cancel-unavailable-009'
+
+function cancelPhaseForRunId(runId: string): 'COMPLETED' | 'FAILED' | 'CANCELLED' {
+  const summary = FIXTURE_RUN_SUMMARIES.find(s => s.runId === runId)
+  if (summary === undefined) return 'CANCELLED'
+  if (summary.status === 'succeeded') return 'COMPLETED'
+  if (summary.status === 'failed') return 'FAILED'
+  return 'CANCELLED'
+}
 
 // Push subscription fixture record. `endpoint` is kept internally ONLY to match
 // unsubscribe requests and compute the synthetic hash — it is never returned
@@ -412,6 +454,95 @@ export function buildFixtureHarnessRouter(): Hono {
     return res
   })
 
+  // POST /runs/:runId/cancel — synthetic cancel. Requires matching fixtureSessionId +
+  // CSRF header + idempotency key. Idempotent per `${fixtureSessionId}:${idemKey}`.
+  // Sentinel: an `idempotency-key` header of exactly 'force-503' forces a 503
+  // {error:'unavailable'} so the bounded-retry UI state is exercisable.
+  router.post('/runs/:runId/cancel', c => {
+    const runId = c.req.param('runId')
+
+    const requestSessionId = extractRequestSessionId(c)
+    if (requestSessionId === undefined) {
+      logger.debug('fixture-harness: POST /runs/:runId/cancel', {status: 400, errorClass: 'invalid-fixture-session'})
+      const res = c.json({error: 'invalid-fixture-session'}, 400)
+      setNoStore(res.headers)
+      return res
+    }
+
+    const csrfToken = c.req.header('x-csrf-token')
+    if (typeof csrfToken !== 'string' || csrfToken.trim() === '') {
+      logger.debug('fixture-harness: POST /runs/:runId/cancel', {status: 400, errorClass: 'missing-csrf'})
+      const res = c.json({error: 'missing-csrf'}, 400)
+      setNoStore(res.headers)
+      return res
+    }
+
+    const idempotencyKey = c.req.header('idempotency-key')
+    if (typeof idempotencyKey !== 'string' || idempotencyKey.trim() === '') {
+      logger.debug('fixture-harness: POST /runs/:runId/cancel', {status: 400, errorClass: 'missing-idempotency-key'})
+      const res = c.json({error: 'missing-idempotency-key'}, 400)
+      setNoStore(res.headers)
+      return res
+    }
+
+    if (!verifyRunOwnership(runId, requestSessionId)) {
+      logger.debug('fixture-harness: POST /runs/:runId/cancel', {status: 404, errorClass: 'unknown-run'})
+      const res = c.json({error: 'not-found'}, 404)
+      setNoStore(res.headers)
+      return res
+    }
+
+    const scopedKey = `${requestSessionId}:${idempotencyKey}`
+    const existing = cancelIdempotencyMap.get(scopedKey)
+    if (existing !== undefined) {
+      logger.debug('fixture-harness: POST /runs/:runId/cancel idempotent', {status: 200})
+      const res = c.json(existing)
+      setNoStore(res.headers)
+      return res
+    }
+
+    if (idempotencyKey === FIXTURE_FORCE_503_IDEMPOTENCY_KEY) {
+      logger.debug('fixture-harness: POST /runs/:runId/cancel', {status: 503, errorClass: 'unavailable'})
+      const res = c.json({error: 'unavailable'}, 503)
+      setNoStore(res.headers)
+      return res
+    }
+
+    if (runId === FIXTURE_CANCEL_RETRY_503_RUN_ID) {
+      logger.debug('fixture-harness: POST /runs/:runId/cancel', {status: 503, errorClass: 'unavailable'})
+      const res = c.json({error: 'unavailable'}, 503)
+      setNoStore(res.headers)
+      return res
+    }
+
+    if (runId === FIXTURE_CANCEL_UNAVAILABLE_404_RUN_ID) {
+      logger.debug('fixture-harness: POST /runs/:runId/cancel', {status: 404, errorClass: 'unknown-run'})
+      const res = c.json({error: 'not-found'}, 404)
+      setNoStore(res.headers)
+      return res
+    }
+
+    if (isIndexedRunId(runId) && !runScenarioMap.has(runId)) {
+      const summary = FIXTURE_RUN_SUMMARIES.find(s => s.runId === runId)
+      const reasonScenario = summary === undefined ? undefined : RUN_ID_TO_REASON_SCENARIO.get(summary.runId)
+      const scenario =
+        reasonScenario ??
+        (summary?.status === 'failed' || summary?.status === 'cancelled'
+          ? FIXTURE_SCENARIO_NAMES.terminal_failure
+          : FIXTURE_SCENARIO_NAMES.success)
+      runScenarioMap.set(runId, scenario)
+    }
+
+    const phase = cancelPhaseForRunId(runId)
+    const body = {ok: true as const, runId, phase}
+    cancelIdempotencyMap.set(scopedKey, body)
+
+    logger.debug('fixture-harness: POST /runs/:runId/cancel', {status: 200})
+    const res = c.json(body)
+    setNoStore(res.headers)
+    return res
+  })
+
   // GET /push/vapid-key — synthetic VAPID public key. EXACTLY {publicKey, keyVersion}.
   router.get('/push/vapid-key', c => {
     logger.debug('fixture-harness: GET /push/vapid-key', {status: 200})
@@ -587,6 +718,7 @@ export function resetFixtureHarnessForTesting(): void {
   validFixtureSessionIds.clear()
   pushIdempotencyMap.clear()
   pushSessionRecordMap.clear()
+  cancelIdempotencyMap.clear()
   sessionIdCounter = 0
   runIdCounter = 0
 }
