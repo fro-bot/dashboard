@@ -160,24 +160,13 @@ interface SWNotificationEvent extends Event {
   waitUntil(f: Promise<unknown>): void
 }
 
-interface SWPushSubscription {
-  readonly options: {readonly applicationServerKey: unknown}
-}
-
-interface SWPushManager {
-  getSubscription(): Promise<SWPushSubscription | null>
-  subscribe(options: {userVisibleOnly: boolean; applicationServerKey: unknown}): Promise<unknown>
-}
-
 interface SWPushSubscriptionChangeEvent extends Event {
-  readonly oldSubscription: SWPushSubscription | null
   waitUntil(f: Promise<unknown>): void
 }
 
 declare const clients: SWClients
 declare const registration: {
   showNotification(title: string, options: {body: string; data: unknown}): Promise<void>
-  readonly pushManager: SWPushManager
 }
 
 /**
@@ -223,34 +212,22 @@ addEventListener('notificationclick', (event: Event) => {
 })
 
 /**
- * `pushsubscriptionchange`: best-effort only. Push is a non-authoritative
- * channel — the page-driven reconcile owns correctness. No durable
- * queue: the postMessage hint is in-memory only and is simply dropped if no
- * client is open. The SW persists nothing about the subscription. Never
- * throws — any failure here is recovered by the page's next load/visibility
- * reconcile, not by retry logic in the SW.
+ * `pushsubscriptionchange`: performs NO resubscribe. The SW-created
+ * subscription would deliver nothing (the Gateway only learns endpoints via
+ * the page's authenticated POST) and the page's next reconcile sweep would
+ * detect the endpointHash mismatch and unsubscribe it anyway — pure churn.
+ * Registration is owned entirely by the page. This handler only posts an
+ * in-memory hint to open window clients so the page can run an immediate
+ * reconcile sweep instead of waiting for its next load/visibility trigger.
+ * No durable queue: the hint is simply dropped if no client is open. The SW
+ * persists nothing about the subscription. Never throws — any failure here
+ * is recovered by the page's next load/visibility reconcile regardless.
  */
 addEventListener('pushsubscriptionchange', (event: Event) => {
   const e = event as SWPushSubscriptionChangeEvent
   e.waitUntil(
     (async () => {
       try {
-        const oldSubscription = e.oldSubscription ?? (await registration.pushManager.getSubscription())
-        const applicationServerKey = oldSubscription?.options.applicationServerKey ?? undefined
-
-        if (applicationServerKey != null) {
-          try {
-            await registration.pushManager.subscribe({
-              userVisibleOnly: true,
-              applicationServerKey,
-            })
-          } catch {
-            // Best-effort resubscribe failed (e.g. VAPID key rotated). No
-            // recovery is attempted here — the page's next load/visibility
-            // reconcile detects stale_key and corrects.
-          }
-        }
-
         const windowClients = await clients.matchAll({type: 'window'})
         for (const client of windowClients) {
           client.postMessage({type: 'PUSH_SUBSCRIPTION_CHANGE'})

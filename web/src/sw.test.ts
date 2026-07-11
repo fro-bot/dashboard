@@ -210,6 +210,15 @@ describe('sw.js build output', () => {
     expect(changeHandlerSource).not.toContain('p256dh')
   })
 
+  it('GUARD: pushsubscriptionchange handler performs no resubscribe — no pushManager.subscribe call', () => {
+    const src = readFileSync(resolve(import.meta.dirname, 'sw.ts'), 'utf8')
+    const changeHandlerStart = src.indexOf("addEventListener('pushsubscriptionchange'")
+    expect(changeHandlerStart).toBeGreaterThan(-1)
+    const changeHandlerSource = src.slice(changeHandlerStart)
+    expect(changeHandlerSource).not.toContain('pushManager.subscribe')
+    expect(changeHandlerSource).not.toContain('applicationServerKey')
+  })
+
   it('GUARD: the push/notificationclick/pushsubscriptionchange handlers are registered AFTER the message handler', () => {
     const src = readFileSync(resolve(import.meta.dirname, 'sw.ts'), 'utf8')
     const messageHandlerIdx = src.indexOf("addEventListener('message'")
