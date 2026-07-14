@@ -46,7 +46,7 @@ jobs:
 
       - name: 🟢 Set up Node.js
         if: github.event_name == 'push'
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
 
@@ -223,7 +223,7 @@ jobs:
           docker network rm smoke-net || true
 
       - name: 🟢 Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
 
