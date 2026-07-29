@@ -148,7 +148,7 @@ jobs:
       # GITHUB_TOKEN to push ghcr.io/<this repo>. The App token is still used for the
       # identity-sensitive git tag push + GitHub Release below (fro-bot[bot] authorship).
       - name: 🔑 Log in to GHCR
-        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4.5.2
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
