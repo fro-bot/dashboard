@@ -119,6 +119,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      security-events: write
     outputs:
       tag: ${{ steps.calver.outputs.tag }}
       digest: ${{ steps.build.outputs.digest }}
@@ -288,6 +289,74 @@ jobs:
             exit 1
           fi
           echo "Smoke cleanup complete."
+
+      - name: 🔢 Normalize image digest
+        id: digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          if [[ "$DIGEST" != sha256:* ]]; then
+            echo "Invalid image digest: $DIGEST" >&2
+            exit 1
+          fi
+          NORMALIZED="${DIGEST#sha256:}"
+          if [[ ! "$NORMALIZED" =~ ^[a-f0-9]{64}$ ]]; then
+            echo "Invalid image digest: $DIGEST" >&2
+            exit 1
+          fi
+          echo "normalized=$NORMALIZED" >> "$GITHUB_OUTPUT"
+
+      - name: 🔍 Generate Trivy SARIF report
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          format: sarif
+          output: trivy-results-${{ steps.digest.outputs.normalized }}.sarif
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          limit-severities-for-sarif: true
+          exit-code: '0'
+          version: v0.72.0
+
+      - name: 📦 Upload Trivy SARIF artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-sarif-${{ steps.digest.outputs.normalized }}
+          path: trivy-results-${{ steps.digest.outputs.normalized }}.sarif
+          retention-days: 5
+
+      - name: 🛡️ Upload Trivy results to code scanning
+        uses: github/codeql-action/upload-sarif@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4
+        with:
+          sarif_file: trivy-results-${{ steps.digest.outputs.normalized }}.sarif
+          category: trivy/release-image
+
+      - name: 📝 Summarize Trivy report
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          ARTIFACT: trivy-sarif-${{ steps.digest.outputs.normalized }}
+          CATEGORY: trivy/release-image
+        run: |
+          {
+            echo "### Release image security"
+            echo
+            echo "- Digest: \`$IMAGE\`"
+            echo "- SARIF artifact: \`$ARTIFACT\`"
+            echo "- Code scanning category: \`$CATEGORY\`"
+            echo "- Report severity: HIGH,CRITICAL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 🚦 Enforce fixed HIGH/CRITICAL vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          version: v0.72.0
 
       - name: 🟢 Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
