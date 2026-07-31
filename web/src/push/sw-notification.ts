@@ -81,5 +81,14 @@ export function buildNotification(rawPayload: unknown): SafeNotification {
   const rawFailureLabel = candidate.failureLabel
   const failureLabel = typeof rawFailureLabel === 'string' ? rawFailureLabel : undefined
 
-  return COPY_MAP[type](failureLabel)
+  switch (type) {
+    case 'approval':
+      return COPY_MAP.approval(failureLabel)
+    case 'run_failed':
+      return COPY_MAP.run_failed(failureLabel)
+    default: {
+      const exhaustiveType: never = type
+      return exhaustiveType
+    }
+  }
 }
