@@ -170,7 +170,6 @@ jobs:
       - name: 🧪 Smoke-test candidate image by digest
         run: |
           IMG="ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}"
-          trap 'docker rm -f dashboard-smoke >/dev/null 2>&1 || true; docker network rm smoke-net >/dev/null 2>&1 || true' EXIT
           docker network create smoke-net
           COOKIE_KEY=$(openssl rand -hex 32)
           docker run -d --name dashboard-smoke --network smoke-net \
@@ -214,13 +213,81 @@ jobs:
             docker logs dashboard-smoke || true
             exit 1
           fi
-          echo "smoke OK (healthz=$ok sibling=$sib spa_manifest=$spa csp=$csp_ok)"
+          runtime_uid=$(docker run --rm "$IMG" node -p 'process.getuid()')
+          runtime_env=$(docker run --rm "$IMG" node -p 'process.env.NODE_ENV')
+          if [ "$runtime_uid" != 1001 ]; then
+            echo "SMOKE FAILED: runtime UID is $runtime_uid, expected 1001"
+            exit 1
+          fi
+          if [ "$runtime_env" != production ]; then
+            echo "SMOKE FAILED: NODE_ENV is '$runtime_env', expected production"
+            exit 1
+          fi
+
+          for tool in npm npx pnpm pnpx corepack yarn yarnpkg; do
+            if docker run --rm "$IMG" sh -ec "command -v '$tool' >/dev/null 2>&1"; then
+              echo "SMOKE FAILED: package-manager command is present: $tool"
+              exit 1
+            fi
+          done
+
+          if ! docker run --rm --user 0 --entrypoint sh "$IMG" -ec '
+            for path in \
+              /usr/local/bin/npm \
+              /usr/local/bin/npx \
+              /usr/local/bin/pnpm \
+              /usr/local/bin/pnpx \
+              /usr/local/bin/corepack \
+              /usr/local/bin/yarn \
+              /usr/local/bin/yarnpkg \
+              /usr/local/lib/node_modules/npm \
+              /usr/local/lib/node_modules/corepack \
+              /root/.cache \
+              /root/.npm \
+              /root/.local/share/pnpm \
+              /usr/local/share/.cache; do
+              if [ -e "$path" ] || [ -L "$path" ]; then
+                echo "package-manager filesystem path is present: $path" >&2
+                exit 1
+              fi
+            done
+          '; then
+            echo "SMOKE FAILED: package-manager filesystem residue is present"
+            exit 1
+          fi
+
+          echo "smoke OK (healthz=$ok sibling=$sib spa_manifest=$spa csp=$csp_ok uid=$runtime_uid node_env=$runtime_env package_managers=absent)"
 
       - name: 🧹 Cleanup smoke containers
         if: always()
         run: |
-          docker rm -f dashboard-smoke || true
-          docker network rm smoke-net || true
+          if ! docker info >/dev/null 2>&1; then
+            echo "Smoke cleanup failed: Docker daemon is unavailable" >&2
+            exit 1
+          fi
+
+          cleanup_failed=0
+          if docker container inspect dashboard-smoke >/dev/null 2>&1; then
+            if ! docker rm -f dashboard-smoke; then
+              cleanup_failed=1
+            fi
+          else
+            echo "Smoke container already absent."
+          fi
+
+          if docker network inspect smoke-net >/dev/null 2>&1; then
+            if ! docker network rm smoke-net; then
+              cleanup_failed=1
+            fi
+          else
+            echo "Smoke network already absent."
+          fi
+
+          if [ "$cleanup_failed" -ne 0 ]; then
+            echo "Smoke cleanup failed; refusing to continue." >&2
+            exit 1
+          fi
+          echo "Smoke cleanup complete."
 
       - name: 🟢 Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
