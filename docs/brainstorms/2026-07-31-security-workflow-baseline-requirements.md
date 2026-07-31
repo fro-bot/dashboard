@@ -37,7 +37,7 @@ The current release image fails an unfiltered HIGH/CRITICAL vulnerability scan b
   - **Outcome:** New high-risk dependency or source vulnerabilities cannot merge unnoticed.
   - **Covered by:** R1, R2, R3, R4, R12, R13, R14, R15, R17, R18
 - F2. Repository posture assessment
-  - **Trigger:** A change reaches `main`, branch protection changes, or the scheduled assessment runs.
+  - **Trigger:** A push reaches `main` or the recurring scheduled assessment runs.
   - **Actors:** A2, A4
   - **Steps:** Repository supply-chain practices are assessed; results are published for the badge and retained as security findings; score changes remain informational.
   - **Outcome:** The repository has current, inspectable posture data without chasing score changes as merge blockers.
@@ -60,13 +60,13 @@ The current release image fails an unfiltered HIGH/CRITICAL vulnerability scan b
 - R4. The repository must resolve existing HIGH or CRITICAL CodeQL alerts before enabling merge protection, after which newly introduced alerts at those severities must block merging.
 
 **Repository posture**
-- R5. OpenSSF Scorecard must assess the repository on pushes to `main`, relevant repository-protection changes, and a recurring schedule.
+- R5. OpenSSF Scorecard must assess the repository on pushes to `main` and a recurring schedule only.
 - R6. Scorecard results must remain informational and publish current data for the existing badge and GitHub security views; a failed or stale assessment must be visible rather than silently preserving an old result.
 
 **Release artifact gate**
 - R7. The production image must not retain npm, pnpm, corepack caches, or other package-manager tooling after production dependencies are installed.
 - R8. Removing package-manager tooling must not change application startup, health checks, or runtime behavior.
-- R9. The exact candidate image digest produced by the release pipeline must be scanned, released, and passed to deployment without rebuilding or substituting a mutable tag.
+- R9. The exact candidate image digest produced by the release pipeline must be scanned, released, and passed to deployment without rebuilding or substituting a mutable tag. A failed release must not move mutable `latest`; `latest` is promoted and read back only as the terminal publication step after the Git ref, release-unique CalVer/SHA tags, their digest verification, and GitHub Release work succeed.
 - R10. A fixed HIGH or CRITICAL vulnerability in the candidate image's runtime operating-system or application packages must fail the release.
 - R11. The blocking image scan must not use directory skips, package allowlists, severity downgrades, ignored layers, or scanner exception files to bypass findings removed by R7; unfixed findings remain visible under the actionable-fixed-vulnerability policy.
 
@@ -93,6 +93,7 @@ The current release image fails an unfiltered HIGH/CRITICAL vulnerability scan b
 - AE6. **Covers R9, R10, R11, R14.** Given a scanner reports only an unfixed vulnerability, when the release gate evaluates it, the finding remains visible and bound to the candidate digest but does not block under the actionable-fixed-vulnerability policy.
 - AE7. **Covers R12, R16.** Given a pull request originates from a fork, when security checks run, they receive no repository secrets and cannot obtain write-capable repository or security-event permissions through untrusted code.
 - AE8. **Covers R6, R15.** Given a required scanner or results upload is unavailable, when a protected pull request or release runs, that operation blocks; an unavailable Scorecard assessment reports failure without blocking unrelated work.
+- AE9. **Covers R9, R10, R14, R15.** Given a release fails during scanning or publication, mutable `latest` is unchanged; after the Git ref, release-unique CalVer/SHA tags, digest verification, and GitHub Release work succeed, `latest` is promoted and read back as the terminal publication step, while release-unique tags may remain for deferred GHCR retention/cleanup.
 
 ---
 
@@ -104,6 +105,7 @@ The current release image fails an unfiltered HIGH/CRITICAL vulnerability scan b
 - The production image passes a strict HIGH/CRITICAL runtime scan without skip-directory exceptions.
 - The digest that passes the image scan is the same digest published in the release and sent to deployment.
 - A vulnerable or unscanned candidate image cannot reach release publication or deployment dispatch.
+- A failed release never intentionally advances mutable `latest`; `latest` is the terminal single-tag publication after all prior fallible release work.
 - The added baseline does not materially increase ordinary pull-request latency or duplicate native GitHub security capabilities.
 
 ---
@@ -115,6 +117,7 @@ The current release image fails an unfiltered HIGH/CRITICAL vulnerability scan b
 - Keep Dependabot alerts authoritative for existing dependency debt; Dependency Review governs newly introduced pull-request changes.
 - Do not make Scorecard scores merge or release blockers.
 - Do not remediate unrelated development-only dependency alerts as part of the workflow adoption unless they block a required baseline check.
+- Allow release-unique CalVer/SHA image tags to remain as scanned residue after a partial publication failure; deferred GHCR retention/cleanup owns that residue because the release job does not receive `packages:delete`.
 - Do not expand this work into the dedicated release-to-infra GitHub App migration tracked separately.
 - Do not layer classic branch protection and a separate code-scanning ruleset; establish one ruleset for the currently-unprotected `main` branch.
 
@@ -128,6 +131,7 @@ The current release image fails an unfiltered HIGH/CRITICAL vulnerability scan b
 - Deliver one baseline in three independently verifiable stages: pull-request gates, repository posture reporting, and release-image hardening plus scanning.
 - Stages one and three enforce; stage two reports posture and never blocks merges or releases.
 - Keep runtime cleanup inseparable from the strict image gate: the cleanup removes the current false-positive attack surface and lets the scan run without permanent exceptions.
+- Make mutable `latest` the terminal single-tag publication: create the Git ref, promote and verify release-unique CalVer/SHA tags, create/edit the GitHub Release, then promote and read back `latest`; partial failures may leave release-unique tags for deferred GHCR retention/cleanup, with no `packages:delete` authority.
 - Separate security analysis from ordinary test CI while keeping dependency review attached to pull requests and artifact scanning attached to release.
 - Require a clean CodeQL baseline before enabling merge protection: do not grandfather existing HIGH/CRITICAL alerts or activate protection against an unknown backlog.
 - Establish one `main` ruleset after the new workflows report cleanly; include the existing CI checks, the new security checks, CodeQL `high_or_higher` protection, administrator enforcement, and no standing bypass actors.

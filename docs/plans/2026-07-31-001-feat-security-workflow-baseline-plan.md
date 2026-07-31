@@ -60,7 +60,7 @@ The baseline must add real enforcement without conflating distinct controls or c
 ### Deferred to Separate Tasks
 
 - Existing HIGH/CRITICAL CodeQL findings discovered during baseline establishment: remediate in focused follow-up work before enabling the ruleset; do not grandfather or weaken the threshold.
-- GHCR cleanup for failed or obsolete CI-candidate tags: separate registry-retention work because the release token cannot safely delete package versions.
+- GHCR cleanup for failed or obsolete CI-candidate and release-unique tags: separate registry-retention work because the release job does not receive `packages:delete`; partial publication may leave release-unique CalVer/SHA residue.
 - Dedicated release-to-infra GitHub App hardening: remains tracked separately.
 
 ---
@@ -71,7 +71,7 @@ The baseline must add real enforcement without conflating distinct controls or c
 
 - `.github/workflows/main.yaml` defines six stable Main CI job names and uses full-SHA action pins with version comments.
 - `.github/workflows/fro-bot.yaml` contributes the existing `Fro Bot` check that must become required alongside Main CI.
-- `.github/workflows/release.yaml` already builds and pushes a CI-candidate image, captures its digest, smoke-tests by digest, promotes the digest to stable tags, publishes the GitHub Release, and dispatches infra with the same digest.
+- `.github/workflows/release.yaml` already builds and pushes a CI-candidate image, captures its digest, smoke-tests by digest, promotes and verifies release-unique CalVer/SHA tags, publishes the GitHub Release, promotes and verifies `latest`, and dispatches infra with the same digest.
 - `Dockerfile` currently installs production dependencies in the runtime stage and retains npm/corepack tooling from the Node base image.
 - `.github/renovate.json5` inherits the shared Fro Bot preset; standard `uses: owner/action@<sha> # version` references require no local manager.
 - `README.md` already contains the OpenSSF Scorecard badge that the new workflow must back with current published results.
@@ -99,7 +99,7 @@ The baseline must add real enforcement without conflating distinct controls or c
 - **Use native CodeQL severity protection.** The new ruleset requires CodeQL code-scanning results with `security_alerts_threshold: high_or_higher`; required status checks alone do not enforce alert severity.
 - **Publish Scorecard with short-lived credentials.** Use the workflow `GITHUB_TOKEN` plus OIDC; do not add a `SCORECARD_TOKEN` unless a verified missing signal justifies one later.
 - **Create an explicit three-stage image.** Use `builder` for the web build, `prod-deps` for the production install, and a fresh `runtime` stage for copied runtime assets and `node_modules`. Final-state verification, not brittle knowledge of base-image internals, proves package-manager binaries and caches are absent before the non-root handoff.
-- **Scan a pushed immutable candidate.** Keep the current CI-candidate push so the workflow has a registry digest, mark that candidate as untrusted/transient until scanning completes, then smoke-test and scan `image@sha256:...`. No stable tags, Git tag, GitHub Release, or deploy dispatch may occur before the gate passes.
+- **Scan a pushed immutable candidate.** Keep the current CI-candidate push so the workflow has a registry digest, mark that candidate as untrusted/transient until scanning completes, then smoke-test and scan `image@sha256:...`. After the gate, create the Git ref, promote and verify release-unique CalVer/SHA tags, create/edit the GitHub Release, and promote/read back mutable `latest` as the terminal publication step before the dependent deploy dispatch. Partial failures may leave release-unique tags; the release workflow has no package-delete authority.
 - **Separate vulnerability visibility from enforcement.** Run one Trivy SARIF report without `ignore-unfixed` and with `limit-severities-for-sarif: true` so HIGH/CRITICAL findings constrain the SARIF, then run a second enforcement scan with `ignore-unfixed: true` and nonzero exit on fixed HIGH/CRITICAL findings. Both scans target the same digest and share the pinned database/tool cache.
 - **Pin both action and scanner binary.** Pin `aquasecurity/trivy-action` to its immutable v0.36.0 commit and set its `version` input to Trivy CLI v0.72.0; do not accept mutable scanner resolution.
 - **Activate one ruleset after baselines.** Deliver workflows first, prove branch and real-fork behavior, observe GitHub's exact check contexts, and establish a clean CodeQL baseline on `main`. Then create one ruleset requiring pull requests, all existing CI/Fro Bot checks, Dependency Review, CodeQL, and CodeQL `high_or_higher` results. No standing bypass actors.
@@ -119,12 +119,13 @@ flowchart TB
   Report --> Upload[Upload security results]
   Upload --> Gate[Trivy fixed-vulnerability gate]
   Gate --> Tag[Create CalVer Git tag]
-  Tag --> Promote[Promote same digest to stable image tags]
+  Tag --> Promote[Promote and verify CalVer/SHA tags]
   Promote --> Release[Publish GitHub Release]
-  Release --> Dispatch[Dispatch same tag and digest to infra]
+  Release --> Latest[Promote and verify latest]
+  Latest --> Dispatch[Dispatch same tag and digest to infra]
 ```
 
-The candidate image may exist in GHCR under its CI tag before scanning, but the digest cannot be promoted, released, or deployed until both result publication and enforcement succeed.
+The candidate image may exist in GHCR under its CI tag before scanning, but the digest cannot be promoted, released, or deployed until both result publication and enforcement succeed. Release-unique CalVer/SHA tags may remain after a partial publication failure; mutable `latest` is reserved for the terminal publication step.
 
 ---
 
@@ -260,14 +261,15 @@ flowchart TB
 - **Files:**
   - Modify: `.github/workflows/release.yaml`
 - **Approach:**
-  - Insert security reporting after candidate smoke cleanup and before CalVer/Git tag creation, stable image promotion, GitHub Release publication, or deploy dispatch. Smoke cleanup runs on every smoke outcome; scanning runs only after successful smoke and cleanup, and cleanup failure remains blocking.
+  - Insert security reporting after candidate smoke cleanup and before any publication. Smoke cleanup runs on every smoke outcome; scanning runs only after successful smoke and cleanup, and cleanup failure remains blocking.
   - Target the immutable `steps.build.outputs.digest` through the existing candidate repository reference; never scan a mutable tag.
   - Pin Trivy Action v0.36.0 to `ed142fd0673e97e23eac54620cfb913e5ce36c25` and its CLI `version` to v0.72.0.
   - Run a SARIF report scan for HIGH/CRITICAL findings without `ignore-unfixed` and with `limit-severities-for-sarif: true`, upload the result through CodeQL upload-sarif v4 under the stable category `trivy/release-image` so recurring uploads reconcile and close prior results, then run an enforcement scan with `ignore-unfixed: true` and nonzero exit for actionable findings. SARIF upload is part of the release gate by design; a clean scan with unpublished evidence still cannot release.
   - Use the stable Code Scanning category `trivy/release-image` so recurring uploads reconcile and close prior results.
   - Keep the exact immutable image digest in the digest-named SARIF artifact and workflow summary/evidence so Security results can be traced to the candidate that is later promoted and dispatched.
+  - Mint the GitHub App token only after all third-party scan/upload actions and `actions/setup-node` complete. Use it through step-local `GH_TOKEN` only in subsequent shell publication steps: create the Git ref with `gh api`, promote and verify release-unique CalVer/SHA tags, create/edit the GitHub Release, and promote/read back mutable `latest` as the terminal publication step. Failure cleanup may delete the Git ref and release but never receives `packages:delete`.
   - Keep Trivy DB caching enabled only in the trusted release workflow, forbid broad restore keys, custom DB sources, DB-skip/download-only settings, and any cache namespace shared with pull-request jobs. Do not mask database, scanner, or upload failures.
-  - Prove digest continuity and step ordering through a real release run and GitHub job/log readback: build digest → smoke → report → upload → gate → tag/promotion/release → deploy.
+  - Prove digest continuity and step ordering through a real release run and GitHub job/log readback: build digest → smoke → report → upload → gate → Git ref → CalVer/SHA promotion and verification → GitHub Release → terminal `latest` promotion and readback → deploy.
 - **Execution note:** No unit test is expected for this workflow/config and release-orchestration unit because file-content tests are prohibited. Run actionlint/check-workflows, then use real passing/failing Docker and Trivy image scans plus GitHub job, Security, and SARIF readback.
 - **Patterns to follow:**
   - Existing `steps.build.outputs.digest` propagation and promoted-digest verification in `.github/workflows/release.yaml`.
@@ -275,16 +277,18 @@ flowchart TB
   - Release path parity learning in `docs/solutions/workflow-issues/release-paths-filter-must-cover-runtime-image-contents-2026-06-25.md`.
 - **Live validation scenarios:**
   - **Happy path:** A clean candidate produces SARIF, passes enforcement, and the exact digest proceeds to release and infra dispatch.
-  - **Actionable finding:** A fixed HIGH/CRITICAL finding fails before stable tags, GitHub Release publication, and dispatch.
+  - **Actionable finding:** A fixed HIGH/CRITICAL finding fails before Git-ref creation, release-unique image tags, GitHub Release publication, terminal `latest` promotion, and dispatch.
   - **Unfixed finding:** The finding appears in SARIF but does not fail the actionable gate.
   - **Scanner outage:** Trivy DB/action failure blocks the release and leaves only the transient candidate tag.
   - **Upload failure:** SARIF upload failure blocks the release instead of continuing unobserved.
+  - **Publication partial failure:** A failure after Git-ref creation or release-unique CalVer/SHA promotion leaves mutable `latest` unchanged; the release-unique tags may remain for deferred GHCR retention/cleanup, while failure cleanup attempts to delete the Git ref and GitHub Release.
   - **Evidence identity:** The stable Code Scanning category `trivy/release-image` lets recurring uploads reconcile and close prior results; the digest-named SARIF artifact and workflow summary/evidence identify the exact digest used by smoke, enforcement, promotion, release, and dispatch.
   - **Cache trust:** Release scanner caches cannot be populated by fork/PR workflows, use no broad restore keys or custom database sources, and cannot skip database updates.
   - **Identity regression:** A controlled release run with a substituted tag, rebuilt image, or different dispatch digest fails the live digest-continuity evidence.
   - **Bypass regression:** Actionlint/check-workflows plus a controlled failing-image run and GitHub job/SARIF readback prove that ignore files, skip directories/layers, severity downgrades, DB-skip flags, and `continue-on-error` cannot bypass the gate.
-- **Verification:** Actionlint/check-workflows pass; real passing and failing Docker/Trivy image scans prove HIGH/CRITICAL-constrained SARIF output and release blocking; GitHub Security/SARIF and job readback prove the stable `trivy/release-image` category reconciles recurring uploads while the digest-named artifact and workflow summary/evidence preserve one exact digest through dispatch.
-  - On every smoke, report, upload, or gate failure, verify the allowed terminal state explicitly: the transient candidate may exist, but stable image tags are unchanged, no Git tag exists, no GitHub Release exists, and infra dispatch did not run.
+- **Verification:** Actionlint/check-workflows pass; real passing and failing Docker/Trivy image scans prove HIGH/CRITICAL-constrained SARIF output and release blocking; GitHub Security/SARIF and job readback prove the stable `trivy/release-image` category reconciles recurring uploads while the digest-named artifact and workflow summary/evidence preserve one exact digest through dispatch. Verify that the App token is minted only after third-party actions and `actions/setup-node`, that no later publication uses a third-party action, and that publication order is Git ref → CalVer/SHA promotion and verification → GitHub Release → terminal `latest` promotion and readback.
+  - On every smoke, report, upload, or gate failure, verify the allowed terminal state explicitly: the transient candidate may exist, mutable `latest` is unchanged, no Git ref or GitHub Release exists, and infra dispatch did not run.
+  - On a later publication failure before terminal `latest` publication, verify that mutable `latest` remains unchanged; release-unique CalVer/SHA tags may remain as deferred-cleanup residue, and cleanup does not require `packages:delete`. If the terminal `latest` write/readback response is lost after an accepted write, it cannot be distinguished locally from a failed write; record that ambiguity rather than claiming rollback certainty.
 
 ### U6. Establish and verify the `main` ruleset
 
@@ -331,7 +335,7 @@ flowchart TB
 
 - **Interaction graph:** Pull requests gain two security checks; default-branch/scheduled runs gain CodeQL and Scorecard; releases gain runtime-tool probes, SARIF upload, and a blocking artifact scan; repository settings consume stable check names and CodeQL results.
 - **Error propagation:** Required pull-request workflow failures block merge through the ruleset. Runtime scan, database, or upload failures stop the release job before promotion. Scorecard failures remain isolated and visible.
-- **State lifecycle risks:** Ruleset activation before a clean baseline can deadlock all merges. Image promotion before scan completion can publish an unverified artifact. Failed releases can leave transient CI tags in GHCR but cannot update stable tags or deploy.
+- **State lifecycle risks:** Ruleset activation before a clean baseline can deadlock all merges. Image promotion before scan completion can publish an unverified artifact. Failures before terminal `latest` publication leave `latest` unchanged; partial publication may leave release-unique CalVer/SHA tags in GHCR, and dispatch still requires a successful release job.
 - **API surface parity:** No application API changes. GitHub workflow/check names and the ruleset become external repository contracts and must remain stable.
 - **Integration coverage:** Actionlint/check-workflows cannot prove token permissions, CodeQL/SARIF publication, scanner DB behavior, image contents, or ruleset enforcement; each receives a live verification step.
 - **Unchanged invariants:** Read-only application behavior, redaction, browser-direct operator routes, existing functional CI, manual merge approval, and digest-based infra deployment remain unchanged.
@@ -349,7 +353,7 @@ flowchart TB
 | Runtime cleanup removes a needed binary or dependency | Low | High | Use a production-dependencies stage, real Docker build, health smoke, non-root check, and runtime dependency probe. |
 | Trivy database/action outage blocks an urgent release | Medium | High | Fail closed by design; no standing bypass. Emergency override requires explicit approval, audit, restoration, and re-verification. |
 | Trivy SARIF hides unfixed findings | Medium | Medium | Separate report and enforcement scans; only the enforcement scan ignores unfixed vulnerabilities. |
-| Candidate image remains in GHCR after a failed scan | High | Low | Accept transient CI-tag residue; no stable tag, GitHub Release, or deploy is produced. Track registry cleanup separately. |
+| Candidate or release-unique image remains in GHCR after failure | High | Low | Accept CI-candidate or release-unique CalVer/SHA residue; mutable `latest` is not intentionally advanced before the terminal publication step. Track registry cleanup separately; do not add `packages:delete`. |
 | Action or scanner pin becomes stale | Medium | Medium | Full-SHA pins with version comments, explicit Trivy CLI version, Renovate-managed updates, actionlint/check-workflows, and live workflow runs. |
 | New checks materially increase pull-request latency | Low | Medium | Keep workflows independent/parallel, analyze only JavaScript/TypeScript, and avoid unnecessary builds or duplicate scans on PRs. |
 
@@ -363,9 +367,9 @@ flowchart TB
 | CodeQL baseline | `main` analysis completes with zero HIGH/CRITICAL security alerts | Any HIGH/CRITICAL alert; open focused remediation work before protection |
 | Scorecard publication | Default-branch result, SARIF/artifact, and public badge are current; Scorecard is absent from ruleset and release dependencies | Missing/stale result, unauthorized trigger, or accidental enforcement coupling |
 | Runtime image | Clean Docker build, direct Node startup, health success, non-root UID, package-manager absence, and production dependency resolution | Startup/health/permission failure or any retained package manager/cache |
-| Trivy release gate | Same exact digest in smoke, the digest-named SARIF artifact and workflow summary/evidence, enforcement scan, promotion inputs, release outputs, and infra dispatch; stable category `trivy/release-image` reconciles recurring uploads; controlled vulnerable candidate stops before stable artifacts | Any digest mismatch, bypass setting, hidden unfixed evidence, or promotion after failed scan/upload |
+| Trivy release gate | Same exact digest in smoke, the digest-named SARIF artifact and workflow summary/evidence, enforcement scan, promotion inputs, release outputs, and infra dispatch; stable category `trivy/release-image` reconciles recurring uploads; controlled vulnerable candidate stops before publication | Any digest mismatch, bypass setting, hidden unfixed evidence, publication after failed scan/upload, or mutable `latest` advancement before terminal publication |
 | Main ruleset | Admin-scoped readback matches active policy; clean test PR merges; pending/failed existing or security checks block both human and bot identities | Missing check, incorrect CodeQL threshold, non-empty bypass list, admin exemption, or force-push/deletion allowance |
-| First production release | Release workflow digest, GHCR stable-tag digest, infra dispatch digest, and deployed RepoDigest are identical; health remains green | Any identity mismatch or unhealthy deployment |
+| First production release | Release workflow digest, GHCR `latest` digest, infra dispatch digest, and deployed RepoDigest are identical; release-unique CalVer/SHA tags also resolve to the same digest; health remains green | Any identity mismatch or unhealthy deployment |
 
 ---
 
