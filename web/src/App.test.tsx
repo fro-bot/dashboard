@@ -29,6 +29,11 @@ describe('App', () => {
     // ready-state DOM don't have to wait for a real async fetch.
     const fixtureLoader = await import('./operator/fixture-runtime-loader.ts')
     vi.spyOn(fixtureLoader, 'fetchFixtureSession').mockResolvedValue(null)
+    const runtimeModule = await import('./operator/runtime.ts')
+    vi.spyOn(runtimeModule, 'createOperatorRuntime').mockImplementation(() => ({
+      isMounted: true,
+      cleanup: vi.fn(),
+    }))
     // App polls the listener unread count on mount + interval for the nav badge.
     // Stub it so the operator-runtime assertions don't race an unmocked fetch.
     const listenerApi = await import('./api/listener.ts')
