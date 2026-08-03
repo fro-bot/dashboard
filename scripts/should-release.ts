@@ -21,7 +21,9 @@
 //      (dependencies, engines, packageManager, overrides, pnpm.overrides,
 //       scripts, type, exports, imports) between base and head.
 //      If any runtime field changed => release.
-//      If only devDependencies changed => skip.
+//      If only proven non-artifact devDependencies changed => skip.
+//      Unknown devDependency changes fail open and trigger a release because
+//      Docker installs them before the shipped browser bundle is built.
 //   3. If only pnpm-lock.yaml changed (no package.json diff) => release.
 //      Rationale: a lockfile-only update can change the exact package versions
 //      installed into the Docker image even when package.json semver ranges are
@@ -56,6 +58,23 @@ interface PkgJson {
   exports?: Record<string, unknown> | string
   imports?: Record<string, unknown>
 }
+
+const NON_ARTIFACT_DEV_DEPENDENCY_PREFIXES = [
+  '@types/',
+  '@testing-library/',
+] as const
+
+const NON_ARTIFACT_DEV_DEPENDENCIES = new Set([
+  'eslint',
+  'eslint-plugin-erasable-syntax-only',
+  '@opencode-ai/plugin',
+  '@bfra.me/eslint-config',
+  '@bfra.me/tsconfig',
+  'typescript',
+  'jiti',
+  'jsdom',
+  'vitest',
+])
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -225,6 +244,24 @@ function unknownRecordsDiffer(
   return false
 }
 
+function isNonArtifactDevDependency(name: string): boolean {
+  return (
+    NON_ARTIFACT_DEV_DEPENDENCIES.has(name) ||
+    NON_ARTIFACT_DEV_DEPENDENCY_PREFIXES.some(prefix => name.startsWith(prefix))
+  )
+}
+
+function changedDevDependencyNames(base: PkgJson, head: PkgJson): string[] {
+  const names = new Set([
+    ...Object.keys(base.devDependencies ?? {}),
+    ...Object.keys(head.devDependencies ?? {}),
+  ])
+
+  return [...names]
+    .filter(name => (base.devDependencies ?? {})[name] !== (head.devDependencies ?? {})[name])
+    .sort()
+}
+
 /**
  * Returns true if any runtime-affecting field changed between base and head.
  * Runtime fields: dependencies, engines, packageManager, overrides,
@@ -287,6 +324,18 @@ function decide(
         reason: 'package.json runtime fields changed (dependencies/engines/packageManager/overrides/scripts/type/exports/imports)',
       }
     }
+
+    const changedDevDependencies = changedDevDependencyNames(base, head)
+    const artifactAffectingDevDependencies = changedDevDependencies.filter(
+      name => !isNonArtifactDevDependency(name),
+    )
+    if (artifactAffectingDevDependencies.length > 0) {
+      return {
+        shouldRelease: true,
+        reason: `package.json artifact-affecting devDependencies changed: ${artifactAffectingDevDependencies.join(', ')}`,
+      }
+    }
+
     // Only devDependencies (or other non-runtime fields) changed
     return {
       shouldRelease: false,
