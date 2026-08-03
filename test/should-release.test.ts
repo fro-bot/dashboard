@@ -42,9 +42,10 @@
  * - package.json `imports` reordered nested keys => no release
  * - reordered dependency keys with same values => no release
  * - hard-release path + package.json no-op => release (hard-release wins)
- * - package.json `devDependencies`-only change => no release
+ * - proven non-artifact `devDependencies`-only change => no release
+ * - bundled, unknown, added, and removed `devDependencies` changes => release
  * - pnpm-lock.yaml-only change (no package.json diff) => release (fail open: may affect runtime graph)
- * - pnpm-lock.yaml + devDependencies-only package.json change => no release
+ * - pnpm-lock.yaml + proven non-artifact devDependency change => no release
  * - pnpm-lock.yaml + dependencies change => release
  * - no changed files => no release
  * - first-push (empty base {}) with runtime fields in head => release
@@ -591,40 +592,125 @@ describe('should-release — imports change triggers release', () => {
 })
 
 // ---------------------------------------------------------------------------
-// No-release: devDependencies-only changes
+// devDependencies-only changes
 // ---------------------------------------------------------------------------
 
-describe('should-release — devDependencies-only change skips release', () => {
-  it('skips when only devDependencies changed (vitest bump)', () => {
-    const base = writePkg(tmpDir, 'base.json', BASE_PKG)
+describe('should-release — devDependencies-only changes', () => {
+  it('releases when bundled React dependencies and their types change', () => {
+    const base = writePkg(tmpDir, 'base.json', {
+      ...BASE_PKG,
+      devDependencies: {
+        ...BASE_PKG.devDependencies,
+        '@types/react': '19.2.17',
+        '@types/react-dom': '19.2.3',
+        react: '19.2.7',
+        'react-dom': '19.2.7',
+      },
+    })
     const head = writePkg(tmpDir, 'head.json', {
       ...BASE_PKG,
-      devDependencies: {...BASE_PKG.devDependencies, vitest: '4.1.8'},
+      devDependencies: {
+        ...BASE_PKG.devDependencies,
+        '@types/react': '19.2.18',
+        '@types/react-dom': '19.2.4',
+        react: '19.2.8',
+        'react-dom': '19.2.8',
+      },
     })
     const {exitCode, stdout} = runGuard('package.json\npnpm-lock.yaml', base, head)
-    expect(exitCode).toBe(1)
-    expect(stdout).toMatch(/^skip:/)
+    expect(exitCode).toBe(0)
+    expect(stdout).toBe('release: package.json artifact-affecting devDependencies changed: react, react-dom')
   })
 
-  it('skips when a new devDependency is added', () => {
-    const base = writePkg(tmpDir, 'base.json', BASE_PKG)
+  it('skips when only @types dependencies change', () => {
+    const base = writePkg(tmpDir, 'base.json', {
+      ...BASE_PKG,
+      devDependencies: {...BASE_PKG.devDependencies, '@types/react': '19.2.17'},
+    })
     const head = writePkg(tmpDir, 'head.json', {
       ...BASE_PKG,
-      devDependencies: {...BASE_PKG.devDependencies, 'new-dev-tool': '1.0.0'},
+      devDependencies: {...BASE_PKG.devDependencies, '@types/react': '19.2.18'},
     })
     const {exitCode, stdout} = runGuard('package.json', base, head)
     expect(exitCode).toBe(1)
     expect(stdout).toMatch(/^skip:/)
   })
 
-  it('skips when a devDependency is removed', () => {
+  it('releases when a browser build dependency changes', () => {
+    const base = writePkg(tmpDir, 'base.json', {
+      ...BASE_PKG,
+      devDependencies: {...BASE_PKG.devDependencies, vite: '8.1.0'},
+    })
+    const head = writePkg(tmpDir, 'head.json', {
+      ...BASE_PKG,
+      devDependencies: {...BASE_PKG.devDependencies, vite: '8.2.0'},
+    })
+    const {exitCode, stdout} = runGuard('package.json', base, head)
+    expect(exitCode).toBe(0)
+    expect(stdout).toMatch(/^release:/)
+  })
+
+  it.each(['unknown-tool', '@bfra.me/browser-build'])(
+    'releases when an unknown devDependency changes: %s',
+    packageName => {
+      const base = writePkg(tmpDir, 'base.json', {
+        ...BASE_PKG,
+        devDependencies: {...BASE_PKG.devDependencies, [packageName]: '1.0.0'},
+      })
+      const head = writePkg(tmpDir, 'head.json', {
+        ...BASE_PKG,
+        devDependencies: {...BASE_PKG.devDependencies, [packageName]: '1.1.0'},
+      })
+      const {exitCode, stdout} = runGuard('package.json', base, head)
+      expect(exitCode).toBe(0)
+      expect(stdout).toMatch(/^release:/)
+    },
+  )
+
+  it.each(['@bfra.me/eslint-config', '@bfra.me/tsconfig'])(
+    'skips when known @bfra.me tooling changes: %s',
+    packageName => {
+      const base = writePkg(tmpDir, 'base.json', {
+        ...BASE_PKG,
+        devDependencies: {...BASE_PKG.devDependencies, [packageName]: '1.0.0'},
+      })
+      const head = writePkg(tmpDir, 'head.json', {
+        ...BASE_PKG,
+        devDependencies: {...BASE_PKG.devDependencies, [packageName]: '1.1.0'},
+      })
+      const {exitCode, stdout} = runGuard('package.json', base, head)
+      expect(exitCode).toBe(1)
+      expect(stdout).toMatch(/^skip:/)
+    },
+  )
+
+  it('releases when an artifact-affecting devDependency is added', () => {
+    const base = writePkg(tmpDir, 'base.json', BASE_PKG)
+    const head = writePkg(tmpDir, 'head.json', {
+      ...BASE_PKG,
+      devDependencies: {...BASE_PKG.devDependencies, react: '19.2.8'},
+    })
+    const {exitCode, stdout} = runGuard('package.json', base, head)
+    expect(exitCode).toBe(0)
+    expect(stdout).toMatch(/^release:/)
+  })
+
+  it('releases when an artifact-affecting devDependency is removed', () => {
+    const base = writePkg(tmpDir, 'base.json', {
+      ...BASE_PKG,
+      devDependencies: {...BASE_PKG.devDependencies, react: '19.2.8'},
+    })
+    const head = writePkg(tmpDir, 'head.json', BASE_PKG)
+    const {exitCode, stdout} = runGuard('package.json', base, head)
+    expect(exitCode).toBe(0)
+    expect(stdout).toMatch(/^release:/)
+  })
+
+  it('skips when a proven tooling devDependency is removed', () => {
     const base = writePkg(tmpDir, 'base.json', BASE_PKG)
     const devWithoutTs = {...(BASE_PKG.devDependencies as Record<string, string>)}
     delete devWithoutTs.typescript
-    const head = writePkg(tmpDir, 'head.json', {
-      ...BASE_PKG,
-      devDependencies: devWithoutTs,
-    })
+    const head = writePkg(tmpDir, 'head.json', {...BASE_PKG, devDependencies: devWithoutTs})
     const {exitCode, stdout} = runGuard('package.json', base, head)
     expect(exitCode).toBe(1)
     expect(stdout).toMatch(/^skip:/)
@@ -648,7 +734,7 @@ describe('should-release — pnpm-lock.yaml-only change triggers release (fail o
   })
 })
 
-describe('should-release — pnpm-lock.yaml + devDependencies-only change skips release', () => {
+describe('should-release — pnpm-lock.yaml + proven non-artifact devDependency change skips release', () => {
   it('skips when lock + devDependencies changed but no runtime fields changed', () => {
     const base = writePkg(tmpDir, 'base.json', BASE_PKG)
     const head = writePkg(tmpDir, 'head.json', {
