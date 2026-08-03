@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>fro-bot/.github"],
+  "extends": ["github>fro-bot/.github", "github>microsoft/m365-renovate-config:groupReact#v2.8.4"],
   "postUpgradeTasks": {
     "commands": ["pnpm install", "pnpm fix"],
     "executionMode": "branch"
