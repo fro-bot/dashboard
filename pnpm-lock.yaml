@@ -46,8 +46,8 @@ importers:
         specifier: 0.13.1
         version: 0.13.1
       '@opencode-ai/plugin':
-        specifier: 1.18.11
-        version: 1.18.11
+        specifier: 1.18.12
+        version: 1.18.12
       '@tailwindcss/vite':
         specifier: 4.3.3
         version: 4.3.3(vite@8.2.0(@types/node@24.13.3)(jiti@2.7.0)(terser@5.48.0)(yaml@2.9.0))
@@ -999,8 +999,8 @@ packages:
   '@octokit/types@17.0.0':
     resolution: {integrity: sha512-ByP1v7YL5SMveFPP7+sj0/ZuWCOOg/Chs4NafOMpq6WNIM/hdGY0S7C0TCGDBWu1aGmOxmUIhMx3cO+IdwYZ1Q==}
 
-  '@opencode-ai/plugin@1.18.11':
-    resolution: {integrity: sha512-mgn7+YO2J5tM2sWtV8pPBz6Lz6vWZswBOjUWssLvGaxKPuHR60sZ3Py4/tjI9RNl74aB4lhI0NUlanuWZS8NfA==}
+  '@opencode-ai/plugin@1.18.12':
+    resolution: {integrity: sha512-p+vOKlWMTAl0ix97hg3aELlVM/jNhIi0kOZEzY+Bo8W//hliw5vmDTuCnOJh0QdQl5fE9uaHzaCJR9qG9YodOQ==}
     peerDependencies:
       '@opentui/core': '>=0.4.5'
       '@opentui/keymap': '>=0.4.5'
@@ -1013,8 +1013,8 @@ packages:
       '@opentui/solid':
         optional: true
 
-  '@opencode-ai/sdk@1.18.11':
-    resolution: {integrity: sha512-yDImmNv4PhxdMgtiHVNWQWEVwQlAm7Dr0y4XU7CT4dOIbzgO+VP+9I02lAP7Zva1FhGeyI7oKMI2tzB9RUsWaQ==}
+  '@opencode-ai/sdk@1.18.12':
+    resolution: {integrity: sha512-Skjm0uRWqIiL9BQliZSrvnBflT99q1aGhT2pATNwli2WU8XSKm4lhZJFay7dIzjrA5C9SfgK+YSeoES2PbFugA==}
 
   '@oslojs/asn1@1.0.0':
     resolution: {integrity: sha512-zw/wn0sj0j0QKbIXfIlnEcTviaCzYOY3V5rAyjR6YtOByFtJiT574+8p9Wlach0lZH9fddD4yb9laEAIl4vXQA==}
@@ -5146,14 +5146,14 @@ snapshots:
     dependencies:
       '@octokit/openapi-types': 28.0.0
 
-  '@opencode-ai/plugin@1.18.11':
+  '@opencode-ai/plugin@1.18.12':
     dependencies:
       '@ai-sdk/provider': 3.0.8
-      '@opencode-ai/sdk': 1.18.11
+      '@opencode-ai/sdk': 1.18.12
       effect: 4.0.0-beta.83
       zod: 4.1.8
 
-  '@opencode-ai/sdk@1.18.11':
+  '@opencode-ai/sdk@1.18.12':
     dependencies:
       cross-spawn: 7.0.6
 
