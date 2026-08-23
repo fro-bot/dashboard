@@ -5,4 +5,7 @@ allowBuilds:
   msgpackr-extract: false
   unrs-resolver: true
 
+minimumReleaseAgeExclude:
+  - '@bfra.me/eslint-config@0.51.2'
+
 shamefullyHoist: true
