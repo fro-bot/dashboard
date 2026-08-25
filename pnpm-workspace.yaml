@@ -6,7 +6,7 @@ allowBuilds:
   unrs-resolver: true
 
 minimumReleaseAgeExclude:
-  - '@bfra.me/eslint-config@0.51.2 || 0.51.3 || 0.51.4'
+  - '@bfra.me/eslint-config@0.51.2 || 0.51.3 || 0.51.4 || 0.52.0'
   - '@bfra.me/tsconfig@0.13.2'
 
 shamefullyHoist: true
