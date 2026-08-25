@@ -1,4 +1,4 @@
-FROM node:24-slim@sha256:ccd0612136f105d59d7266585b0bff88016e3da94c8ebfc8ad1154b529f59e7b AS builder
+FROM node:24-slim@sha256:a9f5f7c91a432850b2a8a7797adf5eadb6c733ceed61167806cee7ea7fbc29df AS builder
 
 # Enable corepack for pnpm
 RUN corepack enable && corepack prepare pnpm@11.8.0 --activate
@@ -18,7 +18,7 @@ COPY web/ ./web/
 RUN pnpm build:web
 
 # ── Production dependency stage ───────────────────────────────────────────────
-FROM node:24-slim@sha256:ccd0612136f105d59d7266585b0bff88016e3da94c8ebfc8ad1154b529f59e7b AS prod-deps
+FROM node:24-slim@sha256:a9f5f7c91a432850b2a8a7797adf5eadb6c733ceed61167806cee7ea7fbc29df AS prod-deps
 
 # Enable corepack for pnpm
 RUN corepack enable && corepack prepare pnpm@11.8.0 --activate
@@ -32,7 +32,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile --prod
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-FROM node:24-slim@sha256:ccd0612136f105d59d7266585b0bff88016e3da94c8ebfc8ad1154b529f59e7b
+FROM node:24-slim@sha256:a9f5f7c91a432850b2a8a7797adf5eadb6c733ceed61167806cee7ea7fbc29df
 
 WORKDIR /app
 
