@@ -1,12 +1,13 @@
 /**
  * Auth route + middleware integration tests.
  * Uses app.request() against buildDashboardApp() with injected config/fakes.
- * Does NOT hit real GitHub — Arctic and /user fetch are mocked.
+ * Does NOT hit real GitHub — GitHub OAuth and /user fetch are mocked.
  */
 import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
 import {Buffer} from 'node:buffer'
 import {createHmac} from 'node:crypto'
 import {describe, expect, it} from 'vitest'
+import {fetchGitHubUserLogin, makeGitHubOAuthClient} from '../src/auth/oauth.ts'
 import {sanitizeErrorMessage} from '../src/logger.ts'
 import {deriveLogoutCsrfToken} from '../src/routes/auth.ts'
 import {buildDashboardApp} from '../src/server.ts'
@@ -311,6 +312,39 @@ describe('OAuth flow', () => {
   })
 
   describe('/auth/callback — security', () => {
+    it('returns 401 when validateAuthorizationCode rejects', async () => {
+      let fetchUserLoginCalls = 0
+      const app = await buildDashboardApp({
+        operatorLogin: 'octocat',
+        cookieKey: TEST_KEY,
+        oauthClient: {
+          createAuthorizationURL: (state: string, _scopes: string[]) =>
+            new URL(`https://github.com/login/oauth/authorize?state=${state}`),
+          validateAuthorizationCode: async (_code: string) => {
+            throw new Error('exchange failed')
+          },
+        },
+        fetchUserLogin: async () => {
+          fetchUserLoginCalls++
+          return 'octocat'
+        },
+      })
+
+      const loginRes = await app.request('/auth/login')
+      const stateCookieHeader = getSetCookie(loginRes, 'oauth_state') ?? ''
+      const stateCookieValue = extractCookieValue(stateCookieHeader)
+      const location = loginRes.headers.get('location') ?? ''
+      const stateParam = new URL(location).searchParams.get('state') ?? ''
+
+      const res = await app.request(`/auth/callback?code=auth-code&state=${stateParam}`, {
+        headers: {cookie: `oauth_state=${stateCookieValue}`},
+      })
+
+      expect(res.status).toBe(401)
+      expect(getSetCookie(res, 'session')).toBeUndefined()
+      expect(fetchUserLoginCalls).toBe(0)
+    })
+
     it('rejects non-allowlisted login (403 or redirect)', async () => {
       // githubLogin is 'attacker', operatorLogin is 'octocat'
       const app = await buildTestApp({operatorLogin: 'octocat', githubLogin: 'attacker'})
@@ -482,6 +516,325 @@ describe('OAuth flow', () => {
 
       expect(res.status).toBe(403)
     })
+  })
+})
+
+describe('makeGitHubOAuthClient', () => {
+  it('createAuthorizationURL produces the GitHub authorization URL', () => {
+    const client = makeGitHubOAuthClient(
+      'client-id',
+      'client-secret',
+      'https://dashboard.example.com/auth/callback',
+    )
+
+    const url = client.createAuthorizationURL('state value', ['read:user', 'repo:status'])
+
+    expect(url.origin).toBe('https://github.com')
+    expect(url.pathname).toBe('/login/oauth/authorize')
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      client_id: 'client-id',
+      redirect_uri: 'https://dashboard.example.com/auth/callback',
+      state: 'state value',
+      scope: 'read:user repo:status',
+      response_type: 'code',
+    })
+  })
+
+  it('validateAuthorizationCode returns the access token on success', async () => {
+    const clientId = 'client-id'
+    const clientSecret = 'client-secret'
+    const code = 'authorization-code'
+    const token = 'gho_access-token'
+    const redirectURI = 'https://dashboard.example.com/auth/callback'
+    const client = makeGitHubOAuthClient(clientId, clientSecret, redirectURI)
+    const originalFetch = globalThis.fetch
+
+    globalThis.fetch = async (input, init) => {
+      expect(input).toBe('https://github.com/login/oauth/access_token')
+      expect(init?.method).toBe('POST')
+      const headers = new Headers(init?.headers)
+      expect(headers.get('accept')).toBe('application/json')
+      expect(headers.get('content-type')).toBe('application/x-www-form-urlencoded')
+      expect(headers.get('user-agent')).toBe('fro-bot-dashboard')
+      expect(headers.get('authorization')).toBe(
+        `Basic ${Buffer.from(`${clientId}:${clientSecret}`, 'utf8').toString('base64')}`,
+      )
+      expect(init?.redirect).toBe('error')
+      expect(init?.body).toBe(
+        new URLSearchParams({
+          client_id: clientId,
+          code,
+          redirect_uri: redirectURI,
+          grant_type: 'authorization_code',
+        }).toString(),
+      )
+      return Response.json({access_token: token})
+    }
+
+    try {
+      const result = await client.validateAuthorizationCode(code)
+      expect(result.accessToken()).toBe(token)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('validateAuthorizationCode rejects network failures without echoing sensitive values', async () => {
+    const clientId = 'client-id'
+    const clientSecret = 'client-secret'
+    const code = 'authorization-code'
+    const token = 'gho_access-token'
+    const client = makeGitHubOAuthClient(clientId, clientSecret, 'https://dashboard.example.com/auth/callback')
+    const originalFetch = globalThis.fetch
+
+    globalThis.fetch = async () => {
+      throw new Error(`network failure: ${clientSecret}, ${code}, ${token}`)
+    }
+
+    try {
+      const result = client.validateAuthorizationCode(code)
+      await expect(result).rejects.toThrow('GitHub OAuth token request failed')
+      await expect(result).rejects.not.toThrow(clientSecret)
+      await expect(result).rejects.not.toThrow(code)
+      await expect(result).rejects.not.toThrow(token)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('validateAuthorizationCode rejects timeout failures without echoing sensitive values', async () => {
+    const clientId = 'client-id'
+    const clientSecret = 'client-secret'
+    const code = 'authorization-code'
+    const token = 'gho_access-token'
+    const client = makeGitHubOAuthClient(clientId, clientSecret, 'https://dashboard.example.com/auth/callback')
+    const originalFetch = globalThis.fetch
+
+    globalThis.fetch = async () => {
+      throw Object.assign(new Error(`timeout: ${clientSecret}, ${code}, ${token}`), {name: 'TimeoutError'})
+    }
+
+    try {
+      const result = client.validateAuthorizationCode(code)
+      await expect(result).rejects.toThrow('GitHub OAuth token request failed')
+      await expect(result).rejects.not.toThrow(clientSecret)
+      await expect(result).rejects.not.toThrow(code)
+      await expect(result).rejects.not.toThrow(token)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('validateAuthorizationCode rejects an HTTP 200 error response', async () => {
+    const clientId = 'client-id'
+    const clientSecret = 'client-secret'
+    const code = 'authorization-code'
+    const token = 'gho_access-token'
+    const errorDescription = `provider response included ${clientSecret}, ${code}, and ${token}`
+    const client = makeGitHubOAuthClient(clientId, clientSecret, 'https://dashboard.example.com/auth/callback')
+    const originalFetch = globalThis.fetch
+
+    globalThis.fetch = async () =>
+      Response.json({
+        error: 'bad_verification_code',
+        error_description: errorDescription,
+        error_uri: 'https://docs.github.com',
+      })
+
+    try {
+      const result = client.validateAuthorizationCode(code)
+      await expect(result).rejects.toThrow('bad_verification_code')
+      await expect(result).rejects.not.toThrow(clientSecret)
+      await expect(result).rejects.not.toThrow(code)
+      await expect(result).rejects.not.toThrow(token)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('validateAuthorizationCode rejects malformed JSON without echoing response content', async () => {
+    const clientId = 'client-id'
+    const clientSecret = 'client-secret'
+    const code = 'authorization-code'
+    const token = 'gho_access-token'
+    const client = makeGitHubOAuthClient(clientId, clientSecret, 'https://dashboard.example.com/auth/callback')
+    const originalFetch = globalThis.fetch
+
+    globalThis.fetch = async () => new Response(clientSecret, {status: 200})
+
+    try {
+      const result = client.validateAuthorizationCode(code)
+      await expect(result).rejects.toThrow('GitHub OAuth token response was not valid JSON')
+      await expect(result).rejects.not.toThrow(clientSecret)
+      await expect(result).rejects.not.toThrow(code)
+      await expect(result).rejects.not.toThrow(token)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('validateAuthorizationCode rejects an error response even when access_token is present', async () => {
+    const clientId = 'client-id'
+    const clientSecret = 'client-secret'
+    const code = 'authorization-code'
+    const token = 'gho_access-token'
+    const client = makeGitHubOAuthClient(clientId, clientSecret, 'https://dashboard.example.com/auth/callback')
+    const originalFetch = globalThis.fetch
+
+    globalThis.fetch = async () =>
+      Response.json({error: 'bad_verification_code', access_token: token})
+
+    try {
+      await expect(client.validateAuthorizationCode(code)).rejects.toThrow('bad_verification_code')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('treats bad_request as an unrecognized OAuth error code', async () => {
+    const clientId = 'client-id'
+    const clientSecret = 'client-secret'
+    const code = 'authorization-code'
+    const client = makeGitHubOAuthClient(clientId, clientSecret, 'https://dashboard.example.com/auth/callback')
+    const originalFetch = globalThis.fetch
+
+    globalThis.fetch = async () => Response.json({error: 'bad_request'})
+
+    try {
+      let message = ''
+      try {
+        await client.validateAuthorizationCode(code)
+      } catch (error) {
+        message = error instanceof Error ? error.message : ''
+      }
+      expect(message).toBe('GitHub OAuth token exchange failed')
+      expect(message).not.toContain('bad_request')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('validateAuthorizationCode rejects a non-string error field', async () => {
+    const clientId = 'client-id'
+    const clientSecret = 'client-secret'
+    const code = 'authorization-code'
+    const token = 'gho_access-token'
+    const client = makeGitHubOAuthClient(clientId, clientSecret, 'https://dashboard.example.com/auth/callback')
+    const originalFetch = globalThis.fetch
+
+    globalThis.fetch = async () => Response.json({error: 42, access_token: token})
+
+    try {
+      const result = client.validateAuthorizationCode(code)
+      await expect(result).rejects.toThrow('GitHub OAuth token exchange failed')
+      await expect(result).rejects.not.toThrow('42')
+      await expect(result).rejects.not.toThrow(clientSecret)
+      await expect(result).rejects.not.toThrow(code)
+      await expect(result).rejects.not.toThrow(token)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('validateAuthorizationCode rejects a non-ok HTTP response', async () => {
+    const clientId = 'client-id'
+    const clientSecret = 'client-secret'
+    const code = 'authorization-code'
+    const token = 'gho_access-token'
+    const client = makeGitHubOAuthClient(clientId, clientSecret, 'https://dashboard.example.com/auth/callback')
+    const originalFetch = globalThis.fetch
+
+    globalThis.fetch = async () => new Response(null, {status: 502})
+
+    try {
+      const result = client.validateAuthorizationCode(code)
+      await expect(result).rejects.toThrow('502')
+      await expect(result).rejects.not.toThrow(clientSecret)
+      await expect(result).rejects.not.toThrow(code)
+      await expect(result).rejects.not.toThrow(token)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('validateAuthorizationCode rejects a response missing access_token', async () => {
+    const clientId = 'client-id'
+    const clientSecret = 'client-secret'
+    const code = 'authorization-code'
+    const token = 'gho_access-token'
+    const client = makeGitHubOAuthClient(clientId, clientSecret, 'https://dashboard.example.com/auth/callback')
+    const originalFetch = globalThis.fetch
+
+    globalThis.fetch = async () => Response.json({scope: 'read:user'})
+
+    try {
+      const result = client.validateAuthorizationCode(code)
+      await expect(result).rejects.toThrow(TypeError)
+      await expect(result).rejects.not.toThrow(clientSecret)
+      await expect(result).rejects.not.toThrow(code)
+      await expect(result).rejects.not.toThrow(token)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('validateAuthorizationCode rejects an empty access_token', async () => {
+    const clientId = 'client-id'
+    const clientSecret = 'client-secret'
+    const code = 'authorization-code'
+    const token = 'gho_access-token'
+    const client = makeGitHubOAuthClient(clientId, clientSecret, 'https://dashboard.example.com/auth/callback')
+    const originalFetch = globalThis.fetch
+
+    globalThis.fetch = async () => Response.json({access_token: ''})
+
+    try {
+      const result = client.validateAuthorizationCode(code)
+      await expect(result).rejects.toThrow(TypeError)
+      await expect(result).rejects.not.toThrow(clientSecret)
+      await expect(result).rejects.not.toThrow(code)
+      await expect(result).rejects.not.toThrow(token)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('validateAuthorizationCode rejects HTTP 201 with a token', async () => {
+    const clientId = 'client-id'
+    const clientSecret = 'client-secret'
+    const code = 'authorization-code'
+    const token = 'gho_access-token'
+    const client = makeGitHubOAuthClient(clientId, clientSecret, 'https://dashboard.example.com/auth/callback')
+    const originalFetch = globalThis.fetch
+
+    globalThis.fetch = async () => Response.json({access_token: token}, {status: 201})
+
+    try {
+      const result = client.validateAuthorizationCode(code)
+      await expect(result).rejects.toThrow('201')
+      await expect(result).rejects.not.toThrow(clientSecret)
+      await expect(result).rejects.not.toThrow(code)
+      await expect(result).rejects.not.toThrow(token)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('fetchGitHubUserLogin rejects network failures without echoing the access token', async () => {
+    const accessToken = 'gho_user-access-token'
+    const originalFetch = globalThis.fetch
+
+    globalThis.fetch = async () => {
+      throw new Error(`network failure: ${accessToken}`)
+    }
+
+    try {
+      const result = fetchGitHubUserLogin(accessToken)
+      await expect(result).rejects.toThrow('GitHub /user request failed')
+      await expect(result).rejects.not.toThrow(accessToken)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 })
 
