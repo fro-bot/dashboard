@@ -290,6 +290,12 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
+          # Review-path triggers withhold credentials from the agent; don't leave one in the workspace.
+          # Schedule/dispatch keep it because branch-pr delivery pushes with it.
+          persist-credentials: >-
+            ${{
+            !contains(fromJSON('["pull_request", "issue_comment", "issues"]'), github.event_name)
+            }}
           # Always check out the default/workflow ref — never PR-head code. On
           # issue_comment the fork guard cannot see PR fork status (the event has
           # no github.event.pull_request), so checking out refs/pull/<n>/head would
