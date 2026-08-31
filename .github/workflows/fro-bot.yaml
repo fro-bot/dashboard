@@ -314,6 +314,13 @@ jobs:
             }}
         with:
           github-token: ${{ secrets.FRO_BOT_PAT }}
+          # Scheduled runs need branch-pr; this workflow has no caller-side PR step.
+          # Scope it to those triggers so other events stay on auto.
+          output-mode: >-
+            ${{
+            (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+            && 'branch-pr' || 'auto'
+            }}
           auth-json: ${{ secrets.OPENCODE_AUTH_JSON }}
           model: ${{ vars.FRO_BOT_MODEL }}
           opencode-config: ${{ secrets.OPENCODE_CONFIG }}
