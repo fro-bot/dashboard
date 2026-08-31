@@ -54,6 +54,12 @@ view of Fro Bot's cross-repo footprint.
   `opencode-*` Actions cache is the only known fix (the PR's alone re-inherits `main`
   via restore-key fallback). Recipe and upstream tracking in
   `docs/solutions/workflow-issues/opencode-bootstrap-timeout-cache-purge-2026-08-31.md`.
+- Fro Bot's `output-mode` defaults to `auto`, which resolves to `working-dir` for
+  schedule/dispatch runs — the agent edits the tree and expects a caller-side commit/PR
+  step. Without one, fixes vanish at runner teardown while reports claim success. The
+  workflow now sets `branch-pr` for those triggers; verify delivery by confirming a
+  fro-bot-authored PR exists, not by reading run status. See
+  `docs/solutions/workflow-issues/workflow-output-mode-auto-discarded-agent-fixes-2026-08-31.md`.
 
 ## Cloned Dependency Source
 
