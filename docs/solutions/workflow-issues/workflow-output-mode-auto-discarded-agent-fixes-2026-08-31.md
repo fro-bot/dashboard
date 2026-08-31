@@ -106,6 +106,14 @@ triggers and the conditional is a no-op today. Scope it anyway: it keeps the
 guarantee in this workflow instead of depending on an upstream event-type switch
 that can change, and it states the intent for the next reader.
 
+This workflow now carries **two** conditionals keyed on the same event
+classification — `output-mode` here and `persist-credentials` on the checkout
+step (see the secondary finding below). They are coupled, and not obviously so:
+`branch-pr` delivery pushes with the credential that `persist-credentials`
+controls. Setting `persist-credentials: false` unconditionally looks like a
+straightforward hardening win and silently breaks delivery, reintroducing exactly
+the failure this document exists to describe. Change one, re-read the other.
+
 ## Why This Matters
 
 At the pinned commit, `packages/runtime/src/agent/output-mode.ts:6-14` returns
@@ -198,30 +206,85 @@ days running. It merged as `8f49fe5`.
 
 Fixed in `d3f8778`, merged to `main` as `de3447c` (#413).
 
-## Secondary finding: the review-path boundary is instruction-only
+## Secondary finding: the review path is gated, and the gate leaked
 
 Recorded here because it surfaced during this work, not because this change
 caused it.
 
-`branch-pr` only injects prompt text. No tool allowlist or permission gate
-anywhere in the agent harness is keyed on the resolved output mode — the
-references to `resolvedOutputMode` in `src/harness/phases/execute.ts` and
-elsewhere are result propagation, output reporting, and summaries.
+The first version of this section claimed the review-path write boundary was
+purely instruction-only. That was wrong, and the correction is worth keeping
+rather than quietly overwriting — the mistake was reasoning from one file instead
+of following the credential end to end.
 
-So `PR_REVIEW_PROMPT`'s instruction —
+**What is actually gated.** `resolveCredential` classifies `pull_request`,
+`issue_comment`, and `issues` as `withhold`, and the runs prove it:
 
 ```text
-Review only. Do NOT push commits, modify files, create branches, or open PRs.
+GitHub CLI credential withheld from child (affected trigger)
+Delivered file-convention response
 ```
 
-— has no technical gate behind it. `FRO_BOT_PAT` authenticates the checkout
-remote (`.github/workflows/fro-bot.yaml:298`) and the agent
-(`:316`) on every trigger, so write capability is present regardless of mode.
+The agent genuinely does not receive a `gh` credential on review triggers, and
+returns its review through a file convention rather than calling the API. There
+is a real technical gate, and it works.
 
-This predates the fix and is unchanged by it. The "zero PRs ever authored"
-evidence above was measuring a missing *instruction*, not a missing *capability*.
-Whether that boundary should be enforced technically belongs upstream in the
-action, not in this workflow.
+**What leaked past it.** `actions/checkout` ran with `persist-credentials`
+defaulting to `true`, leaving a usable git credential in the workspace. `gh` was
+withheld; `git push` would still have authenticated.
+
+Upstream has a preflight built to catch exactly that and fail the run closed. It
+reads with `git config --local --get-regexp`, and `actions/checkout` v6 no longer
+writes `http.<url>.extraheader` into the local config — it writes a file under
+`RUNNER_TEMP` and links it with `includeIf.gitdir`. `--local` does not expand
+includes; git does that at resolution time:
+
+```sh
+git config --local --get-regexp '^http\..*\.extraheader$'   # exit 1, no output
+git config --get-regexp '^http\..*\.extraheader$'           # prints the credential
+```
+
+The assertion reads clean while the credential still resolves. Fail-closed by
+design, fail-open in practice.
+
+**The fix.** Scope `persist-credentials` on the checkout step to match the
+agent's own credential classification —
+`.github/workflows/fro-bot.yaml`, merged as `db99162` (#416):
+
+```yaml
+          # Review-path triggers withhold credentials from the agent; don't leave one in the workspace.
+          # Schedule/dispatch keep it because branch-pr delivery pushes with it.
+          persist-credentials: >-
+            ${{
+            !contains(fromJSON('["pull_request", "issue_comment", "issues"]'), github.event_name)
+            }}
+```
+
+Verified against live runs on both branches, timing taken from the `Checkout
+repository` step:
+
+| Trigger | `persist-credentials` | Credential during agent run |
+| --- | --- | --- |
+| `pull_request` | `false` | written, removed 1.8s later — gone 33s before the agent starts |
+| `workflow_dispatch` | `true` | present throughout; `git push --dry-run` authenticates |
+
+The dispatch half matters as much as the review half. On the run that produced
+#414 the model pushed with plain `git push -u origin <branch>` and no
+`gh auth setup-git` anywhere in the log — the persisted checkout credential is
+what `branch-pr` delivery authenticates with. **Blanket
+`persist-credentials: false` breaks delivery**, leaving `gh pr create` with no
+branch to open against.
+
+**What remains true from the original claim.** No tool allowlist or permission
+gate is keyed on the resolved *output mode* — references to `resolvedOutputMode`
+in `src/harness/phases/execute.ts` and elsewhere are result propagation and
+reporting. `branch-pr` grants no capability; it only injects prompt text. The
+capability boundary is the credential, which is why the credential is where the
+fix belongs.
+
+Filed upstream as `fro-bot/agent#1517`, since fixing the preflight covers every
+consumer. The caller-side conditional works but requires each workflow to
+hand-maintain a copy of the trigger classification, and drift there fails
+silently in the unsafe direction.
 
 ## Related
 
@@ -240,3 +303,6 @@ action, not in this workflow.
   because both make the daily run untrustworthy in different ways.
 - Issue #410 — the daily report whose "Needs Human Attention #1" identified the
   missing PR handoff, closed once delivery was verified.
+- Upstream `fro-bot/agent#1517` — the credential preflight fails open against
+  `actions/checkout` v6's `includeIf` layout. Tracked by a smart note; revisit
+  the local `persist-credentials` conditional if upstream closes it.
