@@ -54,7 +54,7 @@ const lightBlock = lightBlockMatch?.[1] ?? ''
 function hasVar(block: string, varName: string, value: string): boolean {
   // Normalize whitespace and check for `--var-name: value;`
   const pattern = new RegExp(
-    `${varName.replace('--', '--')}\\s*:\\s*${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
+    `${varName}\\s*:\\s*${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
   )
   return pattern.test(block)
 }
