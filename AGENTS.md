@@ -48,6 +48,12 @@ view of Fro Bot's cross-repo footprint.
   `--watch` (which masks crashes by parking). The recipe — and the orchestrator-owns-
   the-server pattern for subagent verification — is in
   `docs/solutions/workflow-issues/dev-server-hang-background-no-watch-kill-orphans-2026-06-25.md`.
+- A `Fro Bot` check that dies in ~34s on `Timeout waiting for server to start after
+  5000ms` is infrastructure, not review feedback — no verdict is produced. The failure
+  is absorbing: reruns re-persist the same cache and never recover. Deleting every
+  `opencode-*` Actions cache is the only known fix (the PR's alone re-inherits `main`
+  via restore-key fallback). Recipe and upstream tracking in
+  `docs/solutions/workflow-issues/opencode-bootstrap-timeout-cache-purge-2026-08-31.md`.
 
 ## Cloned Dependency Source
 
