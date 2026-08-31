@@ -204,8 +204,8 @@ jobs:
           fi
           runtime_uid=$(docker run --rm "$IMG" node -p 'process.getuid()')
           runtime_env=$(docker run --rm "$IMG" node -p 'process.env.NODE_ENV')
-          if [ "$runtime_uid" != 1001 ]; then
-            echo "SMOKE FAILED: runtime UID is $runtime_uid, expected 1001"
+          if [ "$runtime_uid" != 1000 ]; then
+            echo "SMOKE FAILED: runtime UID is $runtime_uid, expected 1000"
             exit 1
           fi
           if [ "$runtime_env" != production ]; then

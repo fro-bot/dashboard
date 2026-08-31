@@ -67,11 +67,9 @@ RUN rm -rf \
       /root/.cache \
       /root/.npm \
       /root/.local/share/pnpm \
-      /usr/local/share/.cache && \
-    addgroup --system --gid 1001 dashboard && \
-    adduser --system --uid 1001 --ingroup dashboard dashboard
+      /usr/local/share/.cache
 
-USER dashboard
+USER node
 
 EXPOSE 3000
 
