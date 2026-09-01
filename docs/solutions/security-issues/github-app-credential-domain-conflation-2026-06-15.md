@@ -145,6 +145,6 @@ async function mintInstallationToken(
 ## Related Issues
 
 - Source: fro-bot/dashboard PR #10 (monitoring dashboard core).
-- Reinforces `AGENTS.md` → "Critical security invariants" (read-only by construction).
+- Reinforces `AGENTS.md` → "Critical security invariants" (read-only by default, with one isolated wiki-write capability).
 - Companion learning: `cross-source-redaction-denylist-before-query-2026-06-15.md`.
 - See `src/github/app-client.ts` (App JWT vs installation token split).

@@ -2,7 +2,7 @@
   "name": "@fro-bot/dashboard",
   "version": "0.0.0",
   "private": true,
-  "description": "Read-only Fro Bot monitoring dashboard",
+  "description": "Fro Bot monitoring dashboard with an isolated wiki-write capability",
   "type": "module",
   "scripts": {
     "bootstrap": "pnpm install",

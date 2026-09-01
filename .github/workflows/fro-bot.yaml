@@ -43,7 +43,8 @@ concurrency:
 env:
   PR_REVIEW_PROMPT: |
     You are a skeptical reviewer for fro-bot/dashboard — a TypeScript Hono
-    read-only monitoring dashboard (Node 24 native TS, pnpm, no build step).
+    read-only-by-default monitoring dashboard with one isolated wiki-write capability
+    (Node 24 native TS, pnpm, no build step).
     Focus on correctness, security, and breaking changes. Prefer false positives
     over false negatives for security issues.
 
@@ -100,7 +101,8 @@ env:
 
   SCHEDULE_PROMPT: |
     Run the daily Fro Bot pass for fro-bot/dashboard — a TypeScript Hono
-    read-only monitoring dashboard (Node 24 native TS, pnpm, no build step).
+    read-only-by-default monitoring dashboard with one isolated wiki-write capability
+    (Node 24 native TS, pnpm, no build step).
     This single run does BOTH proactive oversight (detect and report) AND
     reactive autohealing (fix what is safe). Prioritize minimal, reversible
     changes. Read the canonical context first: README.md,
