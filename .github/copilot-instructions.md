@@ -13,12 +13,13 @@ load-bearing rules for code suggestions.
    token is minted with an explicit read-only `permissions` subset at mint time
    (`pull_requests`/`checks`/`issues`/`contents`/`metadata: read`, with
    `security_events`/`vulnerability_alerts: read` optional and graceful), and those
-   credentials may never mint write-scoped tokens. For the dashboard web/runtime
-   deployment, the only GitHub write authority available to the application is a
-   separately deployed `wiki-writer` service authenticated as the Fro Bot App. It may
-   target only the `fro-bot/.github` repository's `data` branch, under an explicit
-   wiki/corrections path allowlist, executing gates from the shared
-   `@fro-bot/wiki-write-core` package. The dashboard web process must never receive the
+   credentials may never mint write-scoped tokens. The dashboard web/runtime has no
+   GitHub write authority today — the `wiki-writer` service does not exist yet. When it
+   ships it will be the only such authority: separately deployed, authenticated as the
+   Fro Bot App (the same App `release.yaml` uses via `APPLICATION_ID`, distinct from the
+   read-only Agent App behind `DASHBOARD_GITHUB_APP_*`), able to target only the
+   `fro-bot/.github` repository's `data` branch, under an explicit wiki/corrections path
+   allowlist, executing gates from the shared `@fro-bot/wiki-write-core` package. The dashboard web process must never receive the
    Fro Bot App private key or an installation token derived from it. Any additional
    write target or credential requires explicit owner approval and a new threat model.
    This invariant does not govern separately credentialed repository CI/release automation,
