@@ -1,6 +1,6 @@
 # Product
 
-**Fro Bot Dashboard** — a read-only monitoring and operator-control surface for Fro Bot, the autonomous GitHub agent.
+**Fro Bot Dashboard** — a read-only-by-default monitoring and operator-control surface with one isolated wiki-write capability for Fro Bot, the autonomous GitHub agent.
 
 ## Lane
 
