@@ -34,6 +34,7 @@ export type AuditReasonClass =
   | 'stale_timestamp'
   | 'duplicate_request_id'
   | 'credential_header'
+  | 'body_too_large'
 
 export interface AuditEvent {
   readonly outcome: 'rejected'
@@ -45,6 +46,7 @@ export type AuditSink = (event: AuditEvent) => void
 
 export interface WikiWriterApp {
   readonly fetch: (request: Request) => Promise<Response>
+  readonly rejectBodyTooLarge: (requestId: string) => Response
 }
 
 export interface WikiWriterAppOptions {

@@ -36,6 +36,15 @@ export type InternalAuthResult =
   | {readonly ok: true; readonly requestId: string}
   | {readonly ok: false; readonly reasonClass: AuditReasonClass; readonly requestId: string}
 
+export function emitAuditRejection(audit: AuditSink | undefined, reasonClass: AuditReasonClass, requestId: string): void {
+  const event: AuditEvent = {outcome: 'rejected', reasonClass, requestId}
+  try {
+    audit?.(event)
+  } catch {
+    // An audit sink cannot turn a bounded authentication rejection into a success.
+  }
+}
+
 /** Load only raw bytes from the configured file-mounted secret. */
 export async function loadInternalAuthSecret(secretFilePath: string): Promise<Buffer> {
   const secret = await readFile(secretFilePath)
@@ -151,12 +160,7 @@ function hasAlternateCredentialHeader(headers: Headers): boolean {
 }
 
 function reject(audit: AuditSink | undefined, reasonClass: AuditReasonClass, requestId: string): InternalAuthResult {
-  const event: AuditEvent = {outcome: 'rejected', reasonClass, requestId}
-  try {
-    audit?.(event)
-  } catch {
-    // An audit sink cannot turn a bounded authentication rejection into a success.
-  }
+  emitAuditRejection(audit, reasonClass, requestId)
   return {ok: false, reasonClass, requestId}
 }
 

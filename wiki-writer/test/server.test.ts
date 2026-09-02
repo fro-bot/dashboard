@@ -1,10 +1,12 @@
+import type {WikiWriterApp} from '../src/contract.ts'
 import {Buffer} from 'node:buffer'
 import {mkdtemp, rm, writeFile} from 'node:fs/promises'
+import {request as httpRequest} from 'node:http'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {afterEach, describe, expect, it, vi} from 'vitest'
 import {createRequestSignature} from '../src/internal-auth.ts'
-import {createWikiWriterApp} from '../src/server.ts'
+import {createWikiWriterApp, createWikiWriterHttpServer, WIKI_WRITER_MAX_RAW_BYTES} from '../src/server.ts'
 
 const SECRET = Buffer.from('wiki-writer-server-secret-which-is-long-enough')
 const NOW = 1_756_000_000
@@ -23,6 +25,71 @@ function signedRequest(method: string, path: string, body: string, requestId: st
   })
 }
 
+function sizedWriteBody(size: number): string {
+  const emptyBody = JSON.stringify({operation: 'write', repository: 'fixture-org/fixture-repo', ref: 'data', path: 'fixture.md', content: ''})
+  const contentLength = size - Buffer.byteLength(emptyBody)
+  if (contentLength < 0) throw new Error('Requested body size is too small for the write envelope')
+  return JSON.stringify({operation: 'write', repository: 'fixture-org/fixture-repo', ref: 'data', path: 'fixture.md', content: 'x'.repeat(contentLength)})
+}
+
+interface HttpResult {
+  readonly status: number
+  readonly body: string
+}
+
+async function invokeNodeServer(
+  app: WikiWriterApp,
+  body: Buffer,
+  headers: Record<string, string>,
+  contentLength: number | undefined,
+  sendBody = true,
+): Promise<HttpResult> {
+  const server = createWikiWriterHttpServer(app)
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject)
+      resolve()
+    })
+  })
+
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('Test server did not expose a TCP address')
+
+  try {
+    return await new Promise<HttpResult>((resolve, reject) => {
+      const request = httpRequest({
+        host: '127.0.0.1',
+        port: address.port,
+        method: 'POST',
+        path: '/write',
+        headers: {
+          ...headers,
+          ...(contentLength === undefined ? {} : {'content-length': String(contentLength)}),
+        },
+      }, response => {
+        response.setEncoding('utf8')
+        const chunks: string[] = []
+        response.on('data', (chunk: string) => chunks.push(chunk))
+        response.on('end', () => resolve({status: response.statusCode ?? 0, body: chunks.join('')}))
+      })
+      request.on('error', reject)
+      if (sendBody) {
+        if (contentLength === undefined && body.length > WIKI_WRITER_MAX_RAW_BYTES) {
+          request.write(body.subarray(0, WIKI_WRITER_MAX_RAW_BYTES))
+          request.end(body.subarray(WIKI_WRITER_MAX_RAW_BYTES))
+        } else {
+          request.end(body)
+        }
+      } else {
+        request.end()
+      }
+    })
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(error => (error === undefined ? resolve() : reject(error))))
+  }
+}
+
 describe('wiki-writer HTTP boundary', () => {
   const temporaryDirectories: string[] = []
 
@@ -31,14 +98,18 @@ describe('wiki-writer HTTP boundary', () => {
     await Promise.all(temporaryDirectories.splice(0).map(async directory => rm(directory, {recursive: true, force: true})))
   })
 
-  async function createApp(authorizeOperation = vi.fn().mockResolvedValue({allowed: true})) {
+  async function createApp(
+    authorizeOperation = vi.fn().mockResolvedValue({allowed: true}),
+    audit = vi.fn(),
+  ) {
     const directory = await mkdtemp(join(tmpdir(), 'wiki-writer-server-'))
     temporaryDirectories.push(directory)
     const secretPath = join(directory, 'secret')
     await writeFile(secretPath, SECRET)
     return {
-      app: await createWikiWriterApp({secretFilePath: secretPath, nowSeconds: () => NOW, authorizeOperation}),
+      app: await createWikiWriterApp({secretFilePath: secretPath, nowSeconds: () => NOW, authorizeOperation, audit}),
       authorizeOperation,
+      audit,
     }
   }
 
@@ -101,5 +172,68 @@ describe('wiki-writer HTTP boundary', () => {
     expect(text).not.toContain('wiki-writer-server-secret')
     expect(text).not.toContain('safe-health-001')
     expect(text).not.toContain('repository')
+  })
+
+  it('accepts a write body exactly at the one MiB raw envelope ceiling', async () => {
+    const authorizeOperation = vi.fn().mockResolvedValue({allowed: true})
+    const {app} = await createApp(authorizeOperation)
+    const body = sizedWriteBody(WIKI_WRITER_MAX_RAW_BYTES)
+    expect(Buffer.byteLength(body)).toBe(WIKI_WRITER_MAX_RAW_BYTES)
+
+    const response = await app.fetch(signedRequest('POST', '/write', body, 'limit-boundary-001'))
+    expect(response.status).toBe(202)
+    expect(authorizeOperation).toHaveBeenCalledOnce()
+  })
+
+  it('rejects a validly signed body one byte over the ceiling before HMAC or operation authorization', async () => {
+    const authorizeOperation = vi.fn().mockResolvedValue({allowed: true})
+    const {app, audit} = await createApp(authorizeOperation)
+    const body = sizedWriteBody(WIKI_WRITER_MAX_RAW_BYTES + 1)
+    const response = await app.fetch(signedRequest('POST', '/write', body, 'limit-over-001'))
+
+    expect(response.status).toBe(413)
+    expect(await response.json()).toEqual({error: 'payload-too-large'})
+    expect(authorizeOperation).not.toHaveBeenCalled()
+    expect(audit).toHaveBeenCalledWith({outcome: 'rejected', reasonClass: 'body_too_large', requestId: 'limit-over-001'})
+  })
+
+  it('emits only the bounded audit event for an oversize direct request, never the body', async () => {
+    const audit = vi.fn()
+    const {app} = await createApp(vi.fn().mockResolvedValue({allowed: true}), audit)
+    const body = sizedWriteBody(WIKI_WRITER_MAX_RAW_BYTES + 1)
+    const response = await app.fetch(signedRequest('POST', '/write', body, 'limit-audit-001'))
+    expect(response.status).toBe(413)
+    expect(audit).toHaveBeenCalledWith({outcome: 'rejected', reasonClass: 'body_too_large', requestId: 'limit-audit-001'})
+    expect(JSON.stringify(audit.mock.calls)).not.toContain(body)
+  })
+
+  it('rejects an oversize chunked Node request with no content-length while reading it', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({accepted: true}), {status: 202}))
+    const rejectBodyTooLarge = vi.fn(() => new Response(JSON.stringify({error: 'payload-too-large'}), {status: 413}))
+    const app: WikiWriterApp = {fetch, rejectBodyTooLarge}
+    const body = Buffer.from(sizedWriteBody(WIKI_WRITER_MAX_RAW_BYTES + 1))
+    const timestamp = String(NOW)
+    const requestId = 'limit-stream-001'
+    const headers = {
+      'x-request-id': requestId,
+      'x-timestamp': timestamp,
+      'x-signature': createRequestSignature(SECRET, 'POST', '/write', timestamp, body, requestId),
+    }
+
+    const result = await invokeNodeServer(app, body, headers, undefined)
+    expect(result.status).toBe(413)
+    expect(fetch).not.toHaveBeenCalled()
+    expect(rejectBodyTooLarge).toHaveBeenCalledWith(requestId)
+  })
+
+  it('rejects a content-length oversize request before reading or invoking the app boundary', async () => {
+    const fetch = vi.fn().mockRejectedValue(new Error('fetch must not be called'))
+    const rejectBodyTooLarge = vi.fn(() => new Response(JSON.stringify({error: 'payload-too-large'}), {status: 413}))
+    const app: WikiWriterApp = {fetch, rejectBodyTooLarge}
+
+    const result = await invokeNodeServer(app, Buffer.alloc(0), {'x-request-id': 'limit-header-001'}, WIKI_WRITER_MAX_RAW_BYTES + 1, false)
+    expect(result.status).toBe(413)
+    expect(fetch).not.toHaveBeenCalled()
+    expect(rejectBodyTooLarge).toHaveBeenCalledWith('limit-header-001')
   })
 })

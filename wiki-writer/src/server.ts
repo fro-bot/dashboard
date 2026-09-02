@@ -1,10 +1,12 @@
-import type {InternalWikiWriterAppOptions, WikiWriterApp, WikiWriterAppOptions} from './contract.ts'
+import type {AuditSink, InternalWikiWriterAppOptions, WikiWriterApp, WikiWriterAppOptions} from './contract.ts'
 import {Buffer} from 'node:buffer'
 import {createServer, type IncomingMessage, type Server, type ServerResponse} from 'node:http'
 import process from 'node:process'
 import {fileURLToPath} from 'node:url'
 import {isWikiWriteRequest, WIKI_WRITER_HEALTH_PATH, WIKI_WRITER_WRITE_PATH} from './contract.ts'
-import {authenticateInternalRequest, createRequestSignature, InMemoryReplayStore, loadInternalAuthSecret} from './internal-auth.ts'
+import {authenticateInternalRequest, createRequestSignature, emitAuditRejection, InMemoryReplayStore, loadInternalAuthSecret} from './internal-auth.ts'
+
+export const WIKI_WRITER_MAX_RAW_BYTES = 1024 * 1024
 
 export async function createWikiWriterApp(options: WikiWriterAppOptions): Promise<WikiWriterApp> {
   const secret = await loadInternalAuthSecret(options.secretFilePath)
@@ -19,7 +21,8 @@ export function createWikiWriterAppFromSecret(secret: Uint8Array, options: Inter
   return {
     fetch: async request => {
       const url = new URL(request.url)
-      const rawBody = new Uint8Array(await request.arrayBuffer())
+      const rawBody = await readBoundedRequestBody(request)
+      if (rawBody === null) return rejectBodyTooLarge(options.audit, request.headers.get('x-request-id') ?? 'unknown')
       const auth = authenticateInternalRequest({
         secret,
         method: request.method,
@@ -56,6 +59,7 @@ export function createWikiWriterAppFromSecret(secret: Uint8Array, options: Inter
       if (!authorization.allowed) return jsonResponse({error: 'forbidden'}, 403)
       return jsonResponse({accepted: true}, 202)
     },
+    rejectBodyTooLarge: requestId => rejectBodyTooLarge(options.audit, requestId),
   }
 }
 
@@ -79,6 +83,8 @@ export async function startWikiWriterServer(options: WikiWriterHttpOptions = {})
   const server = createWikiWriterHttpServer(app)
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
+    // 0.0.0.0 is required for sibling-service container access; containment is
+    // provided by the private network, with no published port or proxy route.
     server.listen(options.port ?? 3000, options.host ?? '0.0.0.0', () => {
       server.off('error', reject)
       resolve()
@@ -88,9 +94,22 @@ export async function startWikiWriterServer(options: WikiWriterHttpOptions = {})
 }
 
 async function handleNodeRequest(app: WikiWriterApp, request: IncomingMessage, response: ServerResponse): Promise<void> {
+  const requestId = readNodeHeader(request, 'x-request-id') ?? 'unknown'
+  if (contentLengthExceedsLimit(request.headers['content-length'])) {
+    await writeNodeResponse(app.rejectBodyTooLarge(requestId), response)
+    return
+  }
+
   const chunks: Buffer[] = []
+  let bodyLength = 0
   for await (const chunk of request as AsyncIterable<Uint8Array | string>) {
-    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(new Uint8Array(chunk)))
+    const chunkBuffer = typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(new Uint8Array(chunk))
+    bodyLength += chunkBuffer.byteLength
+    if (bodyLength > WIKI_WRITER_MAX_RAW_BYTES) {
+      await writeNodeResponse(app.rejectBodyTooLarge(requestId), response)
+      return
+    }
+    chunks.push(chunkBuffer)
   }
 
   const headers = new Headers()
@@ -109,6 +128,59 @@ async function handleNodeRequest(app: WikiWriterApp, request: IncomingMessage, r
     body: method === 'GET' || method === 'HEAD' ? undefined : body,
   })
   const webResponse = await app.fetch(webRequest)
+  await writeNodeResponse(webResponse, response)
+}
+
+async function readBoundedRequestBody(request: Request): Promise<Uint8Array | null> {
+  if (contentLengthExceedsLimit(request.headers.get('content-length'))) return null
+  if (request.body === null) return new Uint8Array()
+
+  const reader = request.body.getReader() as ReadableStreamDefaultReader<Uint8Array>
+  const chunks: Uint8Array[] = []
+  let bodyLength = 0
+  try {
+    while (true) {
+      const result = await reader.read()
+      if (result.done) break
+      const chunk = result.value
+      bodyLength += chunk.byteLength
+      if (bodyLength > WIKI_WRITER_MAX_RAW_BYTES) {
+        await reader.cancel()
+        return null
+      }
+      chunks.push(chunk)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  const body = new Uint8Array(bodyLength)
+  let offset = 0
+  for (const chunk of chunks) {
+    body.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return body
+}
+
+function contentLengthExceedsLimit(value: string | string[] | null | undefined): boolean {
+  const rawValue = Array.isArray(value) ? value[0] : value
+  if (rawValue === undefined || rawValue === null || !/^\d+$/.test(rawValue)) return false
+  const contentLength = Number(rawValue)
+  return Number.isSafeInteger(contentLength) && contentLength > WIKI_WRITER_MAX_RAW_BYTES
+}
+
+function readNodeHeader(request: IncomingMessage, name: string): string | undefined {
+  const value = request.headers[name]
+  return typeof value === 'string' ? value : Array.isArray(value) ? value[0] : undefined
+}
+
+function rejectBodyTooLarge(audit: AuditSink | undefined, requestId: string): Response {
+  emitAuditRejection(audit, 'body_too_large', requestId)
+  return jsonResponse({error: 'payload-too-large'}, 413)
+}
+
+async function writeNodeResponse(webResponse: Response, response: ServerResponse): Promise<void> {
   response.statusCode = webResponse.status
   webResponse.headers.forEach((value, name) => response.setHeader(name, value))
   response.end(new Uint8Array(await webResponse.arrayBuffer()))
