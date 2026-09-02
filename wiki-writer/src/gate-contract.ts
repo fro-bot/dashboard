@@ -8,6 +8,9 @@ export const GATE_CONTRACT_MARKER_URL = 'https://raw.githubusercontent.com/fro-b
 
 export const GATE_CONTRACT_CACHE_TTL_MS = 5 * 60 * 1000
 export const GATE_CONTRACT_STALE_CEILING_MS = 60 * 60 * 1000
+// Ten seconds is far below the five-minute cache TTL, so a hung public request
+// degrades to bounded stale-cache behavior instead of stalling a write.
+export const GATE_CONTRACT_FETCH_TIMEOUT_MS = 10 * 1000
 
 export interface GateContractMarker {
   readonly version: number
@@ -17,7 +20,7 @@ export interface GateContractMarker {
 export interface GateContractReadiness {
   readonly ready: boolean
   readonly stale: boolean
-  readonly mainHeadSha?: string
+  readonly mainHeadSha: string | null
   readonly cacheAgeMs?: number
 }
 
@@ -48,7 +51,7 @@ export interface GateContractCheckerOptions {
 }
 
 interface GateContractCacheEntry {
-  readonly mainHeadSha: string
+  readonly mainHeadSha: string | null
   readonly marker: GateContractMarker
   readonly fetchedAt: number
 }
@@ -66,30 +69,33 @@ interface MainRefResponse {
  * while `version` is the intentional consumer-visible compatibility boundary.
  */
 export function createGateContractChecker(options: GateContractCheckerOptions) {
-  const cache = new Map<string, GateContractCacheEntry>()
-  let latestCacheKey: string | undefined
+  let latestCacheEntry: GateContractCacheEntry | undefined
   const now = options.now ?? (() => Date.now())
 
   async function check(): Promise<GateContractDecision> {
     const checkedAt = now()
-    const latest = latestCacheKey === undefined ? undefined : cache.get(latestCacheKey)
+    const latest = latestCacheEntry
     if (latest !== undefined && checkedAt - latest.fetchedAt < GATE_CONTRACT_CACHE_TTL_MS) {
       return evaluateMarker(latest.marker, readinessFor(latest, checkedAt, false))
     }
 
     try {
-      const mainHeadSha = await fetchMainHeadSha()
       const marker = await fetchMarker()
+      let mainHeadSha: string | null = null
+      try {
+        mainHeadSha = await fetchMainHeadSha()
+      } catch {
+        options.logger?.warning('gate-contract: main head SHA unavailable')
+      }
       const entry: GateContractCacheEntry = {mainHeadSha, marker, fetchedAt: checkedAt}
-      cache.set(mainHeadSha, entry)
-      latestCacheKey = mainHeadSha
+      latestCacheEntry = entry
       return evaluateMarker(marker, readinessFor(entry, checkedAt, false))
     } catch (error) {
       if (error instanceof InvalidMarkerError) {
         return {
           proceed: false,
           reason: 'invalid_marker',
-          readiness: {ready: false, stale: false},
+          readiness: {ready: false, stale: false, mainHeadSha: null},
         }
       }
 
@@ -116,6 +122,7 @@ export function createGateContractChecker(options: GateContractCheckerOptions) {
         readiness: {
           ready: false,
           stale: true,
+          mainHeadSha: latest?.mainHeadSha ?? null,
           ...staleCacheMetadata,
         },
       }
@@ -123,7 +130,7 @@ export function createGateContractChecker(options: GateContractCheckerOptions) {
   }
 
   async function fetchMainHeadSha(): Promise<string> {
-    const response = await options.fetch(GATE_CONTRACT_HEAD_URL, {
+    const response = await fetchWithTimeout(GATE_CONTRACT_HEAD_URL, {
       headers: {accept: 'application/vnd.github+json'},
     })
     if (!response.ok) throw new Error('Gate contract head fetch failed')
@@ -142,7 +149,7 @@ export function createGateContractChecker(options: GateContractCheckerOptions) {
   }
 
   async function fetchMarker(): Promise<GateContractMarker> {
-    const response = await options.fetch(GATE_CONTRACT_MARKER_URL, {
+    const response = await fetchWithTimeout(GATE_CONTRACT_MARKER_URL, {
       headers: {accept: 'application/json'},
     })
     if (!response.ok) throw new Error('Gate contract marker fetch failed')
@@ -156,6 +163,28 @@ export function createGateContractChecker(options: GateContractCheckerOptions) {
 
     if (!isGateContractMarker(body)) throw new InvalidMarkerError()
     return body
+  }
+
+  async function fetchWithTimeout(input: string, init: RequestInit): Promise<Response> {
+    const signal = AbortSignal.timeout(GATE_CONTRACT_FETCH_TIMEOUT_MS)
+    let onAbort: (() => void) | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<Response>((_, reject) => {
+      onAbort = () => reject(new Error('Gate contract fetch timed out'))
+      signal.addEventListener('abort', onAbort, {once: true})
+      // The explicit timer also bounds injected transports that ignore AbortSignal.
+      timer = setTimeout(() => reject(new Error('Gate contract fetch timed out')), GATE_CONTRACT_FETCH_TIMEOUT_MS)
+    })
+
+    try {
+      return await Promise.race([
+        options.fetch(input, {...init, signal}),
+        timeout,
+      ])
+    } finally {
+      if (onAbort !== undefined) signal.removeEventListener('abort', onAbort)
+      if (timer !== undefined) clearTimeout(timer)
+    }
   }
 
   return {check}
