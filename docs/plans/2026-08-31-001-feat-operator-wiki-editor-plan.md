@@ -61,7 +61,7 @@ repository's half of the feature.
 | R4. All gates before commit | Unit 2 invokes the pinned `@fro-bot/wiki-write-core` gates before the GitHub write. |
 | R5. Synchronous rejection | Units 2 and 3 return bounded gate findings before accepting the save. |
 | R6. Fro Bot identity and sole writer | Unit 2 commits only through the private writer using the Fro Bot App; the dashboard has no GitHub write key. |
-| R7. Auth, origin, CSRF, version, limits, and rate controls | Unit 3 revalidates the active credential on every save, handles both CSRF modes, enforces `If-Match`, route-scoped byte limits, and the authenticated limiter. The upstream 30-minute issued-at step-up is explicitly replaced by D1 below. |
+| R7. Auth, origin, CSRF, version, limits, and rate controls | Unit 3 revalidates the active credential on every save, handles both CSRF modes, enforces `If-Match`, route-scoped byte limits, and the authenticated limiter. Gateway mode uses D1's 30-minute idle-expiry freshness bound because issued-at age is underivable; signed-cookie mode derives `issuedAt = exp - SESSION_TTL_SECONDS` and enforces a 30-minute freshness check. The upstream freshness requirement is therefore replaced only for gateway mode, not dropped globally (`src/gateway/operator-contract/responses.ts:21-27`; `src/session.ts:25-32,51-57`). |
 | R8. Marked corrections | Unit 4 lets the operator mark correction spans; Unit 2 transports them as data for the shared metadata contract. |
 | R9. Server-derived attribution | Unit 3 derives attribution from the validated operator identity; no client attribution field is trusted. |
 | R10. Preservation during regeneration | The survey-side preservation check remains owned by `fro-bot/.github`; this repository persists the marked-correction data required by that contract. |
@@ -75,15 +75,30 @@ repository's half of the feature.
 | R18. Draft preservation | Unit 4 persists drafts through rejection, conflict, auth expiry, and network loss. |
 
 The upstream plan's original freshness requirement is not silently dropped. D1
-replaces it: production uses gateway mode, `OperatorSessionInfo` is frozen at
-`{operatorId, login, expiresAt}`, and `expiresAt` is the sooner of absolute or idle
-expiry (`fro-bot/.github/docs/plans/2026-08-29-001-feat-editable-wiki-path-plan.md:120-128`; `src/gateway/operator-contract/responses.ts:16-27`). An idle-refreshed credential
+replaces it only in gateway mode: production uses gateway mode,
+`OperatorSessionInfo` is frozen at `{operatorId, login, expiresAt}`, and `expiresAt`
+is the sooner of absolute or idle expiry
+(`fro-bot/.github/docs/plans/2026-08-29-001-feat-editable-wiki-path-plan.md:120-128`;
+`src/gateway/operator-contract/responses.ts:21-27`). An idle-refreshed credential
 cannot be distinguished from a fresh one, so issued-at age is underivable. The
-gateway's 30-minute idle expiry is the freshness bound. Adding `issuedAt` to the frozen
-contract would create a cross-repository release dependency for a marginal control;
-deriving age from absolute TTL would hardcode another repository's constant into a
-security check. The compensating controls are the reversible, path-allowlisted,
-gate-validated, attributed commit plus CSRF, origin binding, and rate limits.
+gateway's 30-minute idle expiry is the freshness bound. Adding `issuedAt` to the
+frozen contract would create a cross-repository release dependency for a marginal
+control; deriving age from absolute TTL would hardcode another repository's constant
+into a security check. The compensating controls are the reversible,
+path-allowlisted, gate-validated, attributed commit plus CSRF, origin binding, and
+rate limits.
+
+Signed-cookie mode is intentionally different. `CookiePayload` is `{login, exp}` and
+`exp` is issued as the current Unix time plus the locally owned
+`SESSION_TTL_SECONDS` constant (`src/session.ts:25-32,51-57`). The only `sign()` call
+sites are the OAuth callback and the dev-only bypass
+(`src/routes/auth.ts:144-146`; `src/server.ts:654-658`), so this is a fixed,
+non-sliding 24-hour absolute window with no idle expiry, and
+`issuedAt = exp - SESSION_TTL_SECONDS` is exactly derivable without cross-repository
+coupling. Unit 3 must require the 30-minute freshness check in this mode on every
+save. This asymmetry is not backwards: gateway mode has the 30-minute idle bound as
+its compensating control, while signed-cookie mode has a 24-hour absolute window with
+no idle bound, so the freshness check does more work there, not less.
 
 ## Scope Boundaries
 
@@ -209,11 +224,25 @@ gate-validated, attributed commit plus CSRF, origin binding, and rate limits.
 
 ## Key Technical Decisions
 
-- **D1 — No step-up authentication.** The deployed gateway mode does not mint the
-  dashboard's signed cookie (`src/server.ts:564-675`), and the frozen contract has no
-  derivable issuance time (`src/gateway/operator-contract/responses.ts:16-27`). Use
-  the gateway's 30-minute idle expiry as the freshness bound. Do not expand the frozen
-  contract or hardcode another repository's absolute-expiry constant.
+- **D1 — Gateway mode has no derivable step-up age; signed-cookie mode requires freshness.**
+  **Gateway mode:** the deployed gateway does not mint the dashboard's signed cookie
+  (`src/server.ts:564-633`), and the frozen contract has no derivable issuance time
+  (`src/gateway/operator-contract/responses.ts:21-27`). An idle-refreshed credential
+  cannot be distinguished from a fresh one, so issued-at age is underivable. Use the
+  gateway's 30-minute idle expiry as the freshness bound. Do not expand the frozen
+  contract or hardcode another repository's absolute-expiry constant. Bumping the
+  frozen contract to add `issuedAt` would create a cross-repository release dependency
+  for a marginal control; deriving age from `expiresAt` minus the gateway's absolute
+  TTL would hardcode another repository's constant into a security check.
+  **Signed-cookie mode:** `CookiePayload` contains `{login, exp}`, with
+  `exp = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS`
+  (`src/session.ts:25-32,51-57`). The only signing paths are the OAuth callback and
+  dev-only bypass (`src/routes/auth.ts:144-146`; `src/server.ts:654-658`), so
+  `issuedAt = exp - SESSION_TTL_SECONDS` is exactly derivable from a locally owned
+  constant. Require the 30-minute freshness check on every save and reject stale
+  saves. The asymmetry is deliberate: gateway mode has a 30-minute idle bound as its
+  compensating control; signed-cookie mode has a 24-hour absolute window with no idle
+  bound, so the freshness check is doing more work there, not less.
 - **D2 — Strong validators and atomic compare-and-write.** `GET` returns a strong opaque
   ETag, never `W/`. `PUT` requires `If-Match`: missing is 428, stale/nonmatching is
   412, and 409 is reserved for semantic deletion or identity migration. The writer's
@@ -236,7 +265,10 @@ gate-validated, attributed commit plus CSRF, origin binding, and rate limits.
   `method || path || timestamp || bodyHash || requestId` with a file-mounted secret;
   require `X-Request-Id`, `X-Timestamp`, and `X-Signature`; reject stale timestamps and
   duplicate request IDs. The writer authorizes the requested repository, ref, path,
-  and operation instead of trusting caller authentication alone.
+  and operation instead of trusting caller authentication alone. Repeated HMAC or
+  replay-window rejections are probing signals: emit structured, secret-free audit
+  records containing outcome, reason class, and request ID, never the signature,
+  secret, or body.
 - **D6 — IndexedDB drafts.** Store content keyed by operator, repository, and path,
   alongside base ETag, content digest, updatedAt, and sync state. Keep only a pointer
   and dirty marker in localStorage. Never persist tokens. After reauthentication,
@@ -256,11 +288,25 @@ gate-validated, attributed commit plus CSRF, origin binding, and rate limits.
   would break the container install/runtime boundary. The upstream package and
   codeload availability are recorded in the originating plan
   (`fro-bot/.github/docs/plans/2026-08-29-001-feat-editable-wiki-path-plan.md:118-128`).
+  The committed `dist/` is build-verified at any commit on `fro-bot/.github` `main`
+  because `Check Wiki Write Core Dist` is a required status check there
+  (`fro-bot/.github/.github/settings.yml:10-19`), and its workflow runs the check
+  command (`fro-bot/.github/.github/workflows/main.yaml:81-97`) whose package script
+  invokes `node scripts/build-wiki-write-core.ts --check`
+  (`fro-bot/.github/package.json:21-25`) to tree-compare committed output against a
+  fresh build (`fro-bot/.github/scripts/build-wiki-write-core.ts:41-46`). Pinning to a
+  `main` commit SHA therefore inherits that guarantee. The pinned SHA must be an
+  ancestor of `main`, never an arbitrary branch or fork commit, because the guarantee
+  comes from the required check rather than from the bytes themselves.
 - **D10 — Gate-contract drift behavior.** The writer fetches
   `packages/wiki-write-core/dist/gate-contract.json` from `fro-bot/.github:main` and
   compares `version` with pinned `GATE_CONTRACT_VERSION`. A mismatch refuses writes.
-  Fetch failure uses a cached marker by head SHA within a bounded staleness ceiling,
-  logs and surfaces staleness, and refuses only with no cache or an expired cache.
+  Cache the marker by `main` head SHA with a 5-minute TTL and a 1-hour bounded
+  staleness ceiling. Within that ceiling, a fetch failure proceeds on last-known-good
+  cache with a logged warning and staleness surfaced in readiness/audit metadata. With
+  no cache, or past the ceiling, refuse writes because the contract cannot be
+  established. A version mismatch remains fail-closed; fail-closed on transient
+  unavailability is an outage wearing a security control's clothes.
   `sourceTreeHash` is diagnostic only; it changes on unrelated source edits and must
   not gate writes.
 - **D11 — Network-only wiki API.** Add wiki API patterns to the existing service-worker
@@ -273,7 +319,7 @@ gate-validated, attributed commit plus CSRF, origin binding, and rate limits.
 
 ## High-Level Technical Design
 
-> This illustrates the intended approach and is directional guidance for review, not implementation specification. The implementing agent should treat it as context, not code to reproduce.
+> This illustrates the intended approach and is directional guidance, not an implementation specification.
 
 ```mermaid
 sequenceDiagram
@@ -346,6 +392,7 @@ is added in Unit 2.
 - Edge case: timestamp at the accepted skew boundary succeeds; outside the boundary fails.
 - Error path: missing, malformed, or mismatched signature fails without invoking the writer operation.
 - Error path: duplicate request ID fails, including after a prior successful request.
+- Security: HMAC or replay-window rejection emits a structured, secret-free audit event with outcome, reason class, and request ID only; the signature, secret, and body are never recorded.
 - Error path: caller-supplied `Authorization` or alternate credential header is ignored/rejected.
 - Integration: fixture mode accepts synthetic requests, never reads a key file, never contacts GitHub, and returns `no-store` responses.
 
@@ -408,7 +455,7 @@ for target and reconciliation boundaries.
 - Integration: response loss after an accepted write reconciles only on matching trailer, parent, and digest; matching content alone remains indeterminate.
 - Integration: ambiguous outcomes are persisted as `indeterminate`, surfaced for resolution, and never blindly retried.
 - Edge case: retention removes entries by the configured age/count bounds without deleting unresolved indeterminate records prematurely.
-- Security: the dashboard-side test process cannot read the writer key file or instantiate the GitHub write client.
+- Security: dashboard-side code cannot read the writer key file or instantiate the GitHub write client.
 
 **Verification:** The writer independently rejects every out-of-scope target and gate
 failure, consumes the pinned compiled package under Node 24, produces Fro Bot identity
@@ -463,7 +510,9 @@ transport boundary (`src/server.ts:582-603`).
 - Happy path: authenticated gateway-mode `GET` returns page body, strong ETag, and only system-approved metadata.
 - Happy path: authenticated signed-cookie-mode `GET` uses the dashboard authority and returns the same transport shape.
 - Happy path: valid `PUT` with matching `If-Match`, CSRF, origin, and idempotency key reaches the writer exactly once.
+- Happy path: signed-cookie-mode save with `issuedAt = exp - SESSION_TTL_SECONDS` inside the 30-minute freshness window reaches the writer.
 - Error path: anonymous, expired, revoked, or malformed authentication is denied without a writer call.
+- Error path: signed-cookie-mode save outside the 30-minute freshness window is rejected before the writer call and preserves the exact draft.
 - Error path: gateway-mode CSRF uses `/operator/session/csrf`; signed-cookie mode uses the dashboard-specific source; neither mode accepts the other's token.
 - Error path: missing/invalid origin or CSRF is rejected before body parsing.
 - Error path: missing `If-Match` returns 428; stale/nonmatching validator or lost-validator race returns 412; draft data is not echoed into logs.
@@ -654,8 +703,10 @@ rotation, Caddy routing, host firewall policy, or production rollout.
   pointer/dirty marker; tokens are never persisted.
 - **How are limits scoped?** Wiki routes only: 1 MiB envelope and 512 KiB decoded body;
   existing global IP limiting is unchanged.
-- **Is step-up auth required?** No. D1 records why the frozen gateway contract cannot
-  provide issued-at age and why the gateway idle expiry is the accepted freshness bound.
+- **Is step-up auth required?** Gateway mode cannot derive issued-at age, so its
+  30-minute idle expiry remains the freshness bound; signed-cookie mode requires the
+  30-minute freshness check derived from `exp - SESSION_TTL_SECONDS`
+  (`src/gateway/operator-contract/responses.ts:21-27`; `src/session.ts:25-32,51-57`).
 - **What does deployment own?** `marcusrbrown/infra` owns Compose wiring, private
   network, secret mount, reverse proxy, and rollout; this plan owns application and
   image artifacts only.
