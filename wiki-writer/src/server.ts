@@ -10,23 +10,30 @@ export const WIKI_WRITER_MAX_RAW_BYTES = 1024 * 1024
 
 export async function createWikiWriterApp(options: WikiWriterAppOptions): Promise<WikiWriterApp> {
   const secret = await loadInternalAuthSecret(options.secretFilePath)
-  return createWikiWriterAppFromSecret(secret, options)
+  return createWikiWriterAppWithInjectedSecret(secret, options)
 }
 
-/** Explicit secret injection seam used only by the synthetic fixture. */
-export function createWikiWriterAppFromSecret(secret: Uint8Array, options: InternalWikiWriterAppOptions = {}): WikiWriterApp {
+/**
+ * Production callers must use createWikiWriterApp, which enforces file-mounted
+ * loading and fail-closed length validation. This variant exists so tests and
+ * the synthetic fixture can supply bytes directly; routing a real deployment
+ * through it would bypass the file-mount invariant.
+ */
+export function createWikiWriterAppWithInjectedSecret(secret: Uint8Array, options: InternalWikiWriterAppOptions = {}): WikiWriterApp {
   const replayStore = options.replayStore ?? new InMemoryReplayStore()
   const authorizeOperation = options.authorizeOperation ?? (() => ({allowed: false as const, reasonClass: 'operation_not_authorized' as const}))
 
   return {
     fetch: async request => {
       const url = new URL(request.url)
+      // Use one path value for both signing verification and routing so they cannot diverge.
+      const path = `${url.pathname}${url.search}`
       const rawBody = await readBoundedRequestBody(request)
       if (rawBody === null) return rejectBodyTooLarge(options.audit, request.headers.get('x-request-id') ?? 'unknown')
       const auth = authenticateInternalRequest({
         secret,
         method: request.method,
-        path: `${url.pathname}${url.search}`,
+        path,
         rawBody,
         headers: request.headers,
         nowSeconds: options.nowSeconds?.() ?? Math.floor(Date.now() / 1000),
@@ -37,7 +44,6 @@ export function createWikiWriterAppFromSecret(secret: Uint8Array, options: Inter
 
       if (!auth.ok) return jsonResponse({error: 'unauthorized'}, 401)
 
-      const path = `${url.pathname}${url.search}`
       if (request.method === 'GET' && path === WIKI_WRITER_HEALTH_PATH) {
         return jsonResponse({ready: true})
       }
@@ -106,6 +112,8 @@ async function handleNodeRequest(app: WikiWriterApp, request: IncomingMessage, r
     const chunkBuffer = typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(new Uint8Array(chunk))
     bodyLength += chunkBuffer.byteLength
     if (bodyLength > WIKI_WRITER_MAX_RAW_BYTES) {
+      // Stop consuming immediately: early async-iterator exit destroys the
+      // socket, so this refuses the remaining body without hanging or draining it.
       await writeNodeResponse(app.rejectBodyTooLarge(requestId), response)
       return
     }

@@ -1,7 +1,7 @@
 import type {InternalWikiWriterAppOptions, WikiWriterApp} from './contract.ts'
 import {Buffer} from 'node:buffer'
 import {createRequestSignature} from './internal-auth.ts'
-import {createWikiWriterAppFromSecret} from './server.ts'
+import {createWikiWriterAppWithInjectedSecret} from './server.ts'
 
 const FIXTURE_SECRET = Buffer.from('wiki-writer-fixture-secret-which-is-long-enough')
 const FIXTURE_NOW_SECONDS = 1_756_000_000
@@ -11,7 +11,7 @@ const FIXTURE_NOW_SECONDS = 1_756_000_000
  * dependency injection point from which a GitHub client could be constructed.
  */
 export function createFixtureWikiWriterApp(options: InternalWikiWriterAppOptions = {}): WikiWriterApp {
-  return createWikiWriterAppFromSecret(FIXTURE_SECRET, {
+  return createWikiWriterAppWithInjectedSecret(FIXTURE_SECRET, {
     nowSeconds: options.nowSeconds ?? (() => FIXTURE_NOW_SECONDS),
     skewSeconds: options.skewSeconds,
     replayStore: options.replayStore,
