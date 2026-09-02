@@ -7,6 +7,7 @@ WORKDIR /app
 
 # Copy manifests first for layer caching
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY wiki-writer/package.json ./wiki-writer/package.json
 
 # Install ALL deps (including devDependencies) for the build step
 RUN pnpm install --frozen-lockfile
@@ -27,6 +28,7 @@ WORKDIR /app
 
 # Copy manifests for prod-only install
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY wiki-writer/package.json ./wiki-writer/package.json
 
 # Install production deps only (frozen lockfile) — NO dev deps, NO build tools
 RUN pnpm install --frozen-lockfile --prod
