@@ -18,6 +18,10 @@ export interface WikiWriteRequest {
   readonly ref: string
   readonly path: string
   readonly content: string
+  readonly operationId?: string
+  readonly expectedParentSha?: string
+  readonly expectedBlobSha?: string
+  readonly corrections?: readonly Record<string, unknown>[]
 }
 
 export type OperationAuthorization =
@@ -49,13 +53,22 @@ export interface WikiWriterApp {
   readonly rejectBodyTooLarge: (requestId: string) => Response
 }
 
+export interface WikiWriteOperationHandler {
+  readonly execute: (request: WikiWriteRequest) => Promise<unknown>
+}
+
 export interface WikiWriterAppOptions {
   readonly secretFilePath: string
+  readonly githubAppId?: string | number
+  readonly githubInstallationId?: number
+  readonly githubPrivateKeyFilePath?: string
+  readonly ledgerPath?: string
   readonly nowSeconds?: () => number
   readonly skewSeconds?: number
   readonly replayStore?: ReplayStore
   readonly audit?: AuditSink
   readonly authorizeOperation?: OperationAuthorizer
+  readonly writeOperation?: WikiWriteOperationHandler
 }
 
 export interface InternalWikiWriterAppOptions {
@@ -64,6 +77,7 @@ export interface InternalWikiWriterAppOptions {
   readonly replayStore?: ReplayStore
   readonly audit?: AuditSink
   readonly authorizeOperation?: OperationAuthorizer
+  readonly writeOperation?: WikiWriteOperationHandler
 }
 
 export interface ReplayStore {
