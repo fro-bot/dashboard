@@ -5,6 +5,9 @@ allowBuilds:
   msgpackr-extract: false
   unrs-resolver: true
 
+packages:
+  - wiki-writer
+
 minimumReleaseAgeExclude:
   - '@bfra.me/eslint-config@0.51.2 || 0.51.3 || 0.51.4 || 0.52.0 || 0.52.1'
   - '@bfra.me/tsconfig@0.13.2'

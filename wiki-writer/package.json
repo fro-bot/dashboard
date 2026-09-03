@@ -7,6 +7,9 @@
   "scripts": {
     "start": "node src/server.ts"
   },
+  "dependencies": {
+    "@fro-bot/wiki-write-core": "github:fro-bot/.github#37abb495df047e6b8beb690017ac6d217978fb9c&path:packages/wiki-write-core"
+  },
   "engines": {
     "node": ">=24"
   }
