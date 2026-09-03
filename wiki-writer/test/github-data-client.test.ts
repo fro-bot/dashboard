@@ -51,4 +51,27 @@ describe('GitHub data client', () => {
     expect(transport.createCommit).toHaveBeenCalledWith(expect.objectContaining({parents: ['head-1']}))
     expect(transport.updateRef).toHaveBeenCalledWith({owner: 'fro-bot', repo: '.github', ref: 'heads/data', sha: 'commit-2', force: false})
   })
+
+  it('bounds concurrent blob reads while batching a tree snapshot', async () => {
+    let active = 0
+    let maximum = 0
+    const entries = Array.from({length: 16}, (_, index) => ({path: `knowledge/wiki/topics/${index}.md`, type: 'blob', sha: `blob-${index}`}))
+    const transport = {
+      getRef: vi.fn().mockResolvedValue({data: {object: {sha: 'head-1'}}}),
+      getCommit: vi.fn().mockResolvedValue({data: {sha: 'head-1', tree: {sha: 'tree-1'}, message: '', parents: []}}),
+      getTree: vi.fn().mockResolvedValue({data: {tree: entries}}),
+      getBlob: vi.fn(async () => {
+        active += 1
+        maximum = Math.max(maximum, active)
+        await new Promise(resolve => setTimeout(resolve, 1))
+        active -= 1
+        return {data: {content: Buffer.from('# Example\n').toString('base64'), encoding: 'base64'}}
+      }),
+    }
+
+    await createGitHubDataClientWithTransport(transport).getSnapshot()
+
+    expect(maximum).toBeGreaterThan(1)
+    expect(maximum).toBeLessThanOrEqual(8)
+  })
 })

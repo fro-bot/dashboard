@@ -118,6 +118,109 @@ describe('wiki write operation', () => {
     ledger.close()
   })
 
+  it('allows the corrections sidecar to be created when it is absent', async () => {
+    const client = createClient()
+    const ledger = createOperationLedger(':memory:')
+    const operation = createWikiWriteOperation({client, ledger, gates, gateContractChecker: checker()})
+
+    await expect(operation.execute(request({
+      path: 'knowledge/corrections.yaml',
+      content: 'version: 1\ncorrections: []\n',
+    }))).resolves.toMatchObject({state: 'succeeded'})
+    expect(client.createBlob).toHaveBeenCalled()
+    ledger.close()
+  })
+
+  it('returns the existing result when duplicate requests race at ledger insertion', async () => {
+    const snapshotsReady = createDeferred<void>()
+    let snapshotCalls = 0
+    const client = createClient({
+      getSnapshot: vi.fn(async () => {
+        snapshotCalls += 1
+        if (snapshotCalls === 2) snapshotsReady.resolve()
+        await snapshotsReady.promise
+        return snapshot()
+      }),
+    })
+    const ledger = createOperationLedger(':memory:')
+    const operation = createWikiWriteOperation({client, ledger, gates, gateContractChecker: checker()})
+
+    const first = operation.execute(request())
+    const second = operation.execute(request())
+    const results = await Promise.all([first, second])
+
+    expect(results[0]).toMatchObject({state: 'succeeded', commitSha: 'commit-2'})
+    expect(results[1]).toEqual(results[0])
+    expect(client.createCommit).toHaveBeenCalledOnce()
+    ledger.close()
+  })
+
+  it('reconciles a pending record before allowing a new write', async () => {
+    const desired = `---\ntype: topic\ntitle: Example\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n${CONTENT}`
+    const client = createClient({
+      getSnapshot: vi.fn().mockResolvedValue({...snapshot(desired), headSha: 'commit-2'}),
+    })
+    const ledger = createOperationLedger(':memory:')
+    ledger.begin({
+      operationId: OPERATION_ID,
+      repository: WIKI_REPOSITORY,
+      ref: WIKI_REF,
+      path: PATH,
+      expectedParentSha: 'head-1',
+      contentDigest: createHash('sha256').update(desired).digest('hex'),
+      createdAt: Date.now(),
+    })
+    const operation = createWikiWriteOperation({client, ledger, gates, gateContractChecker: checker()})
+
+    await expect(operation.execute(request())).resolves.toMatchObject({state: 'succeeded', commitSha: 'commit-2'})
+    expect(client.createCommit).not.toHaveBeenCalled()
+    ledger.close()
+  })
+
+  it('keeps a pending record indeterminate when reconciliation finds no landed commit', async () => {
+    const client = createClient({
+      getSnapshot: vi.fn().mockResolvedValue(snapshot()),
+      getCommit: vi.fn().mockResolvedValue({sha: 'head-1', message: 'unrelated', parents: []}),
+    })
+    const ledger = createOperationLedger(':memory:')
+    ledger.begin({
+      operationId: OPERATION_ID,
+      repository: WIKI_REPOSITORY,
+      ref: WIKI_REF,
+      path: PATH,
+      expectedParentSha: 'head-1',
+      contentDigest: 'digest-not-present',
+      createdAt: Date.now(),
+    })
+    const operation = createWikiWriteOperation({client, ledger, gates, gateContractChecker: checker()})
+
+    await expect(operation.execute(request())).resolves.toEqual({state: 'indeterminate', operationId: OPERATION_ID})
+    expect(ledger.get(OPERATION_ID)).toMatchObject({state: 'indeterminate'})
+    ledger.close()
+  })
+
+  it('keeps pending content-only matches indeterminate', async () => {
+    const desired = `---\ntype: topic\ntitle: Example\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n${CONTENT}`
+    const client = createClient({
+      getSnapshot: vi.fn().mockResolvedValue({...snapshot(desired), headSha: 'head-2'}),
+      getCommit: vi.fn().mockResolvedValue({sha: 'head-2', message: 'docs: identical content', parents: ['head-1']}),
+    })
+    const ledger = createOperationLedger(':memory:')
+    ledger.begin({
+      operationId: OPERATION_ID,
+      repository: WIKI_REPOSITORY,
+      ref: WIKI_REF,
+      path: PATH,
+      expectedParentSha: 'head-1',
+      contentDigest: createHash('sha256').update(desired).digest('hex'),
+      createdAt: Date.now(),
+    })
+    const operation = createWikiWriteOperation({client, ledger, gates, gateContractChecker: checker()})
+
+    await expect(operation.execute(request())).resolves.toEqual({state: 'indeterminate', operationId: OPERATION_ID})
+    ledger.close()
+  })
+
   it('persists marked corrections in the sidecar file rather than page frontmatter', async () => {
     const gateResult = await createSharedWikiWriteGates().run({
       path: PATH,
@@ -249,6 +352,14 @@ describe('wiki write operation', () => {
     ledger.close()
   })
 })
+
+function createDeferred<T>(): {promise: Promise<T>; resolve: (value: T) => void} {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(value => {
+    resolve = value
+  })
+  return {promise, resolve}
+}
 
 describe('write operation discrimination fixture', () => {
   it('uses the final reconstructed content digest as the ledger identity', async () => {

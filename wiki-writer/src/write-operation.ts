@@ -89,6 +89,7 @@ export interface WikiWriteOperation {
 export function createWikiWriteOperation(options: WikiWriteOperationOptions): WikiWriteOperation {
   const gates = options.gates ?? createSharedWikiWriteGates()
   const now = options.now ?? (() => Date.now())
+  const inFlight = new Map<string, Deferred<WikiWriteResult>>()
 
   async function execute(request: WikiWriteRequest): Promise<WikiWriteResult> {
     try {
@@ -106,7 +107,7 @@ export function createWikiWriteOperation(options: WikiWriteOperationOptions): Wi
     if (!contract.proceed) return {state: 'rejected', reason: 'gate-contract'}
 
     const existing = options.ledger.get(request.operationId)
-    if (existing !== undefined) return resultFromExisting(existing)
+    if (existing !== undefined) return resultFromExisting(existing, options, now)
 
     let snapshot: GitHubSnapshot
     try {
@@ -118,7 +119,9 @@ export function createWikiWriteOperation(options: WikiWriteOperationOptions): Wi
     if (snapshot.headSha !== request.expectedParentSha) return {state: 'conflict', status: 412}
 
     const existingContent = snapshot.files[request.path]
-    if (existingContent === undefined) return {state: 'rejected', reason: 'invalid-request'}
+    // Page writes preserve system-owned frontmatter, so a new page is rejected;
+    // the corrections sidecar is a complete YAML document and may be bootstrapped.
+    if (existingContent === undefined && request.path !== 'knowledge/corrections.yaml') return {state: 'rejected', reason: 'invalid-request'}
     if (request.expectedBlobSha !== undefined && snapshot.fileShas[request.path] !== request.expectedBlobSha) {
       return {state: 'conflict', status: 412}
     }
@@ -127,7 +130,7 @@ export function createWikiWriteOperation(options: WikiWriteOperationOptions): Wi
     try {
       submittedContent = request.path === 'knowledge/corrections.yaml'
         ? request.content
-        : reconstructFrontmatter(existingContent, request.content)
+        : reconstructFrontmatter(existingContent ?? '', request.content)
     } catch {
       return {state: 'rejected', reason: 'gate'}
     }
@@ -148,15 +151,28 @@ export function createWikiWriteOperation(options: WikiWriteOperationOptions): Wi
 
     const files = gateResult.files
     const contentDigest = digest(submittedContent)
-    options.ledger.begin({
-      operationId: request.operationId,
-      repository: request.repository,
-      ref: request.ref,
-      path: request.path,
-      expectedParentSha: request.expectedParentSha,
-      contentDigest,
-      createdAt: now(),
-    })
+    const priorFlight = inFlight.get(request.operationId)
+    const flight = priorFlight ?? createDeferred<WikiWriteResult>()
+    if (priorFlight === undefined) inFlight.set(request.operationId, flight)
+    try {
+      options.ledger.begin({
+        operationId: request.operationId,
+        repository: request.repository,
+        ref: request.ref,
+        path: request.path,
+        expectedParentSha: request.expectedParentSha,
+        contentDigest,
+        createdAt: now(),
+      })
+    } catch (error) {
+      if (isDuplicateIntentError(error)) {
+        if (priorFlight !== undefined) return priorFlight.promise
+        const duplicate = options.ledger.get(request.operationId)
+        if (duplicate !== undefined) return resultFromExisting(duplicate, options, now)
+      }
+      if (priorFlight === undefined) inFlight.delete(request.operationId)
+      return {state: 'failed', operationId: request.operationId, correlationId: randomUUID()}
+    }
 
     const changedEntries: TreeEntry[] = []
     try {
@@ -166,11 +182,11 @@ export function createWikiWriteOperation(options: WikiWriteOperationOptions): Wi
       }
     } catch {
       completeLedger(options.ledger, request.operationId, {state: 'failed', updatedAt: now()}, now)
-      return {state: 'failed', operationId: request.operationId, correlationId: randomUUID()}
+      return finish(flight, inFlight, request.operationId, {state: 'failed', operationId: request.operationId, correlationId: randomUUID()})
     }
     if (changedEntries.length === 0) {
       completeLedger(options.ledger, request.operationId, {state: 'failed', updatedAt: now()}, now)
-      return {state: 'rejected', reason: 'invalid-request'}
+      return finish(flight, inFlight, request.operationId, {state: 'rejected', reason: 'invalid-request'})
     }
 
     const message = `docs(knowledge): manual edit ${request.path}\n\n${OPERATION_TRAILER}: ${request.operationId}`
@@ -188,23 +204,23 @@ export function createWikiWriteOperation(options: WikiWriteOperationOptions): Wi
       } catch (error) {
         if (statusOf(error) === 422) {
           completeLedger(options.ledger, request.operationId, {state: 'failed', updatedAt: now()}, now)
-          return {state: 'conflict', status: 412}
+          return finish(flight, inFlight, request.operationId, {state: 'conflict', status: 412})
         }
 
         const reconciliation = await reconcile(options.client, request, contentDigest)
         if (reconciliation.state === 'succeeded') {
           completeLedger(options.ledger, request.operationId, {state: 'succeeded', commitSha: reconciliation.commitSha, updatedAt: now()}, now)
-          return reconciliation
+          return finish(flight, inFlight, request.operationId, reconciliation)
         }
         completeLedger(options.ledger, request.operationId, {state: 'indeterminate', updatedAt: now()}, now)
-        return {state: 'indeterminate', operationId: request.operationId}
+        return finish(flight, inFlight, request.operationId, {state: 'indeterminate', operationId: request.operationId})
       }
 
       completeLedger(options.ledger, request.operationId, {state: 'succeeded', commitSha, updatedAt: now()}, now)
-      return {state: 'succeeded', operationId: request.operationId, commitSha}
+      return finish(flight, inFlight, request.operationId, {state: 'succeeded', operationId: request.operationId, commitSha})
     } catch {
       completeLedger(options.ledger, request.operationId, {state: 'failed', updatedAt: now()}, now)
-      return {state: 'failed', operationId: request.operationId, correlationId: randomUUID()}
+      return finish(flight, inFlight, request.operationId, {state: 'failed', operationId: request.operationId, correlationId: randomUUID()})
     }
   }
 
@@ -247,7 +263,7 @@ export function createSharedWikiWriteGates(): WikiWriteGates {
   }
 }
 
-async function reconcile(client: GitHubDataClient, request: WikiWriteRequest, contentDigest: string): Promise<{state: 'succeeded'; operationId: string; commitSha: string} | {state: 'indeterminate'}> {
+async function reconcile(client: GitHubDataClient, request: Pick<WikiWriteRequest, 'operationId' | 'path' | 'expectedParentSha'>, contentDigest: string): Promise<{state: 'succeeded'; operationId: string; commitSha: string} | {state: 'indeterminate'}> {
   try {
     const snapshot = await client.getSnapshot()
     if (digest(snapshot.files[request.path] ?? '') !== contentDigest) return {state: 'indeterminate'}
@@ -281,10 +297,47 @@ function completeLedger(ledger: OperationLedger, operationId: string, completion
   ledger.prune(now())
 }
 
-function resultFromExisting(record: OperationRecord): WikiWriteResult {
+async function resultFromExisting(record: OperationRecord, options: WikiWriteOperationOptions, now: () => number): Promise<WikiWriteResult> {
   if (record.state === 'succeeded' && record.commitSha !== null) return {state: 'succeeded', operationId: record.operationId, commitSha: record.commitSha}
   if (record.state === 'indeterminate') return {state: 'indeterminate', operationId: record.operationId}
+  if (record.state === 'pending') {
+    const reconciliation = await reconcile(options.client, record, record.contentDigest)
+    if (reconciliation.state === 'succeeded') {
+      completeLedger(options.ledger, record.operationId, {state: 'succeeded', commitSha: reconciliation.commitSha, updatedAt: now()}, now)
+      return reconciliation
+    }
+    completeLedger(options.ledger, record.operationId, {state: 'indeterminate', updatedAt: now()}, now)
+    return {state: 'indeterminate', operationId: record.operationId}
+  }
   return {state: 'failed', operationId: record.operationId, correlationId: randomUUID()}
+}
+
+interface Deferred<T> {
+  readonly promise: Promise<T>
+  readonly resolve: (value: T) => void
+}
+
+function createDeferred<T>(): Deferred<T> {
+  let resolvePromise: ((value: T) => void) | undefined
+  const promise = new Promise<T>(resolve => {
+    resolvePromise = resolve
+  })
+  return {
+    promise,
+    resolve: value => {
+      if (resolvePromise !== undefined) resolvePromise(value)
+    },
+  }
+}
+
+function finish(flight: Deferred<WikiWriteResult>, inFlight: Map<string, Deferred<WikiWriteResult>>, operationId: string, result: WikiWriteResult): WikiWriteResult {
+  flight.resolve(result)
+  inFlight.delete(operationId)
+  return result
+}
+
+function isDuplicateIntentError(error: unknown): boolean {
+  return error instanceof Error && error.message === 'operation intent already exists'
 }
 
 function boundFindings(findings: readonly WikiWriteGateFinding[], submittedContent: string): WikiWriteGateFinding[] {

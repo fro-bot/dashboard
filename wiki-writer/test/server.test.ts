@@ -164,6 +164,26 @@ describe('wiki-writer HTTP boundary', () => {
     expect(writeOperation.execute).toHaveBeenCalledOnce()
   })
 
+  it('rejects malformed corrections before invoking the write operation', async () => {
+    const writeOperation = {execute: vi.fn().mockResolvedValue({state: 'succeeded', operationId: 'op', commitSha: 'sha'})}
+    const body = JSON.stringify({
+      operation: 'write',
+      repository: 'fro-bot/.github',
+      ref: 'data',
+      path: 'knowledge/wiki/page.md',
+      content: '# Test',
+      operationId: '11111111-1111-4111-8111-111111111111',
+      expectedParentSha: 'head-1',
+      corrections: [{}],
+    })
+    const injectedApp = createWikiWriterAppWithInjectedSecret(SECRET, {nowSeconds: () => NOW, writeOperation})
+
+    const response = await injectedApp.fetch(signedRequest('POST', '/write', body, 'malformed-corrections-001'))
+
+    expect(response.status).toBe(400)
+    expect(writeOperation.execute).not.toHaveBeenCalled()
+  })
+
   it('does not invoke the operation seam for rejected authentication or replay', async () => {
     const authorizeOperation = vi.fn().mockResolvedValue({allowed: true})
     const {app} = await createApp(authorizeOperation)

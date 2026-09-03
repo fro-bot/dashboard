@@ -10,6 +10,7 @@ export const WIKI_REPO = '.github'
 
 const ALLOWED_PATH = /^knowledge\/wiki\/(?:repos|topics|entities|comparisons)\/[^/]+\.md$/u
 const CORRECTIONS_PATH = 'knowledge/corrections.yaml'
+const BLOB_READ_CONCURRENCY = 8
 
 export interface GitHubTreeEntry {
   readonly path?: string
@@ -132,15 +133,26 @@ export function createGitHubDataClientWithTransport(transport: GitHubDataTranspo
     const entries = Array.isArray(tree.tree) ? tree.tree as GitHubTreeEntry[] : []
     const files: Record<string, string> = {}
     const fileShas: Record<string, string> = {}
-    for (const entry of entries) {
-      if (entry.type !== 'blob' || typeof entry.path !== 'string' || typeof entry.sha !== 'string') continue
-      const blob = await call<{content?: unknown; encoding?: unknown}>('getBlob', {
-        owner: WIKI_OWNER,
-        repo: WIKI_REPO,
-        file_sha: entry.sha,
-      })
-      files[entry.path] = decodeBlob(blob)
-      fileShas[entry.path] = entry.sha
+    let nextEntry = 0
+    const readBlob = async (): Promise<{path: string; content: string; sha: string}[]> => {
+      const result: {path: string; content: string; sha: string}[] = []
+      while (nextEntry < entries.length) {
+        const entry = entries[nextEntry]
+        nextEntry += 1
+        if (entry?.type !== 'blob' || typeof entry.path !== 'string' || typeof entry.sha !== 'string') continue
+        const blob = await call<{content?: unknown; encoding?: unknown}>('getBlob', {
+          owner: WIKI_OWNER,
+          repo: WIKI_REPO,
+          file_sha: entry.sha,
+        })
+        result.push({path: entry.path, content: decodeBlob(blob), sha: entry.sha})
+      }
+      return result
+    }
+    const workers = Array.from({length: Math.min(BLOB_READ_CONCURRENCY, entries.length)}, async () => readBlob())
+    for (const blob of (await Promise.all(workers)).flat()) {
+      files[blob.path] = blob.content
+      fileShas[blob.path] = blob.sha
     }
     return {headSha, treeSha: requireString(commit.treeSha, 'GitHub commit did not return a tree'), files, fileShas}
   }

@@ -1,9 +1,9 @@
-import type {AuditSink, InternalWikiWriterAppOptions, WikiWriteOperationHandler, WikiWriterApp, WikiWriterAppOptions, WikiWriteRequest} from './contract.ts'
+import type {AuditSink, InternalWikiWriterAppOptions, WikiWriteOperationHandler, WikiWriterApp, WikiWriterAppOptions} from './contract.ts'
 import {Buffer} from 'node:buffer'
 import {createServer, type IncomingMessage, type Server, type ServerResponse} from 'node:http'
 import process from 'node:process'
 import {fileURLToPath} from 'node:url'
-import {isWikiWriteRequest, WIKI_WRITER_HEALTH_PATH, WIKI_WRITER_WRITE_PATH} from './contract.ts'
+import {isCompleteWikiWriteRequest, isWikiWriteRequest, WIKI_WRITER_HEALTH_PATH, WIKI_WRITER_WRITE_PATH} from './contract.ts'
 import {createGateContractChecker} from './gate-contract.ts'
 import {createGitHubDataClient} from './github-data-client.ts'
 import {authenticateInternalRequest, createRequestSignature, emitAuditRejection, InMemoryReplayStore, loadInternalAuthSecret} from './internal-auth.ts'
@@ -67,7 +67,7 @@ export function createWikiWriterAppWithInjectedSecret(secret: Uint8Array, option
       if (!isWikiWriteRequest(payload)) return jsonResponse({error: 'invalid-request'}, 400)
 
       if (options.writeOperation !== undefined) {
-        if (!isCompleteWriteRequest(payload)) return jsonResponse({error: 'invalid-request'}, 400)
+        if (!isCompleteWikiWriteRequest(payload)) return jsonResponse({error: 'invalid-request'}, 400)
         const result = await options.writeOperation.execute(payload)
         return writeResultResponse(result)
       }
@@ -242,12 +242,8 @@ async function createProductionWriteOperation(options: WikiWriterAppOptions): Pr
     gateContractChecker: createGateContractChecker({fetch}),
   })
   return {
-    execute: async request => operation.execute(request as unknown as import('./write-operation.ts').WikiWriteRequest),
+    execute: async request => operation.execute(request),
   }
-}
-
-function isCompleteWriteRequest(value: WikiWriteRequest): value is WikiWriteRequest & Required<Pick<WikiWriteRequest, 'operationId' | 'expectedParentSha'>> {
-  return typeof value.operationId === 'string' && typeof value.expectedParentSha === 'string'
 }
 
 function writeResultResponse(value: unknown): Response {
