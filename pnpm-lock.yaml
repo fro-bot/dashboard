@@ -135,6 +135,12 @@ importers:
       '@fro-bot/wiki-write-core':
         specifier: github:fro-bot/.github#37abb495df047e6b8beb690017ac6d217978fb9c&path:packages/wiki-write-core
         version: https://codeload.github.com/fro-bot/.github/tar.gz/37abb495df047e6b8beb690017ac6d217978fb9c#path:packages/wiki-write-core
+      '@octokit/auth-app':
+        specifier: 8.3.0
+        version: 8.3.0
+      '@octokit/core':
+        specifier: 7.0.8
+        version: 7.0.8
 
 packages:
 

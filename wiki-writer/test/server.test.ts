@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {afterEach, describe, expect, it, vi} from 'vitest'
 import {createRequestSignature} from '../src/internal-auth.ts'
-import {createWikiWriterApp, createWikiWriterHttpServer, WIKI_WRITER_MAX_RAW_BYTES} from '../src/server.ts'
+import {createWikiWriterApp, createWikiWriterAppWithInjectedSecret, createWikiWriterHttpServer, WIKI_WRITER_MAX_RAW_BYTES} from '../src/server.ts'
 
 const SECRET = Buffer.from('wiki-writer-server-secret-which-is-long-enough')
 const NOW = 1_756_000_000
@@ -137,6 +137,51 @@ describe('wiki-writer HTTP boundary', () => {
       path: 'knowledge/wiki/page.md',
       content: '# Test',
     })
+  })
+
+  it('maps the injected write operation result onto the writer wire contract', async () => {
+    const writeOperation = {
+      execute: vi.fn().mockResolvedValue({state: 'indeterminate', operationId: '11111111-1111-4111-8111-111111111111'}),
+    }
+    const body = JSON.stringify({
+      operation: 'write',
+      repository: 'fro-bot/.github',
+      ref: 'data',
+      path: 'knowledge/wiki/page.md',
+      content: '# Test',
+      operationId: '11111111-1111-4111-8111-111111111111',
+      expectedParentSha: 'head-1',
+    })
+    const injectedApp = createWikiWriterAppWithInjectedSecret(SECRET, {
+      nowSeconds: () => NOW,
+      writeOperation,
+    })
+
+    const response = await injectedApp.fetch(signedRequest('POST', '/write', body, 'write-operation-001'))
+
+    expect(response.status).toBe(202)
+    expect(await response.json()).toEqual({accepted: true, status: 'indeterminate', operationId: '11111111-1111-4111-8111-111111111111'})
+    expect(writeOperation.execute).toHaveBeenCalledOnce()
+  })
+
+  it('rejects malformed corrections before invoking the write operation', async () => {
+    const writeOperation = {execute: vi.fn().mockResolvedValue({state: 'succeeded', operationId: 'op', commitSha: 'sha'})}
+    const body = JSON.stringify({
+      operation: 'write',
+      repository: 'fro-bot/.github',
+      ref: 'data',
+      path: 'knowledge/wiki/page.md',
+      content: '# Test',
+      operationId: '11111111-1111-4111-8111-111111111111',
+      expectedParentSha: 'head-1',
+      corrections: [{}],
+    })
+    const injectedApp = createWikiWriterAppWithInjectedSecret(SECRET, {nowSeconds: () => NOW, writeOperation})
+
+    const response = await injectedApp.fetch(signedRequest('POST', '/write', body, 'malformed-corrections-001'))
+
+    expect(response.status).toBe(400)
+    expect(writeOperation.execute).not.toHaveBeenCalled()
   })
 
   it('does not invoke the operation seam for rejected authentication or replay', async () => {

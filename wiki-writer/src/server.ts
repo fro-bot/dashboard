@@ -1,16 +1,21 @@
-import type {AuditSink, InternalWikiWriterAppOptions, WikiWriterApp, WikiWriterAppOptions} from './contract.ts'
+import type {AuditSink, InternalWikiWriterAppOptions, WikiWriteOperationHandler, WikiWriterApp, WikiWriterAppOptions} from './contract.ts'
 import {Buffer} from 'node:buffer'
 import {createServer, type IncomingMessage, type Server, type ServerResponse} from 'node:http'
 import process from 'node:process'
 import {fileURLToPath} from 'node:url'
-import {isWikiWriteRequest, WIKI_WRITER_HEALTH_PATH, WIKI_WRITER_WRITE_PATH} from './contract.ts'
+import {isCompleteWikiWriteRequest, isWikiWriteRequest, WIKI_WRITER_HEALTH_PATH, WIKI_WRITER_WRITE_PATH} from './contract.ts'
+import {createGateContractChecker} from './gate-contract.ts'
+import {createGitHubDataClient} from './github-data-client.ts'
 import {authenticateInternalRequest, createRequestSignature, emitAuditRejection, InMemoryReplayStore, loadInternalAuthSecret} from './internal-auth.ts'
+import {createOperationLedger} from './operation-ledger.ts'
+import {createWikiWriteOperation, type WikiWriteResult} from './write-operation.ts'
 
 export const WIKI_WRITER_MAX_RAW_BYTES = 1024 * 1024
 
 export async function createWikiWriterApp(options: WikiWriterAppOptions): Promise<WikiWriterApp> {
   const secret = await loadInternalAuthSecret(options.secretFilePath)
-  return createWikiWriterAppWithInjectedSecret(secret, options)
+  const writeOperation = options.writeOperation ?? await createProductionWriteOperation(options)
+  return createWikiWriterAppWithInjectedSecret(secret, {...options, writeOperation})
 }
 
 /**
@@ -61,6 +66,12 @@ export function createWikiWriterAppWithInjectedSecret(secret: Uint8Array, option
 
       if (!isWikiWriteRequest(payload)) return jsonResponse({error: 'invalid-request'}, 400)
 
+      if (options.writeOperation !== undefined) {
+        if (!isCompleteWikiWriteRequest(payload)) return jsonResponse({error: 'invalid-request'}, 400)
+        const result = await options.writeOperation.execute(payload)
+        return writeResultResponse(result)
+      }
+
       const authorization = await authorizeOperation(payload)
       if (!authorization.allowed) return jsonResponse({error: 'forbidden'}, 403)
       return jsonResponse({accepted: true}, 202)
@@ -85,7 +96,13 @@ export function createWikiWriterHttpServer(app: WikiWriterApp): Server {
 
 export async function startWikiWriterServer(options: WikiWriterHttpOptions = {}): Promise<Server> {
   const secretFilePath = process.env.WIKI_WRITER_HMAC_SECRET_FILE ?? '/run/secrets/wiki_writer_hmac'
-  const app = await createWikiWriterApp({secretFilePath})
+  const app = await createWikiWriterApp({
+    secretFilePath,
+    githubAppId: requiredEnvironment('WIKI_WRITER_GITHUB_APP_ID'),
+    githubInstallationId: parseEnvironmentInteger('WIKI_WRITER_GITHUB_INSTALLATION_ID'),
+    githubPrivateKeyFilePath: requiredEnvironment('WIKI_WRITER_GITHUB_PRIVATE_KEY_FILE'),
+    ledgerPath: process.env.WIKI_WRITER_LEDGER_PATH ?? '/var/lib/wiki-writer/operations.sqlite',
+  })
   const server = createWikiWriterHttpServer(app)
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
@@ -202,6 +219,61 @@ function jsonResponse(body: object, status = 200): Response {
       'content-type': 'application/json; charset=utf-8',
     },
   })
+}
+
+async function createProductionWriteOperation(options: WikiWriterAppOptions): Promise<WikiWriteOperationHandler | undefined> {
+  const configuredFields = [options.githubAppId, options.githubInstallationId, options.githubPrivateKeyFilePath]
+  const hasAnyGitHubConfig = configuredFields.some(value => value !== undefined)
+  const hasGitHubConfig = options.githubAppId !== undefined &&
+    options.githubInstallationId !== undefined &&
+    options.githubPrivateKeyFilePath !== undefined
+  if (hasAnyGitHubConfig && !hasGitHubConfig) throw new Error('GitHub writer configuration is incomplete')
+  if (!hasGitHubConfig) return undefined
+
+  const client = await createGitHubDataClient({
+    appId: options.githubAppId,
+    installationId: options.githubInstallationId,
+    privateKeyFilePath: options.githubPrivateKeyFilePath,
+  })
+  const ledger = createOperationLedger(options.ledgerPath ?? '/var/lib/wiki-writer/operations.sqlite')
+  const operation = createWikiWriteOperation({
+    client,
+    ledger,
+    gateContractChecker: createGateContractChecker({fetch}),
+  })
+  return {
+    execute: async request => operation.execute(request),
+  }
+}
+
+function writeResultResponse(value: unknown): Response {
+  if (value === null || typeof value !== 'object') return jsonResponse({error: 'write-failed'}, 500)
+  const result = value as WikiWriteResult
+  switch (result.state) {
+    case 'succeeded':
+      return jsonResponse({accepted: true, operationId: result.operationId, commitSha: result.commitSha}, 202)
+    case 'conflict':
+      return jsonResponse({error: 'precondition-failed'}, 412)
+    case 'indeterminate':
+      return jsonResponse({accepted: true, status: 'indeterminate', operationId: result.operationId}, 202)
+    case 'rejected':
+      if (result.reason === 'content-too-large') return jsonResponse({error: 'content-too-large'}, 413)
+      return jsonResponse({error: result.reason, ...(result.findings === undefined ? {} : {findings: result.findings})}, 422)
+    case 'failed':
+      return jsonResponse({error: 'write-failed', correlationId: result.correlationId}, 500)
+  }
+}
+
+function requiredEnvironment(name: string): string {
+  const value = process.env[name]
+  if (value === undefined || value.length === 0) throw new Error(`${name} is required`)
+  return value
+}
+
+function parseEnvironmentInteger(name: string): number {
+  const value = Number(requiredEnvironment(name))
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`)
+  return value
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
