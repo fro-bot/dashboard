@@ -118,6 +118,20 @@ describe('wiki write operation', () => {
     ledger.close()
   })
 
+  it('rejects creating a wiki page that is absent from the snapshot', async () => {
+    const client = createClient()
+    const ledger = createOperationLedger(':memory:')
+    const operation = createWikiWriteOperation({client, ledger, gates, gateContractChecker: checker()})
+
+    await expect(operation.execute(request({
+      path: 'knowledge/wiki/topics/new-page.md',
+      content: '---\ntitle: New\n---\n\nBody\n',
+    }))).resolves.toEqual({state: 'rejected', reason: 'invalid-request'})
+    expect(client.createBlob).not.toHaveBeenCalled()
+    expect(ledger.get(request().operationId)).toBeUndefined()
+    ledger.close()
+  })
+
   it('allows the corrections sidecar to be created when it is absent', async () => {
     const client = createClient()
     const ledger = createOperationLedger(':memory:')
