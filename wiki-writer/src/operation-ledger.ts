@@ -48,6 +48,62 @@ interface OperationRow {
   commit_sha: string | null
 }
 
+const OPERATION_STATES = new Set<OperationState>(['pending', 'succeeded', 'failed', 'indeterminate'])
+
+export class OperationRowValidationError extends Error {
+  constructor(operationId: unknown, reason: string) {
+    const id = typeof operationId === 'string' && operationId.length > 0 ? operationId : '<unreadable>'
+    super(`Ledger row for operation ${id} failed validation: ${reason}`)
+    this.name = 'OperationRowValidationError'
+  }
+}
+
+function isOperationRow(value: unknown): value is OperationRow {
+  if (value === null || typeof value !== 'object') {
+    throw new OperationRowValidationError(undefined, 'row is not an object')
+  }
+  const row = value as Record<string, unknown>
+  const operationId = row.operation_id
+
+  if (typeof row.operation_id !== 'string' || row.operation_id.length === 0) {
+    throw new OperationRowValidationError(operationId, 'operation_id is not a non-empty string')
+  }
+  if (typeof row.repository !== 'string' || row.repository.length === 0) {
+    throw new OperationRowValidationError(operationId, 'repository is not a non-empty string')
+  }
+  if (typeof row.ref !== 'string' || row.ref.length === 0) {
+    throw new OperationRowValidationError(operationId, 'ref is not a non-empty string')
+  }
+  if (typeof row.path !== 'string' || row.path.length === 0) {
+    throw new OperationRowValidationError(operationId, 'path is not a non-empty string')
+  }
+  if (typeof row.expected_parent_sha !== 'string' || row.expected_parent_sha.length === 0) {
+    throw new OperationRowValidationError(operationId, 'expected_parent_sha is not a non-empty string')
+  }
+  if (typeof row.content_digest !== 'string' || row.content_digest.length === 0) {
+    throw new OperationRowValidationError(operationId, 'content_digest is not a non-empty string')
+  }
+  if (typeof row.state !== 'string' || !OPERATION_STATES.has(row.state as OperationState)) {
+    throw new OperationRowValidationError(operationId, `state is not one of the permitted lifecycle values (got ${JSON.stringify(row.state)})`)
+  }
+  if (typeof row.created_at !== 'number' || !Number.isFinite(row.created_at)) {
+    throw new OperationRowValidationError(operationId, 'created_at is not a finite number')
+  }
+  if (typeof row.updated_at !== 'number' || !Number.isFinite(row.updated_at)) {
+    throw new OperationRowValidationError(operationId, 'updated_at is not a finite number')
+  }
+  if (row.commit_sha !== null && typeof row.commit_sha !== 'string') {
+    throw new OperationRowValidationError(operationId, 'commit_sha is neither null nor a string')
+  }
+
+  return true
+}
+
+function toOperationRow(value: unknown): OperationRow {
+  if (!isOperationRow(value)) throw new OperationRowValidationError(undefined, 'row failed validation')
+  return value
+}
+
 export function createOperationLedger(dbPath: string): OperationLedger {
   if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), {recursive: true})
 
@@ -102,16 +158,16 @@ export function createOperationLedger(dbPath: string): OperationLedger {
   }
 
   function get(operationId: string): OperationRecord | undefined {
-    const row = select.get(operationId) as unknown as OperationRow | undefined
-    return row === undefined ? undefined : rowToRecord(row)
+    const row = select.get(operationId)
+    return row === undefined ? undefined : rowToRecord(toOperationRow(row))
   }
 
   function list(): OperationRecord[] {
-    return (selectAll.all() as unknown as OperationRow[]).map(rowToRecord)
+    return selectAll.all().map(row => rowToRecord(toOperationRow(row)))
   }
 
   function listIndeterminate(): OperationRecord[] {
-    return (selectIndeterminate.all() as unknown as OperationRow[]).map(rowToRecord)
+    return selectIndeterminate.all().map(row => rowToRecord(toOperationRow(row)))
   }
 
   function prune(now: number): void {
