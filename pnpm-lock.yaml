@@ -49,8 +49,8 @@ importers:
         specifier: 0.13.2
         version: 0.13.2
       '@opencode-ai/plugin':
-        specifier: 1.18.25
-        version: 1.18.25
+        specifier: 1.18.26
+        version: 1.18.26
       '@tailwindcss/vite':
         specifier: 4.3.3
         version: 4.3.3(vite@8.2.2(@types/node@24.13.3)(jiti@2.7.0)(terser@5.48.0)(yaml@2.9.0))
@@ -849,7 +849,7 @@ packages:
         optional: true
 
   '@fro-bot/wiki-write-core@https://codeload.github.com/fro-bot/.github/tar.gz/37abb495df047e6b8beb690017ac6d217978fb9c#path:packages/wiki-write-core':
-    resolution: {gitHosted: true, path: packages/wiki-write-core, tarball: https://codeload.github.com/fro-bot/.github/tar.gz/37abb495df047e6b8beb690017ac6d217978fb9c}
+    resolution: {gitHosted: true, integrity: sha512-c72czBsjFt/1gidBO6ZCdzmb99QrZ1H1lZttBM/rw79sPqa1UTo5rpdFhnQUWHTqZ1Z5bdtaykhYrg4bObxSDA==, path: packages/wiki-write-core, tarball: https://codeload.github.com/fro-bot/.github/tar.gz/37abb495df047e6b8beb690017ac6d217978fb9c}
     version: 0.0.0
 
   '@hono/node-server@2.1.1':
@@ -1038,8 +1038,8 @@ packages:
   '@octokit/types@18.0.0':
     resolution: {integrity: sha512-l6bAF43PNxkJp6g+W4PjoUSSkxHomXw2nOum5CTftJz1NlV3vu93NImgOYtLf6CbBUb5j+fiuzW0PPQ5JTSvZA==}
 
-  '@opencode-ai/plugin@1.18.25':
-    resolution: {integrity: sha512-Kb34zFqYosFNiMd1IuYiZGjX17z+18Srm7tHZMCz+uMVRTYNkEw1FTrfAK2FLbggwYdgzifGwKMNF1slLT8eLw==}
+  '@opencode-ai/plugin@1.18.26':
+    resolution: {integrity: sha512-frk7el3wQnIjoJ9ESuuS+wEhZ7wLz73enReuJ8ynRAf3akKtwy/DA7MxjUXhG2se5y9nXbypn3FJLkvm3RR2Lw==}
     peerDependencies:
       '@opentui/core': '>=0.4.5'
       '@opentui/keymap': '>=0.4.5'
@@ -1052,8 +1052,8 @@ packages:
       '@opentui/solid':
         optional: true
 
-  '@opencode-ai/sdk@1.18.25':
-    resolution: {integrity: sha512-GwgwhW+vE8FWSDw730SjzqNhsWXB0uJjbFOiqFkmM+USFuG13HuTlGe6SR2ixt+WXxoD6FV1hILWqsXyqej9hQ==}
+  '@opencode-ai/sdk@1.18.26':
+    resolution: {integrity: sha512-1TnlEZty7V2NTIZHbJOt2O+v6YsJ/Bt2pSYgXb98G/RkSVOjlDd/35+ewfYtM4fmMroaa6cEG6S58FihKO4K0w==}
 
   '@ota-meshi/ast-token-store@0.3.0':
     resolution: {integrity: sha512-XRO0zi2NIUKq2lUk3T1ecFSld1fMWRKE6naRFGkgkdeosx7IslyUKNv5Dcb5PJTja9tHJoFu0v/7yEpAkrkrTg==}
@@ -5166,14 +5166,14 @@ snapshots:
     dependencies:
       '@octokit/openapi-types': 29.0.1
 
-  '@opencode-ai/plugin@1.18.25':
+  '@opencode-ai/plugin@1.18.26':
     dependencies:
       '@ai-sdk/provider': 3.0.8
-      '@opencode-ai/sdk': 1.18.25
+      '@opencode-ai/sdk': 1.18.26
       effect: 4.0.0-beta.83
       zod: 4.1.8
 
-  '@opencode-ai/sdk@1.18.25':
+  '@opencode-ai/sdk@1.18.26':
     dependencies:
       cross-spawn: 7.0.6
 

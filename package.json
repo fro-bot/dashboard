@@ -31,7 +31,7 @@
   "devDependencies": {
     "@bfra.me/eslint-config": "0.52.1",
     "@bfra.me/tsconfig": "0.13.2",
-    "@opencode-ai/plugin": "1.18.25",
+    "@opencode-ai/plugin": "1.18.26",
     "@tailwindcss/vite": "4.3.3",
     "@testing-library/jest-dom": "6.9.1",
     "@testing-library/react": "16.3.3",
