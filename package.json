@@ -39,7 +39,7 @@
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.7",
     "@vitejs/plugin-react-swc": "4.3.3",
-    "eslint": "10.9.1",
+    "eslint": "10.10.0",
     "eslint-plugin-erasable-syntax-only": "0.4.2",
     "jiti": "2.7.0",
     "jsdom": "29.1.1",
