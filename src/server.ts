@@ -463,6 +463,22 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
 
   const app = new Hono<{Variables: Variables}>()
 
+  // ── Global error handler (redaction chokepoint) ─────────────────────────────
+  // Hono's default onError does `console.error(err)` — a RAW, unredacted Error
+  // object (message + stack + any custom properties) straight to the log sink,
+  // bypassing logger.ts's single redacting chokepoint. Any handler that throws
+  // outside a local try/catch would fall through to that raw path. Route it
+  // through logger.error + sanitizeErrorMessage instead so every log line goes
+  // through the same redaction regardless of where the throw originated. The
+  // HTTP response stays generic (matches Hono's own default body/status) — this
+  // only changes where the error text is logged, not what a client can see.
+  app.onError((error, c) => {
+    logger.error('Unhandled request error', {
+      error: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)),
+    })
+    return c.text('Internal Server Error', 500)
+  })
+
   // ── PWA service worker CSP bypass (registered BEFORE secureHeaders) ──────────
   // Must be registered before secureHeaders (which runs post-next()) so this
   // middleware wraps it and can delete the CSP after secureHeaders sets it.

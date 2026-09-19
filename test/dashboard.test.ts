@@ -18,7 +18,7 @@ import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
 import type {AggregatorSnapshot, DashboardRepo} from '../src/github/aggregator.ts'
 import {Buffer} from 'node:buffer'
 import process from 'node:process'
-import {afterEach, describe, expect, it} from 'vitest'
+import {afterEach, describe, expect, it, vi} from 'vitest'
 import {buildDashboardApp} from '../src/server.ts'
 import {SessionManager} from '../src/session.ts'
 
@@ -485,6 +485,66 @@ describe('/api/status', () => {
       expect(monitoringBody.repos[0]?.full_name).toBe('fro-bot/shared-source')
       expect(statusBody.repos[0]?.full_name).toBe('fro-bot/shared-source')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Global error handler — redaction chokepoint (unhandled route exceptions)
+//
+// Hono's default onError does a raw console.error(err) — this must instead
+// route through logger.ts's single redacting chokepoint (sanitizeErrorMessage),
+// so a thrown error that happens to embed secret-shaped text never reaches the
+// log sink unredacted. The HTTP response must stay generic either way.
+// ---------------------------------------------------------------------------
+
+describe('global error handler — redaction chokepoint', () => {
+  it('an uncaught throw in a route handler returns a generic 500, not the raw error message', async () => {
+    const app = await buildDashboardApp({
+      operatorLogin: TEST_OPERATOR,
+      cookieKey: TEST_KEY,
+      oauthClient: makeFakeOAuthClient(),
+      fetchUserLogin: async () => TEST_OPERATOR,
+      getSnapshot: () => {
+        throw new Error('boom: ghp_abcdefghijklmnopqrstuvwxyz0123456789')
+      },
+    })
+
+    const res = await authedGet(app, '/api/status')
+
+    expect(res.status).toBe(500)
+    const body = await res.text()
+    expect(body).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789')
+    expect(body).not.toContain('boom')
+  })
+
+  it('logs the sanitized error via logger.error, never the raw secret-shaped text, via console.error', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const app = await buildDashboardApp({
+        operatorLogin: TEST_OPERATOR,
+        cookieKey: TEST_KEY,
+        oauthClient: makeFakeOAuthClient(),
+        fetchUserLogin: async () => TEST_OPERATOR,
+        getSnapshot: () => {
+          throw new Error('boom: ghp_abcdefghijklmnopqrstuvwxyz0123456789')
+        },
+      })
+
+      const res = await authedGet(app, '/api/status')
+      expect(res.status).toBe(500)
+
+      expect(consoleErrorSpy).toHaveBeenCalledTimes(1)
+      const loggedLine = consoleErrorSpy.mock.calls[0]?.join(' ') ?? ''
+      // Routed through logger.error (the "[error] ..." prefix), not Hono's raw
+      // console.error(err) of the bare Error object.
+      expect(loggedLine).toContain('[error]')
+      expect(loggedLine).toContain('Unhandled request error')
+      // sanitizeErrorMessage must have stripped the token-shaped text.
+      expect(loggedLine).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789')
+      expect(loggedLine).toContain('[REDACTED]')
+    } finally {
+      consoleErrorSpy.mockRestore()
+    }
   })
 })
 
