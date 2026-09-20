@@ -48,6 +48,15 @@ describe('public privacy policy content', () => {
     expect(pageText).not.toMatch(/sets no explicit/i)
   })
 
+  it('discloses that a dispatch record identifies its triggering run', () => {
+    // The Gateway sets a dispatch record's correlation id to the triggering
+    // run/approval id, so the record is run-linkable. Describing it only as a
+    // "correlation identifier" reads as an opaque trace value and understates
+    // what is kept. This pins the disclosure against that regression.
+    expect(pageText).toMatch(/run or approval that triggered/i)
+    expect(pageText).not.toMatch(/never record.{0,120}run detail/i)
+  })
+
   it('does not expose private or internal values', () => {
     const urls = pageText.match(/https:\/\/[^\s<)]+/g) ?? []
     expect(urls).toEqual(['https://github.com/fro-bot/dashboard/issues'])

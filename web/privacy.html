@@ -70,7 +70,7 @@
 
         <section>
           <h2 class="mb-4 text-2xl font-semibold tracking-tight text-text sm:text-3xl">What is logged</h2>
-          <p>Operational records are written when a subscription is created, when it is removed, when it is deactivated, when notifications are dispatched, and when push is disabled. These record the operator's account identifier, a coarse reason, a trigger label, delivery counts, an event kind, and a correlation identifier. They never record an endpoint, key material, notification content, or any repository or run detail.</p>
+          <p>Operational records are written when a subscription is created, when it is removed, when it is deactivated, when notifications are dispatched, and when push is disabled. These record the operator's account identifier, a coarse reason, a trigger label, delivery counts, and an event kind. Dispatch records also identify the run or approval that triggered the notification, so a dispatch record can be traced back to the run that caused it. They never record an endpoint, key material, notification content, or a repository name.</p>
         </section>
 
         <section>

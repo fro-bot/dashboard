@@ -155,11 +155,11 @@ export const CLAIMS = {
       "subscribe (records the operator's account identifier)",
       "unsubscribe (records the operator's account identifier)",
       "deactivation (records the operator's account identifier and a coarse reason)",
-      'dispatch (records a trigger label and delivered/dead/failed counts)',
+      'dispatch (records a trigger label, delivered/dead/failed counts, and the identifier of the run or approval that triggered it)',
       'push disabled (records a coarse reason)',
     ],
     sourceNote:
-      'Every audit record also carries an event kind and a correlation identifier. No endpoint, key material, payload, or repository/run content is ever recorded.',
+      'Every audit record also carries an event kind and a correlation identifier. For a dispatch record that identifier IS the triggering run or approval id, so a dispatch record is linkable to the run that caused it — disclose it rather than describing it as an opaque correlation value. No endpoint, key material, notification payload, or repository name is ever recorded.',
   },
   vapidRotation: {
     status: 'published',
