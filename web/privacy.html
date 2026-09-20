@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0d0216" />
+    <link rel="icon" type="image/svg+xml" href="/icon-192.svg" />
+    <link rel="apple-touch-icon" href="/icon-192.svg" />
+    <link rel="stylesheet" href="/src/index.css" />
+    <title>Fro Bot operator push notifications privacy</title>
+  </head>
+  <body class="min-h-screen bg-bg font-body text-text antialiased">
+    <main class="mx-auto max-w-3xl px-6 py-12 sm:px-8 sm:py-16 lg:py-24">
+      <header class="mb-12 border-b border-border-muted pb-8 sm:mb-16 sm:pb-10">
+        <a class="mb-8 inline-flex min-h-11 items-center text-sm font-medium text-accent underline decoration-accent/50 underline-offset-4 transition-colors hover:text-accent-hover focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent" href="/">
+          Back to dashboard
+        </a>
+        <h1 class="max-w-2xl text-4xl font-bold tracking-tight text-text sm:text-5xl sm:leading-tight">
+          Operator push notifications — privacy
+        </h1>
+      </header>
+
+      <div class="space-y-12 text-base leading-8 text-text-muted sm:space-y-16 sm:text-lg">
+        <p class="text-lg leading-8 text-text sm:text-xl sm:leading-9">
+          This page describes what happens to your data when you turn on push notifications for the Fro Bot operator dashboard. This is a single-operator deployment: the person who runs this dashboard and the person who receives its notifications are the same party. There is no separate controller to contact, no shared user base, and no analytics or advertising of any kind.
+        </p>
+
+        <section>
+          <h2 class="mb-4 text-2xl font-semibold tracking-tight text-text sm:text-3xl">Push is optional</h2>
+          <p>Notifications are off until you turn them on, and turning them on requires explicit permission from your browser. They cover two events: a run is waiting for your approval, and a run failed. Nothing else produces a notification. You can turn them off at any time from the dashboard.</p>
+        </section>
+
+        <section>
+          <h2 class="mb-4 text-2xl font-semibold tracking-tight text-text sm:text-3xl">What is stored when you subscribe</h2>
+          <p>Subscribing stores a record containing a one-way hash of the browser push endpoint, the browser push endpoint URL, the browser's generated P-256 public key, the browser's generated authentication secret, the operator's GitHub account identifier, an active/inactive flag, the signing-key version in effect when the subscription was created, an ownership-generation counter used to detect a transferred session, created and last-updated timestamps, an optional deactivation timestamp, and an optional coarse deactivation reason.</p>
+        </section>
+
+        <section>
+          <h2 class="mb-4 text-2xl font-semibold tracking-tight text-text sm:text-3xl">What you can read back</h2>
+          <p>Through the operator interface you can see a one-way hash of the endpoint, created and last-updated timestamps, the signing-key version, the active/inactive flag, and an optional coarse inactive reason. The endpoint URL, the P-256 public key, and the authentication secret are never returned by any read surface.</p>
+          <p class="mt-6">There is no separate export or download surface. The metadata listing described above is the access path, and it returns the same fields — never the endpoint URL or the browser keys.</p>
+        </section>
+
+        <section>
+          <h2 class="mb-4 text-2xl font-semibold tracking-tight text-text sm:text-3xl">What notifications contain</h2>
+          <p>Notification payloads use fixed, neutral copy plus a small set of allowlisted failure labels. They never include repository names, prompts, run identifiers, run output, endpoints, signing keys, tokens, cookies, or session data.</p>
+        </section>
+
+        <section>
+          <h2 class="mb-4 text-2xl font-semibold tracking-tight text-text sm:text-3xl">Who else receives your data</h2>
+          <p>Delivery goes to the push service selected by your browser or operating system. Depending on platform this may be a service operated by Google, Mozilla, Apple, Microsoft's browser platform, or another compatible browser push provider. This service does not maintain a fixed list of providers, because the choice belongs to your browser rather than to this service.</p>
+          <p class="mt-6">That provider can observe the endpoint identity, request timing, the size of the encrypted payload, the time-to-live and urgency values attached to each request, authentication information identifying this service as the sender, delivery status, and the sending server's network metadata. Each delivery request carries a time-to-live of four weeks and normal urgency, and no topic. The provider cannot read the encrypted notification content.</p>
+        </section>
+
+        <section>
+          <h2 class="mb-4 text-2xl font-semibold tracking-tight text-text sm:text-3xl">When a subscription stops being used</h2>
+          <p>A subscription is marked inactive when you unsubscribe, when ownership of the browser session is transferred, when the push provider reports the endpoint as dead, when the signing key is revoked, or when your operator session is revoked.</p>
+          <p class="mt-6">Rotating the signing key does not deactivate or delete anything. Subscriptions registered under the current or immediately previous signing key remain deliverable, and subscriptions on an older key are skipped until your browser registers again.</p>
+        </section>
+
+        <section>
+          <h2 class="mb-4 text-2xl font-semibold tracking-tight text-text sm:text-3xl">How long data is kept</h2>
+          <p>An inactive subscription record is kept for 30 days by default. A deletion tombstone is kept for 90 days by default, tracked separately. Both are configurable, so neither is an unconditional guarantee.</p>
+        </section>
+
+        <section>
+          <h2 class="mb-4 text-2xl font-semibold tracking-tight text-text sm:text-3xl">Deleting your data</h2>
+          <p>Unsubscribing from the dashboard deletes the subscription. Deletion writes a tombstone recording the endpoint hash, the operator's account identifier, and the deletion timestamp, then removes the subscription record itself. Read paths exclude tombstoned records. Subscribing again later clears the tombstone.</p>
+        </section>
+
+        <section>
+          <h2 class="mb-4 text-2xl font-semibold tracking-tight text-text sm:text-3xl">What is logged</h2>
+          <p>Operational records are written when a subscription is created, when it is removed, when it is deactivated, when notifications are dispatched, and when push is disabled. These record the operator's account identifier, a coarse reason, a trigger label, delivery counts, an event kind, and a correlation identifier. They never record an endpoint, key material, notification content, or any repository or run detail.</p>
+        </section>
+
+        <section>
+          <h2 class="mb-4 text-2xl font-semibold tracking-tight text-text sm:text-3xl">Questions</h2>
+          <p>Open an issue at <a class="text-accent underline decoration-accent/50 underline-offset-4 transition-colors hover:text-accent-hover focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent" href="https://github.com/fro-bot/dashboard/issues">https://github.com/fro-bot/dashboard/issues</a>.</p>
+        </section>
+      </div>
+
+      <footer class="mt-16 border-t border-border-muted pt-6 text-sm text-text-subtle sm:mt-24">
+        Last updated 19 September 2026.
+      </footer>
+    </main>
+  </body>
+</html>

@@ -153,10 +153,23 @@ describe('sw.js build output', () => {
     expect(content).not.toMatch(/"url":"registerSW\.js"/)
   })
 
+  // Asserts the shell's hashed JS and CSS are precached. Deliberately not
+  // pinned to a chunk name: the shared stylesheet is emitted as `src-*.css`
+  // rather than `index-*.css` now that privacy.html is a second build entry
+  // sharing it. The guarantee is "the shell's JS and CSS are precached", not
+  // what Rollup happens to name the chunk.
   it('precache list contains at least the app JS bundle and CSS', () => {
     const content = readSW()
-    expect(content).toMatch(/"url":"assets\/index-[A-Za-z0-9_-]+\.js"/)
-    expect(content).toMatch(/"url":"assets\/index-[A-Za-z0-9_-]+\.css"/)
+    expect(content).toMatch(/"url":"assets\/[A-Za-z0-9_-]+\.js"/)
+    expect(content).toMatch(/"url":"assets\/[A-Za-z0-9_-]+\.css"/)
+  })
+
+  // The public privacy page must never enter the precache. Its install-time
+  // fetch would 404 (the server serves it at /privacy, not /privacy.html),
+  // which makes the service worker redundant and stops it registering at all.
+  it('SECURITY: privacy.html is NOT in the precache list', () => {
+    const content = readSW()
+    expect(content).not.toMatch(/privacy/i)
   })
 
   // Security: operator data must never be cached.
