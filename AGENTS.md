@@ -17,8 +17,12 @@ view of Fro Bot's cross-repo footprint.
    credentials may never mint write-scoped tokens.
 
    **Today the dashboard web/runtime has no GitHub write authority at all.** The
-   `wiki-writer` service below does not exist yet; this records the boundary it
-   must be built inside, so the decision is settled before the code lands.
+   `wiki-writer` service below is implemented in `wiki-writer/` but is not
+   deployed, not integrated, and holds no runtime authority: no workflow builds
+   or deploys it, nothing in `src/` reaches it, and its source never enters the
+   dashboard runtime image (`Dockerfile` copies only its `package.json`, for
+   workspace resolution). `wiki-writer/test/security-boundary.test.ts` enforces
+   that `src/` and `web/src/` cannot import writer code or key-loading symbols.
 
    When it ships, it will be the ONLY GitHub write authority available to the
    application: a separately deployed `wiki-writer` service authenticated as the

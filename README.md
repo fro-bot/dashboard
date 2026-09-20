@@ -62,7 +62,9 @@ The dashboard mints each GitHub App installation token with an explicit read-onl
 subset (`pull_requests`/`checks`/`issues`/`contents`/`metadata:read`, with
 `security_events`/`vulnerability_alerts:read` optional). `DASHBOARD_GITHUB_APP_*` may never
 mint write-scoped tokens. The dashboard web/runtime has no GitHub write authority today. The
-`wiki-writer` service is not built yet; when it ships it will be the only such authority —
+`wiki-writer` service is implemented in `wiki-writer/` but is not deployed, not integrated, and
+holds no runtime authority — no workflow deploys it, nothing in `src/` reaches it, and its source
+never enters the dashboard runtime image. When it ships it will be the only such authority —
 separately deployed, authenticated as the Fro Bot App (the same App `release.yaml` uses via
 `APPLICATION_ID`, distinct from the read-only Agent App behind `DASHBOARD_GITHUB_APP_*`), able
 to target only the `fro-bot/.github` `data` branch under the explicit wiki/corrections path

@@ -14,8 +14,11 @@ load-bearing rules for code suggestions.
    (`pull_requests`/`checks`/`issues`/`contents`/`metadata: read`, with
    `security_events`/`vulnerability_alerts: read` optional and graceful), and those
    credentials may never mint write-scoped tokens. The dashboard web/runtime has no
-   GitHub write authority today — the `wiki-writer` service does not exist yet. When it
-   ships it will be the only such authority: separately deployed, authenticated as the
+   GitHub write authority today — the `wiki-writer` service is implemented in
+   `wiki-writer/` but is not deployed, not integrated, and holds no runtime authority
+   (nothing in `src/` reaches it, and its source never enters the dashboard runtime
+   image). When it ships it will be the only such authority: separately deployed,
+   authenticated as the
    Fro Bot App (the same App `release.yaml` uses via `APPLICATION_ID`, distinct from the
    read-only Agent App behind `DASHBOARD_GITHUB_APP_*`), able to target only the
    `fro-bot/.github` repository's `data` branch, under an explicit wiki/corrections path
