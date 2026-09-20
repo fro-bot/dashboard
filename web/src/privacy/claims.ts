@@ -1,39 +1,14 @@
 /**
- * Pinned Gateway privacy claims artifact.
+ * Structured source for the public `/privacy` page copy, describing the
+ * Gateway-owned push surface.
  *
- * Every factual claim the public `/privacy` page makes about operator Web
- * Push behavior is sourced from this file, and every claim in this file is
- * sourced from a survey of the `fro-bot/agent` Gateway implementation at one
- * pinned tag. Nothing here is invented, extrapolated, or copied from the
- * `fro-bot/dashboard#238` issue body (which research found materially
- * inaccurate — see `README.md`).
+ * Compiled into a public, unauthenticated page: every value must be a data
+ * category, never an instance. No endpoints, key material, route or storage
+ * paths, or account identifiers. `claims.test.ts` enforces this.
  *
- * Source: fro-bot/agent | Surveyed tag: v0.113.2 | Verified: 2026-09-19
- * Deployed pin: v0.93.1 (marcusrbrown/infra apps/gateway/upstream.json)
- *
- * CRITICAL: this module is compiled into a PUBLIC, unauthenticated page.
- * Every value here MUST be a data *category*, never an instance:
- * - no endpoint URLs or endpoint fragments
- * - no key material (VAPID keys, P-256 keys, auth secrets)
- * - no internal HTTP route paths or storage paths
- * - no concrete account identifiers (GitHub user IDs, session IDs, hashes)
- * Internal specifics needed to detect drift against the Gateway source live
- * in `README.md`, which is not bundled into the client build.
- *
- * Unverified items are modeled as `UnverifiedClaim`, a variant with no
- * `value` field, so there is no code path by which an unverified item can be
- * rendered as an asserted fact — a renderer can only read `.value` off a
- * `PublishedClaim`.
+ * `UnverifiedClaim` carries no `value`, so an unresolved item cannot reach the
+ * page as an asserted fact.
  */
-
-/** Upstream provenance for the whole claim set. */
-export const CLAIMS_SOURCE = {
-  repository: 'fro-bot/agent',
-  surveyedTag: 'v0.113.2',
-  deployedPin: 'v0.93.1',
-  deployedPinSource: 'marcusrbrown/infra: apps/gateway/upstream.json',
-  verifiedOn: '2026-09-19',
-} as const
 
 /** Disclosure categories the privacy page is required to cover. */
 export type ClaimCategory =

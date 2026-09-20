@@ -1,14 +1,9 @@
-/**
- * Conformance tests for the pinned Gateway privacy claims artifact.
- *
- * Source: fro-bot/agent | Surveyed tag: v0.113.2 | Verified: 2026-09-19
- */
+/** Tests for the structured privacy claims used to build the public policy page. */
 import type {Claim, ClaimCategory, ClaimValue, RetentionValue} from './claims.ts'
 
 import {describe, expect, it} from 'vitest'
 import {
   CLAIMS,
-  CLAIMS_SOURCE,
   formatClaimValue,
   formatRetention,
   getPublishedClaims,
@@ -40,31 +35,6 @@ describe('published claims', () => {
     for (const claim of getPublishedClaims()) {
       expect(claim.status).toBe('published')
     }
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Happy path: the artifact declares an upstream repo, tag, and verification date
-// ---------------------------------------------------------------------------
-
-describe('CLAIMS_SOURCE', () => {
-  it('declares a non-empty upstream repository', () => {
-    expect(CLAIMS_SOURCE.repository.length).toBeGreaterThan(0)
-  })
-
-  it('declares a non-empty surveyed tag', () => {
-    expect(CLAIMS_SOURCE.surveyedTag.length).toBeGreaterThan(0)
-  })
-
-  it('declares a non-empty verification date', () => {
-    expect(CLAIMS_SOURCE.verifiedOn.length).toBeGreaterThan(0)
-    // ISO date shape, not a free-form string.
-    expect(CLAIMS_SOURCE.verifiedOn).toMatch(/^\d{4}-\d{2}-\d{2}$/)
-  })
-
-  it('also records the deployed pin, distinct from the surveyed tag', () => {
-    expect(CLAIMS_SOURCE.deployedPin.length).toBeGreaterThan(0)
-    expect(CLAIMS_SOURCE.deployedPinSource.length).toBeGreaterThan(0)
   })
 })
 
