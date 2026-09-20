@@ -384,6 +384,28 @@ export function AppShell({
         {children}
       </main>
 
+      <footer
+        data-testid="app-footer"
+        style={{
+          width: '100%',
+          maxWidth: 'var(--bp-xl)',
+          margin: '0 auto',
+          padding: 'var(--space-3) var(--space-4)',
+          borderTop: '1px solid var(--color-border-muted)',
+          color: 'var(--color-text-muted)',
+        }}
+        className="sm:px-6 md:px-8 lg:px-10"
+      >
+        <a
+          href="/privacy"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex min-h-11 items-center text-label text-text-muted underline underline-offset-4 transition-colors duration-fast hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        >
+          Privacy
+        </a>
+      </footer>
+
       <ReloadPrompt />
     </div>
   )

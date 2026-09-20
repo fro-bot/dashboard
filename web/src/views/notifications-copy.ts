@@ -22,6 +22,7 @@ export type NotificationUiState =
 export interface NotificationStateCopy {
   readonly headline: string
   readonly detail: string
+  readonly privacyPolicyLinkText: string
   readonly ctaText: string | null
   readonly recoveryHint: string
 }
@@ -30,48 +31,56 @@ const COPY: Record<NotificationUiState, NotificationStateCopy> = {
   'not-requested': {
     headline: 'Push Alerts',
     detail: 'Get notified of pending approvals and failed run outcomes. Sensitive keys and payloads never leave the server.',
+    privacyPolicyLinkText: 'How we handle notification data',
     ctaText: 'Enable notifications',
     recoveryHint: '',
   },
   subscribed: {
     headline: 'Alerts Active',
     detail: 'Monitoring pending approvals and failed run outcomes for this device.',
+    privacyPolicyLinkText: 'How we handle notification data',
     ctaText: 'Disable notifications',
     recoveryHint: '',
   },
   denied: {
     headline: 'Alerts Blocked',
     detail: 'Permission was denied at the browser level. To receive alerts, manually update site permissions in your browser settings.',
+    privacyPolicyLinkText: 'How we handle notification data',
     ctaText: null,
     recoveryHint: 'Reset site permissions to resume.',
   },
   dismissed: {
     headline: 'Prompt Closed',
     detail: 'The permission request was dismissed. You can retry the setup when ready.',
+    privacyPolicyLinkText: 'How we handle notification data',
     ctaText: 'Try again',
     recoveryHint: '',
   },
   unsupported: {
     headline: 'Alerts Unsupported',
     detail: 'This browser profile or environment does not support the native push and notifications engine.',
+    privacyPolicyLinkText: 'How we handle notification data',
     ctaText: null,
     recoveryHint: 'Use a compatible browser or enable native system notifications.',
   },
   'ios-not-installed': {
     headline: 'Installation Required',
     detail: 'Web Push on iOS requires launching this dashboard as an installed Home Screen app.',
+    privacyPolicyLinkText: 'How we handle notification data',
     ctaText: 'Install App',
     recoveryHint: 'Open the share menu and select "Add to Home Screen" to install.',
   },
   'sw-not-ready': {
     headline: 'Initializing background sync',
     detail: 'The background service worker is initializing or temporarily unavailable.',
+    privacyPolicyLinkText: 'How we handle notification data',
     ctaText: 'Retry',
     recoveryHint: 'Wait a moment, or click Retry to check status again.',
   },
   'subscribe-failed': {
     headline: 'Setup Failed',
     detail: 'Site permission is active, but registering the subscription with the gateway failed.',
+    privacyPolicyLinkText: 'How we handle notification data',
     ctaText: 'Retry Registration',
     recoveryHint: 'Verify your session and network connection, then try again.',
   },

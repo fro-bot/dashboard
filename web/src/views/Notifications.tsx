@@ -372,6 +372,15 @@ export function Notifications({
           </p>
         )}
 
+        <a
+          href="/privacy"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex min-h-11 items-center self-start text-body-sm text-accent underline underline-offset-4 transition-colors duration-fast hover:text-accent-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        >
+          {copy.privacyPolicyLinkText}
+        </a>
+
         <div className="flex flex-wrap items-center gap-3 mt-1">
           {showCta && (
             <button

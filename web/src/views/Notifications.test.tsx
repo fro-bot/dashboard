@@ -233,6 +233,87 @@ describe('Notifications Component', () => {
     expect(screen.getByTestId('notifications-cta')).toHaveTextContent('Enable notifications')
   })
 
+  it('renders the privacy policy link before the consent CTA without requesting permission', async () => {
+    addMetaTag()
+    const requestPermission = vi.fn()
+    vi.stubGlobal('Notification', {requestPermission})
+
+    await act(async () => {
+      render(<Notifications />)
+    })
+
+    const policyLink = screen.getByRole('link', {name: 'How we handle notification data'})
+    const cta = screen.getByTestId('notifications-cta')
+
+    expect(policyLink).toHaveAttribute('href', '/privacy')
+    expect(policyLink).toHaveAttribute('target', '_blank')
+    expect(policyLink).toHaveAttribute('rel', 'noopener noreferrer')
+    expect(policyLink.compareDocumentPosition(cta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(requestPermission).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['subscribed', 'subscribed'],
+    ['denied', 'denied'],
+    ['unsupported', 'unsupported'],
+  ] as const)('keeps the privacy policy link in the %s state', async (_label, uiState) => {
+    addMetaTag()
+    vi.mocked(runReconcileSweep).mockResolvedValue({
+      skipped: false,
+      action: undefined,
+      uiState,
+      nextCache: {} as any,
+    })
+
+    await act(async () => {
+      render(<Notifications />)
+    })
+
+    expect(screen.getByRole('link', {name: 'How we handle notification data'})).toBeInTheDocument()
+  })
+
+  it('keeps the privacy policy link in the iOS installation state', async () => {
+    addMetaTag()
+    vi.mocked(getPushSupport).mockReturnValue({supported: false, needsInstall: true})
+
+    await act(async () => {
+      render(<Notifications />)
+    })
+
+    expect(screen.getByRole('link', {name: 'How we handle notification data'})).toBeInTheDocument()
+  })
+
+  it.each([
+    ['service-worker-not-ready', {kind: 'sw-not-ready'}],
+    ['subscribe-failed', {kind: 'subscribe-failed'}],
+  ] as const)('keeps the privacy policy link in the %s state', async (_label, outcome) => {
+    addMetaTag()
+    vi.mocked(subscribeOptIn).mockResolvedValue(outcome)
+
+    await act(async () => {
+      render(<Notifications />)
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('notifications-cta'))
+    })
+
+    expect(screen.getByRole('link', {name: 'How we handle notification data'})).toBeInTheDocument()
+  })
+
+  it('keeps the privacy policy link in the dismissed state', async () => {
+    addMetaTag()
+    vi.mocked(subscribeOptIn).mockResolvedValue({kind: 'dismissed'})
+
+    await act(async () => {
+      render(<Notifications />)
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('notifications-cta'))
+    })
+
+    expect(screen.getByRole('link', {name: 'How we handle notification data'})).toBeInTheDocument()
+  })
+
   it('handles transitioning from not-requested to dismissed on user dismiss', async () => {
     addMetaTag()
     vi.mocked(subscribeOptIn).mockResolvedValue({kind: 'dismissed'})

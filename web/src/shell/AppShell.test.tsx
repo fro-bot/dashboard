@@ -145,6 +145,21 @@ describe('AppShell', () => {
     expect(screen.getByRole('link', {name: /fro bot dashboard home/i})).toBeInTheDocument()
   })
 
+  it('renders the persistent privacy link when push is disabled', () => {
+    render(<AppShell>content</AppShell>)
+
+    expect(screen.getByRole('link', {name: 'Privacy'})).toHaveAttribute('href', '/privacy')
+  })
+
+  it('renders the persistent privacy link after the notification card is dismissed', () => {
+    window.localStorage.setItem('fro-bot-notifications-dismissed', '1')
+
+    render(<AppShell>content</AppShell>)
+
+    expect(screen.queryByTestId('notifications-settings')).toBeNull()
+    expect(screen.getByRole('link', {name: 'Privacy'})).toBeInTheDocument()
+  })
+
   it('renders primary navigation landmark', () => {
     render(<AppShell>content</AppShell>)
     expect(screen.getByRole('navigation', {name: /primary navigation/i})).toBeInTheDocument()
