@@ -27,6 +27,13 @@ describe('public privacy policy content', () => {
     }
   })
 
+  it('tells a reader how current the policy is', () => {
+    // Presence and shape only. Asserting the literal date would make every
+    // content edit a two-place change and the test would pin the very string
+    // it exists to protect.
+    expect(pageText).toMatch(/last updated\s+\d{1,2}\s+\w+\s+\d{4}/i)
+  })
+
   it('publishes configurable retention durations without making guarantees', () => {
     const inactive = CLAIMS.inactiveRetention.value
     const tombstone = CLAIMS.tombstoneRetention.value
