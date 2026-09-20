@@ -33,7 +33,9 @@ the page's SSR shell can keep rendering stale fixtures/copy that no unit test as
 against. Before calling an operator-facing feature done:
 
 1. **Render the actual page and look at it** — locally or on a deploy preview — not just
-   the unit suite. The screenshot is the test the unit suite can't be.
+   the unit suite. The screenshot is the test the unit suite can't be. For anything
+   production-bound, look at it on the deployed origin too: a local server has no reverse
+   proxy in front of it, so it cannot prove the route survives the real request path.
 2. **Grep the page's SSR source for fixture/mock leftovers** when adding live behavior:
    fixture constants (`ALL_FIXTURE_RUNS`), "mock"/"skeleton"/"v1" copy, and placeholder
    data sources that a later PR was supposed to replace. A new client module that
@@ -71,7 +73,7 @@ What passed vs. what was true on the operator page:
   still rendered `ALL_FIXTURE_RUNS`/`FIXTURE_RUN_TIMELINE` and the live client had no real
   runs to attach to.
 
-The prevention is one line in the definition of done: **open the page.**
+The prevention is one line in the definition of done: **open the page** — and, once it ships, open the deployed URL.
 
 ## Related
 
