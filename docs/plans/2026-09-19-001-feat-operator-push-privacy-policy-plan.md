@@ -310,7 +310,7 @@ The two red terminals are the current production behavior, and they are reached 
 **Approach:**
 - Add the policy path to the `NavigationRoute` denylist alongside the existing auth and api exemptions, matching both the bare path and its trailing-slash form.
 - Preserve the load-bearing registration order; the exemption is a denylist entry, not a new route or a new cache story.
-- Accept that already-controlled clients running the previous service worker keep the old denylist until the new worker activates, and that nothing in the app escapes this — a new tab on the same origin is still controlled by the same worker. During that window the only reliable path to the policy is an entry point outside the dashboard, which is why registering the external URL is a release dependency rather than a nicety.
+- Accept that already-controlled clients running the previous service worker keep the old denylist until the new worker activates, and that nothing escapes this — a new tab is still same-origin and still controlled by the same worker, and so is a link arriving from another site. During that window that browser cannot reach the policy by any link, including a directly typed URL. The window is transient and closes on activation. No external entry point fixes it: where the link came from is irrelevant, because the destination is same-origin either way.
 
 **Patterns to follow:**
 - The existing denylist entries in `web/src/sw.ts` for regex shape.
@@ -370,7 +370,7 @@ The two red terminals are the current production behavior, and they are reached 
 
 - **Interaction graph:** The pre-auth allowlist is consulted by both the Gateway and Arctic auth branches, so one entry changes both. The service-worker denylist affects every same-origin navigation. The app-shell link renders on every authenticated view.
 - **Error propagation:** The policy page has no data path and no failure mode beyond the static file being absent. It must never depend on a remote read — a compliance document that can fail to render is worse than one that is slightly stale.
-- **State lifecycle risks:** Service-worker versions are the real risk. A client on the previous worker keeps the old denylist until activation, so the page is unreliable in-app for that window; the new-tab link and an external entry point mitigate it.
+- **State lifecycle risks:** Service-worker versions are the real risk. A client on the previous worker keeps the old denylist until activation, so the page is unreachable in that browser for that window. Nothing mitigates it — the new-tab link preserves app state but does not escape the worker. The window is transient and self-resolving.
 - **API surface parity:** None. No API route, no contract version change, no operator contract impact.
 - **Integration coverage:** The service-worker interception is invisible to route tests and to `curl`. Only a real browser with an active worker proves R1 for returning visitors.
 - **Unchanged invariants:** The read-only GitHub authority boundary is untouched — this adds no write path and no credential. Redaction behavior is unchanged. The push flag stays off, so no notification is dispatched as a result of this work. `isPublicPath` matching semantics are unchanged for every existing entry.
@@ -383,7 +383,7 @@ The two red terminals are the current production behavior, and they are reached 
 | Second build entry enters the precache and 404s at install, making the service worker redundant | Ignore pattern written against the emitted artifact path, not the source path; install and activation verified in a real browser before merge |
 | New page escapes the CI Design Check and accumulates hand-rolled styling | Detector scan path extended in the same unit that creates the page; workflow change surfaced for owner approval |
 | A real processing activity is omitted because the survey could not confirm it | Unverified items are a release blocker; each must resolve to published or confirmed-absent before the page ships |
-| Policy unreachable for clients on a stale service worker after release | External entry point registered as a release dependency; in-app new-tab link does not and cannot mitigate this |
+| Policy unreachable for clients on a stale service worker after release | Unmitigated and transient — the window closes when the new worker activates. No entry point escapes a same-origin worker, so this is accepted rather than solved |
 | Route tests pass while returning visitors still get the app shell | Browser verification is a named requirement, not an optional check |
 | Allowlist change accidentally widens the auth boundary | Exact match only; a prefix-sibling test proves the boundary held; helper semantics left alone |
 | Policy unreachable in practice because push is disabled and the card is dismissible | Persistent app-shell link |
@@ -392,7 +392,8 @@ The two red terminals are the current production behavior, and they are reached 
 ## Documentation / Operational Notes
 
 - Post the corrected facts back to `#238` so the issue stops standing as an inaccurate content spec — specifically the omitted stored fields, the tombstone retention class, ownership-transfer deactivation, the rotation semantics, the audit contents, and the unverified export surface.
-- Register the published URL as the GitHub App's privacy policy link once the release deploys. Treat this as a release dependency, not a follow-up: it is the only reachable path to the policy both for an unauthenticated visitor (login redirects straight to GitHub, with no dashboard-served landing page) and for any operator still on a stale service worker.
+- **Correction — there is no such registration.** An earlier draft of this plan called for registering the published URL as the GitHub App's privacy policy link, and treated it as a release dependency. That field does not exist. A GitHub App's settings carry a name, description, homepage URL, callback URLs, a setup URL, webhook configuration, permissions, and installation scope — no privacy policy URL. The privacy policy field belongs to a GitHub Marketplace listing, which is a separate artifact and applies only to listed apps. This app is not listed, so nothing can be registered.
+- The concern behind that step was that an unauthenticated visitor has no in-product path to the policy, since `/` redirects through the gateway to GitHub's authorization screen with no dashboard-served page in between. The flow is accurate but the concern is weak here: this is a single-operator deployment, so there is no population of unauthenticated visitors. The policy is publicly reachable at a stable URL, which is what the page exists to provide. If a pre-auth link were ever wanted, the only real mechanism is product-side — serve a minimal public landing at `/` instead of redirecting.
 - Push enablement stays blocked until a release containing this page is deployed. That sequencing is the point of the gate — do not flip the flag in the same change.
 - Verify live with the documented dev-server recipe: background the server, no `--watch`, fresh port, kill orphans first.
 
