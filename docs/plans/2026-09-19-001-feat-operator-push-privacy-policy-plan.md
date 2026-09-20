@@ -193,18 +193,17 @@ The two red terminals are the current production behavior, and they are reached 
 - Test: `web/src/privacy/claims.test.ts`
 
 **Approach:**
-- Mirror the vendored-contract discipline: a header stamping the upstream repository, the exact tag the claims were verified against, and the verification date; a README recording what was surveyed, what could not be verified, and where each claim came from.
+- Name the upstream that owns the behavior, and keep a README recording what was surveyed, what could not be confirmed, and where each claim came from. Record no version and no verification date: a string nothing bumps goes stale while still reading as authoritative, and the vendored contract next door already demonstrates that failure.
 - Record the claims research already completed: stored subscription fields including the endpoint hash and the ownership-generation counter; the inactive-record retention default and the separate, longer tombstone retention default, both noted as configurable; the deactivation reason set including ownership transfer; the safe-metadata projection actually returned to operators; audit event contents including event kind, correlation identifier, and dispatch trigger label; and VAPID rotation as stale-key dispatch suppression rather than deactivation.
 - Record the unverified items explicitly rather than asserting them: whether a standalone export route exists, and the actual relay vendor mix.
 - Keep the artifact free of endpoints, key material, and internal route names — it is compiled into a public page.
 
 **Patterns to follow:**
-- `src/gateway/operator-contract/README.md` for the source-and-tag header and the omissions record.
-- `test/operator-contract-conformance.test.ts` for conformance-test shape.
+- `src/gateway/operator-contract/README.md` for the omissions record — its source-and-tag header is the part to avoid, not copy.
+- `test/operator-contract-conformance.test.ts` for test shape.
 
 **Test scenarios:**
 - Happy path: every claim key the policy page references resolves to a non-empty value.
-- Happy path: the artifact declares an upstream repository, a tag, and a verification date.
 - Edge case: retention values are expressed with their units and marked configurable, so the copy cannot render a bare number as an absolute guarantee.
 - Error path: a claim recorded as unverified is flagged as such and cannot be rendered as an asserted fact.
 - Integration: the claim set covers every category the policy is required to disclose, so a missing disclosure fails rather than silently omitting.
