@@ -559,6 +559,13 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     path.startsWith('/icon-') ||
     path === '/sw.js' ||
     path === '/registerSW.js' ||
+    // Public privacy policy — a compliance document, unconditional in every
+    // deployment posture (not gated behind operatorUiEnabled, the fixture
+    // harness, or the push flag). Exact match only (plus the trailing-slash
+    // variant) — no startsWith/prefix match, so a future /privacy-* path
+    // does not silently become public.
+    path === '/privacy' ||
+    path === '/privacy/' ||
     // Listener machine-write path — public-before-session; HMAC-gated by the
     // route itself (see routes/listener.ts). The read/ack paths
     // (/api/listener/messages*, /api/listener/ack-all) are intentionally NOT
@@ -822,6 +829,16 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     c.res.headers.set('cache-control', 'no-cache, no-store, must-revalidate')
   })
   app.use('/registerSW.js', serveStatic({root: webDistRoot}))
+
+  // ── Public privacy policy — unconditional, flag-independent ────────────────
+  // Reads no cookie and validates no session (registered outside both auth
+  // branches via isPublicPath above), so authenticated and unauthenticated
+  // visitors get byte-identical responses. Serves ONLY the clean /privacy
+  // path (plus its trailing-slash variant, matching isPublicPath above) —
+  // /privacy.html itself is never registered as a route, which is what keeps
+  // the service worker's precache exclusion correct (see sw.ts).
+  app.get('/privacy', serveStatic({root: webDistRoot, path: 'privacy.html'}))
+  app.get('/privacy/', serveStatic({root: webDistRoot, path: 'privacy.html'}))
 
   // Warn early if the SPA build artifact is missing (GET / will 404 silently).
   if (!existsSync(`${webDistRoot}/index.html`)) {

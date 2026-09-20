@@ -7,7 +7,7 @@
  *   3. /api/*             → NetworkOnly  (default-deny; all API routes)
  *   4. precache           → precacheAndRoute(self.__WB_MANIFEST) + cleanupOutdatedCaches()
  *   5. /operator nav      → local redirect to / (canonicalize old links offline)
- *   6. navigate           → NavigationRoute(/) denylist [/auth/, /operator/auth/, /api/]
+ *   6. navigate           → NavigationRoute(/) denylist [/auth/, /operator/auth/, /api/, /privacy/]
  *
  * Precache (4) MUST come before the NavigationRoute (6): createHandlerBoundToURL
  * resolves '/' against the precache at call time, so the manifest must be
@@ -77,11 +77,14 @@ registerRoute(
 )
 
 // 6. Navigation requests → precached app shell.
-// /auth/*, /operator/auth/*, and /api/* are denylisted so server-side auth
-// redirects run for those paths.
+// /auth/*, /operator/auth/*, /api/*, and /privacy are denylisted so
+// server-side handling runs for those paths instead of the cached SPA shell.
+// /privacy is a public, unauthenticated document served by the server at
+// src/server.ts — without this exemption an SW-controlled client navigating
+// there would be served the precached app shell and never reach it.
 registerRoute(
   new NavigationRoute(createHandlerBoundToURL('/'), {
-    denylist: [/^\/auth(\/|$)/, /^\/operator\/auth(\/|$)/, /^\/api(\/|$)/],
+    denylist: [/^\/auth(\/|$)/, /^\/operator\/auth(\/|$)/, /^\/api(\/|$)/, /^\/privacy(\/|$)/],
   }),
 )
 

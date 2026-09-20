@@ -1,8 +1,10 @@
+import {Buffer} from 'node:buffer'
 import {existsSync, readdirSync} from 'node:fs'
 import {join} from 'node:path'
 import process from 'node:process'
 import {beforeAll, describe, expect, it, vi} from 'vitest'
 import {buildDashboardApp, buildSnapshotProvider, readServerBindConfig} from '../src/server.ts'
+import {SessionManager} from '../src/session.ts'
 
 describe('readServerBindConfig — server bind address (issue #13)', () => {
   it('defaults to 0.0.0.0:3000 so a sibling reverse-proxy container can reach it', () => {
@@ -492,6 +494,76 @@ describe('Auth gating regression', () => {
   it('/manifest.webmanifest is reachable without auth', async () => {
     const res = await app.request('/manifest.webmanifest')
     expect(res.status).not.toBe(401)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// /privacy — public policy route (issue #238 follow-up)
+//
+// The policy is a compliance document: it must be reachable by every visitor,
+// authenticated or not, in every deployment posture, and must not become a
+// prefix match that could later swallow an unrelated /privacy-* path.
+// ---------------------------------------------------------------------------
+
+describe('GET /privacy — public policy route', () => {
+  const TEST_KEY = Buffer.from('testkey-ABCDEFGHIJKLMNOPQRSTUV12', 'utf8') // 32 bytes
+  const TEST_OPERATOR = 'octocat'
+
+  it('returns 200 with no cookie (unauthenticated visitor)', async () => {
+    const app = await buildDashboardApp()
+    const res = await app.request('/privacy')
+    expect(res.status).toBe(200)
+  })
+
+  it('returns 200 with a valid operator session, and the body matches the unauthenticated response', async () => {
+    const anonApp = await buildDashboardApp()
+    const anonRes = await anonApp.request('/privacy')
+    const anonBody = await anonRes.text()
+
+    const authedApp = await buildDashboardApp({operatorLogin: TEST_OPERATOR, cookieKey: TEST_KEY})
+    const sm = new SessionManager(TEST_KEY)
+    const cookieValue = sm.sign(TEST_OPERATOR)
+    const authedRes = await authedApp.request('/privacy', {
+      headers: {cookie: `session=${cookieValue}`},
+    })
+    const authedBody = await authedRes.text()
+
+    expect(authedRes.status).toBe(200)
+    expect(authedBody).toBe(anonBody)
+  })
+
+  it('the trailing-slash variant returns 200, not a redirect', async () => {
+    const app = await buildDashboardApp()
+    const res = await app.request('/privacy/')
+    expect(res.status).toBe(200)
+  })
+
+  it('a query string appended does not defeat the allowlist match', async () => {
+    const app = await buildDashboardApp()
+    const res = await app.request('/privacy?utm_source=test')
+    expect(res.status).toBe(200)
+  })
+
+  it('a sibling path sharing the prefix is still auth-gated (proves this is not a prefix match)', async () => {
+    // No operator configured — the app fails closed: an unrecognized protected
+    // path returns 401, not the policy document.
+    const app = await buildDashboardApp()
+    const res = await app.request('/privacy-policy-internal')
+    expect(res.status).not.toBe(200)
+    expect(res.status).toBe(401)
+  })
+
+  it('stays public when the operator-UI and fixture-harness flags are off', async () => {
+    const app = await buildDashboardApp({operatorUiEnabled: false, fixtureHarnessEnabled: false})
+    const res = await app.request('/privacy')
+    expect(res.status).toBe(200)
+  })
+
+  it('an existing protected route still redirects to login, proving the allowlist boundary did not widen', async () => {
+    const app = await buildDashboardApp({operatorLogin: TEST_OPERATOR, cookieKey: TEST_KEY})
+    const res = await app.request('/')
+    expect([302, 303]).toContain(res.status)
+    expect(res.headers.get('location')).toContain('/auth/login')
   })
 })
 
