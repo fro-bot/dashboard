@@ -19,7 +19,7 @@ importers:
         version: 0.1.0
       '@hono/node-server':
         specifier: ^2.0.0
-        version: 2.1.1(hono@4.13.7)
+        version: 2.1.1(hono@4.13.8)
       '@octokit/auth-app':
         specifier: 8.3.1
         version: 8.3.1
@@ -37,7 +37,7 @@ importers:
         version: 11.0.5(@octokit/core@7.0.8)
       hono:
         specifier: ^4.7.11
-        version: 4.13.7
+        version: 4.13.8
       yaml:
         specifier: 2.9.1
         version: 2.9.1
@@ -49,8 +49,8 @@ importers:
         specifier: 0.13.2
         version: 0.13.2
       '@opencode-ai/plugin':
-        specifier: 1.18.30
-        version: 1.18.30
+        specifier: 1.18.31
+        version: 1.18.31
       '@tailwindcss/vite':
         specifier: 4.3.3
         version: 4.3.3(vite@8.3.0(@types/node@24.13.3)(jiti@2.7.0)(terser@5.48.0)(yaml@2.9.1))
@@ -1053,8 +1053,8 @@ packages:
   '@octokit/types@18.0.0':
     resolution: {integrity: sha512-l6bAF43PNxkJp6g+W4PjoUSSkxHomXw2nOum5CTftJz1NlV3vu93NImgOYtLf6CbBUb5j+fiuzW0PPQ5JTSvZA==}
 
-  '@opencode-ai/plugin@1.18.30':
-    resolution: {integrity: sha512-bXWcA2VD478PXXke1qAYANTq58fCcbgY0GAUqZIFZqPpo48FoG8RH37nNZ78eHtz+ddiKIhFTBZJRaHF3IgFqw==}
+  '@opencode-ai/plugin@1.18.31':
+    resolution: {integrity: sha512-Rdc1bPK06PByaGyGd0kf7JUZ4pTkexz2OOUNlqZWLpHOiMEZ+/rFGjt46ypZ3QwA697gNdWwwwQbHbKG5NMwGA==}
     peerDependencies:
       '@opentui/core': '>=0.4.5'
       '@opentui/keymap': '>=0.4.5'
@@ -1067,8 +1067,8 @@ packages:
       '@opentui/solid':
         optional: true
 
-  '@opencode-ai/sdk@1.18.30':
-    resolution: {integrity: sha512-uviJ+PZLc/D1szt33WGzzt/rqJ+IaNmRGBb+UcOXrcQANl8XXKJrp4CNQQ2UAnUJ3Ek+VqcamIwjtKHUW/OjOQ==}
+  '@opencode-ai/sdk@1.18.31':
+    resolution: {integrity: sha512-Raouthf8Lhe9edjvYeeSK7SgvdoU6bBjH9qV3f70dHoa6h+z0X2TMz/e22/wKp/StlFUZ4kIRpYYxFnY8/k01w==}
 
   '@ota-meshi/ast-token-store@0.3.0':
     resolution: {integrity: sha512-XRO0zi2NIUKq2lUk3T1ecFSld1fMWRKE6naRFGkgkdeosx7IslyUKNv5Dcb5PJTja9tHJoFu0v/7yEpAkrkrTg==}
@@ -2621,8 +2621,8 @@ packages:
     resolution: {integrity: sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A==}
     engines: {node: '>= 0.4'}
 
-  hono@4.13.7:
-    resolution: {integrity: sha512-c8/gF9ac8Y78/agExVocyLevgR+JlpNB444Py0FSX8pJoPdYUfUzRcXtYEYGwt6l19qIlVZPN5Mfsw9jFShmQQ==}
+  hono@4.13.8:
+    resolution: {integrity: sha512-/Gng7NfoykZl2pjukW5Z6+8Yxm3BPRf86GTbQnt0SbySkvax4fyL4H3HhY1cCpBGmiW9XDRFzRV+CXK2W8QudQ==}
     engines: {node: '>=16.9.0'}
 
   hookified@1.15.1:
@@ -5009,9 +5009,9 @@ snapshots:
       '@octokit/rest': 22.0.1
       yaml: 2.9.1
 
-  '@hono/node-server@2.1.1(hono@4.13.7)':
+  '@hono/node-server@2.1.1(hono@4.13.8)':
     dependencies:
-      hono: 4.13.7
+      hono: 4.13.8
 
   '@humanfs/core@0.19.2':
     dependencies:
@@ -5219,14 +5219,14 @@ snapshots:
     dependencies:
       '@octokit/openapi-types': 29.0.1
 
-  '@opencode-ai/plugin@1.18.30':
+  '@opencode-ai/plugin@1.18.31':
     dependencies:
       '@ai-sdk/provider': 3.0.8
-      '@opencode-ai/sdk': 1.18.30
+      '@opencode-ai/sdk': 1.18.31
       effect: 4.0.0-beta.83
       zod: 4.1.8
 
-  '@opencode-ai/sdk@1.18.30':
+  '@opencode-ai/sdk@1.18.31':
     dependencies:
       cross-spawn: 7.0.6
 
@@ -6723,7 +6723,7 @@ snapshots:
     dependencies:
       function-bind: 1.1.2
 
-  hono@4.13.7: {}
+  hono@4.13.8: {}
 
   hookified@1.15.1: {}
 
