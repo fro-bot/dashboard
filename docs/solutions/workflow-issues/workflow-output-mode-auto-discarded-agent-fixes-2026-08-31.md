@@ -303,6 +303,12 @@ silently in the unsafe direction.
   because both make the daily run untrustworthy in different ways.
 - Issue #410 — the daily report whose "Needs Human Attention #1" identified the
   missing PR handoff, closed once delivery was verified.
-- Upstream `fro-bot/agent#1517` — the credential preflight fails open against
-  `actions/checkout` v6's `includeIf` layout. Tracked by a smart note; revisit
-  the local `persist-credentials` conditional if upstream closes it.
+- Upstream `fro-bot/agent#1517` — the credential preflight failed open against
+  `actions/checkout` v6's `includeIf` layout. Fixed by PR #1597, first released in
+  v0.111.0; detection is now include-aware
+  (`git config --includes --name-only --get-regexp '^http\.(.*\.)?extraheader$'`).
+  Revisited 2026-09-20: **keep the local conditional.** The fix makes the preflight
+  detect a persisted credential, not tolerate one, and v0.111.0 is a breaking change
+  where withheld runs reject effective credentials from any scope and deny when
+  verification cannot complete. Without the conditional those runs would now fail
+  closed. Upstream guidance still says to set `persist-credentials: false`.

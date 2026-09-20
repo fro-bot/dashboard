@@ -1,5 +1,5 @@
 ---
-title: Fro Bot bootstrap timeout is absorbing — purge every opencode cache to recover
+title: Fro Bot bootstrap timeout was absorbing — fixed upstream, do not purge caches
 date: 2026-08-31
 category: workflow-issues
 module: dashboard
@@ -27,7 +27,24 @@ tags:
   - upstream-bug
 ---
 
-# Fro Bot bootstrap timeout is absorbing — purge every opencode cache to recover
+# Fro Bot bootstrap timeout was absorbing — fixed upstream, do not purge caches
+
+> **Resolved upstream. The purge recipe below is history, not instructions.**
+> `fro-bot/agent#1407` was fixed by PR #1519, first released in **v0.107.1**. The
+> restored database is now repaired before OpenCode opens it, and the database is
+> checkpointed inside `saveCache`, so a poisoned cache heals on the next run with no
+> manual deletion and no loss of session history. It is not a prune guard, and
+> restore-key fallback is unchanged. `server-bootstrap-timeout` also became a
+> configurable input with a bounded default.
+>
+> This repo is pinned well past v0.107.1, so **do not delete caches**. On a current
+> pin this signature is a new problem and deleting caches will destroy session
+> history for nothing. Read the recognition signals below, then investigate fresh.
+>
+> The fix also settles the question this document left open. The measurements here
+> showed cache *size* did not explain the failure — a smaller cache succeeded while
+> larger ones timed out. The real cause was database corruption, which is why a purge
+> worked and why size never correlated. The skepticism recorded below was right.
 
 ## Context
 
@@ -53,9 +70,11 @@ Three signals together are conclusive enough to skip investigation:
 If those hold, do not read the diff, do not re-run, and do not treat it as a
 review rejection.
 
-### 2. Purge every `opencode-*` cache
+### 2. Purge every `opencode-*` cache — obsolete, kept for the record
 
-Deleting only the PR's cache does **not** work. Restore-keys fall back to the
+This was the recovery before v0.107.1. Do not run it on a current pin.
+
+Deleting only the PR's cache did **not** work. Restore-keys fall back to the
 `opencode-storage-github-<owner>-<repo>-` prefix, so the run re-inherits the
 `main` branch entry. Both `opencode-storage-*` and `opencode-tools-*` must go.
 
@@ -76,7 +95,8 @@ seconds. The following run restores the freshly saved cache and stays green.
 
 ### 3. Do not bother with these
 
-- **Raising a timeout.** There is no workflow-level knob. See below.
+- **Raising a timeout.** There was no workflow-level knob at the time. As of
+  v0.107.1 there is: `server-bootstrap-timeout`, with a bounded default.
 - **`skip-cache: true`.** It is honored by both restore (`restore.ts:144`) and
   save (`save.ts:76`), so it suppresses the symptom for one run without ever
   shrinking the stored entry. Remove the flag and the same cache is still there.
@@ -162,13 +182,17 @@ Fro Bot   fail   34s
 Fro Bot   pass   2m38s
 ```
 
-## When to revisit
+## Resolution
 
-- `fro-bot/agent#1407` closes or a release parameterises the bootstrap timeout,
-  or prunes without requiring a live server. Then re-check whether this recipe
-  is still needed and bump the pin in `.github/workflows/fro-bot.yaml`.
-- The cache regrows and the failure returns. There is no local mitigation; the
-  purge is the only known recovery.
+Both revisit conditions fired, and were checked on 2026-09-20.
+
+- `fro-bot/agent#1407` closed completed on 2026-09-02, fixed by PR #1519 and first
+  released in v0.107.1. The bootstrap timeout is now parameterised as
+  `server-bootstrap-timeout`.
+- The pin in `.github/workflows/fro-bot.yaml` was already well past that release, so
+  no bump was needed.
+- The recipe is retired. A poisoned cache now repairs itself on restore, so the
+  absorbing property that made this worth documenting no longer exists.
 
 ## Related
 
