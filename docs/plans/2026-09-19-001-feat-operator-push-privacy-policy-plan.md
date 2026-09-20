@@ -12,7 +12,7 @@ origin: docs/brainstorms/2026-07-08-operator-push-notifications-requirements.md
 
 Publish a public, unauthenticated privacy policy for operator Web Push at `/privacy`, and link it from the push consent surface. This closes the last gate the operator-push work deferred: production push cannot be enabled until the policy ships.
 
-The page is a static document built as a second Vite entry, served outside the operator auth boundary, and exempted from the service worker's navigation fallback. Its factual claims are pinned to a recorded `fro-bot/agent` version and guarded against drift.
+The page is a static document built as a second Vite entry, served outside the operator auth boundary, and exempted from the service worker's navigation fallback. Its factual claims live in a single structured claims artifact, and the page's content test binds to that artifact so a disclosure cannot be dropped from the page silently.
 
 `DASHBOARD_OPERATOR_PUSH_ENABLED` stays off throughout. No flag flip belongs in this work.
 
@@ -31,14 +31,13 @@ The service worker registers a catch-all navigation route that serves the precac
 ## Requirements Trace
 
 - R1. A stable public policy URL returns 200 with no operator session and no login redirect — for a cold visitor and for a client with an active service worker.
-- R2. Policy content is accurate against the Gateway implementation at a recorded pinned version: stored fields, inactive and tombstone retention, deactivation triggers, export surface, audit event contents, and VAPID rotation semantics.
+- R2. Policy content is accurate against the Gateway implementation: stored fields, inactive and tombstone retention, deactivation triggers, export surface, audit event contents, and VAPID rotation semantics.
 - R3. The policy discloses third-party push relay processing and the metadata a relay can observe (origin R11, R23).
-- R4. The policy carries the standard notice elements: controller identity and contact route, legal basis, data-subject rights and complaint route, and an effective date.
+- R4. The policy states that this is a single-operator deployment where operator and controller are the same party, keeps the substantive disclosures in full, publishes a GitHub issue link as the contact route, and omits the data-subject-rights apparatus as inapplicable.
 - R5. The policy exposes no VAPID private material, no subscription endpoints, no browser encryption keys, and no internal route or implementation detail.
 - R6. The consent surface links to the policy before native permission is requested, and the policy stays reachable when the consent card is dismissed or push is disabled.
 - R7. Route tests cover unauthenticated access; service-worker behavior is verified in a real browser, not by unit tests alone.
 - R8. `DASHBOARD_OPERATOR_PUSH_ENABLED` remains off.
-- R9. A drift signal fails when the Gateway's privacy-relevant behavior diverges from the published claims.
 
 ## Scope Boundaries
 
@@ -52,7 +51,6 @@ The service worker registers a catch-all navigation route that serves the precac
 
 - Correcting the `#238` issue body itself so it stops standing as an inaccurate spec: a comment on the issue during this work, not a code change.
 - Resolving the survey's unverified items is *not* deferred — see the release gate in Key Technical Decisions. It blocks Unit 2.
-- Refreshing the stale vendored contract header (`src/gateway/operator-contract/README.md` still records `v0.78.0` against a deployed `v0.93.1`): separate maintenance task, tracked with the drift work in Unit 6.
 - Production enablement of push: `marcusrbrown/infra`, after this ships.
 
 ## Context & Research
@@ -81,7 +79,7 @@ No existing learning covers a privacy-policy page or push-consent copy.
 
 ### External References
 
-- Gateway push implementation surveyed at `fro-bot/agent@v0.113.2`, with the deployed pin at `v0.93.1` recorded from `marcusrbrown/infra` `apps/gateway/upstream.json`. Live `dashboard.fro.bot/operator/health` reports contract `1.6.0`.
+- Research was done against the Gateway push implementation, not the issue text.
 - Practical disclosure baseline for a Web Push notice: controller and contact, purposes, data categories, legal basis, recipients including relays, retention, data-subject rights and complaint route, security and encryption limits, opt-out and deletion, and an effective date.
 - Browser push delivery passes through a browser-vendor push service; the endpoint identifies that service, and payload encryption does not prevent the relay from observing endpoint identity, timing, and encrypted payload size.
 
@@ -135,7 +133,8 @@ No existing learning covers a privacy-policy page or push-consent copy.
 - **Exempt the policy path in the service worker's navigation denylist.** Without it, a controlled client is served the precached SPA shell and never reaches the server. This is the difference between passing route tests and actually working.
 - **Add the path to the allowlist by exact match, including its trailing-slash variant.** Reject case-folding or slash-normalizing `isPublicPath` itself: that function is a security boundary shared by both auth branches, and normalizing it silently widens every existing entry. Reject prefix matching for the same reason — a later `/privacy-*` path would become public by accident.
 - **Treat the Gateway as the authority and the issue text as a draft.** Where `#238` and the implementation disagree, the implementation wins and the issue gets corrected.
-- **Keep policy facts in one pinned claims artifact the page renders from.** Facts stated in prose in a page nobody diffs will drift silently; facts in a stamped artifact can be asserted against.
+- **Keep policy facts in one structured artifact that the page's content test binds to.** Facts stated only in prose in a page nobody diffs can be dropped silently; a content test bound to a structured artifact fails the build when a disclosure goes missing.
+- **Frame the notice for a single-operator deployment, not a general controller/data-subject apparatus.** The page states that operator and controller are the same party, keeps the substantive disclosures in full, and publishes a GitHub issue link as the contact route; the data-subject-rights and complaint apparatus a multi-party service needs is omitted as inapplicable.
 - **Open the policy in a new tab from inside the app.** Same-tab navigation to a separate document tears down the SPA, severing in-flight run streams and losing the operator's place. This is state preservation only — a new tab on the same origin is still service-worker controlled, so it does not escape a stale worker's navigation handling.
 - **Disclose data categories, never instances, and never exact internal schema.** The page must say that an operator GitHub user identifier is stored; it must not publish one. It must describe what audit records cover; it must not publish the event field names or correlation schema. Those are not secrets, but on a permanent public page they are free reconnaissance.
 - **Treat an unverified claim as a release blocker, not a third state.** Silently omitting a real processing activity from a privacy notice is itself a compliance failure. Every item the survey could not confirm must resolve to published-because-true or excluded-because-confirmed-absent before the page ships.
@@ -144,10 +143,9 @@ No existing learning covers a privacy-policy page or push-consent copy.
 
 ### Resolved During Planning
 
-- *Where should the privacy policy live, and what retention/export/delete language is required?* (origin, deferred to planning) — At `/privacy`, as a static document built with the client. Language is derived from the Gateway implementation at a recorded pinned version, not from the issue text.
+- *Where should the privacy policy live, and what retention/export/delete language is required?* (origin, deferred to planning) — At `/privacy`, as a static document built with the client. Language is derived from the Gateway implementation, not from the issue text.
 - *Is the issue's required-content list usable as the content spec?* — No. It omits stored fields, omits tombstone retention entirely, omits ownership-transfer deactivation, misstates VAPID rotation as deactivation, understates audit contents, and asserts an unverified export surface. The plan publishes a corrected superset and reports the corrections back to the issue.
 - *Does building the page in the client tree put it under the CI Design Check?* — No. The detector is invoked against the client source directory, and the new HTML entry sits at the client root, outside it. Token coverage does carry over, because the page shares the stylesheet the token tests assert against. The detector gap is real and is closed explicitly in Unit 2 rather than assumed away.
-- *Can the drift guard assert against a locally pinned Gateway version?* — Not directly. This repository pins `fro-bot/agent` only as a workflow action; the deployed gateway version is pinned in `marcusrbrown/infra`. So the PR-gate test is offline and structural — every fact the page renders must come from the claims artifact, and the artifact must declare the ref and date it was verified against — while the cross-repo comparison runs on a schedule where network access is acceptable. Splitting it this way keeps the PR gate deterministic without weakening the signal.
 
 ### Deferred to Implementation
 
@@ -170,7 +168,7 @@ flowchart TD
     D --> E{isPublicPath exact match?}
     E -->|No — current behavior| Y[302 to operator login]
     E -->|Yes — after this work| F[Static policy document, 200]
-    F --> G[Renders facts sourced from<br/>pinned claims artifact]
+    F --> G[Renders facts sourced from<br/>the claims artifact]
 
     style X fill:#4a1f1f,color:#fff
     style Y fill:#4a1f1f,color:#fff
@@ -181,11 +179,11 @@ The two red terminals are the current production behavior, and they are reached 
 
 ## Implementation Units
 
-- [ ] **Unit 1: Pinned Gateway privacy claims artifact**
+- [x] **Unit 1: Gateway privacy claims artifact**
 
 **Goal:** Establish one stamped source of truth for every factual claim the policy makes about Gateway behavior, so the copy has something to be correct against.
 
-**Requirements:** R2, R9
+**Requirements:** R2
 
 **Dependencies:** None
 
@@ -217,7 +215,7 @@ The two red terminals are the current production behavior, and they are reached 
 
 ---
 
-- [ ] **Unit 2: Policy page as a second client build entry**
+- [x] **Unit 2: Policy page as a second client build entry**
 
 **Goal:** Produce a standalone, JS-free policy document that builds with the client and inherits its design tokens.
 
@@ -235,7 +233,7 @@ The two red terminals are the current production behavior, and they are reached 
 - Add the second entry to the existing `rollupOptions` input. HTML entries are emitted by resolved path and are unaffected by the custom asset-naming patterns, so the existing output shape is preserved and hashed assets keep landing under the already-allowlisted assets path.
 - Add the emitted HTML filename to `injectManifest.globIgnores`. The pattern must match the built artifact in the output directory, not the source path — an ignore written against the source name will not match, the file enters the precache manifest, its install fetch 404s, and the service worker goes redundant and never registers. This is the single highest-risk step in the plan.
 - Extend the Design Check's detector path so it covers the new entry. Without this the page is outside the gate that exists to catch exactly the kind of hand-rolled styling a standalone document invites. Flag the workflow change for owner approval rather than landing it silently.
-- Write the policy content covering, at minimum: that push is optional and consent-gated and carries only pending-approval and failed-run notices; the stored data categories from Unit 1; that the endpoint and browser keys are never returned by any read surface; that payloads use fixed neutral copy and allowlisted labels and exclude repositories, prompts, run identifiers, outputs, endpoints, keys, tokens, and session data; the deactivation triggers; both retention classes; what deletion does and what a tombstone retains; audit event scope; third-party relay processing and what a relay can observe; controller identity and contact route; legal basis; data-subject rights and complaint route; and an effective date.
+- Write the policy content covering, at minimum: that push is optional and consent-gated and carries only pending-approval and failed-run notices; the stored data categories from Unit 1; that the endpoint and browser keys are never returned by any read surface; that payloads use fixed neutral copy and allowlisted labels and exclude repositories, prompts, run identifiers, outputs, endpoints, keys, tokens, and session data; the deactivation triggers; both retention classes; what deletion does and what a tombstone retains; audit event scope; third-party relay processing and what a relay can observe; that this is a single-operator deployment where operator and controller are the same party; a GitHub issue link as the contact route; legal basis; and that the data-subject-rights apparatus is omitted as inapplicable.
 - Source every factual sentence from Unit 1's artifact.
 
 **Execution note:** Write the content-leak assertions before the copy, so the prohibitions are enforced from the first draft rather than audited afterward.
@@ -246,7 +244,7 @@ The two red terminals are the current production behavior, and they are reached 
 
 **Test scenarios:**
 - Happy path: the page renders each required disclosure category.
-- Happy path: the page declares an effective date and a contact route.
+- Happy path: the page declares the single-operator controller framing and a contact route.
 - Error path: no VAPID private material, concrete endpoint URL, browser key value, session identifier, or internal route name appears anywhere in the output.
 - Error path: no concrete account identifier, GitHub login, or internal audit field name appears — categories are described, instances and schema are not.
 - Edge case: retention statements name both the inactive-record and tombstone periods, and do not present either as unconditional.
@@ -260,7 +258,7 @@ The two red terminals are the current production behavior, and they are reached 
 
 ---
 
-- [ ] **Unit 3: Public route and pre-auth allowlist entry**
+- [x] **Unit 3: Public route and pre-auth allowlist entry**
 
 **Goal:** Serve the built document at a stable public path that returns 200 with no session.
 
@@ -298,7 +296,7 @@ The two red terminals are the current production behavior, and they are reached 
 
 ---
 
-- [ ] **Unit 4: Service-worker navigation exemption**
+- [x] **Unit 4: Service-worker navigation exemption**
 
 **Goal:** Stop the service worker from serving the SPA shell in place of the policy page for controlled clients.
 
@@ -332,7 +330,7 @@ The two red terminals are the current production behavior, and they are reached 
 
 ---
 
-- [ ] **Unit 5: Consent-surface link and persistent entry point**
+- [x] **Unit 5: Consent-surface link and persistent entry point**
 
 **Goal:** Put the policy in front of the operator before consent, and keep it reachable afterward.
 
@@ -369,41 +367,6 @@ The two red terminals are the current production behavior, and they are reached 
 - The policy is reachable from the app with push disabled and the card dismissed.
 - No render path requests notification permission as a side effect of showing the link.
 
----
-
-- [ ] **Unit 6: Cross-repo drift check**
-
-**Goal:** Fail loudly when Gateway behavior diverges from the published claims, instead of discovering it in an audit.
-
-**Requirements:** R9
-
-**Dependencies:** Unit 1. Independent of Units 2-5 and can run alongside them.
-
-**Files:**
-- Create: `.github/workflows/privacy-claims-drift.yaml`
-- Modify: `web/src/privacy/README.md`
-
-**Approach:**
-- Run on a schedule, not as a PR gate, so the network dependency never makes a pull request flaky.
-- Fetch the Gateway source at both the deployed pin and the latest release, and compare the privacy-relevant values against the claims artifact: retention defaults, the stored field set, the deactivation reason set, the safe-metadata projection, and the audit event shape.
-- Report divergence as an actionable signal identifying which claim drifted and at which version, rather than a bare failure.
-- Follow the repository's workflow conventions: pinned action SHAs with version comments, least-privilege permissions, and the shared setup action.
-- Record in the README that the claims artifact has a scheduled owner, so the next person to bump the Gateway knows the obligation exists.
-
-**Patterns to follow:**
-- Existing workflows for permission scoping and SHA-pinned actions.
-- `test/operator-contract-conformance.test.ts` for what "conformance against a pinned upstream" means in this repo.
-
-**Test scenarios:**
-- Happy path: with claims matching the pinned Gateway, the check passes.
-- Error path: a changed retention default is reported as drift naming the claim and the version.
-- Error path: a stored field added upstream is reported as an undisclosed field.
-- Edge case: an unreachable upstream is reported as an inconclusive run, not as a false pass.
-
-**Verification:**
-- A deliberate mismatch produces a failing run naming the specific claim.
-- An upstream fetch failure does not report success.
-
 ## System-Wide Impact
 
 - **Interaction graph:** The pre-auth allowlist is consulted by both the Gateway and Arctic auth branches, so one entry changes both. The service-worker denylist affects every same-origin navigation. The app-shell link renders on every authenticated view.
@@ -417,7 +380,7 @@ The two red terminals are the current production behavior, and they are reached 
 
 | Risk | Mitigation |
 |------|------------|
-| Published policy misstates Gateway behavior | Facts pinned to a surveyed version in one artifact; page sources every claim from it; scheduled drift check |
+| Published policy misstates Gateway behavior, or goes stale as the Gateway's push behavior changes | Facts live in one claims artifact; the page's content test binds every rendered claim to it; the artifact is re-surveyed when the Gateway's push behavior changes |
 | Second build entry enters the precache and 404s at install, making the service worker redundant | Ignore pattern written against the emitted artifact path, not the source path; install and activation verified in a real browser before merge |
 | New page escapes the CI Design Check and accumulates hand-rolled styling | Detector scan path extended in the same unit that creates the page; workflow change surfaced for owner approval |
 | A real processing activity is omitted because the survey could not confirm it | Unverified items are a release blocker; each must resolve to published or confirmed-absent before the page ships |
@@ -425,15 +388,12 @@ The two red terminals are the current production behavior, and they are reached 
 | Route tests pass while returning visitors still get the app shell | Browser verification is a named requirement, not an optional check |
 | Allowlist change accidentally widens the auth boundary | Exact match only; a prefix-sibling test proves the boundary held; helper semantics left alone |
 | Policy unreachable in practice because push is disabled and the card is dismissible | Persistent app-shell link |
-| Gateway drifts after publication and nobody notices | Scheduled cross-repo check reporting the specific diverged claim |
 | Unverified claims published as fact | Unverified items recorded as such in the artifact and barred from the page by test |
-| Vendored-contract header already stale at `v0.78.0` against a deployed `v0.93.1` | Refresh tracked as a separate task; the new artifact carries its own tag independently |
 
 ## Documentation / Operational Notes
 
 - Post the corrected facts back to `#238` so the issue stops standing as an inaccurate content spec — specifically the omitted stored fields, the tombstone retention class, ownership-transfer deactivation, the rotation semantics, the audit contents, and the unverified export surface.
 - Register the published URL as the GitHub App's privacy policy link once the release deploys. Treat this as a release dependency, not a follow-up: it is the only reachable path to the policy both for an unauthenticated visitor (login redirects straight to GitHub, with no dashboard-served landing page) and for any operator still on a stale service worker.
-- `fro-bot/.github#3512` records the deployed gateway as `v0.83.0`; it is actually `v0.93.1`. Worth correcting on the tracker while touching this rollout.
 - Push enablement stays blocked until a release containing this page is deployed. That sequencing is the point of the gate — do not flip the flag in the same change.
 - Verify live with the documented dev-server recipe: background the server, no `--watch`, fresh port, kill orphans first.
 
@@ -442,5 +402,4 @@ The two red terminals are the current production behavior, and they are reached 
 - **Origin document:** `docs/brainstorms/2026-07-08-operator-push-notifications-requirements.md` (requirement R11 deferred this work; R15 and R23 constrain its content)
 - Sibling plan: `docs/plans/2026-07-08-001-feat-operator-push-notifications-dashboard-plan.md`
 - Related issues: `fro-bot/dashboard#238`, `fro-bot/dashboard#108`, tracker `fro-bot/.github#3512`
-- Gateway implementation surveyed at `fro-bot/agent@v0.113.2`; deployed pin `v0.93.1` per `marcusrbrown/infra` `apps/gateway/upstream.json`
 - Related code: `src/server.ts` (`isPublicPath`), `web/src/sw.ts`, `web/vite.config.ts`, `web/src/views/Notifications.tsx`, `src/gateway/operator-contract/`
