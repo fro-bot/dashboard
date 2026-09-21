@@ -306,6 +306,62 @@ describe('subscribeOptIn', () => {
     expect(outcome).toEqual({kind: 'denied'})
   })
 
+  // GUARD: pins privacy.html's "Notifications are off until you turn them
+  // on, and turning them on requires explicit permission from your
+  // browser." A denied/dismissed prompt must never let the flow reach
+  // pushManager.subscribe.
+
+  it('GUARD: denied permission never reaches pushManager.subscribe', async () => {
+    const registration = fakeRegistration(fakeSubscription())
+    const outcome = await subscribeOptIn({
+      serviceWorkerReady: () => Promise.resolve(registration),
+      getSupport: () => ({supported: true, needsInstall: false}),
+      getPermission: () => 'default',
+      requestPermission: vi.fn().mockResolvedValue('denied'),
+      pushClient: fakePushClient(),
+    })
+    expect(outcome).toEqual({kind: 'denied'})
+    expect(registration.subscribeMock).not.toHaveBeenCalled()
+  })
+
+  it('GUARD: dismissed permission prompt never reaches pushManager.subscribe', async () => {
+    const registration = fakeRegistration(fakeSubscription())
+    const outcome = await subscribeOptIn({
+      serviceWorkerReady: () => Promise.resolve(registration),
+      getSupport: () => ({supported: true, needsInstall: false}),
+      getPermission: () => 'default',
+      requestPermission: vi.fn().mockResolvedValue('default'),
+      pushClient: fakePushClient(),
+    })
+    expect(outcome).toEqual({kind: 'dismissed'})
+    expect(registration.subscribeMock).not.toHaveBeenCalled()
+  })
+
+  it('GUARD: requestPermission is called before pushManager.subscribe when permission is not already granted', async () => {
+    const callOrder: string[] = []
+    const subscription = fakeSubscription()
+    const registration = fakeRegistration(subscription)
+    registration.subscribeMock.mockImplementation(async () => {
+      callOrder.push('subscribe')
+      return subscription
+    })
+    const requestPermission = vi.fn().mockImplementation(async () => {
+      callOrder.push('requestPermission')
+      return 'granted'
+    })
+
+    const outcome = await subscribeOptIn({
+      serviceWorkerReady: () => Promise.resolve(registration),
+      getSupport: () => ({supported: true, needsInstall: false}),
+      getPermission: () => 'default',
+      requestPermission,
+      pushClient: fakePushClient(),
+    })
+
+    expect(outcome).toEqual({kind: 'subscribed'})
+    expect(callOrder).toEqual(['requestPermission', 'subscribe'])
+  })
+
   it('VAPID fetch failure with granted permission -> subscribe-failed; retry skips native prompt', async () => {
     const requestPermission = vi.fn().mockResolvedValue('granted')
     const pushClient = fakePushClient({getVapidKey: vi.fn().mockResolvedValue(err({kind: 'http', status: 401}))})

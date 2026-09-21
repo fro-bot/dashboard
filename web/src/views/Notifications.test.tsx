@@ -481,6 +481,54 @@ describe('Notifications Component', () => {
     }
   })
 
+  // GUARD: pins privacy.html's "You can turn them off at any time from the
+  // dashboard." Distinct from the reconcile-driven cleanup-and-unsubscribe
+  // tests above (automatic drift cleanup, not user-initiated) — this is the
+  // user clicking the CTA while subscribed.
+
+  it('GUARD: clicking the CTA while subscribed calls unsubscribeOptOut and returns to not-requested', async () => {
+    addMetaTag()
+    const originalSw = Object.getOwnPropertyDescriptor(globalThis.navigator, 'serviceWorker')
+    const swStub = {
+      ready: Promise.resolve({pushManager: {getSubscription: async () => null}}),
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    }
+    Object.defineProperty(globalThis.navigator, 'serviceWorker', {
+      value: swStub,
+      configurable: true,
+    })
+    vi.mocked(runReconcileSweep).mockResolvedValue({
+      skipped: false,
+      action: undefined,
+      uiState: 'subscribed',
+      nextCache: {} as any,
+    })
+    vi.mocked(unsubscribeOptOut).mockResolvedValue({gatewayUnsubscribeCalled: true})
+
+    try {
+      await act(async () => {
+        render(<Notifications />)
+      })
+
+      const cta = screen.getByTestId('notifications-cta')
+      expect(cta).toHaveTextContent('Disable notifications')
+
+      await act(async () => {
+        fireEvent.click(cta)
+      })
+
+      expect(unsubscribeOptOut).toHaveBeenCalledTimes(1)
+      expect(screen.getByTestId('notifications-cta')).toHaveTextContent('Enable notifications')
+    } finally {
+      if (originalSw) {
+        Object.defineProperty(globalThis.navigator, 'serviceWorker', originalSw)
+      } else {
+        Reflect.deleteProperty(globalThis.navigator, 'serviceWorker')
+      }
+    }
+  })
+
   it('handleEnable ignores a second click while the first is in flight', async () => {
     addMetaTag()
     let resolveSubscribe: (outcome: {kind: 'subscribed'}) => void = () => undefined
