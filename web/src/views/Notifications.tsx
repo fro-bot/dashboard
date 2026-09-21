@@ -140,11 +140,17 @@ export function Notifications({
             setCurrentUiState('sw-not-ready')
           }
         } else if (result.action === 'cleanup') {
-          const reg = await navigator.serviceWorker.ready
-          const sub = await reg.pushManager.getSubscription()
-          if (sub) {
-            await sub.unsubscribe().catch(() => false)
-          }
+          // Must notify the Gateway with the endpoint — captured by
+          // unsubscribeOptOut BEFORE local unsubscribe() — or the Gateway
+          // record is orphaned. The next sweep then sees no local
+          // subscription and re-registers, minting a new endpoint per focus
+          // cycle (the incident this fixes). Same helper cleanup-and-
+          // unsubscribe already uses below.
+          await unsubscribeOptOut({
+            getLocalSubscription: () =>
+              navigator.serviceWorker.ready.then((r) => r.pushManager.getSubscription()),
+            pushClient,
+          })
           // Honor the state reconcile derived — `cleanup` fires for
           // push_disabled (→ unsupported), denied-without-subscription
           // (→ denied), and granted-but-drifted (→ not-requested). Hardcoding

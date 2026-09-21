@@ -427,6 +427,70 @@ describe('Notifications Component', () => {
     expect(screen.getByTestId('notifications-headline')).toHaveTextContent('Alerts Active')
   })
 
+  it('regression: `cleanup` action notifies the Gateway via unsubscribeOptOut, not a local-only unsubscribe', async () => {
+    addMetaTag()
+    // Pre-fix, `cleanup` called reg.pushManager.getSubscription()/unsubscribe()
+    // directly and never told the Gateway — orphaning its record, which the
+    // next sweep then "healed" by minting a brand new subscription. Must go
+    // through unsubscribeOptOut (same as cleanup-and-unsubscribe below),
+    // which captures the endpoint before unsubscribing locally.
+    vi.mocked(runReconcileSweep).mockResolvedValue({
+      skipped: false,
+      action: 'cleanup',
+      uiState: 'not-requested',
+      nextCache: {} as any,
+    })
+    vi.mocked(unsubscribeOptOut).mockResolvedValue({gatewayUnsubscribeCalled: true})
+
+    await act(async () => {
+      render(<Notifications />)
+    })
+
+    expect(unsubscribeOptOut).toHaveBeenCalledTimes(1)
+    expect(unsubscribeOptOut).toHaveBeenCalledWith(
+      expect.objectContaining({getLocalSubscription: expect.any(Function), pushClient: expect.anything()}),
+    )
+    expect(screen.getByTestId('notifications-headline')).toHaveTextContent('Push Alerts')
+  })
+
+  it('regression: an inconclusive sweep (uiState: undefined) preserves the current UI state instead of resetting to not-requested', async () => {
+    addMetaTag()
+    // First sweep: healthy, subscribed.
+    vi.mocked(runReconcileSweep).mockResolvedValueOnce({
+      skipped: false,
+      action: undefined,
+      uiState: 'subscribed',
+      nextCache: {} as any,
+    })
+
+    const {rerender} = render(<Notifications pushConfigReady={true} />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.getByTestId('notifications-headline')).toHaveTextContent('Alerts Active')
+
+    // Second sweep: inconclusive (e.g. a metadata read that raced the
+    // subscribe POST) — action: 'none', uiState: undefined. Pre-fix this
+    // fell back to uiState 'not-requested' and the CTA flipped to "Enable
+    // notifications" while the subscription was still live.
+    vi.mocked(runReconcileSweep).mockResolvedValueOnce({
+      skipped: false,
+      action: 'none',
+      uiState: undefined,
+      nextCache: {} as any,
+    })
+
+    await act(async () => {
+      rerender(<Notifications pushConfigReady={false} />)
+    })
+    await act(async () => {
+      rerender(<Notifications pushConfigReady={true} />)
+    })
+
+    expect(screen.getByTestId('notifications-headline')).toHaveTextContent('Alerts Active')
+    expect(screen.getByTestId('notifications-cta')).toHaveTextContent('Disable notifications')
+  })
+
   it('runs reconcile actions: cleanup-and-unsubscribe', async () => {
     addMetaTag()
     vi.mocked(runReconcileSweep).mockResolvedValue({

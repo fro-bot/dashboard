@@ -79,8 +79,29 @@ export type ReconcileUiState =
 export type ReconcileAction = 'none' | 'register' | 'resubscribe' | 'cleanup' | 'cleanup-and-unsubscribe'
 
 export interface ReconcileResult {
-  readonly uiState: ReconcileUiState
+  /**
+   * `undefined` means "no change" — an inconclusive sweep must not reset
+   * the UI to a default state; the caller should preserve whatever it's
+   * currently showing.
+   */
+  readonly uiState: ReconcileUiState | undefined
   readonly action: ReconcileAction
+}
+
+export interface ReconcileOptions {
+  /**
+   * Whether a `not_subscribed` handoffState reflects a *confirmed*
+   * divergence — Gateway metadata was actually read (not just absent/
+   * unparseable) AND the local subscription's endpoint hash was actually
+   * computed AND the two genuinely disagree — as opposed to merely
+   * inconclusive input. `derivePushHandoffState` collapses "no metadata",
+   * "no local hash", and "confirmed mismatch" into the same `not_subscribed`
+   * value; only the caller (which holds the raw metadata/hash) can tell
+   * them apart. Defaults to `false` (never treat as confirmed) when
+   * omitted, so a caller that forgets to pass it fails safe rather than
+   * destructive.
+   */
+  readonly notSubscribedConfirmed?: boolean
 }
 
 /**
@@ -95,6 +116,7 @@ export function reconcile(
   permission: NotificationPermission,
   localSubscriptionPresent: boolean,
   handoffState: HandoffState,
+  options?: ReconcileOptions,
 ): ReconcileResult {
   // push_disabled wins regardless of permission/local state.
   if (handoffState === 'push_disabled') {
@@ -129,6 +151,18 @@ export function reconcile(
   }
 
   // not_subscribed / inactive
+
+  // `not_subscribed` while a local subscription is present is only safe to
+  // act on (`cleanup`) when the divergence is confirmed. An inconclusive
+  // read here (e.g. a Gateway metadata GET that raced the subscribe POST
+  // and came back empty) must not tear down a live local subscription —
+  // that's what orphaned a Gateway record on every focus cycle. `inactive`
+  // is never reached without a successfully-read, matching metadata record,
+  // so it's always confirmed by construction and isn't gated here.
+  if (handoffState === 'not_subscribed' && localSubscriptionPresent && options?.notSubscribedConfirmed !== true) {
+    return {uiState: undefined, action: 'none'}
+  }
+
   return {
     uiState: 'not-requested',
     action: localSubscriptionPresent ? 'cleanup' : 'register',

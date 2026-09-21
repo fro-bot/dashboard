@@ -614,13 +614,30 @@ export async function runReconcileSweep(
     return {skipped: true, action: undefined, uiState: undefined, nextCache: cache}
   }
 
-  const localHash = subscriptionPresent && localSubscription !== null ? await endpointHash(localSubscription.endpoint) : undefined
+  // A thrown/rejected hash computation (e.g. a transient crypto.subtle
+  // failure) must be treated the same as "unavailable" — not silently
+  // dropped into a false not_subscribed/cleanup. Never let it crash the
+  // sweep either.
+  let localHash: string | undefined
+  if (subscriptionPresent && localSubscription !== null) {
+    try {
+      localHash = await endpointHash(localSubscription.endpoint)
+    } catch {
+      localHash = undefined
+    }
+  }
   const currentKeyVersion = deps.getCurrentKeyVersion?.()
 
   const handoffState = derivePushHandoffState(localHash, currentKeyVersion, metadataResult.data)
 
   const permissionForReconcile: NotificationPermission = permission === 'unsupported' ? 'denied' : permission
-  const {uiState, action} = reconcile(permissionForReconcile, subscriptionPresent, handoffState)
+  // Only a genuinely confirmed mismatch (metadata actually read AND local
+  // hash actually computed) may license a destructive cleanup — see
+  // reconcile()'s ReconcileOptions doc.
+  const notSubscribedConfirmed = metadataResult.data.metadata !== undefined && localHash !== undefined
+  const {uiState, action} = reconcile(permissionForReconcile, subscriptionPresent, handoffState, {
+    notSubscribedConfirmed,
+  })
 
   const nextCache: ReconcileSweepCache = {
     permission,
