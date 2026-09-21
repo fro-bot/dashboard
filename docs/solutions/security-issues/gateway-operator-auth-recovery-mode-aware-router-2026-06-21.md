@@ -108,6 +108,12 @@ the gateway allowlist AND emitting the actual path instead of the fixed `/operat
 
 ## See also
 
+- `gateway-operator-oauth-rate-limit-shared-key-behind-caddy-2026-09-21.md` — routing
+  recovery correctly is not sufficient. The same restart-wipes-sessions trigger later
+  produced a full lockout by a different mechanism: behind Caddy every rate-limit key
+  collapses to the proxy's, so the gateway's per-client OAuth attempt cap is global and
+  the recovery redirect documented here mints a cap-consuming state entry on every
+  unauthenticated page load.
 - `gateway-operator-session-cookie-forwarding-trust-boundary-2026-06-20.md` — the
   configured-origin / cookie-forwarding trust boundary in the same dual-mode auth.
 - `safe-operator-launch-surface-2026-06-20.md` — the reverse-proxy-owns-the-route
