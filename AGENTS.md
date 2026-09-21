@@ -67,6 +67,10 @@ view of Fro Bot's cross-repo footprint.
 - Gates: `pnpm check-types` (server + `web/`), `pnpm lint`, `pnpm test` (rebuilds the
   client via `pretest`, then runs Vitest). Build the client with `pnpm build:web` →
   `web/dist`; `pnpm dev` serves that prebuilt bundle.
+- `docs/runbooks/gateway-access.md` — how to reach the gateway behind `/operator/*` and read its
+  logs. The operator surface is proxied to `fro-bot/agent`, so operator auth, session, and push
+  evidence lives there and no test in this repo can reach it. Requires a local `marcusrbrown/infra`
+  checkout.
 - `docs/solutions/` — documented solutions to past problems, organized by category
   with YAML frontmatter (`module`, `tags`, `problem_type`). Relevant when
   implementing or debugging in documented areas.
