@@ -927,6 +927,83 @@ describe('nextStreamState — reset frame', () => {
     expect(state.shouldReconnect).toBe(false)
     expect(state.connection).toBe('closed')
   })
+
+  it('does not reconnect on no-snapshot reset when the run is terminal (fro-bot/agent#1639)', () => {
+    const liveState = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: PINNED_CONTRACT_VERSION},
+    })
+    const withTerminal = nextStreamState(liveState, {
+      type: 'status',
+      data: TERMINAL_STATUS,
+    })
+    // no-snapshot for a finished run is a stable fact, not a transient hiccup — every
+    // retry gets a byte-identical response, so reconnecting can never help.
+    const liveWithTerminal: StreamState = {...withTerminal, connection: 'live'}
+    const state = nextStreamState(liveWithTerminal, {
+      type: 'reset',
+      data: {runId: 'run-abc', reason: 'no-snapshot'},
+    })
+    expect(state.shouldReconnect).toBe(false)
+    expect(state.connection).toBe('closed')
+    expect(state.retryCount).toBe(withTerminal.retryCount)
+  })
+
+  it('reconnects on no-snapshot reset when the run is still active', () => {
+    const liveState = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: PINNED_CONTRACT_VERSION},
+    })
+    const withActive = nextStreamState(liveState, {
+      type: 'status',
+      data: ACTIVE_STATUS,
+    })
+    // no-snapshot on a live run is legitimate: the stream attached before the first
+    // snapshot was taken, so retrying is expected to succeed once one exists.
+    const state = nextStreamState(withActive, {
+      type: 'reset',
+      data: {runId: 'run-abc', reason: 'no-snapshot'},
+    })
+    expect(state.connection).toBe('reconnecting')
+    expect(state.shouldReconnect).toBe(true)
+    expect(state.retryCount).toBe(withActive.retryCount + 1)
+  })
+
+  it('reconnects on no-snapshot reset when the run entry is unknown', () => {
+    const liveState = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: PINNED_CONTRACT_VERSION},
+    })
+    // No status frame has been applied for run-abc, so the run entry is unknown —
+    // must fall through to the generic retry branch exactly as before the fix.
+    const state = nextStreamState(liveState, {
+      type: 'reset',
+      data: {runId: 'run-abc', reason: 'no-snapshot'},
+    })
+    expect(state.connection).toBe('reconnecting')
+    expect(state.shouldReconnect).toBe(true)
+    expect(state.retryCount).toBe(liveState.retryCount + 1)
+  })
+
+  it('ends the production ready → reset:no-snapshot sequence for a terminal run in a settled, non-reconnecting state', () => {
+    // Mirrors the exact captured wire sequence: ready, then reset with reason
+    // no-snapshot, for a run that is already known-terminal client-side.
+    const liveState = nextStreamState(INITIAL_STATE, {
+      type: 'ready',
+      data: {contractVersion: PINNED_CONTRACT_VERSION},
+    })
+    const withTerminal = nextStreamState(liveState, {
+      type: 'status',
+      data: TERMINAL_STATUS,
+    })
+    const state = nextStreamState(withTerminal, {
+      type: 'reset',
+      data: {runId: 'run-abc', reason: 'no-snapshot'},
+    })
+    expect(state.connection).not.toBe('reconnecting')
+    expect(state.connection).toBe('closed')
+    expect(state.shouldReconnect).toBe(false)
+  })
 })
 
 describe('nextStreamState — lifecycle signals', () => {

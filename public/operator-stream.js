@@ -673,6 +673,25 @@ export function nextStreamState(current, event) {
         }
       }
 
+      // no-snapshot: the gateway has no terminal replay entry for this run. For a
+      // known-terminal run this is a stable fact, not a transient hiccup — every
+      // retry gets the same byte-identical reset, so reconnecting can never help.
+      // Unlike max-duration, an unknown run entry must still fall through and
+      // retry: no-snapshot on a live run is a legitimate transient condition (the
+      // stream attached before the first snapshot), and "unknown" is not evidence
+      // the run is terminal.
+      if (reason === 'no-snapshot') {
+        const runEntry = current.runs[event.data.runId]
+        const runIsKnownTerminal = runEntry !== undefined && runEntry.terminal
+        if (runIsKnownTerminal) {
+          return {
+            ...current,
+            connection: 'closed',
+            shouldReconnect: false,
+          }
+        }
+      }
+
       // Increment retryCount on reset and cap at RETRY_MAX_COUNT
       if (current.retryCount >= RETRY_MAX_COUNT) {
         return {
