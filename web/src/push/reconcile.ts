@@ -163,6 +163,16 @@ export function reconcile(
     return {uiState: undefined, action: 'none'}
   }
 
+  // granted + not_subscribed + no local subscription is a legitimate resting
+  // state (operator simply hasn't opted in) — not drift. A leftover browser
+  // permission grant (e.g. after an explicit unsubscribe) is not consent to
+  // mint a new subscription; only the explicit opt-in button (subscribeOptIn)
+  // may register. Auto-registering here was the mirror-image defect left
+  // open by #508's auto-cleanup fix.
+  if (handoffState === 'not_subscribed' && localSubscriptionPresent === false) {
+    return {uiState: 'not-requested', action: 'none'}
+  }
+
   return {
     uiState: 'not-requested',
     action: localSubscriptionPresent ? 'cleanup' : 'register',

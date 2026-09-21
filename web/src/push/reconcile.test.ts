@@ -74,8 +74,11 @@ describe('reconcile — drift matrix', () => {
     expect(reconcile('default', false, 'not_subscribed')).toEqual({uiState: 'not-requested', action: 'none'})
   })
 
-  it('granted + none + not_subscribed -> offer register', () => {
-    expect(reconcile('granted', false, 'not_subscribed')).toEqual({uiState: 'not-requested', action: 'register'})
+  it('granted + none + not_subscribed -> resting state, no auto-register', () => {
+    // Regression guard for the mirror-image #508 defect: a granted permission
+    // with no local subscription is not drift — it's the operator simply not
+    // opted in. Only the explicit button click (subscribeOptIn) may register.
+    expect(reconcile('granted', false, 'not_subscribed')).toEqual({uiState: 'not-requested', action: 'none'})
   })
 
   it('granted + none + inactive -> offer register', () => {
