@@ -12,7 +12,7 @@
   <body class="min-h-screen bg-bg font-body text-text antialiased">
     <main class="mx-auto max-w-3xl px-6 py-12 sm:px-8 sm:py-16 lg:py-24">
       <header class="mb-12 border-b border-border-muted pb-8 sm:mb-16 sm:pb-10">
-        <a class="mb-8 inline-flex min-h-11 items-center text-sm font-medium text-accent underline decoration-accent/50 underline-offset-4 transition-colors hover:text-accent-hover focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent" href="/">
+        <a class="mb-8 inline-flex min-h-11 items-center rounded-md border border-accent/50 bg-surface px-3 py-2 text-sm font-semibold text-accent transition-colors hover:border-accent hover:bg-surface-raised hover:text-accent-hover focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent" href="/">
           Back to dashboard
         </a>
         <h1 class="max-w-2xl text-4xl font-bold tracking-tight text-text sm:text-5xl sm:leading-tight">
@@ -21,18 +21,22 @@
       </header>
 
       <div class="space-y-12 text-base leading-8 text-text-muted sm:space-y-16 sm:text-lg">
-        <p class="text-lg leading-8 text-text sm:text-xl sm:leading-9">
-          This page describes what happens to your data when you turn on push notifications for the Fro Bot operator dashboard. This is a single-operator deployment: the person who runs this dashboard and the person who receives its notifications are the same party. There is no separate controller to contact, no shared user base, and no analytics or advertising of any kind.
+        <p class="text-pretty text-lg leading-8 text-text sm:text-xl sm:leading-9">
+          This page describes what happens to your data when you turn on push notifications for the Fro Bot operator dashboard.
+        </p>
+        <p class="mt-6 text-pretty text-lg leading-8 text-text sm:text-xl sm:leading-9">
+          This is a single-operator deployment: the person who runs this dashboard and the person who receives its notifications are the same party. There is no separate controller to contact, no shared user base, and no analytics or advertising of any kind.
         </p>
 
         <section>
           <h2 class="mb-4 text-2xl font-semibold tracking-tight text-text sm:text-3xl">Push is optional</h2>
-          <p>Notifications are off until you turn them on, and turning them on requires explicit permission from your browser. They cover two events: a run is waiting for your approval, and a run failed. Nothing else produces a notification. You can turn them off at any time from the dashboard.</p>
+          <p class="text-pretty">Notifications are off until you turn them on, and turning them on requires explicit permission from your browser.</p>
+          <p class="mt-6 text-pretty">They cover two events: a run is waiting for your approval, and a run failed. Nothing else produces a notification. You can turn them off at any time from the dashboard.</p>
         </section>
 
         <section>
           <h2 class="mb-4 text-2xl font-semibold tracking-tight text-text sm:text-3xl">What is stored when you subscribe</h2>
-          <p>Subscribing stores a record containing a one-way hash of the browser push endpoint, the browser push endpoint URL, the browser's generated P-256 public key, the browser's generated authentication secret, the operator's GitHub account identifier, an active/inactive flag, the signing-key version in effect when the subscription was created, an ownership-generation counter used to detect a transferred session, created and last-updated timestamps, an optional deactivation timestamp, and an optional coarse deactivation reason.</p>
+          <p class="text-pretty">Subscribing stores a record containing a one-way hash of the browser push endpoint, the browser push endpoint URL, the browser's generated P-256 public key, the browser's generated authentication secret, the operator's GitHub account identifier, an active/inactive flag, the signing-key version in effect when the subscription was created, an ownership-generation counter used to detect a transferred session, created and last-updated timestamps, an optional deactivation timestamp, and an optional coarse deactivation reason.</p>
         </section>
 
         <section>
@@ -43,7 +47,7 @@
 
         <section>
           <h2 class="mb-4 text-2xl font-semibold tracking-tight text-text sm:text-3xl">What notifications contain</h2>
-          <p>Notification payloads use fixed, neutral copy plus a small set of allowlisted failure labels. They never include repository names, prompts, run identifiers, run output, endpoints, signing keys, tokens, cookies, or session data.</p>
+          <p class="text-pretty">Notification payloads use fixed, neutral copy plus a small set of allowlisted failure labels. They never include repository names, prompts, run identifiers, run output, endpoints, signing keys, tokens, cookies, or session data.</p>
         </section>
 
         <section>
@@ -70,7 +74,7 @@
 
         <section>
           <h2 class="mb-4 text-2xl font-semibold tracking-tight text-text sm:text-3xl">What is logged</h2>
-          <p>Operational records are written when a subscription is created, when it is removed, when it is deactivated, when notifications are dispatched, and when push is disabled. These record the operator's account identifier, a coarse reason, a trigger label, delivery counts, and an event kind. Dispatch records also identify the run or approval that triggered the notification, so a dispatch record can be traced back to the run that caused it. They never record an endpoint, key material, notification content, or a repository name.</p>
+          <p class="text-pretty">Operational records are written when a subscription is created, when it is removed, when it is deactivated, when notifications are dispatched, and when push is disabled. These record the operator's account identifier, a coarse reason, a trigger label, delivery counts, and an event kind. Dispatch records also identify the run or approval that triggered the notification, so a dispatch record can be traced back to the run that caused it. They never record an endpoint, key material, notification content, or a repository name.</p>
         </section>
 
         <section>
