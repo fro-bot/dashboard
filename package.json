@@ -29,7 +29,7 @@
     "yaml": "2.9.1"
   },
   "devDependencies": {
-    "@bfra.me/eslint-config": "0.52.2",
+    "@bfra.me/eslint-config": "0.54.0",
     "@bfra.me/tsconfig": "0.13.2",
     "@opencode-ai/plugin": "1.18.32",
     "@tailwindcss/vite": "4.3.3",
