@@ -230,6 +230,11 @@
   background: rgba(198, 40, 40, 0.1);
 }
 
+[data-theme="light"] .run-card:has([data-role="run-checkout-detail"]:not([hidden])) .run-status.status-failed,
+[data-theme="light"] .run-card:has([data-role="run-checkout-detail"]:not([hidden])) .run-status.status-blocked {
+  background: var(--color-bg);
+}
+
 .run-status.status-running {
   background: rgba(0, 188, 212, 0.1);
   color: var(--color-info);
@@ -278,6 +283,11 @@
   white-space: nowrap;
 }
 
+/* Selected checkout cards need legible metadata against the raised surface. */
+.run-card:has([data-role="run-checkout-detail"]:not([hidden])) .run-updated-at {
+  color: var(--color-text-muted);
+}
+
 /* Expanded substructure */
 [data-role="run-output"],
 [data-role="run-output-coalesced"],
@@ -304,10 +314,6 @@
 }
 
 [data-role="run-output"] { grid-row: 4; }
-[data-role="run-output-coalesced"] { grid-row: 5; }
-[data-role="run-approvals"] { grid-row: 6; }
-[data-role="approval-badge"] { grid-row: 7; }
-[data-role="run-cancel"] { grid-row: 8; }
 
 [data-role="run-checkout-detail"][hidden] {
   display: none;
@@ -338,6 +344,10 @@
   color: var(--color-warning);
 }
 
+[data-theme="light"] .checkout-detail__flags {
+  color: color-mix(in srgb, var(--color-warning) 55%, var(--color-text) 45%);
+}
+
 .checkout-detail__list {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -354,7 +364,7 @@
 }
 
 .checkout-detail__overflow {
-  color: var(--color-text-subtle);
+  color: var(--color-text-muted);
 }
 
 [data-role="approval-badge"] {
@@ -1084,11 +1094,9 @@
     grid-row: 4;
   }
 
-  [data-role="run-output"] { grid-row: 5; }
-  [data-role="run-output-coalesced"] { grid-row: 6; }
-  [data-role="run-approvals"] { grid-row: 7; }
-  [data-role="approval-badge"] { grid-row: 8; }
-  [data-role="run-cancel"] { grid-row: 9; }
+  .run-card:has([data-role="run-checkout-detail"]:not([hidden])) [data-role="run-output"] {
+    grid-row: 5;
+  }
 
   .run-card-skeleton {
     grid-template-columns: auto 1fr;
