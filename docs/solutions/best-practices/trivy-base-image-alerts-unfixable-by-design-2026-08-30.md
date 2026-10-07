@@ -33,10 +33,10 @@ daily report can flag the open `trivy/release-image` code-scanning alerts as an
 outstanding security gap. The framing is wrong, and re-deriving that each time
 the report runs is pure cost.
 
-The reporting pass currently lists 43 HIGH and 0 CRITICAL findings, all unfixed
-or deferred upstream. They are inherited Debian OS packages in the base image.
-Their `Fixed Version:` fields are empty, so there is no upstream package version
-to move to.
+As of PR #576 the reporting pass lists 43 HIGH and 0 CRITICAL findings. They are
+inherited Debian OS packages in the base image. Each is either unfixed or marked
+`fix_deferred` by Debian. Both leave `Fixed Version:` empty, so there is no
+upstream package version to move to.
 
 ## Guidance
 
@@ -130,9 +130,13 @@ but a digest bump could not help until upstream rebuilt the tag.
 
 PR #576 moved all three Dockerfile stages to `node:24-trixie-slim`. They move
 together because `prod-deps` compiles native modules that are copied into the
-runtime stage, so the glibc must match. After the move the enforcement pass finds
-0 findings and the remaining reporting-pass findings stay visible in code
-scanning.
+runtime stage, so the glibc must match. After the move, the Release run for #576
+(Actions run 37574091492) passed the enforcement pass on Debian 13.7, where
+`perl-base` is `5.40.1-6+deb13u1`. The remaining reporting-pass findings stay
+visible in code scanning.
+
+A further `perl-base` CVE, CVE-2026-9538, is `fix_deferred` on both Debian 12 and
+13. It has no fixed version, so it never blocked the gate, and it stays visible.
 
 ## When to Apply
 
