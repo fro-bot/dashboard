@@ -8111,6 +8111,10 @@ function ckRecordingElement(writes: string[]): Record<string, unknown> {
     classList: {add: (...tokens: string[]) => writes.push(...tokens), remove: () => {}},
     style: {setProperty: (name: string, value: string) => writes.push(`${name}=${value}`)},
     setAttribute: (name: string, value: string) => writes.push(`${name}=${value}`),
+    children: [] as Record<string, unknown>[],
+    append(...nodes: Record<string, unknown>[]) {
+      ;(target.children as Record<string, unknown>[]).push(...nodes)
+    },
   }
   return new Proxy(target, {
     set(object, prop, value) {
@@ -8159,11 +8163,22 @@ describe('checkout fields — leak guard', () => {
     vi.stubGlobal('location', ckAccessRecorder(locationWrites))
 
     const writes: string[] = []
-    // The checkout-detail target is accepted but nothing renders into it yet.
     const checkoutWrites: string[] = []
+    const checkoutRegion = ckRecordingElement(checkoutWrites)
+    vi.stubGlobal('document', {
+      createElement: () => ckRecordingElement(checkoutWrites),
+      createTextNode: (text: string) => {
+        const node = ckRecordingElement(checkoutWrites)
+        node.textContent = text
+        return node
+      },
+    })
 
     const encoder = new TextEncoder()
-    const body = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\nevent: status\ndata: ${JSON.stringify(ckSentinelStatus())}\n\n`
+    const sentinel = ckSentinelStatus()
+    const provenanceStatus = {...sentinel, phase: 'EXECUTING', status: 'running', checkoutPreparation: undefined}
+    const preparationStatus = {...sentinel, checkoutProvenance: undefined}
+    const body = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\nevent: status\ndata: ${JSON.stringify(provenanceStatus)}\n\nevent: status\ndata: ${JSON.stringify(preparationStatus)}\n\n`
     let read = 0
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
@@ -8177,7 +8192,7 @@ describe('checkout fields — leak guard', () => {
       statusEl: ckRecordingElement(writes),
       noticeEl: ckRecordingElement(writes),
       reasonEl: ckRecordingElement(writes),
-      checkoutEl: ckRecordingElement(checkoutWrites),
+      checkoutEl: checkoutRegion as never,
       endpointBase: '/operator',
     })
     await new Promise(resolve => setTimeout(resolve, 50))
@@ -8191,7 +8206,12 @@ describe('checkout fields — leak guard', () => {
     expect(locationWrites).toEqual([])
     expect(writes.join('\n')).not.toContain('fixture-')
     expect(writes.length).toBeGreaterThan(0)
-    expect(checkoutWrites).toEqual([])
+    const checkoutTextWrites = checkoutWrites.filter(write => write.startsWith('textContent='))
+    for (const sentinel of ['fixture-sentinel-branch', 'fixture-sentinel-default', 'fixture-sentinel-path']) {
+      expect(checkoutTextWrites.some(write => write.includes(sentinel))).toBe(true)
+    }
+    expect(checkoutWrites.join('\n')).not.toMatch(/(?:className|classList|dataset|style|aria-|data-)[^\n]*fixture-/)
+    expect(checkoutWrites.filter(write => !write.startsWith('textContent=') && write.includes('fixture-'))).toEqual([])
   })
 
   it('sentinels live only in the closed DTOs inside in-memory run state', () => {
@@ -8207,5 +8227,148 @@ describe('checkout fields — leak guard', () => {
       expect(JSON.stringify(dto)).toContain(needle)
       expect(JSON.stringify(rest)).not.toContain('fixture-')
     }
+  })
+})
+
+describe('checkout rendering — labelled safe detail region', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('renders observed provenance head, worktree and remote lines', async () => {
+    const region = makeFakeEl('section')
+    const reason = makeFakeEl('p')
+    const status = makeFakeEl('span')
+    const notice = makeFakeEl('p')
+    const payload = ckStatusPayload({
+      phase: 'FAILED', status: 'failed',
+      checkoutProvenance: ckObserved({
+        observation: ckObservation({
+          head: {kind: 'attached', branch: 'fixture-main', sha: CK_SHA_A},
+          worktree: {kind: 'clean'}, operationInProgress: 'none',
+        }),
+        remote: {kind: 'checked', change: 'unchanged', defaultBranch: 'main', sha: CK_SHA_B, checkedAt: 'now'},
+      }),
+    })
+    let read = 0
+    vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag), createTextNode: (text: string) => {
+      const node = makeFakeEl('#text')
+      node.textContent = text
+      return node
+    }})
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, headers: {get: () => 'text/event-stream'},
+      body: {getReader: () => ({read: async () => read++ === 0
+        ? {done: false, value: new TextEncoder().encode(`event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\nevent: status\ndata: ${JSON.stringify(payload)}\n\n`)}
+        : {done: true}})},
+    }))
+    const handle = initOperatorStream({runId: 'run-ck-001', statusEl: status, noticeEl: notice, reasonEl: reason, checkoutEl: region as never})
+    await new Promise(resolve => setTimeout(resolve, 30))
+    handle.close()
+    const textOf = (element: FakeElement): string => element.textContent + element.children.map(textOf).join('')
+    const rendered = region.children
+    expect(region.hidden).toBe(false)
+    expect(rendered[0] && textOf(rendered[0])).toContain('Started from fixture-main at aaaaaaa')
+    expect(rendered.map(textOf).join(' ')).toContain('Up to date with main')
+    expect(rendered.map(textOf).join(' ')).toContain('Clean worktree')
+  })
+
+  it('renders a refused dirty headline and at most 10 paths with an overflow line', async () => {
+    const region = makeFakeEl('section')
+    const reason = makeFakeEl('p')
+    let read = 0
+    const payload = ckStatusPayload({
+      phase: 'FAILED', status: 'failed',
+      checkoutPreparation: {outcome: 'refused', reason: 'dirty', changedPaths: Array.from({length: 12}, (_, index) => `/tmp/path-${index}`)},
+    })
+    vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag), createTextNode: (text: string) => {
+      const node = makeFakeEl('#text')
+      node.textContent = text
+      return node
+    }})
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, headers: {get: () => 'text/event-stream'},
+      body: {getReader: () => ({read: async () => read++ === 0
+        ? {done: false, value: new TextEncoder().encode(`event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\nevent: status\ndata: ${JSON.stringify(payload)}\n\n`)}
+        : {done: true}})},
+    }))
+    const handle = initOperatorStream({runId: 'run-ck-001', statusEl: makeFakeEl(), noticeEl: makeFakeEl(), reasonEl: reason, checkoutEl: region as never})
+    await new Promise(resolve => setTimeout(resolve, 30))
+    handle.close()
+    const textOf = (element: FakeElement): string => element.textContent + element.children.map(textOf).join('')
+    const allElements = (element: FakeElement): FakeElement[] => element.children.flatMap(child => [child, ...allElements(child)])
+    expect(reason.textContent).toBe('Checkout refused: uncommitted changes')
+    expect(textOf(region)).toContain('/tmp/path-0')
+    expect(textOf(region)).toContain('and 2 more')
+    expect(allElements(region).filter(element => element.tagName === 'li')).toHaveLength(10)
+  })
+
+  it('renders failed-preparation flags as their fixed sentences below the headline', async () => {
+    const region = makeFakeEl('section')
+    const reason = makeFakeEl('p')
+    let read = 0
+    const payload = ckStatusPayload({
+      phase: 'FAILED', status: 'failed',
+      checkoutPreparation: {outcome: 'failed', reason: 'fetch-timeout', permanent: true, mutationStarted: 'possibly'},
+    })
+    vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag), createTextNode: (text: string) => {
+      const node = makeFakeEl('#text')
+      node.textContent = text
+      return node
+    }})
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, headers: {get: () => 'text/event-stream'},
+      body: {getReader: () => ({read: async () => read++ === 0
+        ? {done: false, value: new TextEncoder().encode(`event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\nevent: status\ndata: ${JSON.stringify(payload)}\n\n`)}
+        : {done: true}})},
+    }))
+    const handle = initOperatorStream({runId: 'run-ck-001', statusEl: makeFakeEl(), noticeEl: makeFakeEl(), reasonEl: reason, checkoutEl: region as never})
+    await new Promise(resolve => setTimeout(resolve, 30))
+    handle.close()
+    const textOf = (element: FakeElement): string => element.textContent + element.children.map(textOf).join('')
+    expect(reason.textContent).toBe('Checkout update failed: fetch timed out')
+    expect(textOf(region)).toContain("Retrying won't help.")
+    expect(textOf(region)).toContain('The checkout may have been partly changed.')
+  })
+
+  it('hides and clears the region on attach when the status has no checkout DTOs', async () => {
+    const region = makeFakeEl('section')
+    region.append(makeFakeEl('p'))
+    region.hidden = false
+    vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag), createTextNode: (text: string) => {
+      const node = makeFakeEl('#text')
+      node.textContent = text
+      return node
+    }})
+    vi.stubGlobal('fetch', vi.fn(async () => new Promise<Response>(() => {})))
+    const handle = initOperatorStream({runId: 'run-ck-001', statusEl: makeFakeEl(), noticeEl: makeFakeEl(), checkoutEl: region as never})
+    expect(region.hidden).toBe(true)
+    expect(region.children).toHaveLength(0)
+    handle.close()
+  })
+
+  it('does not repeat checkout-substituted preparation under its matching failure headline', async () => {
+    const region = makeFakeEl('section')
+    const reason = makeFakeEl('p')
+    let read = 0
+    const payload = ckStatusPayload({
+      phase: 'FAILED', status: 'failed', failureKind: 'checkout-substituted',
+      checkoutPreparation: {outcome: 'refused', reason: 'checkout-substituted'},
+    })
+    vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag), createTextNode: (text: string) => {
+      const node = makeFakeEl('#text')
+      node.textContent = text
+      return node
+    }})
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, headers: {get: () => 'text/event-stream'},
+      body: {getReader: () => ({read: async () => read++ === 0
+        ? {done: false, value: new TextEncoder().encode(`event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\nevent: status\ndata: ${JSON.stringify(payload)}\n\n`)}
+        : {done: true}})},
+    }))
+    const handle = initOperatorStream({runId: 'run-ck-001', statusEl: makeFakeEl(), noticeEl: makeFakeEl(), reasonEl: reason, checkoutEl: region as never})
+    await new Promise(resolve => setTimeout(resolve, 30))
+    handle.close()
+    const textOf = (element: FakeElement): string => element.textContent + element.children.map(textOf).join('')
+    expect(reason.textContent).toBe('Checkout mismatch')
+    expect(textOf(region)).not.toContain('checkout mismatch')
   })
 })

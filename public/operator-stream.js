@@ -13,7 +13,8 @@
  * Security invariants:
  * - Never console.log/console.error/console.warn frame data, run IDs, repo names,
  *   stream URLs, or status payloads.
- * - Render only phase/status/timestamps — never entityRef/surface/output/tool/path.
+ * - Render only phase/status/timestamps plus validated, capped checkout DTO values —
+ *   never entityRef/surface/output/tool or unchecked wire paths.
  * - All 404s collapse to one not-found state; no cause inference from body or timing.
  * - Read-only: GET stream only; no POST/PUT/DELETE, no telemetry endpoint.
  * - Same-origin: credentials:'include', no URL rewriting.
@@ -2370,6 +2371,121 @@ export function renderCancelControl(runId, cancelClient, onCancelDispatch) {
   return {el, notifyTerminal, dispose}
 }
 
+function appendCheckoutText(parent, text) {
+  parent.append(document.createTextNode(text))
+}
+
+function addCheckoutLine(region, text, className = 'checkout-detail__line') {
+  const line = document.createElement('p')
+  line.className = className
+  appendCheckoutText(line, text)
+  region.append(line)
+}
+
+function addCheckoutList(region, items, more, toText = value => value) {
+  if (items.length === 0) return
+  const list = document.createElement('ul')
+  list.className = 'checkout-detail__list'
+  for (const item of items) {
+    const entry = document.createElement('li')
+    entry.className = 'checkout-detail__item'
+    appendCheckoutText(entry, toText(item))
+    list.append(entry)
+  }
+  region.append(list)
+  if (more > 0) addCheckoutLine(region, `and ${more} more`, 'checkout-detail__overflow')
+}
+
+function formatCheckoutProvenance(region, provenance) {
+  if (provenance.kind === 'unavailable') {
+    addCheckoutLine(region, CHECKOUT_PROVENANCE_LABELS.unavailable)
+  } else {
+    const {head, worktree, operation} = provenance
+    if (head.kind === 'attached') {
+      addCheckoutLine(region, fillLabelTemplate(CHECKOUT_PROVENANCE_LABELS.headAttached, {branch: head.branch, sha: head.sha.slice(0, 7)}))
+    } else {
+      addCheckoutLine(region, fillLabelTemplate(CHECKOUT_PROVENANCE_LABELS.headDetached, {sha: head.sha.slice(0, 7)}))
+    }
+    if (worktree.kind === 'clean') {
+      addCheckoutLine(region, CHECKOUT_PROVENANCE_LABELS.worktreeClean)
+    } else {
+      addCheckoutLine(region, `${CHECKOUT_PROVENANCE_LABELS.worktreeDirty} ${[
+        ['staged', worktree.staged], ['unstaged', worktree.unstaged],
+        ['untracked', worktree.untracked], ['conflicted', worktree.conflicted],
+      ].filter(([, count]) => count > 0).map(([label, count]) => `${label} ${count}`).join(', ')}`)
+    }
+    const operationLabel = CHECKOUT_OPERATION_LABELS[operation]
+    if (operationLabel !== undefined) {
+      addCheckoutLine(region, fillLabelTemplate(CHECKOUT_PROVENANCE_LABELS.operationInProgress, {operation: operationLabel}))
+    }
+  }
+
+  const {remote} = provenance
+  if (remote.kind === 'not-checked') {
+    addCheckoutLine(region, CHECKOUT_PROVENANCE_LABELS.remoteNotChecked)
+  } else if (remote.change === 'unchanged') {
+    addCheckoutLine(region, fillLabelTemplate(CHECKOUT_PROVENANCE_LABELS.remoteUpToDate, {defaultBranch: remote.defaultBranch}))
+  } else {
+    addCheckoutLine(region, fillLabelTemplate(CHECKOUT_PROVENANCE_LABELS.remoteFastForwarded, {
+      fromSha: remote.fromSha.slice(0, 7), sha: remote.sha.slice(0, 7), defaultBranch: remote.defaultBranch,
+    }))
+  }
+}
+
+function formatCheckoutPreparation(region, preparation, omitRepeatedReason) {
+  let reason
+  if (preparation.outcome === 'failed') {
+    reason = CHECKOUT_UPDATE_FAILURE_REASON_LABELS[preparation.reason]
+  } else {
+    reason = CHECKOUT_REFUSAL_REASON_LABELS[preparation.reason]
+    reason = fillLabelTemplate(reason, {
+      ...(preparation.layoutReason === undefined ? {} : {layout: CHECKOUT_LAYOUT_REASON_LABELS[preparation.layoutReason]}),
+      ...(preparation.operation === undefined ? {} : {operation: CHECKOUT_OPERATION_LABELS[preparation.operation] ?? ''}),
+      ...(preparation.branch === undefined ? {} : {branch: preparation.branch}),
+    })
+  }
+  if (!omitRepeatedReason) addCheckoutLine(region, reason, 'checkout-detail__line checkout-detail__preparation')
+
+  if (preparation.outcome === 'refused') {
+    if (preparation.reason === 'dirty') addCheckoutList(region, preparation.changedPaths.items, preparation.changedPaths.more)
+    if (preparation.reason === 'submodule-initialized') addCheckoutList(region, preparation.submodules.items, preparation.submodules.more)
+    if (preparation.reason === 'unsupported-config') addCheckoutList(region, preparation.disallowedKeys.items, preparation.disallowedKeys.more)
+    if (preparation.reason === 'obstructed') {
+      addCheckoutList(region, preparation.obstructions.items, preparation.obstructions.more,
+        item => `${item.path} — ${CHECKOUT_OBSTRUCTION_KIND_LABELS[item.kind]}`)
+    }
+  } else {
+    if (preparation.permanent) addCheckoutLine(region, CHECKOUT_FAILURE_FLAG_LABELS.permanent, 'checkout-detail__line checkout-detail__flags')
+    if (preparation.mutationStarted === true) addCheckoutLine(region, CHECKOUT_FAILURE_FLAG_LABELS.mutationStarted, 'checkout-detail__line checkout-detail__flags')
+    if (preparation.mutationStarted === 'possibly') addCheckoutLine(region, CHECKOUT_FAILURE_FLAG_LABELS.mutationPossibly, 'checkout-detail__line checkout-detail__flags')
+  }
+}
+
+function renderCheckoutDetail(region, runEntry) {
+  region.textContent = ''
+  const provenance = runEntry?.checkoutProvenance
+  const preparation = runEntry?.checkoutPreparation
+  if (provenance === undefined && preparation === undefined) {
+    region.hidden = true
+    return
+  }
+
+  const group = document.createElement('div')
+  group.className = 'checkout-detail'
+  group.setAttribute('role', 'group')
+  group.setAttribute('aria-label', 'Checkout details')
+  if (provenance !== undefined) formatCheckoutProvenance(group, provenance)
+  if (preparation !== undefined) {
+    const repeatedInHeadline = runEntry?.reasonLabel === undefined || (
+      runEntry.reasonLabel === FAILURE_REASON_LABELS['checkout-substituted'] &&
+      preparation.outcome === 'refused' && preparation.reason === 'checkout-substituted'
+    )
+    formatCheckoutPreparation(group, preparation, repeatedInHeadline)
+  }
+  region.append(group)
+  region.hidden = false
+}
+
 /**
  * Initialize the operator run stream for a given run ID.
  *
@@ -2383,21 +2499,26 @@ export function renderCancelControl(runId, cancelClient, onCancelDispatch) {
  *   approvalsEl — element with [data-role="run-approvals"] to render approval prompts
  *   badgeEl     — element with [data-role="approval-badge"] for the approval count badge
  *   checkoutEl  — element with [data-role="run-checkout-detail"], the target for checkout
- *                 provenance / preparation. Handed over by the runtime; not rendered into
- *                 yet (the option is accepted and ignored until the renderer lands).
+ *                 provenance / preparation, rendered only from the sanitized closed DTOs.
  *   approvalClient — optional pre-built approval client (for testing); if absent,
  *                    buildApprovalClient() is called when the flag is on
  *
  * Security:
  * - Never logs frame data, run IDs, repo names, or stream URLs.
- * - Renders only phase/status/timestamps via toSafeRunView.
+ * - Renders phase/status/timestamps via toSafeRunView; checkout values only from
+ *   validated, capped, sanitized DTOs and only through text nodes.
  * - Status labels rendered from STATUS_LABELS map, never raw wire strings.
  * - Approval prompt content rendered via textContent only — never innerHTML.
  * - All 404s → one not-found state, one retry policy.
  * - Read-only: GET only for stream; approval decisions are operator-forwarded writes.
  */
 export function initOperatorStream(opts) {
-  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, cancelEl, approvalClient: injectedApprovalClient, cancelClient: injectedCancelClient, endpointBase, fixtureSessionId} = opts
+  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, checkoutEl, cancelEl, approvalClient: injectedApprovalClient, cancelClient: injectedCancelClient, endpointBase, fixtureSessionId} = opts
+
+  if (checkoutEl) {
+    checkoutEl.textContent = ''
+    checkoutEl.hidden = true
+  }
 
   // Build the approval client lazily (only if approvalsEl is present).
   // Pass endpointBase and fixtureSessionId so fixture mode uses the fixture approval routes
@@ -2553,6 +2674,18 @@ export function initOperatorStream(opts) {
         if (view.reasonLabel !== undefined) {
           reasonEl.textContent = view.reasonLabel
           if (reasonEl.dataset) reasonEl.dataset.reasonState = 'present'
+        } else if (runEntry.checkoutPreparation !== undefined) {
+          const preparation = runEntry.checkoutPreparation
+          const template = CHECKOUT_PREPARATION_HEADLINE_LABELS[preparation.outcome]
+          const reason = preparation.outcome === 'failed'
+            ? CHECKOUT_UPDATE_FAILURE_REASON_LABELS[preparation.reason]
+            : fillLabelTemplate(CHECKOUT_REFUSAL_REASON_LABELS[preparation.reason], {
+                ...(preparation.layoutReason === undefined ? {} : {layout: CHECKOUT_LAYOUT_REASON_LABELS[preparation.layoutReason]}),
+                ...(preparation.operation === undefined ? {} : {operation: CHECKOUT_OPERATION_LABELS[preparation.operation] ?? ''}),
+                ...(preparation.branch === undefined ? {} : {branch: preparation.branch}),
+              })
+          reasonEl.textContent = fillLabelTemplate(template, {reason})
+          if (reasonEl.dataset) reasonEl.dataset.reasonState = 'present'
         }
       } else if (!aborted) {
         const conn = state.connection
@@ -2569,6 +2702,8 @@ export function initOperatorStream(opts) {
         }
       }
     }
+
+    if (checkoutEl) renderCheckoutDetail(checkoutEl, state.runs[runId])
 
     // Run output: render the accumulated answer via textContent only — `text` is
     // free-form agent output and must NEVER be interpolated as HTML. droppedCount is

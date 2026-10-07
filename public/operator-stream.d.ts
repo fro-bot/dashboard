@@ -522,8 +522,7 @@ export interface InitOptions {
   readonly cancelEl?: (HTMLElement & {hidden: boolean}) | null
   /**
    * Checkout-detail region (data-role="run-checkout-detail"): where checkout provenance /
-   * preparation is rendered. Accepted by initOperatorStream and handed over by the runtime;
-   * nothing is rendered into it yet.
+   * preparation is rendered from the sanitized closed DTOs carried by the run entry.
    */
   readonly checkoutEl?: (HTMLElement & {hidden: boolean}) | null
   /** Injectable cancel client for testing. If absent, buildCancelClient() is used. */

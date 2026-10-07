@@ -888,3 +888,19 @@ describe('security — operator-stream.js contract pin and checkout-field bounda
     expect(src).not.toMatch(/checkout(?:Provenance|Preparation)/)
   })
 })
+
+describe('checkout detail styling — selector/emitter parity', () => {
+  it('styles every checkout detail class emitted by operator-stream.js', async () => {
+    const fs = await import('node:fs/promises')
+    const [js, css] = await Promise.all([
+      fs.readFile('public/operator-stream.js', 'utf8'),
+      fs.readFile('web/src/index.css', 'utf8'),
+    ])
+    const emitted = [...js.matchAll(/\bcheckout-detail(?:__[a-z-]+)?\b/g)]
+      .map(match => match[0])
+    expect(emitted.length).toBeGreaterThan(0)
+    for (const className of emitted) {
+      expect(css, `missing CSS rule for .${className}`).toMatch(new RegExp(String.raw`\.${className}(?![\w-])`))
+    }
+  })
+})

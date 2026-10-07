@@ -700,7 +700,9 @@ describe('defaultRuntimeLoader — single-open accordion via onSelectRun/onRunLa
 
       expect(attachedTargets.at(-1)?.runId).toBe(runId)
       expect(attachedTargets.at(-1)?.checkoutEl).toBe(region)
-      expect(region.hidden).toBe(false)
+      // Expanding reveals the empty region, then stream attachment clears and
+      // hides it until a validated checkout DTO arrives.
+      expect(region.hidden).toBe(true)
       expect(region.textContent).toBe('')
     }
     closeActive()

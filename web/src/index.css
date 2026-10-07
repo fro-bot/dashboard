@@ -293,6 +293,70 @@
   word-break: break-all;
 }
 
+/* Checkout facts are quiet run metadata: after the status/reason line, before output. */
+[data-role="run-checkout-detail"] {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  align-self: start;
+  width: 100%;
+  min-width: 0;
+  margin-top: var(--space-1);
+}
+
+[data-role="run-output"] { grid-row: 4; }
+[data-role="run-output-coalesced"] { grid-row: 5; }
+[data-role="run-approvals"] { grid-row: 6; }
+[data-role="approval-badge"] { grid-row: 7; }
+[data-role="run-cancel"] { grid-row: 8; }
+
+[data-role="run-checkout-detail"][hidden] {
+  display: none;
+}
+
+.checkout-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-label);
+  line-height: 1.5;
+}
+
+.checkout-detail__line,
+.checkout-detail__overflow {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.checkout-detail__preparation {
+  color: var(--color-text);
+}
+
+.checkout-detail__flags {
+  color: var(--color-warning);
+}
+
+.checkout-detail__list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-1);
+  min-width: 0;
+  margin: 0;
+  padding-inline-start: var(--space-4);
+  color: var(--color-text-muted);
+}
+
+.checkout-detail__item {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.checkout-detail__overflow {
+  color: var(--color-text-subtle);
+}
+
 [data-role="approval-badge"] {
   display: inline-block;
   justify-self: start;
@@ -1005,11 +1069,26 @@
     align-self: center;
   }
 
+  .run-card:has(.run-reason[data-reason-state="present"]) .run-repo {
+    grid-row: 2;
+    align-self: center;
+  }
+
   .run-reason {
     grid-column: 1 / -1;
     grid-row: 3;
     align-self: center;
   }
+
+  [data-role="run-checkout-detail"] {
+    grid-row: 4;
+  }
+
+  [data-role="run-output"] { grid-row: 5; }
+  [data-role="run-output-coalesced"] { grid-row: 6; }
+  [data-role="run-approvals"] { grid-row: 7; }
+  [data-role="approval-badge"] { grid-row: 8; }
+  [data-role="run-cancel"] { grid-row: 9; }
 
   .run-card-skeleton {
     grid-template-columns: auto 1fr;

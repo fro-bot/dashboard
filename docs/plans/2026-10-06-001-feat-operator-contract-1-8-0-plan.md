@@ -385,7 +385,7 @@ flowchart LR
 
 **Verification:** Anatomy parity holds across the three card shapes.
 
-- [ ] **Unit 4: Render provenance and preparation (design lane)**
+- [x] **Unit 4: Render provenance and preparation (design lane)**
 
 **Goal:** The expanded card presents both fields clearly without crowding status, output, approvals, or cancel.
 
