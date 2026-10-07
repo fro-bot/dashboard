@@ -518,7 +518,7 @@ function blankRanges(text: string, ranges: readonly {pos: number; end: number}[]
   return out
 }
 
-/** Dotted versions (1.2, 1.2.3, v1.2.3) and bare `vN` tags. */
+/** Dotted version strings, optionally v-prefixed, and bare v-prefixed tags. */
 function findVersionLiterals(text: string): string[] {
   return text.match(/\bv?\d+(?:\.\d+)+\b|\bv\d+\b/g) ?? []
 }

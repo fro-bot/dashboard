@@ -7267,6 +7267,33 @@ describe('CSS selector ↔ cancel-control state emitter agreement', () => {
   })
 })
 
+describe('CSS selector ↔ checkout-detail emitter agreement', () => {
+  it('has a rule for every checkout-detail class the renderer emits and for the region selector', async () => {
+    const fs = await import('node:fs/promises')
+    const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
+    const source = await fs.readFile(new URL('../public/operator-stream.js', import.meta.url).pathname, 'utf8')
+
+    // Every class token the renderer can emit: the root, and each `checkout-detail__*` element.
+    const emitted = [...new Set(source.match(/(?<![\w-])checkout-detail(?:__[a-z]+)?(?![\w-])/g) ?? [])]
+    expect(emitted).toEqual(expect.arrayContaining([
+      'checkout-detail',
+      'checkout-detail__line',
+      'checkout-detail__list',
+      'checkout-detail__item',
+      'checkout-detail__overflow',
+      'checkout-detail__preparation',
+      'checkout-detail__flags',
+    ]))
+    for (const token of emitted) {
+      expect(css, `no CSS rule for .${token}`).toMatch(new RegExp(String.raw`\.${token}(?![\w-])`))
+    }
+
+    // The region the stream renders into is styled by its data-role selector, shown or hidden.
+    expect(css).toContain('[data-role="run-checkout-detail"] {')
+    expect(css).toContain('[data-role="run-checkout-detail"][hidden]')
+  })
+})
+
 // ===========================================================================
 // Checkout provenance / checkout preparation — browser trust boundary
 // ===========================================================================
@@ -8230,6 +8257,32 @@ describe('checkout fields — leak guard', () => {
   })
 })
 
+/** Streams the given status payloads on a live, still-open connection and returns the rendered elements. */
+async function renderCheckoutStatuses(payloads: Record<string, unknown>[]) {
+  const region = makeFakeEl('section')
+  const reason = makeFakeEl('p')
+  const body = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n${payloads
+    .map(payload => `event: status\ndata: ${JSON.stringify(payload)}\n\n`)
+    .join('')}`
+  let read = 0
+  vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag), createTextNode: (text: string) => {
+    const node = makeFakeEl('#text')
+    node.textContent = text
+    return node
+  }})
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    ok: true, status: 200, headers: {get: () => 'text/event-stream'},
+    body: {getReader: () => ({read: async () => read++ === 0
+      ? {done: false, value: new TextEncoder().encode(body)}
+      : new Promise(() => {})})},
+  }))
+  const handle = initOperatorStream({runId: 'run-ck-001', statusEl: makeFakeEl(), noticeEl: makeFakeEl(), reasonEl: reason, checkoutEl: region as never})
+  await new Promise(resolve => setTimeout(resolve, 30))
+  handle.close()
+  const textOf = (element: FakeElement): string => element.textContent + element.children.map(textOf).join('')
+  return {region, reason, regionText: textOf(region)}
+}
+
 describe('checkout rendering — labelled safe detail region', () => {
   afterEach(() => vi.unstubAllGlobals())
 
@@ -8370,5 +8423,41 @@ describe('checkout rendering — labelled safe detail region', () => {
     const textOf = (element: FakeElement): string => element.textContent + element.children.map(textOf).join('')
     expect(reason.textContent).toBe('Checkout mismatch')
     expect(textOf(region)).not.toContain('checkout mismatch')
+  })
+
+  it('clears the reason line when a later status replaces the preparation with provenance', async () => {
+    const preparation = ckStatusPayload({phase: 'PENDING', status: 'queued', checkoutPreparation: {outcome: 'refused', reason: 'detached'}})
+    const provenance = ckStatusPayload({phase: 'EXECUTING', status: 'running', checkoutProvenance: ckObserved()})
+
+    const before = await renderCheckoutStatuses([preparation])
+    expect(before.reason.textContent).toBe('Checkout refused: detached HEAD')
+    expect(before.reason.dataset.reasonState).toBe('present')
+
+    const after = await renderCheckoutStatuses([preparation, provenance])
+    expect(after.reason.textContent).toBe('')
+    expect(after.reason.dataset.reasonState).toBeUndefined()
+    expect(after.regionText).not.toContain('Checkout refused')
+  })
+
+  it('renders an operation-in-progress refusal with operation none as fixed copy, without a blank operation name', async () => {
+    const preparation = {outcome: 'refused', reason: 'operation-in-progress', operation: 'none'}
+    const headline = await renderCheckoutStatuses([ckStatusPayload({phase: 'FAILED', status: 'failed', checkoutPreparation: preparation})])
+    expect(headline.reason.textContent).toBe('Checkout refused: operation in progress')
+
+    // With a failure reason on the headline, the region repeats the preparation reason as its own line.
+    const detail = await renderCheckoutStatuses([
+      ckStatusPayload({phase: 'FAILED', status: 'failed', failureKind: 'session-error', checkoutPreparation: preparation}),
+    ])
+    expect(detail.reason.textContent).toBe('Session error')
+    expect(detail.regionText).toBe('operation in progress')
+  })
+
+  it('renders provenance operationInProgress none as no line', async () => {
+    const payload = ckStatusPayload({
+      phase: 'FAILED', status: 'failed',
+      checkoutProvenance: ckObserved({observation: ckObservation({operationInProgress: 'none'})}),
+    })
+    const {regionText} = await renderCheckoutStatuses([payload])
+    expect(regionText).not.toContain('in progress')
   })
 })

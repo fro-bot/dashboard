@@ -159,6 +159,8 @@ function readyFrame(contractVersion: string): string {
 interface CheckoutFrameFields {
   readonly checkoutProvenance?: OperatorCheckoutProvenance
   readonly checkoutPreparation?: OperatorCheckoutPreparation
+  /** Emitted as `checkoutPreparation` verbatim, untyped: only for scenarios that violate the contract on purpose. */
+  readonly rawCheckoutPreparation?: unknown
 }
 
 function statusFrame(
@@ -180,6 +182,7 @@ function statusFrame(
     ...(failureKind === undefined ? {} : {failureKind}),
     ...(checkout.checkoutProvenance === undefined ? {} : {checkoutProvenance: checkout.checkoutProvenance}),
     ...(checkout.checkoutPreparation === undefined ? {} : {checkoutPreparation: checkout.checkoutPreparation}),
+    ...(checkout.rawCheckoutPreparation === undefined ? {} : {checkoutPreparation: checkout.rawCheckoutPreparation}),
   })
 }
 
@@ -375,6 +378,8 @@ interface CheckoutScenarioSpec {
   readonly provenance?: OperatorCheckoutProvenance
   /** Present → the run never reached EXECUTING (and ends failed). */
   readonly preparation?: OperatorCheckoutPreparation
+  /** Present → emitted on the wire in place of `preparation`; for malformed-contract scenarios only. */
+  readonly rawPreparation?: unknown
 }
 
 const FIXTURE_UNSAFE_PATHS = [
@@ -532,13 +537,13 @@ const CHECKOUT_SCENARIO_SPECS: Readonly<Record<CheckoutScenarioName, CheckoutSce
     summaryStatus: 'failed',
     failureKind: 'checkout-substituted',
     // A corrupted nested field: changedPaths holds a non-string. Upstream rules (and ours) drop the
-    // whole object, so the card shows only the failureKind label. The cast is the one deliberate
+    // whole object, so the card shows only the failureKind label. This raw value is the one deliberate
     // contract violation in this file.
-    preparation: {
+    rawPreparation: {
       outcome: 'refused',
       reason: 'dirty',
       changedPaths: ['fixture/ok.txt', 7],
-    } as unknown as OperatorCheckoutPreparation,
+    },
   },
 }
 
@@ -584,7 +589,10 @@ function buildCheckoutScenario(scenario: CheckoutScenarioName, activeRunId: stri
       'FAILED',
       startedAt,
       spec.failureKind,
-      spec.preparation === undefined ? {} : {checkoutPreparation: spec.preparation},
+      {
+        ...(spec.preparation === undefined ? {} : {checkoutPreparation: spec.preparation}),
+        ...(spec.rawPreparation === undefined ? {} : {rawCheckoutPreparation: spec.rawPreparation}),
+      },
     )
   )
 }

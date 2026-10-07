@@ -168,6 +168,47 @@ function isCheckoutObservation(value: unknown): value is OperatorCheckoutObserva
   )
 }
 
+// ---------------------------------------------------------------------------
+// Constructors — a validated value is rebuilt field-by-field, never returned as
+// received, so extra own keys (including a JSON-parsed `__proto__`) on the input
+// cannot reach a caller.
+// ---------------------------------------------------------------------------
+
+function copyHead(head: OperatorCheckoutHead): OperatorCheckoutHead {
+  return head.kind === 'attached'
+    ? {kind: 'attached', branch: head.branch, sha: head.sha}
+    : {kind: 'detached', sha: head.sha}
+}
+
+function copyWorktree(worktree: OperatorWorktreeState): OperatorWorktreeState {
+  return worktree.kind === 'clean'
+    ? {kind: 'clean'}
+    : {
+        kind: 'dirty',
+        staged: worktree.staged,
+        unstaged: worktree.unstaged,
+        untracked: worktree.untracked,
+        conflicted: worktree.conflicted,
+      }
+}
+
+function copyObservation(observation: OperatorCheckoutObservation): OperatorCheckoutObservation {
+  return {
+    head: copyHead(observation.head),
+    worktree: copyWorktree(observation.worktree),
+    operationInProgress: observation.operationInProgress,
+    observedAt: observation.observedAt,
+  }
+}
+
+function copyRemote(remote: OperatorRemoteFreshness): OperatorRemoteFreshness {
+  if (remote.kind === 'not-checked') return {kind: 'not-checked'}
+  const {defaultBranch, sha, checkedAt} = remote
+  return remote.change === 'unchanged'
+    ? {kind: 'checked', defaultBranch, sha, checkedAt, change: 'unchanged'}
+    : {kind: 'checked', defaultBranch, sha, checkedAt, change: 'fast-forward', fromSha: remote.fromSha}
+}
+
 /**
  * Validate `runState.details.checkoutProvenance` (untyped `unknown` read off
  * disk) into an `OperatorCheckoutProvenance`, or `undefined` when the value is
@@ -183,11 +224,11 @@ export function parseOperatorCheckoutProvenance(value: unknown): OperatorCheckou
 
   if (v.kind === 'observed') {
     if (!isCheckoutObservation(v.observation)) return undefined
-    return {kind: 'observed', observation: v.observation, remote: v.remote}
+    return {kind: 'observed', observation: copyObservation(v.observation), remote: copyRemote(v.remote)}
   }
 
   if (v.kind === 'unavailable') {
-    return {kind: 'unavailable', remote: v.remote}
+    return {kind: 'unavailable', remote: copyRemote(v.remote)}
   }
 
   return undefined
@@ -383,18 +424,24 @@ function parseCheckoutPreparationRefused(v: Record<string, unknown>): OperatorCh
         : undefined
     case 'unsupported-config':
       return isStringArray(v.disallowedKeys)
-        ? {outcome: 'refused', reason, disallowedKeys: v.disallowedKeys}
+        ? {outcome: 'refused', reason, disallowedKeys: [...v.disallowedKeys]}
         : undefined
     case 'operation-in-progress':
       return isCheckoutOperation(v.operation) ? {outcome: 'refused', reason, operation: v.operation} : undefined
     case 'dirty':
-      return isStringArray(v.changedPaths) ? {outcome: 'refused', reason, changedPaths: v.changedPaths} : undefined
+      return isStringArray(v.changedPaths) ? {outcome: 'refused', reason, changedPaths: [...v.changedPaths]} : undefined
     case 'submodule-initialized':
-      return isStringArray(v.submodules) ? {outcome: 'refused', reason, submodules: v.submodules} : undefined
+      return isStringArray(v.submodules) ? {outcome: 'refused', reason, submodules: [...v.submodules]} : undefined
     case 'non-default-branch':
       return isNonEmptyString(v.branch) ? {outcome: 'refused', reason, branch: v.branch} : undefined
     case 'obstructed':
-      return isObstructionArray(v.obstructions) ? {outcome: 'refused', reason, obstructions: v.obstructions} : undefined
+      return isObstructionArray(v.obstructions)
+        ? {
+            outcome: 'refused',
+            reason,
+            obstructions: v.obstructions.map(({path, kind}) => ({path, kind})),
+          }
+        : undefined
     default:
       return undefined
   }
@@ -411,7 +458,9 @@ export function parseOperatorCheckoutPreparation(value: unknown): OperatorChecko
   const v = value as Record<string, unknown>
 
   if (v.outcome === 'failed') {
-    return isCheckoutPreparationFailed(v) ? v : undefined
+    return isCheckoutPreparationFailed(v)
+      ? {outcome: 'failed', reason: v.reason, mutationStarted: v.mutationStarted, permanent: v.permanent}
+      : undefined
   }
   if (v.outcome === 'refused') {
     return parseCheckoutPreparationRefused(v)

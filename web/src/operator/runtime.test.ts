@@ -708,15 +708,61 @@ describe('defaultRuntimeLoader — single-open accordion via onSelectRun/onRunLa
     closeActive()
   })
 
-  it('production _attachStream discovers checkoutEl and passes it to initOperatorStream (source pin)', async () => {
-    const fs = await import('node:fs/promises')
-    const path = await import('node:path')
-    const url = await import('node:url')
-    const src = await fs.readFile(path.join(path.dirname(url.fileURLToPath(import.meta.url)), 'runtime.ts'), 'utf8')
-    expect(src).toMatch(/const \{[^}]*\bcheckoutEl\b[^}]*\} = discoverCardStreamTargets\(runId\)/)
-    const call = src.slice(src.indexOf('streamMod.initOperatorStream({'), src.indexOf('_activeStreamHandle = handle'))
-    expect(call).toMatch(/^\s*checkoutEl,$/m)
-    expect(src).toContain(`checkoutEl?: Element | null`)
+})
+
+describe('defaultRuntimeLoader — production stream wiring', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.doUnmock('/static/operator-stream.js?manual=1')
+    vi.doUnmock('/static/operator-run-index.js?manual=1')
+    vi.doUnmock('/static/operator-launch.js?manual=1')
+    vi.restoreAllMocks()
+  })
+
+  it('selecting a card runs the real _attachStream, which hands the discovered checkoutEl to initOperatorStream', async () => {
+    const handle = {close: vi.fn()}
+    const initOperatorStream = vi.fn((_opts: {runId: string; checkoutEl?: Element | null}) => handle)
+    let onSelectRun: ((runId: string) => void) | undefined
+    // A vitest module mock throws on any export the factory omits, so every export the loader reads is listed.
+    vi.doMock('/static/operator-stream.js?manual=1', () => ({
+      initOperatorStream,
+      bootstrapOperatorStreams: vi.fn(),
+      resetBootstrapState: vi.fn(),
+    }))
+    vi.doMock('/static/operator-run-index.js?manual=1', () => ({
+      initOperatorRunIndex: async (opts: {onSelectRun: (runId: string) => void}) => {
+        onSelectRun = opts.onSelectRun
+      },
+      resetRunIndexState: vi.fn(),
+      markRunStreamAttached: vi.fn(),
+      markCardExpandedForLaunch: vi.fn(),
+    }))
+    vi.doMock('/static/operator-launch.js?manual=1', () => ({
+      initOperatorLaunch: vi.fn(async () => {}),
+      resetLaunchState: vi.fn(),
+    }))
+
+    document.body.innerHTML = `
+      <div data-run-id="run-wired-1">
+        <span data-role="run-status"></span>
+        <div data-role="run-checkout-detail" hidden></div>
+      </div>
+      <div data-role="stream-status"></div>`
+    const region = document.querySelector('[data-role="run-checkout-detail"]')
+
+    const onStateChange = vi.fn()
+    const runtime = createOperatorRuntime({container: makeContainer(), onStateChange})
+    await vi.waitFor(() => expect(onSelectRun).toBeDefined())
+    expect(onStateChange).not.toHaveBeenCalled()
+
+    onSelectRun?.('run-wired-1')
+
+    expect(region).not.toBeNull()
+    expect(initOperatorStream).toHaveBeenCalledTimes(1)
+    expect(initOperatorStream.mock.calls[0]?.[0].runId).toBe('run-wired-1')
+    expect(initOperatorStream.mock.calls[0]?.[0].checkoutEl).toBe(region)
+
+    runtime.cleanup()
   })
 })
 

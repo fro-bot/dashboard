@@ -2442,6 +2442,7 @@ describe('checkout fixture scenarios — the malformed scenario still terminaliz
     const sse = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.checkout_malformed_preparation, 'run-fixture-malformed-prep-001')
     // The wire really does carry the corrupted field...
     expect(sse).toContain('"checkoutPreparation"')
+    expect(sse).toContain('"changedPaths":["fixture/ok.txt",7]')
     // ...and both parsers accept the frame without it.
     const terminal = browserTerminalStatus(sse)
     expect(terminal?.status).toBe('failed')

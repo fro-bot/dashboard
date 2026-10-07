@@ -2246,6 +2246,27 @@ function parseStatusData(payload: Record<string, unknown>) {
   return result.frame.data
 }
 
+/**
+ * Deep copy that adds an extra key and an own `__proto__` key to every plain object. Serialized
+ * with JSON.stringify, the `__proto__` key reaches the parser as an own property of the JSON-parsed input.
+ */
+function withExtraKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withExtraKeys)
+  if (typeof value !== 'object' || value === null) return value
+  const copy: Record<string, unknown> = {}
+  for (const [key, entry] of Object.entries(value)) copy[key] = withExtraKeys(entry)
+  copy.fixtureExtra = 'fixture-extra'
+  Object.defineProperty(copy, '__proto__', {value: {fixturePolluted: true}, enumerable: true, configurable: true, writable: true})
+  return copy
+}
+
+/** Every own property name (enumerable or not) at every depth, sorted, with duplicates kept. */
+function ownKeysDeep(value: unknown): string[] {
+  if (typeof value !== 'object' || value === null) return []
+  const nested = Object.values(value).flatMap(ownKeysDeep)
+  return [...Object.getOwnPropertyNames(value), ...nested].sort()
+}
+
 describe('parseSseChunk — checkoutProvenance', () => {
   it('carries a valid observed provenance on the status frame', () => {
     const provenance = observedProvenance()
@@ -2376,6 +2397,39 @@ describe('parseSseChunk — checkoutProvenance', () => {
     expect(Object.prototype.hasOwnProperty.call(data, 'checkoutProvenance')).toBe(false)
     expect(Object.prototype.hasOwnProperty.call(data, 'checkoutPreparation')).toBe(false)
   })
+
+  it('returns only contract fields for every provenance variant, dropping extra keys including a parsed __proto__', () => {
+    const provenances: Record<string, unknown>[] = [
+      observedProvenance(),
+      {kind: 'unavailable', remote: {kind: 'not-checked'}},
+      {
+        kind: 'observed',
+        observation: {
+          head: {kind: 'detached', sha: SHA_A},
+          worktree: {kind: 'dirty', staged: 1, unstaged: 2, untracked: 3, conflicted: 0},
+          operationInProgress: 'rebase',
+          observedAt: '2026-06-18T20:00:00Z',
+        },
+        remote: {kind: 'checked', defaultBranch: 'main', sha: SHA_B, checkedAt: '2026-06-18T20:00:01Z', change: 'unchanged'},
+      },
+      {
+        kind: 'unavailable',
+        remote: {
+          kind: 'checked',
+          defaultBranch: 'main',
+          sha: SHA_B,
+          checkedAt: '2026-06-18T20:00:01Z',
+          change: 'fast-forward',
+          fromSha: SHA_A,
+        },
+      },
+    ]
+    for (const provenance of provenances) {
+      const data = parseStatusData(statusPayload({checkoutProvenance: withExtraKeys(provenance)}))
+      expect(data?.checkoutProvenance).toEqual(provenance)
+      expect(ownKeysDeep(data?.checkoutProvenance)).toEqual(ownKeysDeep(provenance))
+    }
+  })
 })
 
 describe('parseSseChunk — checkoutPreparation', () => {
@@ -2466,6 +2520,27 @@ describe('parseSseChunk — checkoutPreparation', () => {
       expect(data?.status).toBe('failed')
       expect(data?.failureKind).toBe('workspace-unavailable')
       expect(Object.prototype.hasOwnProperty.call(data, 'checkoutPreparation')).toBe(false)
+    }
+  })
+
+  it('returns only contract fields for failed and refused preparations, dropping extra keys including a parsed __proto__', () => {
+    const preparations: Record<string, unknown>[] = [
+      {outcome: 'failed', reason: 'fetch-timeout', mutationStarted: 'possibly', permanent: true},
+      {outcome: 'refused', reason: 'detached'},
+      {outcome: 'refused', reason: 'unsupported-layout', layoutReason: 'shallow'},
+      {outcome: 'refused', reason: 'unsupported-config', disallowedKeys: ['fixture.key']},
+      {outcome: 'refused', reason: 'operation-in-progress', operation: 'merge'},
+      {outcome: 'refused', reason: 'dirty', changedPaths: ['fixture/a']},
+      {outcome: 'refused', reason: 'submodule-initialized', submodules: ['fixture-sub']},
+      {outcome: 'refused', reason: 'non-default-branch', branch: 'fixture-feature'},
+      {outcome: 'refused', reason: 'obstructed', obstructions: [{path: 'fixture/a', kind: 'exact-conflict'}]},
+    ]
+    for (const preparation of preparations) {
+      const data = parseStatusData(
+        statusPayload({phase: 'FAILED', status: 'failed', checkoutPreparation: withExtraKeys(preparation)}),
+      )
+      expect(data?.checkoutPreparation).toEqual(preparation)
+      expect(ownKeysDeep(data?.checkoutPreparation)).toEqual(ownKeysDeep(preparation))
     }
   })
 

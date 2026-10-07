@@ -2432,18 +2432,22 @@ function formatCheckoutProvenance(region, provenance) {
   }
 }
 
+/** Refusal copy when the contract reports an in-progress operation as `none` (no name to fill in). */
+const CHECKOUT_UNNAMED_OPERATION_REASON = 'operation in progress'
+
+/** The display reason for a preparation record, built only from label maps and sanitized values. */
+function describeCheckoutPreparationReason(preparation) {
+  if (preparation.outcome === 'failed') return CHECKOUT_UPDATE_FAILURE_REASON_LABELS[preparation.reason]
+  if (preparation.reason === 'operation-in-progress' && preparation.operation === 'none') return CHECKOUT_UNNAMED_OPERATION_REASON
+  return fillLabelTemplate(CHECKOUT_REFUSAL_REASON_LABELS[preparation.reason], {
+    ...(preparation.layoutReason === undefined ? {} : {layout: CHECKOUT_LAYOUT_REASON_LABELS[preparation.layoutReason]}),
+    ...(preparation.operation === undefined ? {} : {operation: CHECKOUT_OPERATION_LABELS[preparation.operation] ?? ''}),
+    ...(preparation.branch === undefined ? {} : {branch: preparation.branch}),
+  })
+}
+
 function formatCheckoutPreparation(region, preparation, omitRepeatedReason) {
-  let reason
-  if (preparation.outcome === 'failed') {
-    reason = CHECKOUT_UPDATE_FAILURE_REASON_LABELS[preparation.reason]
-  } else {
-    reason = CHECKOUT_REFUSAL_REASON_LABELS[preparation.reason]
-    reason = fillLabelTemplate(reason, {
-      ...(preparation.layoutReason === undefined ? {} : {layout: CHECKOUT_LAYOUT_REASON_LABELS[preparation.layoutReason]}),
-      ...(preparation.operation === undefined ? {} : {operation: CHECKOUT_OPERATION_LABELS[preparation.operation] ?? ''}),
-      ...(preparation.branch === undefined ? {} : {branch: preparation.branch}),
-    })
-  }
+  const reason = describeCheckoutPreparationReason(preparation)
   if (!omitRepeatedReason) addCheckoutLine(region, reason, 'checkout-detail__line checkout-detail__preparation')
 
   if (preparation.outcome === 'refused') {
@@ -2566,6 +2570,7 @@ export function initOperatorStream(opts) {
   let firstFrameTimer = null // track pending first-frame timeout
   let aborted = false // set by close() to prevent late timer from fetching
   let announcedFailure = false
+  let paintedPreparationHeadline = false // reasonEl currently shows a headline this stream wrote from checkoutPreparation
 
   function updateDOM() {
     // Late-frame guard: after close(), no write of any kind (notice, status,
@@ -2674,18 +2679,18 @@ export function initOperatorStream(opts) {
         if (view.reasonLabel !== undefined) {
           reasonEl.textContent = view.reasonLabel
           if (reasonEl.dataset) reasonEl.dataset.reasonState = 'present'
+          paintedPreparationHeadline = false
         } else if (runEntry.checkoutPreparation !== undefined) {
           const preparation = runEntry.checkoutPreparation
           const template = CHECKOUT_PREPARATION_HEADLINE_LABELS[preparation.outcome]
-          const reason = preparation.outcome === 'failed'
-            ? CHECKOUT_UPDATE_FAILURE_REASON_LABELS[preparation.reason]
-            : fillLabelTemplate(CHECKOUT_REFUSAL_REASON_LABELS[preparation.reason], {
-                ...(preparation.layoutReason === undefined ? {} : {layout: CHECKOUT_LAYOUT_REASON_LABELS[preparation.layoutReason]}),
-                ...(preparation.operation === undefined ? {} : {operation: CHECKOUT_OPERATION_LABELS[preparation.operation] ?? ''}),
-                ...(preparation.branch === undefined ? {} : {branch: preparation.branch}),
-              })
-          reasonEl.textContent = fillLabelTemplate(template, {reason})
+          reasonEl.textContent = fillLabelTemplate(template, {reason: describeCheckoutPreparationReason(preparation)})
           if (reasonEl.dataset) reasonEl.dataset.reasonState = 'present'
+          paintedPreparationHeadline = true
+        } else if (paintedPreparationHeadline) {
+          // The preparation this stream painted is gone; a reason painted at page load is left alone.
+          reasonEl.textContent = ''
+          if (reasonEl.dataset) delete reasonEl.dataset.reasonState
+          paintedPreparationHeadline = false
         }
       } else if (!aborted) {
         const conn = state.connection
@@ -2699,6 +2704,7 @@ export function initOperatorStream(opts) {
         ) {
           reasonEl.textContent = ''
           if (reasonEl.dataset) delete reasonEl.dataset.reasonState
+          paintedPreparationHeadline = false
         }
       }
     }

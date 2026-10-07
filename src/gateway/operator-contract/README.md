@@ -14,7 +14,7 @@ inlined boundary types for RunPhase/Surface/RunState).
 - `provenance.ts` — vendored from the operator-contract barrel, whole: it keeps
   upstream's types and parsers (`parseOperatorCheckoutProvenance`,
   `parseOperatorCheckoutPreparation`) as-is. Beyond the comment rewording below,
-  the dashboard applies exactly two edits:
+  the dashboard applies exactly three edits:
   - `export` is added to the existing vocabulary sets (`CHECKOUT_OPERATIONS`,
     `LAYOUT_REFUSAL_REASONS`, `OBSTRUCTION_KINDS`, `UPDATE_FAILURE_REASONS`), so
     coverage tests can read them at runtime.
@@ -22,8 +22,10 @@ inlined boundary types for RunPhase/Surface/RunState).
     A compile-time check (`CheckoutRefusalReasonsAreExact`) fails the type check if
     the list and `OperatorCheckoutPreparationRefused['reason']` differ in either
     direction.
+  - Both parsers return freshly constructed objects holding only contract fields, never
+    the input or its nested parts, so extra input keys cannot reach the reader's frames.
   Comments that name contract versions are reworded so no version literal remains.
-  Behavior is unchanged. The dashboard server reader calls both parsers on status
+  Accept/reject behavior is unchanged. The dashboard server reader calls both parsers on status
   frames. It applies no length caps or sanitizing: the browser is the sanitization
   boundary, so any future server-side consumer must apply the same caps first.
 - `sse-frames.ts` — vendored from the gateway's web/sse/ surface

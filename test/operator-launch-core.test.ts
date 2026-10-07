@@ -349,27 +349,14 @@ async function readLaunchSource() {
 describe('optimistic pending card anatomy — operable before a fetch adopts it', () => {
   // initOperatorLaunch's submit path dynamically imports an absolute /static URL and
   // cannot run under Node, so (like the rest of this file) the launch-built card is
-  // pinned at the source-contract level. The run-index side of the contract —
+  // pinned at the source-contract level; the checkout-detail region is exercised
+  // behaviorally in web/src/operator/launch-card.test.ts. The run-index side of the contract —
   // expansion wiring bound by markCardExpandedForLaunch, upgrade-on-adoption — is
   // exercised behaviorally in test/operator-run-index-core.test.js.
   it('gives the optimistic card the run-cancel region so the stream can populate it once attached', async () => {
     const src = await readLaunchSource()
     expect(src).toContain(`cancelEl.dataset.role = 'run-cancel'`)
     expect(src).toMatch(/cancelEl\.hidden\s*=\s*true/)
-  })
-
-  it('gives the optimistic card exactly one hidden checkout-detail region, in the same slot a fetched card uses', async () => {
-    const src = await readLaunchSource()
-    expect(src.match(/dataset\.role = 'run-checkout-detail'/g)).toHaveLength(1)
-    expect(src).toMatch(/checkoutEl\.hidden\s*=\s*true/)
-    expect(src).not.toMatch(/checkoutEl\.(?:textContent|innerHTML)\s*=/)
-
-    // Slot: after the header row (repo span) and ahead of every other hidden region.
-    const at = src.indexOf('card.append(checkoutEl)')
-    expect(at).toBeGreaterThan(src.indexOf('card.append(repoSpan)'))
-    for (const later of ['card.append(outputEl)', 'card.append(coalescedEl)', 'card.append(approvalsEl)', 'card.append(badgeEl)', 'card.append(cancelEl)']) {
-      expect(at).toBeLessThan(src.indexOf(later))
-    }
   })
 
   it('marks the optimistic card role=button and includes the run-repo span', async () => {
