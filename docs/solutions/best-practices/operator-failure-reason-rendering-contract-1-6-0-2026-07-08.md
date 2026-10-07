@@ -33,10 +33,12 @@ The shipped slice was PR [fro-bot/dashboard#174](https://github.com/fro-bot/dash
 
 When vendoring a Gateway operator contract bump, update every consumer that enforces the contract version:
 
-- `src/gateway/operator-contract/version.ts` — `OPERATOR_CONTRACT_VERSION = '1.6.0'`
-- `public/operator-stream.js` — `PINNED_CONTRACT_VERSION = '1.6.0'`
-- fixture SSE ready frames — `contractVersion: '1.6.0'`
+- `src/gateway/operator-contract/version.ts` — `OPERATOR_CONTRACT_VERSION`
+- `public/operator-stream.js` — `PINNED_CONTRACT_VERSION`
+- fixture SSE ready frames — `contractVersion`
 - conformance/parity tests proving server and browser pins cannot drift
+
+This slice moved all three to `1.6.0`. For the current pins and the fuller adoption checklist (free-form fields, upstream projection gaps, the joint infra deploy), see [consume-gateway-operator-contract-1-8-0-2026-10-07.md](./consume-gateway-operator-contract-1-8-0-2026-10-07.md).
 
 Do not loosen drift handling to accept multiple versions unless that compatibility behavior is explicitly planned. Operator streams should fail closed on contract mismatch.
 
@@ -99,7 +101,7 @@ Use synthetic identifiers and fixture-prefixed unknowns. Keep `Cache-Control: no
 
 Production verification should prove the deployed asset state and auth boundary without enumerating operator data. Static asset probes and unauthenticated boundary checks are enough for this contract slice:
 
-- `/static/operator-stream.js` contains `1.6.0`, `failureKind`, and the expected labels
+- `/static/operator-stream.js` contains the expected contract version, `failureKind`, and the expected labels
 - `/static/operator-run-index.js` contains the label rendering path
 - `/operator/session` and `/operator/runs` return unauthenticated `401` JSON
 
