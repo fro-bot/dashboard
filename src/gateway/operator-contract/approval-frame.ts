@@ -1,8 +1,8 @@
 /**
- * Operator run-stream approval frame (contract 1.4.0).
+ * Operator run-stream approval frame.
  *
  * Vendored byte-exact from fro-bot/agent
- * packages/gateway/src/operator-contract/approval-frame.ts at tag v0.76.0
+ * packages/gateway/src/operator-contract/approval-frame.ts
  * (gateway PR #986).
  *
  * Delivered as `event: approval` on GET /operator/runs/:runId/stream.

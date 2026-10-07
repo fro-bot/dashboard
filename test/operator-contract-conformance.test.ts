@@ -1,21 +1,16 @@
-/**
- * Operator contract conformance tests.
- *
- * Verifies the vendored operator contract v1.5.0 is correctly pinned and
- * that parse helpers behave per spec. Also verifies the SSE frame types
- * vendored from fro-bot/agent (including the run-output and approval channels)
- * are structurally correct.
- *
- * Source: fro-bot/agent | Tag: v0.78.0
- */
 import type {ApprovalDecisionState, RunStatus} from '../src/gateway/operator-client.ts'
 import type {
   OperatorApprovalFrame,
   OperatorCancelResponse,
+  OperatorCheckoutOperation,
+  OperatorCheckoutPreparationRefused,
   OperatorDecisionState,
   OperatorFailureKind,
+  OperatorLayoutRefusalReason,
+  OperatorObstructionKind,
   OperatorOutputFrame,
   OperatorRunStatus,
+  OperatorUpdateFailureReason,
   OperatorWebStatus,
   ReadyFrame,
   RepoSummary,
@@ -28,10 +23,30 @@ import type {
   StatusFrameData,
   TerminalPhase,
 } from '../src/gateway/operator-contract/index.ts'
+/**
+ * Operator contract conformance tests.
+ *
+ * Verifies the vendored operator contract is correctly pinned and
+ * that parse helpers behave per spec. Also verifies the SSE frame types
+ * vendored from fro-bot/agent (including the run-output and approval channels)
+ * are structurally correct, and that no version or release-tag literal is
+ * hand-typed anywhere in the vendored directory.
+ *
+ * Source: fro-bot/agent
+ */
+import {readdirSync, readFileSync} from 'node:fs'
+import {join} from 'node:path'
+import ts from 'typescript'
 import {describe, expect, it} from 'vitest'
 import {
+  CHECKOUT_OPERATIONS,
+  CHECKOUT_REFUSAL_REASONS,
+  LAYOUT_REFUSAL_REASONS,
+  OBSTRUCTION_KINDS,
   OPERATOR_CONTRACT_VERSION,
   parseOperatorCancelResponse,
+  parseOperatorCheckoutPreparation,
+  parseOperatorCheckoutProvenance,
   parseOperatorCsrfToken,
   parseOperatorError,
   parseOperatorOk,
@@ -43,7 +58,9 @@ import {
   parseRunSummaryList,
   PHASE_TO_WEB_STATUS,
   RUN_INDEX_CAP,
+  UPDATE_FAILURE_REASONS,
 } from '../src/gateway/operator-contract/index.ts'
+import {isOperatorFailureKind, OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
 
 // ---------------------------------------------------------------------------
 // Type-level assignability: dashboard types ↔ canonical contract types
@@ -75,7 +92,7 @@ export {checkRunStatusBidirectional}
 // Using satisfies/export to avoid unused-variable lint while keeping the type constraint.
 
 // ReadyFrame: must accept a literal with contractVersion string
-const checkReadyFrameLiteral: ReadyFrame = {contractVersion: '1.6.0'}
+const checkReadyFrameLiteral: ReadyFrame = {contractVersion: OPERATOR_CONTRACT_VERSION}
 export {checkReadyFrameLiteral}
 
 // ResetFrameData: must accept a literal with runId + ResetReason
@@ -141,7 +158,7 @@ const checkApprovalFrameSettle: OperatorApprovalFrame = {
 export {checkApprovalFrameSettle}
 
 // RunStreamFrame discriminated union: each variant must be constructable
-const checkReadyFrame: RunStreamFrame = {type: 'ready', data: {contractVersion: '1.6.0'}}
+const checkReadyFrame: RunStreamFrame = {type: 'ready', data: {contractVersion: OPERATOR_CONTRACT_VERSION}}
 const checkOutputFrame: RunStreamFrame = {
   type: 'output',
   data: {runId: 'run-001', text: 'partial', final: false, seq: 0},
@@ -173,13 +190,36 @@ const checkApprovalRunStreamFrame: RunStreamFrame = {
 }
 export {checkApprovalRunStreamFrame, checkReadyFrame, checkResetFrame, checkStatusFrame}
 
+const CONTRACT_DIR = join(import.meta.dirname, '../src/gateway/operator-contract')
+
 // ---------------------------------------------------------------------------
 // Version pin
 // ---------------------------------------------------------------------------
 
 describe('OPERATOR_CONTRACT_VERSION', () => {
-  it('is pinned to 1.6.0', () => {
-    expect(OPERATOR_CONTRACT_VERSION).toBe('1.6.0')
+  it('is a well-formed major.minor.patch version (the value itself is never re-typed in tests)', () => {
+    expect(OPERATOR_CONTRACT_VERSION).toMatch(/^\d+\.\d+\.\d+$/)
+  })
+
+  it('is the single version literal in the vendored directory: none in any comment or in the README', () => {
+    const files = readdirSync(CONTRACT_DIR).filter(name => name.endsWith('.ts') || name.endsWith('.md'))
+    expect(files).toContain('version.ts')
+    expect(files).toContain('README.md')
+    expect(files).toContain('provenance.ts')
+
+    for (const name of files) {
+      const text = readFileSync(join(CONTRACT_DIR, name), 'utf8')
+      const prose = name.endsWith('.md') ? [text] : commentRanges(text).map(range => text.slice(range.pos, range.end))
+      for (const chunk of prose) {
+        expect(findVersionLiterals(chunk), `${name} comment/prose carries a version or tag literal`).toEqual([])
+      }
+    }
+  })
+
+  it('version.ts holds OPERATOR_CONTRACT_VERSION as the only literal outside comments', () => {
+    const text = readFileSync(join(CONTRACT_DIR, 'version.ts'), 'utf8')
+    const code = blankRanges(text, commentRanges(text))
+    expect(findVersionLiterals(code)).toEqual([OPERATOR_CONTRACT_VERSION])
   })
 })
 
@@ -187,17 +227,44 @@ describe('OPERATOR_CONTRACT_VERSION', () => {
 // OperatorFailureKind
 // ---------------------------------------------------------------------------
 
+// Exhaustive over the union: adding or removing a member without updating this record fails tsc.
+const FAILURE_KIND_RECORD = {
+  'inactivity-timeout': true,
+  'max-duration-timeout': true,
+  'stream-ended': true,
+  'workspace-unreachable': true,
+  'session-error': true,
+  'checkout-substituted': true,
+  'workspace-unavailable': true,
+  unknown: true,
+} satisfies Record<OperatorFailureKind, true>
+
 describe('OperatorFailureKind', () => {
-  it('all six known reason codes are assignable to the union', () => {
+  it('all known reason codes are assignable to the union', () => {
     const checkFailureKinds: OperatorFailureKind[] = [
       'inactivity-timeout',
       'max-duration-timeout',
       'stream-ended',
       'workspace-unreachable',
       'session-error',
+      'checkout-substituted',
+      'workspace-unavailable',
       'unknown',
     ]
-    expect(checkFailureKinds).toHaveLength(6)
+    expect(checkFailureKinds).toHaveLength(Object.keys(FAILURE_KIND_RECORD).length)
+  })
+
+  it('OPERATOR_FAILURE_KINDS equals the union members, no more and no fewer', () => {
+    expect([...OPERATOR_FAILURE_KINDS].toSorted()).toEqual(Object.keys(FAILURE_KIND_RECORD).toSorted())
+  })
+
+  it('isOperatorFailureKind accepts every member and rejects anything else', () => {
+    for (const kind of Object.keys(FAILURE_KIND_RECORD)) {
+      expect(isOperatorFailureKind(kind)).toBe(true)
+    }
+    for (const bad of ['fixture-unknown-kind', '', 'Checkout-Substituted', 7, null, undefined, {}, ['unknown']]) {
+      expect(isOperatorFailureKind(bad)).toBe(false)
+    }
   })
 
   it('OperatorRunStatus accepts an optional failureKind on a failed status', () => {
@@ -223,7 +290,238 @@ describe('OperatorFailureKind', () => {
     expect(checkStatusWithFailureKind.failureKind).toBe('inactivity-timeout')
     expect(checkStatusWithoutFailureKind.failureKind).toBeUndefined()
   })
+
+  it('OperatorRunStatus accepts optional checkoutProvenance and checkoutPreparation', () => {
+    const base = {
+      runId: 'run-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'FAILED',
+      status: 'failed',
+      startedAt: '2026-07-07T00:00:00Z',
+      stale: false,
+    } as const
+    const withPreparation: OperatorRunStatus = {
+      ...base,
+      checkoutPreparation: {outcome: 'refused', reason: 'detached'},
+    }
+    const withProvenance: OperatorRunStatus = {
+      ...base,
+      checkoutProvenance: {kind: 'unavailable', remote: {kind: 'not-checked'}},
+    }
+    expect(withPreparation.checkoutPreparation?.outcome).toBe('refused')
+    expect(withProvenance.checkoutProvenance?.kind).toBe('unavailable')
+  })
 })
+
+// ---------------------------------------------------------------------------
+// Runtime vocabularies — exported so coverage tests can read them. Each set is
+// compared with an exhaustive record keyed by the vendored union, so a value
+// added to one side and not the other fails here (compile time and run time).
+// ---------------------------------------------------------------------------
+
+const LAYOUT_REASON_RECORD = {
+  'core-worktree': true,
+  gitfile: true,
+  'symlinked-git-dir': true,
+  'symlinked-config': true,
+  alternates: true,
+  'replace-refs': true,
+  grafts: true,
+  shallow: true,
+  'partial-clone': true,
+  'linked-worktree': true,
+  'unsupported-index-flag': true,
+  'bare-repository': true,
+} satisfies Record<OperatorLayoutRefusalReason, true>
+
+const OBSTRUCTION_KIND_RECORD = {
+  'exact-conflict': true,
+  'prefix-conflict': true,
+  'identical-content': true,
+  'symlink-ancestor': true,
+} satisfies Record<OperatorObstructionKind, true>
+
+const UPDATE_FAILURE_REASON_RECORD = {
+  aborted: true,
+  'inspection-failed': true,
+  'fetch-auth-rejected': true,
+  'fetch-not-found': true,
+  'fetch-forbidden': true,
+  'fetch-rate-limited': true,
+  'fetch-unreachable': true,
+  'fetch-timeout': true,
+  'fetch-failed': true,
+  'remote-moved': true,
+  'apply-failed': true,
+  'termination-unconfirmed': true,
+} satisfies Record<OperatorUpdateFailureReason, true>
+
+const CHECKOUT_OPERATION_RECORD = {
+  none: true,
+  merge: true,
+  rebase: true,
+  am: true,
+  'cherry-pick': true,
+  revert: true,
+  bisect: true,
+} satisfies Record<OperatorCheckoutOperation, true>
+
+const REFUSAL_REASON_RECORD = {
+  'needs-recovery': true,
+  'checkout-substituted': true,
+  'unsupported-layout': true,
+  'unsupported-config': true,
+  'operation-in-progress': true,
+  dirty: true,
+  'submodule-initialized': true,
+  detached: true,
+  'non-default-branch': true,
+  diverged: true,
+  ahead: true,
+  obstructed: true,
+  'maintenance-hold': true,
+} satisfies Record<OperatorCheckoutPreparationRefused['reason'], true>
+
+describe('provenance runtime vocabularies', () => {
+  it.each([
+    ['layout refusal reasons', LAYOUT_REFUSAL_REASONS, LAYOUT_REASON_RECORD],
+    ['obstruction kinds', OBSTRUCTION_KINDS, OBSTRUCTION_KIND_RECORD],
+    ['update-failure reasons', UPDATE_FAILURE_REASONS, UPDATE_FAILURE_REASON_RECORD],
+    ['checkout operations', CHECKOUT_OPERATIONS, CHECKOUT_OPERATION_RECORD],
+  ] as const)('%s: the exported set equals the union', (_name, set, record) => {
+    expect([...set].toSorted()).toEqual(Object.keys(record).toSorted())
+  })
+
+  it('refusal reasons: the exported list equals the union, with no duplicates', () => {
+    expect([...CHECKOUT_REFUSAL_REASONS].toSorted()).toEqual(Object.keys(REFUSAL_REASON_RECORD).toSorted())
+    expect(new Set(CHECKOUT_REFUSAL_REASONS).size).toBe(CHECKOUT_REFUSAL_REASONS.length)
+  })
+
+  it('every listed refusal reason is a parseable refusal shape, and an unlisted reason is not', () => {
+    // Per-reason minimal valid payloads; the loop proves the list and the parser's switch agree.
+    const payloads: Record<(typeof CHECKOUT_REFUSAL_REASONS)[number], Record<string, unknown>> = {
+      'needs-recovery': {},
+      'checkout-substituted': {},
+      'unsupported-layout': {layoutReason: 'shallow'},
+      'unsupported-config': {disallowedKeys: []},
+      'operation-in-progress': {operation: 'merge'},
+      dirty: {changedPaths: []},
+      'submodule-initialized': {submodules: []},
+      detached: {},
+      'non-default-branch': {branch: 'fixture-feature'},
+      diverged: {},
+      ahead: {},
+      obstructed: {obstructions: []},
+      'maintenance-hold': {},
+    }
+    for (const reason of CHECKOUT_REFUSAL_REASONS) {
+      const parsed = parseOperatorCheckoutPreparation({outcome: 'refused', reason, ...payloads[reason]})
+      expect(parsed?.outcome, reason).toBe('refused')
+    }
+    expect(parseOperatorCheckoutPreparation({outcome: 'refused', reason: 'fixture-unknown-reason'})).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseOperatorCheckoutProvenance / parseOperatorCheckoutPreparation — direct
+// ---------------------------------------------------------------------------
+
+const FIXTURE_SHA = 'c'.repeat(40)
+
+describe('parseOperatorCheckoutProvenance', () => {
+  const observed = {
+    kind: 'observed',
+    observation: {
+      head: {kind: 'attached', branch: 'fixture-main', sha: FIXTURE_SHA},
+      worktree: {kind: 'clean'},
+      operationInProgress: 'none',
+      observedAt: '2026-10-06T00:00:00Z',
+    },
+    remote: {kind: 'not-checked'},
+  }
+
+  it('accepts a valid observed provenance and an unavailable provenance', () => {
+    expect(parseOperatorCheckoutProvenance(observed)).toEqual(observed)
+    const unavailable = {kind: 'unavailable', remote: {kind: 'not-checked'}}
+    expect(parseOperatorCheckoutProvenance(unavailable)).toEqual(unavailable)
+  })
+
+  it('rejects absent and non-object inputs to undefined', () => {
+    for (const bad of [undefined, null, 'x', 1, true, []]) {
+      expect(parseOperatorCheckoutProvenance(bad)).toBeUndefined()
+    }
+  })
+
+  it('rejects a 39-character SHA, and a fast-forward whose fromSha equals sha', () => {
+    const short = {...observed, observation: {...observed.observation, head: {kind: 'detached', sha: 'c'.repeat(39)}}}
+    expect(parseOperatorCheckoutProvenance(short)).toBeUndefined()
+    const noAdvance = {
+      ...observed,
+      remote: {
+        kind: 'checked',
+        defaultBranch: 'main',
+        sha: FIXTURE_SHA,
+        checkedAt: '2026-10-06T00:00:00Z',
+        change: 'fast-forward',
+        fromSha: FIXTURE_SHA,
+      },
+    }
+    expect(parseOperatorCheckoutProvenance(noAdvance)).toBeUndefined()
+  })
+
+  it('accepts an unchanged checked remote and a real fast-forward', () => {
+    const unchanged = {
+      ...observed,
+      remote: {kind: 'checked', defaultBranch: 'main', sha: FIXTURE_SHA, checkedAt: 'now', change: 'unchanged'},
+    }
+    expect(parseOperatorCheckoutProvenance(unchanged)).toEqual(unchanged)
+    const fastForward = {
+      ...observed,
+      remote: {
+        kind: 'checked',
+        defaultBranch: 'main',
+        sha: FIXTURE_SHA,
+        checkedAt: 'now',
+        change: 'fast-forward',
+        fromSha: 'd'.repeat(40),
+      },
+    }
+    expect(parseOperatorCheckoutProvenance(fastForward)).toEqual(fastForward)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Static helpers for the version-literal scan
+// ---------------------------------------------------------------------------
+
+function commentRanges(text: string): {pos: number; end: number}[] {
+  const sourceFile = ts.createSourceFile('contract.ts', text, ts.ScriptTarget.Latest, true)
+  const ranges = new Map<number, {pos: number; end: number}>()
+  const visit = (node: ts.Node): void => {
+    const found = [
+      ...(ts.getLeadingCommentRanges(text, node.getFullStart()) ?? []),
+      ...(ts.getTrailingCommentRanges(text, node.getEnd()) ?? []),
+    ]
+    for (const range of found) ranges.set(range.pos, {pos: range.pos, end: range.end})
+    for (const child of node.getChildren(sourceFile)) visit(child)
+  }
+  visit(sourceFile)
+  return [...ranges.values()]
+}
+
+function blankRanges(text: string, ranges: readonly {pos: number; end: number}[]): string {
+  let out = text
+  for (const {pos, end} of ranges) {
+    out = out.slice(0, pos) + ' '.repeat(end - pos) + out.slice(end)
+  }
+  return out
+}
+
+/** Dotted versions (1.2, 1.2.3, v1.2.3) and bare `vN` tags. */
+function findVersionLiterals(text: string): string[] {
+  return text.match(/\bv?\d+(?:\.\d+)+\b|\bv\d+\b/g) ?? []
+}
 
 // ---------------------------------------------------------------------------
 // parseOperatorSessionInfo
@@ -951,6 +1249,8 @@ describe('parseRunSummary', () => {
       'stream-ended',
       'workspace-unreachable',
       'session-error',
+      'checkout-substituted',
+      'workspace-unavailable',
       'unknown',
     ] as const
     for (const failureKind of kinds) {

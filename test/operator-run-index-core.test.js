@@ -283,6 +283,8 @@ describe('parseRunSummaryItem — failureKind', () => {
       'stream-ended',
       'workspace-unreachable',
       'session-error',
+      'checkout-substituted',
+      'workspace-unavailable',
       'unknown',
     ]
     for (const failureKind of kinds) {
@@ -2308,6 +2310,30 @@ describe('failure reason label map parity (stream ↔ run-index)', () => {
     for (const key of Object.keys(STREAM_FAILURE_REASON_LABELS)) {
       expect(RUN_INDEX_FAILURE_REASON_LABELS[key]).toBe(STREAM_FAILURE_REASON_LABELS[key])
     }
+  })
+})
+
+describe('failure reason label copy (workspace and checkout kinds)', () => {
+  it('workspace-unreachable, workspace-unavailable and checkout-substituted have three distinct labels, identical in both maps', () => {
+    const kinds = ['workspace-unreachable', 'workspace-unavailable', 'checkout-substituted']
+    for (const kind of kinds) {
+      expect(RUN_INDEX_FAILURE_REASON_LABELS[kind]).toBe(STREAM_FAILURE_REASON_LABELS[kind])
+    }
+    const labels = kinds.map(kind => RUN_INDEX_FAILURE_REASON_LABELS[kind])
+    expect(new Set(labels).size).toBe(3)
+    expect(labels).toEqual(['Workspace unreachable', 'Workspace unavailable', 'Checkout mismatch'])
+  })
+
+  it('a failed summary with each new kind resolves its own reason label in the safe view', () => {
+    const view = kind => buildRunSafeView(makeValidSummary({status: 'failed', failureKind: kind}))
+    expect(view('workspace-unreachable').reasonLabel).toBe('Workspace unreachable')
+    expect(view('workspace-unavailable').reasonLabel).toBe('Workspace unavailable')
+    expect(view('checkout-substituted').reasonLabel).toBe('Checkout mismatch')
+  })
+
+  it('a non-failed summary carrying a new kind renders no reason', () => {
+    const view = buildRunSafeView(makeValidSummary({status: 'running', failureKind: 'checkout-substituted'}))
+    expect('reasonLabel' in view).toBe(false)
   })
 })
 

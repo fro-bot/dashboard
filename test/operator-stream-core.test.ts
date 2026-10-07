@@ -18,6 +18,16 @@ import {
   buildApprovalClient,
   buildCancelClient,
   CANCEL_RETRY_MAX_ATTEMPTS,
+  CHECKOUT_FAILURE_FLAG_LABELS,
+  CHECKOUT_LAYOUT_REASON_LABELS,
+  CHECKOUT_OBSTRUCTION_KIND_LABELS,
+  CHECKOUT_OPERATION_LABELS,
+  CHECKOUT_PREPARATION_HEADLINE_LABELS,
+  CHECKOUT_PROVENANCE_LABELS,
+  CHECKOUT_REFUSAL_REASON_LABELS,
+  CHECKOUT_UPDATE_FAILURE_REASON_LABELS,
+  FAILURE_REASON_LABELS,
+  fillLabelTemplate,
   FIRST_FRAME_TIMEOUT_MS,
   GATEWAY_PENDING_APPROVALS_CAP,
   getOpenApprovals,
@@ -37,10 +47,21 @@ import {
   RETRY_BASE_MS,
   RETRY_FACTOR,
   RETRY_MAX_COUNT,
+  sanitizeCheckoutText,
   toSafeRunView,
 } from '../public/operator-stream.js'
-import {OPERATOR_CONTRACT_VERSION, PHASE_TO_WEB_STATUS as VENDORED_PHASE_TO_WEB_STATUS} from '../src/gateway/operator-contract/index.ts'
+import {
+  CHECKOUT_OPERATIONS,
+  CHECKOUT_REFUSAL_REASONS,
+  LAYOUT_REFUSAL_REASONS,
+  OBSTRUCTION_KINDS,
+  OPERATOR_CONTRACT_VERSION,
+  UPDATE_FAILURE_REASONS,
+  PHASE_TO_WEB_STATUS as VENDORED_PHASE_TO_WEB_STATUS,
+} from '../src/gateway/operator-contract/index.ts'
+import {OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
 import {FIXTURE_RUN_ID_FOR_TESTS, FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../src/gateway/operator-fixture-sse.ts'
+import {parseSseChunk} from '../src/gateway/operator-sse-reader.ts'
 
 const ACTIVE_STATUS = {
   runId: 'run-abc',
@@ -1225,8 +1246,8 @@ describe('backoff constants', () => {
     expect(Number.isInteger(RETRY_MAX_COUNT)).toBe(true)
   })
 
-  it('PINNED_CONTRACT_VERSION is 1.6.0', () => {
-    expect(PINNED_CONTRACT_VERSION).toBe('1.6.0')
+  it('PINNED_CONTRACT_VERSION is a well-formed version literal (its value is checked only against the server constant)', () => {
+    expect(PINNED_CONTRACT_VERSION).toMatch(/^\d+\.\d+\.\d+$/)
   })
 })
 
@@ -5986,7 +6007,7 @@ describe('initOperatorStream — late-frame guard: closed stream does not mutate
     const badgeEl = {textContent: '', hidden: true}
 
     const encoder = new TextEncoder()
-    const readyFrame = 'event: ready\ndata: {"contractVersion":"1.6.0"}\n\n'
+    const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
     const outputFrame = `event: output\ndata: ${JSON.stringify({runId: 'run-late-frame', text: 'late output', final: false, seq: 0})}\n\n`
     const approvalFrame = `event: approval\ndata: ${JSON.stringify({runId: 'run-late-frame', requestID: 'req-late', permission: 'shell', settled: false})}\n\n`
 
@@ -6072,7 +6093,7 @@ describe('initOperatorStream — terminal run: immediate close preserves termina
     const noticeEl = {textContent: '', hidden: false, dataset: {connectionState: ''}}
 
     const encoder = new TextEncoder()
-    const readyFrame = 'event: ready\ndata: {"contractVersion":"1.6.0"}\n\n'
+    const readyFrame = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`
     const terminalFrame = `event: status\ndata: ${JSON.stringify({
       runId: 'run-terminal-001',
       entityRef: 'fro-bot/agent',
@@ -6484,9 +6505,9 @@ describe('live failure reason updates and announcements', () => {
     await new Promise(resolve => setTimeout(resolve, 30))
 
     expect(statusEl.textContent).toBe('Failed')
-    expect(reasonEl.textContent).toBe('Workspace unavailable')
+    expect(reasonEl.textContent).toBe('Workspace unreachable')
     // noticeEl must contain the live polite announcement
-    expect(noticeEl.textContent).toBe('Run failed: Workspace unavailable')
+    expect(noticeEl.textContent).toBe('Run failed: Workspace unreachable')
     expect(noticeEl.hidden).toBe(false)
 
     handle.close()
@@ -7242,6 +7263,945 @@ describe('CSS selector ↔ cancel-control state emitter agreement', () => {
     const requiredStateTokens = ['idle', 'armed', 'pending', 'retrying', 'cancelled', 'unavailable', 'session-expired', 'transport-failure']
     for (const state of requiredStateTokens) {
       expect(cssContent).toContain(`[data-state="${state}"]`)
+    }
+  })
+})
+
+// ===========================================================================
+// Checkout provenance / checkout preparation — browser trust boundary
+// ===========================================================================
+
+const CK_SHA_A = 'a'.repeat(40)
+const CK_SHA_B = 'b'.repeat(40)
+const CK_SHA_C = 'c'.repeat(40)
+
+function ckStatusPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    runId: 'run-ck-001',
+    entityRef: 'fro-bot/agent',
+    surface: 'github',
+    phase: 'EXECUTING',
+    status: 'running',
+    startedAt: '2026-10-06T10:00:00Z',
+    stale: false,
+    ...overrides,
+  }
+}
+
+function ckObserved(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    kind: 'observed',
+    observation: {
+      head: {kind: 'attached', branch: 'fixture-main', sha: CK_SHA_A},
+      worktree: {kind: 'clean'},
+      operationInProgress: 'none',
+      observedAt: '2026-10-06T10:00:00Z',
+    },
+    remote: {kind: 'not-checked'},
+    ...overrides,
+  }
+}
+
+function ckObservation(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {...(ckObserved().observation as Record<string, unknown>), ...overrides}
+}
+
+function ckBrowserStatus(payload: Record<string, unknown>) {
+  const result = parseSseFrame(`event: status\ndata: ${JSON.stringify(payload)}\n\n`)
+  if (result === null || !result.success || result.frame.type !== 'status') return undefined
+  return result.frame.data
+}
+
+function ckServerStatus(payload: Record<string, unknown>) {
+  const result = parseSseChunk(`event: status\ndata: ${JSON.stringify(payload)}\n\n`)[0]
+  if (result === undefined || !result.success || result.frame.type !== 'status') return undefined
+  return result.frame.data
+}
+
+function ckLive(): StreamState {
+  return nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+}
+
+function ckApply(state: StreamState, payload: Record<string, unknown>): StreamState {
+  const data = ckBrowserStatus(payload)
+  if (data === undefined) throw new Error('fixture frame did not parse')
+  return nextStreamState(state, {type: 'status', data})
+}
+
+// ---------------------------------------------------------------------------
+// Label coverage — every vendored value has a dashboard label
+// ---------------------------------------------------------------------------
+
+describe('checkout label maps — coverage against the vendored vocabularies', () => {
+  const sorted = (values: Iterable<string>) => [...values].toSorted()
+
+  it('failure-kind labels cover exactly the vendored OperatorFailureKind set', () => {
+    expect(sorted(Object.keys(FAILURE_REASON_LABELS))).toEqual(sorted(OPERATOR_FAILURE_KINDS))
+  })
+
+  it('refusal-reason labels cover exactly the vendored refusal reasons', () => {
+    expect(sorted(Object.keys(CHECKOUT_REFUSAL_REASON_LABELS))).toEqual(sorted(CHECKOUT_REFUSAL_REASONS))
+  })
+
+  it('update-failure labels cover exactly the vendored update-failure reasons', () => {
+    expect(sorted(Object.keys(CHECKOUT_UPDATE_FAILURE_REASON_LABELS))).toEqual(sorted(UPDATE_FAILURE_REASONS))
+  })
+
+  it('layout-reason labels cover exactly the vendored layout reasons', () => {
+    expect(sorted(Object.keys(CHECKOUT_LAYOUT_REASON_LABELS))).toEqual(sorted(LAYOUT_REFUSAL_REASONS))
+  })
+
+  it('obstruction-kind labels cover exactly the vendored obstruction kinds', () => {
+    expect(sorted(Object.keys(CHECKOUT_OBSTRUCTION_KIND_LABELS))).toEqual(sorted(OBSTRUCTION_KINDS))
+  })
+
+  it('operation labels cover every vendored operation except `none`, which deliberately renders nothing', () => {
+    expect(sorted([...Object.keys(CHECKOUT_OPERATION_LABELS), 'none'])).toEqual(sorted(CHECKOUT_OPERATIONS))
+    expect('none' in CHECKOUT_OPERATION_LABELS).toBe(false)
+  })
+
+  it('every label is a non-empty string', () => {
+    const maps = [
+      FAILURE_REASON_LABELS,
+      CHECKOUT_REFUSAL_REASON_LABELS,
+      CHECKOUT_UPDATE_FAILURE_REASON_LABELS,
+      CHECKOUT_LAYOUT_REASON_LABELS,
+      CHECKOUT_OBSTRUCTION_KIND_LABELS,
+      CHECKOUT_OPERATION_LABELS,
+      CHECKOUT_FAILURE_FLAG_LABELS,
+      CHECKOUT_PREPARATION_HEADLINE_LABELS,
+      CHECKOUT_PROVENANCE_LABELS,
+    ] as readonly Readonly<Record<string, string>>[]
+    for (const map of maps) {
+      for (const value of Object.values(map)) {
+        expect(typeof value).toBe('string')
+        expect(value.length).toBeGreaterThan(0)
+      }
+    }
+  })
+
+  it('workspace-unreachable, workspace-unavailable and checkout-substituted have three distinct labels', () => {
+    const labels = [
+      FAILURE_REASON_LABELS['workspace-unreachable'],
+      FAILURE_REASON_LABELS['workspace-unavailable'],
+      FAILURE_REASON_LABELS['checkout-substituted'],
+    ]
+    expect(new Set(labels).size).toBe(3)
+    expect(labels).toEqual(['Workspace unreachable', 'Workspace unavailable', 'Checkout mismatch'])
+  })
+
+  it('all labels within each map are distinct', () => {
+    for (const map of [
+      FAILURE_REASON_LABELS,
+      CHECKOUT_REFUSAL_REASON_LABELS,
+      CHECKOUT_UPDATE_FAILURE_REASON_LABELS,
+      CHECKOUT_LAYOUT_REASON_LABELS,
+      CHECKOUT_OBSTRUCTION_KIND_LABELS,
+      CHECKOUT_OPERATION_LABELS,
+    ] as readonly Readonly<Record<string, string>>[]) {
+      const values = Object.values(map)
+      expect(new Set(values).size).toBe(values.length)
+    }
+  })
+
+  it('label copy matches the reviewed Label Copy verbatim', () => {
+    expect(CHECKOUT_PREPARATION_HEADLINE_LABELS).toEqual({
+      refused: 'Checkout refused: {reason}',
+      failed: 'Checkout update failed: {reason}',
+    })
+    expect(CHECKOUT_FAILURE_FLAG_LABELS).toEqual({
+      permanent: "Retrying won't help.",
+      mutationStarted: 'The checkout was partly changed.',
+      mutationPossibly: 'The checkout may have been partly changed.',
+    })
+    expect(CHECKOUT_REFUSAL_REASON_LABELS).toEqual({
+      'needs-recovery': 'needs recovery',
+      'checkout-substituted': 'checkout mismatch',
+      'unsupported-layout': 'unsupported repository layout ({layout})',
+      'unsupported-config': 'disallowed git config',
+      'operation-in-progress': '{operation} in progress',
+      dirty: 'uncommitted changes',
+      'submodule-initialized': 'submodules initialized',
+      detached: 'detached HEAD',
+      'non-default-branch': 'on branch {branch}, not the default',
+      diverged: 'diverged from remote',
+      ahead: 'local commits not on remote',
+      obstructed: 'files in the way',
+      'maintenance-hold': 'maintenance hold',
+    })
+    expect(CHECKOUT_OPERATION_LABELS).toEqual({
+      merge: 'Merge',
+      rebase: 'Rebase',
+      am: 'Patch apply',
+      'cherry-pick': 'Cherry-pick',
+      revert: 'Revert',
+      bisect: 'Bisect',
+    })
+    expect(CHECKOUT_PROVENANCE_LABELS).toEqual({
+      headAttached: 'Started from {branch} at {sha}',
+      headDetached: 'Started from detached {sha}',
+      worktreeClean: 'Clean worktree',
+      worktreeDirty: 'Uncommitted changes:',
+      operationInProgress: '{operation} in progress',
+      remoteNotChecked: 'Remote not checked',
+      remoteUpToDate: 'Up to date with {defaultBranch}',
+      remoteFastForwarded: 'Fast-forwarded {fromSha} → {sha} on {defaultBranch}',
+      unavailable: 'Checkout state unavailable',
+    })
+  })
+
+  it('every {placeholder} used by a template is one the renderer is expected to supply', () => {
+    const allowed = new Set(['reason', 'layout', 'operation', 'branch', 'sha', 'fromSha', 'defaultBranch'])
+    const templates = [
+      ...Object.values(CHECKOUT_REFUSAL_REASON_LABELS),
+      ...Object.values(CHECKOUT_PREPARATION_HEADLINE_LABELS),
+      ...Object.values(CHECKOUT_PROVENANCE_LABELS),
+    ]
+    for (const template of templates) {
+      for (const match of template.matchAll(/\{(\w+)\}/g)) {
+        expect(allowed.has(match[1] ?? '')).toBe(true)
+      }
+    }
+  })
+
+  it('fillLabelTemplate substitutes in a single pass and never re-expands substituted text', () => {
+    expect(fillLabelTemplate('on {a} at {b}', {a: 'x', b: 'y'})).toBe('on x at y')
+    expect(fillLabelTemplate('on {a}', {a: '{b}', b: 'nope'})).toBe('on {b}')
+    expect(fillLabelTemplate('on {a}', {a: '$& $1'})).toBe('on $& $1')
+    expect(fillLabelTemplate('keep {missing}', {})).toBe('keep {missing}')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Parser — acceptance (shared inputs drive the server and browser parsers)
+// ---------------------------------------------------------------------------
+
+function ckRefusals(): Record<string, unknown>[] {
+  return [
+    {outcome: 'refused', reason: 'needs-recovery'},
+    {outcome: 'refused', reason: 'checkout-substituted'},
+    {outcome: 'refused', reason: 'unsupported-layout', layoutReason: 'shallow'},
+    {outcome: 'refused', reason: 'unsupported-config', disallowedKeys: ['fixture.key']},
+    {outcome: 'refused', reason: 'unsupported-config', disallowedKeys: []},
+    {outcome: 'refused', reason: 'operation-in-progress', operation: 'merge'},
+    {outcome: 'refused', reason: 'dirty', changedPaths: ['fixture/a', 'fixture/b']},
+    {outcome: 'refused', reason: 'dirty', changedPaths: []},
+    {outcome: 'refused', reason: 'submodule-initialized', submodules: ['fixture-sub']},
+    {outcome: 'refused', reason: 'detached'},
+    {outcome: 'refused', reason: 'non-default-branch', branch: 'fixture-feature'},
+    {outcome: 'refused', reason: 'diverged'},
+    {outcome: 'refused', reason: 'ahead'},
+    {outcome: 'refused', reason: 'obstructed', obstructions: [{path: 'fixture/a', kind: 'exact-conflict'}]},
+    {outcome: 'refused', reason: 'obstructed', obstructions: []},
+    {outcome: 'refused', reason: 'maintenance-hold'},
+  ]
+}
+
+interface CkParityCase {
+  readonly name: string
+  readonly field: 'checkoutProvenance' | 'checkoutPreparation'
+  readonly value: unknown
+  readonly present: boolean
+}
+
+function ckParityCases(): CkParityCase[] {
+  const cases: CkParityCase[] = []
+  const prov = (name: string, value: unknown, present: boolean) =>
+    cases.push({name: `provenance: ${name}`, field: 'checkoutProvenance', value, present})
+  const prep = (name: string, value: unknown, present: boolean) =>
+    cases.push({name: `preparation: ${name}`, field: 'checkoutPreparation', value, present})
+
+  prov('observed, attached, clean, not-checked', ckObserved(), true)
+  prov('observed, detached, dirty, rebase', ckObserved({observation: ckObservation({
+    head: {kind: 'detached', sha: CK_SHA_A},
+    worktree: {kind: 'dirty', staged: 1, unstaged: 2, untracked: 3, conflicted: 4},
+    operationInProgress: 'rebase',
+  })}), true)
+  prov('unavailable', {kind: 'unavailable', remote: {kind: 'not-checked'}}, true)
+  prov('checked unchanged', ckObserved({remote: {kind: 'checked', defaultBranch: 'main', sha: CK_SHA_B, checkedAt: 'now', change: 'unchanged'}}), true)
+  prov('checked fast-forward', ckObserved({remote: {kind: 'checked', defaultBranch: 'main', sha: CK_SHA_B, checkedAt: 'now', change: 'fast-forward', fromSha: CK_SHA_C}}), true)
+  prov('39-character SHA', ckObserved({observation: ckObservation({head: {kind: 'detached', sha: 'a'.repeat(39)}})}), false)
+  prov('41-character SHA', ckObserved({observation: ckObservation({head: {kind: 'detached', sha: 'a'.repeat(41)}})}), false)
+  prov('uppercase-hex SHA', ckObserved({observation: ckObservation({head: {kind: 'detached', sha: 'A'.repeat(40)}})}), false)
+  prov('fast-forward with fromSha === sha', ckObserved({remote: {kind: 'checked', defaultBranch: 'main', sha: CK_SHA_B, checkedAt: 'now', change: 'fast-forward', fromSha: CK_SHA_B}}), false)
+  prov('fast-forward without fromSha', ckObserved({remote: {kind: 'checked', defaultBranch: 'main', sha: CK_SHA_B, checkedAt: 'now', change: 'fast-forward'}}), false)
+  prov('checked with unknown change', ckObserved({remote: {kind: 'checked', defaultBranch: 'main', sha: CK_SHA_B, checkedAt: 'now', change: 'fixture-unknown'}}), false)
+  prov('checked with empty defaultBranch', ckObserved({remote: {kind: 'checked', defaultBranch: '', sha: CK_SHA_B, checkedAt: 'now', change: 'unchanged'}}), false)
+  prov('checked with empty checkedAt', ckObserved({remote: {kind: 'checked', defaultBranch: 'main', sha: CK_SHA_B, checkedAt: '', change: 'unchanged'}}), false)
+  prov('unknown remote kind', ckObserved({remote: {kind: 'fixture-unknown'}}), false)
+  prov('missing remote', ckObserved({remote: undefined}), false)
+  prov('empty branch', ckObserved({observation: ckObservation({head: {kind: 'attached', branch: '', sha: CK_SHA_A}})}), false)
+  prov('attached head without branch', ckObserved({observation: ckObservation({head: {kind: 'attached', sha: CK_SHA_A}})}), false)
+  prov('unknown head kind', ckObserved({observation: ckObservation({head: {kind: 'fixture-unknown', sha: CK_SHA_A}})}), false)
+  prov('unknown worktree kind', ckObserved({observation: ckObservation({worktree: {kind: 'fixture-unknown'}})}), false)
+  prov('unknown operation', ckObserved({observation: ckObservation({operationInProgress: 'fixture-unknown'})}), false)
+  prov('negative count', ckObserved({observation: ckObservation({worktree: {kind: 'dirty', staged: -1, unstaged: 0, untracked: 0, conflicted: 0}})}), false)
+  prov('fractional count', ckObserved({observation: ckObservation({worktree: {kind: 'dirty', staged: 1.5, unstaged: 0, untracked: 0, conflicted: 0}})}), false)
+  prov('string count', ckObserved({observation: ckObservation({worktree: {kind: 'dirty', staged: '1', unstaged: 0, untracked: 0, conflicted: 0}})}), false)
+  prov('null count (Infinity on the wire)', ckObserved({observation: ckObservation({worktree: {kind: 'dirty', staged: null, unstaged: 0, untracked: 0, conflicted: 0}})}), false)
+  prov('missing count', ckObserved({observation: ckObservation({worktree: {kind: 'dirty', staged: 1, unstaged: 0, untracked: 0}})}), false)
+  prov('empty observedAt', ckObserved({observation: ckObservation({observedAt: ''})}), false)
+  prov('unknown provenance kind', {kind: 'fixture-unknown', remote: {kind: 'not-checked'}}, false)
+  prov('observed without observation', {kind: 'observed', remote: {kind: 'not-checked'}}, false)
+  for (const value of ['fixture-string', 42, true, [], ['fixture-array'], {}]) {
+    prov(`non-object ${JSON.stringify(value)}`, value, false)
+  }
+
+  for (const refusal of ckRefusals()) {
+    prep(`refused ${String(refusal.reason)} #${cases.length}`, refusal, true)
+  }
+  for (const mutationStarted of [true, false, 'possibly']) {
+    for (const permanent of [true, false]) {
+      prep(`failed mutationStarted=${String(mutationStarted)} permanent=${String(permanent)}`, {outcome: 'failed', reason: 'fetch-timeout', mutationStarted, permanent}, true)
+    }
+  }
+  prep('unknown refusal reason', {outcome: 'refused', reason: 'fixture-unknown'}, false)
+  prep('unknown layout reason', {outcome: 'refused', reason: 'unsupported-layout', layoutReason: 'fixture-unknown'}, false)
+  prep('missing layout reason', {outcome: 'refused', reason: 'unsupported-layout'}, false)
+  prep('disallowedKeys not an array', {outcome: 'refused', reason: 'unsupported-config', disallowedKeys: 'fixture'}, false)
+  prep('changedPaths with a non-string entry', {outcome: 'refused', reason: 'dirty', changedPaths: ['fixture/a', 7]}, false)
+  prep('submodules with a null entry', {outcome: 'refused', reason: 'submodule-initialized', submodules: [null]}, false)
+  prep('empty non-default branch', {outcome: 'refused', reason: 'non-default-branch', branch: ''}, false)
+  prep('non-string non-default branch', {outcome: 'refused', reason: 'non-default-branch', branch: 7}, false)
+  prep('unknown operation', {outcome: 'refused', reason: 'operation-in-progress', operation: 'fixture-unknown'}, false)
+  prep('unknown obstruction kind', {outcome: 'refused', reason: 'obstructed', obstructions: [{path: 'fixture/a', kind: 'fixture-unknown'}]}, false)
+  prep('obstruction path not a string', {outcome: 'refused', reason: 'obstructed', obstructions: [{path: 3, kind: 'exact-conflict'}]}, false)
+  prep('obstruction entry not an object', {outcome: 'refused', reason: 'obstructed', obstructions: ['fixture/a']}, false)
+  prep('unknown update-failure reason', {outcome: 'failed', reason: 'fixture-unknown', mutationStarted: false, permanent: false}, false)
+  prep('mutationStarted not tri-state', {outcome: 'failed', reason: 'fetch-failed', mutationStarted: 'maybe', permanent: false}, false)
+  prep('permanent not boolean', {outcome: 'failed', reason: 'fetch-failed', mutationStarted: false, permanent: 'yes'}, false)
+  prep('unknown outcome', {outcome: 'fixture-unknown'}, false)
+  for (const value of ['fixture-string', 42, true, [], ['fixture-array'], {}]) {
+    prep(`non-object ${JSON.stringify(value)}`, value, false)
+  }
+  return cases
+}
+
+describe('checkout fields — server and browser parsers agree on presence', () => {
+  for (const testCase of ckParityCases()) {
+    it(`${testCase.name} → ${testCase.present ? 'present' : 'absent'} in both`, () => {
+      const payload = ckStatusPayload({[testCase.field]: testCase.value})
+      const server = ckServerStatus(payload)
+      const browser = ckBrowserStatus(payload)
+      // The frame itself is always accepted by both — soft fields never reject it.
+      expect(server).toBeDefined()
+      expect(browser).toBeDefined()
+      expect(server?.[testCase.field] !== undefined).toBe(testCase.present)
+      expect(browser?.[testCase.field] !== undefined).toBe(testCase.present)
+      if (!testCase.present) {
+        expect(Object.prototype.hasOwnProperty.call(browser, testCase.field)).toBe(false)
+      }
+    })
+  }
+
+  it('every vendored vocabulary value is accepted by the browser parser, and an unlisted one is not', () => {
+    for (const layoutReason of LAYOUT_REFUSAL_REASONS) {
+      const value = {outcome: 'refused', reason: 'unsupported-layout', layoutReason}
+      expect(ckBrowserStatus(ckStatusPayload({checkoutPreparation: value}))?.checkoutPreparation).toBeDefined()
+    }
+    for (const kind of OBSTRUCTION_KINDS) {
+      const value = {outcome: 'refused', reason: 'obstructed', obstructions: [{path: 'fixture/a', kind}]}
+      expect(ckBrowserStatus(ckStatusPayload({checkoutPreparation: value}))?.checkoutPreparation).toBeDefined()
+    }
+    for (const reason of UPDATE_FAILURE_REASONS) {
+      const value = {outcome: 'failed', reason, mutationStarted: false, permanent: false}
+      expect(ckBrowserStatus(ckStatusPayload({checkoutPreparation: value}))?.checkoutPreparation).toBeDefined()
+    }
+    for (const operation of CHECKOUT_OPERATIONS) {
+      const value = {outcome: 'refused', reason: 'operation-in-progress', operation}
+      expect(ckBrowserStatus(ckStatusPayload({checkoutPreparation: value}))?.checkoutPreparation).toBeDefined()
+      const observed = ckObserved({observation: ckObservation({operationInProgress: operation})})
+      expect(ckBrowserStatus(ckStatusPayload({checkoutProvenance: observed}))?.checkoutProvenance).toBeDefined()
+    }
+    for (const reason of CHECKOUT_REFUSAL_REASONS) {
+      const match = ckRefusals().find(candidate => candidate.reason === reason)
+      expect(match, `fixture for ${reason}`).toBeDefined()
+      expect(ckBrowserStatus(ckStatusPayload({checkoutPreparation: match}))?.checkoutPreparation).toBeDefined()
+    }
+  })
+
+  it('the browser is deliberately stricter than the vendored server parser in exactly two ways', () => {
+    // 1. A required scalar that is empty after sanitizing invalidates the containing object.
+    const bidiOnly = '\u202E\u202D\u0007'
+    const emptyBranch = ckObserved({observation: ckObservation({head: {kind: 'attached', branch: bidiOnly, sha: CK_SHA_A}})})
+    expect(ckServerStatus(ckStatusPayload({checkoutProvenance: emptyBranch}))?.checkoutProvenance).toBeDefined()
+    expect(ckBrowserStatus(ckStatusPayload({checkoutProvenance: emptyBranch}))?.checkoutProvenance).toBeUndefined()
+    // 2. Counts must be safe integers (the server accepts any integer-valued number).
+    const unsafe = ckObserved({observation: ckObservation({worktree: {kind: 'dirty', staged: 2 ** 60, unstaged: 0, untracked: 0, conflicted: 0}})})
+    expect(ckServerStatus(ckStatusPayload({checkoutProvenance: unsafe}))?.checkoutProvenance).toBeDefined()
+    expect(ckBrowserStatus(ckStatusPayload({checkoutProvenance: unsafe}))?.checkoutProvenance).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Parser — DTO shape, caps and sanitizing
+// ---------------------------------------------------------------------------
+
+describe('checkout provenance DTO', () => {
+  it('stores a closed DTO: head, worktree, operation and remote — and no timestamps', () => {
+    const wire = ckObserved({
+      observation: ckObservation({
+        head: {kind: 'attached', branch: 'fixture-main', sha: CK_SHA_A},
+        worktree: {kind: 'dirty', staged: 1, unstaged: 2, untracked: 3, conflicted: 0},
+        operationInProgress: 'merge',
+      }),
+      remote: {kind: 'checked', defaultBranch: 'main', sha: CK_SHA_B, checkedAt: 'fixture-checked-at', change: 'fast-forward', fromSha: CK_SHA_C},
+    })
+    const dto = ckBrowserStatus(ckStatusPayload({checkoutProvenance: wire}))?.checkoutProvenance
+    expect(dto).toEqual({
+      kind: 'observed',
+      head: {kind: 'attached', branch: 'fixture-main', sha: CK_SHA_A},
+      worktree: {kind: 'dirty', staged: 1, unstaged: 2, untracked: 3, conflicted: 0},
+      operation: 'merge',
+      remote: {kind: 'checked', change: 'fast-forward', defaultBranch: 'main', sha: CK_SHA_B, fromSha: CK_SHA_C},
+    })
+    const serialized = JSON.stringify(dto)
+    expect(serialized).not.toContain('observedAt')
+    expect(serialized).not.toContain('checkedAt')
+    expect(serialized).not.toContain('fixture-checked-at')
+    expect(serialized).not.toContain('2026-10-06')
+  })
+
+  it('stores the detached, clean, not-checked and unavailable shapes', () => {
+    const detached = ckBrowserStatus(
+      ckStatusPayload({checkoutProvenance: ckObserved({observation: ckObservation({head: {kind: 'detached', sha: CK_SHA_A}})})}),
+    )?.checkoutProvenance
+    expect(detached).toEqual({
+      kind: 'observed',
+      head: {kind: 'detached', sha: CK_SHA_A},
+      worktree: {kind: 'clean'},
+      operation: 'none',
+      remote: {kind: 'not-checked'},
+    })
+    const unavailable = ckBrowserStatus(
+      ckStatusPayload({checkoutProvenance: {kind: 'unavailable', remote: {kind: 'not-checked'}}}),
+    )?.checkoutProvenance
+    expect(unavailable).toEqual({kind: 'unavailable', remote: {kind: 'not-checked'}})
+  })
+
+  it('drops unknown extra keys instead of copying them', () => {
+    const wire = {
+      ...ckObserved({fixtureExtra: 'fixture-extra-top'}),
+      observation: {...ckObservation({fixtureExtra: 'fixture-extra-obs'}), head: {kind: 'attached', branch: 'b', sha: CK_SHA_A, fixtureExtra: 'fixture-extra-head'}},
+    }
+    const dto = ckBrowserStatus(ckStatusPayload({checkoutProvenance: wire}))?.checkoutProvenance
+    expect(dto).toBeDefined()
+    expect(JSON.stringify(dto)).not.toContain('fixture-extra')
+  })
+
+  it('a branch containing U+202E is stored without it', () => {
+    const wire = ckObserved({observation: ckObservation({head: {kind: 'attached', branch: 'fixture\u202Emain', sha: CK_SHA_A}})})
+    const dto = ckBrowserStatus(ckStatusPayload({checkoutProvenance: wire}))?.checkoutProvenance
+    expect(dto?.kind === 'observed' && dto.head.kind === 'attached' ? dto.head.branch : undefined).toBe('fixturemain')
+  })
+
+  it('a head.branch made only of bidi and control characters makes the provenance absent', () => {
+    const wire = ckObserved({observation: ckObservation({head: {kind: 'attached', branch: '\u202E\u2066\u061C\u0000\u009F', sha: CK_SHA_A}})})
+    expect(ckBrowserStatus(ckStatusPayload({checkoutProvenance: wire}))?.checkoutProvenance).toBeUndefined()
+  })
+
+  it('a remote.defaultBranch that is empty after sanitizing makes the provenance absent', () => {
+    const wire = ckObserved({remote: {kind: 'checked', defaultBranch: '\u200E\u200F', sha: CK_SHA_B, checkedAt: 'now', change: 'unchanged'}})
+    expect(ckBrowserStatus(ckStatusPayload({checkoutProvenance: wire}))?.checkoutProvenance).toBeUndefined()
+  })
+
+  it('caps a 300-character branch at 256 characters with a trailing ellipsis', () => {
+    const wire = ckObserved({observation: ckObservation({head: {kind: 'attached', branch: 'x'.repeat(300), sha: CK_SHA_A}})})
+    const dto = ckBrowserStatus(ckStatusPayload({checkoutProvenance: wire}))?.checkoutProvenance
+    const branch = dto?.kind === 'observed' && dto.head.kind === 'attached' ? dto.head.branch : ''
+    expect(branch).toHaveLength(256)
+    expect(branch.endsWith('…')).toBe(true)
+  })
+
+  it('a branch exactly at the cap is kept whole', () => {
+    const wire = ckObserved({observation: ckObservation({head: {kind: 'attached', branch: 'y'.repeat(256), sha: CK_SHA_A}})})
+    const dto = ckBrowserStatus(ckStatusPayload({checkoutProvenance: wire}))?.checkoutProvenance
+    const branch = dto?.kind === 'observed' && dto.head.kind === 'attached' ? dto.head.branch : ''
+    expect(branch).toBe('y'.repeat(256))
+  })
+
+  it('cap truncation never leaves half a surrogate pair', () => {
+    const wire = ckObserved({observation: ckObservation({head: {kind: 'attached', branch: '😀'.repeat(300), sha: CK_SHA_A}})})
+    const dto = ckBrowserStatus(ckStatusPayload({checkoutProvenance: wire}))?.checkoutProvenance
+    const branch = dto?.kind === 'observed' && dto.head.kind === 'attached' ? dto.head.branch : ''
+    expect(branch.length).toBeLessThanOrEqual(256)
+    expect(branch.isWellFormed()).toBe(true)
+    expect(branch.endsWith('…')).toBe(true)
+  })
+
+  it('SHAs are re-validated 40-hex and stored whole (never unvalidated text)', () => {
+    const dto = ckBrowserStatus(ckStatusPayload({checkoutProvenance: ckObserved()}))?.checkoutProvenance
+    expect(dto?.kind === 'observed' ? dto.head.sha : '').toMatch(/^[0-9a-f]{40}$/)
+  })
+})
+
+describe('sanitizeCheckoutText', () => {
+  it('strips C0, DEL and C1 controls', () => {
+    const controls = Array.from({length: 0x20}, (_, i) => String.fromCodePoint(i))
+      .join('')
+      .concat('\u007F', Array.from({length: 0x20}, (_, i) => String.fromCodePoint(0x80 + i)).join(''))
+    expect(sanitizeCheckoutText(`a${controls}b`, 256)).toBe('ab')
+  })
+
+  it('strips every bidi control: overrides and embeddings, isolates, and marks', () => {
+    const bidi = ['\u202A', '\u202B', '\u202C', '\u202D', '\u202E', '\u2066', '\u2067', '\u2068', '\u2069', '\u200E', '\u200F', '\u061C']
+    for (const char of bidi) {
+      expect(sanitizeCheckoutText(`fixture${char}text`, 256)).toBe('fixturetext')
+    }
+  })
+
+  it('keeps ordinary text, including non-ASCII letters and emoji', () => {
+    expect(sanitizeCheckoutText('fixture/ünïcode/日本語/😀.txt', 256)).toBe('fixture/ünïcode/日本語/😀.txt')
+  })
+
+  it('truncates to the cap with a trailing ellipsis, within the cap', () => {
+    const out = sanitizeCheckoutText('z'.repeat(1000), 10)
+    expect(out).toHaveLength(10)
+    expect(out).toBe(`${'z'.repeat(9)}…`)
+  })
+})
+
+describe('checkout preparation DTO — bounded lists', () => {
+  const dirty = (changedPaths: unknown) => ({outcome: 'refused', reason: 'dirty', changedPaths})
+  const prepOf = (value: unknown) => ckBrowserStatus(ckStatusPayload({phase: 'FAILED', status: 'failed', checkoutPreparation: value}))?.checkoutPreparation
+
+  it('refused dirty with 3 paths lists all 3, overflow 0', () => {
+    expect(prepOf(dirty(['fixture/a', 'fixture/b', 'fixture/c']))).toEqual({
+      outcome: 'refused',
+      reason: 'dirty',
+      changedPaths: {items: ['fixture/a', 'fixture/b', 'fixture/c'], more: 0},
+    })
+  })
+
+  it('25 changed paths → 10 entries plus an overflow of 15, none over 256 characters', () => {
+    const paths = Array.from({length: 25}, (_, i) => `fixture/${i}/${'p'.repeat(400)}`)
+    const dto = prepOf(dirty(paths))
+    expect(dto?.outcome === 'refused' && dto.reason === 'dirty' ? dto.changedPaths.items : []).toHaveLength(10)
+    expect(dto?.outcome === 'refused' && dto.reason === 'dirty' ? dto.changedPaths.more : -1).toBe(15)
+    for (const entry of dto?.outcome === 'refused' && dto.reason === 'dirty' ? dto.changedPaths.items : []) {
+      expect(entry.length).toBeLessThanOrEqual(256)
+    }
+  })
+
+  it('exactly 10 entries → no overflow; 11 → overflow of 1', () => {
+    const ten = prepOf(dirty(Array.from({length: 10}, (_, i) => `fixture/${i}`)))
+    expect(ten?.outcome === 'refused' && ten.reason === 'dirty' ? ten.changedPaths.more : -1).toBe(0)
+    const eleven = prepOf(dirty(Array.from({length: 11}, (_, i) => `fixture/${i}`)))
+    expect(eleven?.outcome === 'refused' && eleven.reason === 'dirty' ? eleven.changedPaths.more : -1).toBe(1)
+  })
+
+  it('a path of only bidi or control characters is dropped, and does not count toward the overflow', () => {
+    const dto = prepOf(dirty(['fixture/a', '\u202E\u2066', '\u0000\u009F', 'fixture/b']))
+    expect(dto).toEqual({outcome: 'refused', reason: 'dirty', changedPaths: {items: ['fixture/a', 'fixture/b'], more: 0}})
+  })
+
+  it('a list that is empty after sanitizing keeps the reason with no entries', () => {
+    expect(prepOf(dirty(['\u202E', '\u061C']))).toEqual({outcome: 'refused', reason: 'dirty', changedPaths: {items: [], more: 0}})
+    expect(prepOf(dirty([]))).toEqual({outcome: 'refused', reason: 'dirty', changedPaths: {items: [], more: 0}})
+  })
+
+  it('applies the same bounds to submodules, disallowedKeys and obstructions', () => {
+    const many = Array.from({length: 12}, (_, i) => `fixture-${i}`)
+    const subs = prepOf({outcome: 'refused', reason: 'submodule-initialized', submodules: many})
+    expect(subs?.outcome === 'refused' && subs.reason === 'submodule-initialized' ? subs.submodules : undefined).toEqual({items: many.slice(0, 10), more: 2})
+    const keys = prepOf({outcome: 'refused', reason: 'unsupported-config', disallowedKeys: many})
+    expect(keys?.outcome === 'refused' && keys.reason === 'unsupported-config' ? keys.disallowedKeys : undefined).toEqual({items: many.slice(0, 10), more: 2})
+    const obstructions = prepOf({
+      outcome: 'refused',
+      reason: 'obstructed',
+      obstructions: [
+        ...many.map(path => ({path, kind: 'exact-conflict'})),
+        {path: '\u202E', kind: 'prefix-conflict'},
+      ],
+    })
+    expect(obstructions?.outcome === 'refused' && obstructions.reason === 'obstructed' ? obstructions.obstructions : undefined).toEqual({
+      items: many.slice(0, 10).map(path => ({path, kind: 'exact-conflict'})),
+      more: 2,
+    })
+  })
+
+  it('an obstruction keeps its kind next to the sanitized path', () => {
+    const dto = prepOf({
+      outcome: 'refused',
+      reason: 'obstructed',
+      obstructions: [{path: 'fixture\u202E/a', kind: 'symlink-ancestor', fixtureExtra: 'fixture-extra'}],
+    })
+    expect(dto).toEqual({
+      outcome: 'refused',
+      reason: 'obstructed',
+      obstructions: {items: [{path: 'fixture/a', kind: 'symlink-ancestor'}], more: 0},
+    })
+  })
+
+  it('a non-default-branch branch is sanitized, and empty-after-sanitizing makes the preparation absent', () => {
+    expect(prepOf({outcome: 'refused', reason: 'non-default-branch', branch: 'fixture\u202E-feature'})).toEqual({
+      outcome: 'refused',
+      reason: 'non-default-branch',
+      branch: 'fixture-feature',
+    })
+    expect(prepOf({outcome: 'refused', reason: 'non-default-branch', branch: '\u202E\u0000'})).toBeUndefined()
+  })
+
+  it('the shape of every other refusal and the failed outcome is closed', () => {
+    expect(prepOf({outcome: 'refused', reason: 'unsupported-layout', layoutReason: 'shallow', fixtureExtra: 'fixture-extra'})).toEqual({
+      outcome: 'refused',
+      reason: 'unsupported-layout',
+      layoutReason: 'shallow',
+    })
+    expect(prepOf({outcome: 'refused', reason: 'operation-in-progress', operation: 'bisect'})).toEqual({
+      outcome: 'refused',
+      reason: 'operation-in-progress',
+      operation: 'bisect',
+    })
+    expect(prepOf({outcome: 'refused', reason: 'diverged', fixtureExtra: 'fixture-extra'})).toEqual({outcome: 'refused', reason: 'diverged'})
+    expect(prepOf({outcome: 'failed', reason: 'remote-moved', mutationStarted: 'possibly', permanent: true, fixtureExtra: 'fixture-extra'})).toEqual({
+      outcome: 'failed',
+      reason: 'remote-moved',
+      mutationStarted: 'possibly',
+      permanent: true,
+    })
+  })
+})
+
+describe('checkout fields never reject the status frame; the core stays hard', () => {
+  it('malformed provenance and preparation leave the frame accepted with failureKind intact', () => {
+    const data = ckBrowserStatus(
+      ckStatusPayload({
+        phase: 'FAILED',
+        status: 'failed',
+        failureKind: 'workspace-unavailable',
+        checkoutProvenance: {kind: 'fixture-bogus'},
+        checkoutPreparation: {outcome: 'fixture-bogus'},
+      }),
+    )
+    expect(data?.status).toBe('failed')
+    expect(data?.failureKind).toBe('workspace-unavailable')
+    expect(data?.checkoutProvenance).toBeUndefined()
+    expect(data?.checkoutPreparation).toBeUndefined()
+  })
+
+  it('both new failure kinds parse, and an unknown kind is still absent', () => {
+    for (const failureKind of ['checkout-substituted', 'workspace-unavailable']) {
+      expect(ckBrowserStatus(ckStatusPayload({phase: 'FAILED', status: 'failed', failureKind}))?.failureKind).toBe(failureKind)
+    }
+    expect(ckBrowserStatus(ckStatusPayload({phase: 'FAILED', status: 'failed', failureKind: 'fixture-unknown'}))?.failureKind).toBeUndefined()
+  })
+
+  it('status, phase and surface still hard-reject even with valid provenance and preparation', () => {
+    const valid = {checkoutProvenance: ckObserved(), checkoutPreparation: {outcome: 'refused', reason: 'detached'}}
+    for (const override of [{status: 'fixture-unknown'}, {phase: 'FIXTURE_UNKNOWN'}, {surface: 'fixture-unknown'}]) {
+      const result = parseSseFrame(`event: status\ndata: ${JSON.stringify(ckStatusPayload({...override, ...valid}))}\n\n`)
+      expect(result?.success).toBe(false)
+    }
+  })
+
+  it('omits both keys entirely when absent', () => {
+    const data = ckBrowserStatus(ckStatusPayload())
+    expect(Object.prototype.hasOwnProperty.call(data, 'checkoutProvenance')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(data, 'checkoutPreparation')).toBe(false)
+  })
+
+  it('an own __proto__ key inside a nested object cannot smuggle fields into the DTO', () => {
+    const text = `event: status\ndata: ${JSON.stringify(ckStatusPayload())
+      .slice(0, -1)},"checkoutPreparation":{"outcome":"refused","reason":"detached","__proto__":{"polluted":"fixture-polluted"}}}\n\n`
+    const result = parseSseFrame(text)
+    expect(result?.success).toBe(true)
+    expect(JSON.stringify(result)).not.toContain('fixture-polluted')
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Reducer — latest valid wins, per field; provenance and preparation exclusive
+// ---------------------------------------------------------------------------
+
+describe('nextStreamState — checkout fields', () => {
+  const observed = ckObserved()
+  const prepared = {outcome: 'refused', reason: 'dirty', changedPaths: ['fixture/a']}
+
+  it('stores the provenance DTO on the run entry', () => {
+    const state = ckApply(ckLive(), ckStatusPayload({checkoutProvenance: observed}))
+    expect(state.runs['run-ck-001']?.checkoutProvenance).toEqual(ckBrowserStatus(ckStatusPayload({checkoutProvenance: observed}))?.checkoutProvenance)
+    expect(state.runs['run-ck-001']?.checkoutPreparation).toBeUndefined()
+  })
+
+  it('EXECUTING with provenance, then a frame without it, then a terminal frame without it → provenance survives', () => {
+    let state = ckApply(ckLive(), ckStatusPayload({checkoutProvenance: observed}))
+    const stored = state.runs['run-ck-001']?.checkoutProvenance
+    expect(stored).toBeDefined()
+    state = ckApply(state, ckStatusPayload({stale: true}))
+    expect(state.runs['run-ck-001']?.checkoutProvenance).toEqual(stored)
+    state = ckApply(state, ckStatusPayload({phase: 'COMPLETED', status: 'succeeded'}))
+    expect(state.runs['run-ck-001']?.terminal).toBe(true)
+    expect(state.runs['run-ck-001']?.checkoutProvenance).toEqual(stored)
+  })
+
+  it('a run that never reached EXECUTING ends FAILED carrying preparation → preparation stored, no provenance key', () => {
+    let state = ckApply(ckLive(), ckStatusPayload({phase: 'PENDING', status: 'queued'}))
+    state = ckApply(state, ckStatusPayload({phase: 'FAILED', status: 'failed', checkoutPreparation: prepared}))
+    const entry = state.runs['run-ck-001']
+    expect(entry?.checkoutPreparation).toEqual({outcome: 'refused', reason: 'dirty', changedPaths: {items: ['fixture/a'], more: 0}})
+    expect(entry !== undefined && 'checkoutProvenance' in entry).toBe(false)
+    expect(entry?.terminal).toBe(true)
+  })
+
+  it('a valid replacement provenance replaces the stored one', () => {
+    let state = ckApply(ckLive(), ckStatusPayload({checkoutProvenance: observed}))
+    const next = ckObserved({observation: ckObservation({head: {kind: 'detached', sha: CK_SHA_B}})})
+    state = ckApply(state, ckStatusPayload({checkoutProvenance: next}))
+    const stored = state.runs['run-ck-001']?.checkoutProvenance
+    expect(stored?.kind === 'observed' ? stored.head : undefined).toEqual({kind: 'detached', sha: CK_SHA_B})
+  })
+
+  it('an invalid incoming value keeps the stored one (per field), including on the terminal frame', () => {
+    let state = ckApply(ckLive(), ckStatusPayload({checkoutProvenance: observed}))
+    const stored = state.runs['run-ck-001']?.checkoutProvenance
+    state = ckApply(
+      state,
+      ckStatusPayload({phase: 'FAILED', status: 'failed', failureKind: 'session-error', checkoutProvenance: {kind: 'fixture-bogus'}, checkoutPreparation: {outcome: 'fixture-bogus'}}),
+    )
+    const entry = state.runs['run-ck-001']
+    expect(entry?.status).toBe('failed')
+    expect(entry?.terminal).toBe(true)
+    expect(entry?.checkoutProvenance).toEqual(stored)
+    expect(entry !== undefined && 'checkoutPreparation' in entry).toBe(false)
+  })
+
+  it('a malformed preparation on the terminal frame leaves the earlier valid preparation in place', () => {
+    // The earlier frame is non-terminal (a terminal frame closes the stream), so the terminal frame is applied.
+    let state = ckApply(ckLive(), ckStatusPayload({phase: 'PENDING', status: 'queued', checkoutPreparation: prepared}))
+    const stored = state.runs['run-ck-001']?.checkoutPreparation
+    expect(stored).toBeDefined()
+    state = ckApply(state, ckStatusPayload({phase: 'FAILED', status: 'failed', checkoutPreparation: {outcome: 'fixture-bogus'}}))
+    expect(state.runs['run-ck-001']?.terminal).toBe(true)
+    expect(state.runs['run-ck-001']?.checkoutPreparation).toEqual(stored)
+  })
+
+  it('a valid preparation after stored provenance clears the provenance (contract-impossible, defended)', () => {
+    let state = ckApply(ckLive(), ckStatusPayload({checkoutProvenance: observed}))
+    state = ckApply(state, ckStatusPayload({phase: 'FAILED', status: 'failed', checkoutPreparation: prepared}))
+    const entry = state.runs['run-ck-001']
+    expect(entry?.terminal).toBe(true)
+    expect(entry?.checkoutPreparation).toBeDefined()
+    expect(entry !== undefined && 'checkoutProvenance' in entry).toBe(false)
+  })
+
+  it('and the reverse: a valid provenance after stored preparation clears the preparation', () => {
+    let state = ckApply(ckLive(), ckStatusPayload({phase: 'PENDING', status: 'queued', checkoutPreparation: prepared}))
+    state = ckApply(state, ckStatusPayload({checkoutProvenance: observed}))
+    const entry = state.runs['run-ck-001']
+    expect(entry?.checkoutProvenance).toBeDefined()
+    expect(entry !== undefined && 'checkoutPreparation' in entry).toBe(false)
+  })
+
+  it('both valid in a single frame (contract-impossible): preparation wins, exclusivity holds', () => {
+    const state = ckApply(ckLive(), ckStatusPayload({phase: 'FAILED', status: 'failed', checkoutProvenance: observed, checkoutPreparation: prepared}))
+    const entry = state.runs['run-ck-001']
+    expect(entry?.checkoutPreparation).toBeDefined()
+    expect(entry !== undefined && 'checkoutProvenance' in entry).toBe(false)
+  })
+
+  it('malformed preparation on a failed frame still advances status to failed and keeps the reason label', () => {
+    const state = ckApply(
+      ckLive(),
+      ckStatusPayload({phase: 'FAILED', status: 'failed', failureKind: 'checkout-substituted', checkoutPreparation: {outcome: 'refused', reason: 'dirty', changedPaths: 'fixture'}}),
+    )
+    const entry = state.runs['run-ck-001']
+    expect(entry?.status).toBe('failed')
+    expect(entry?.reasonLabel).toBe('Checkout mismatch')
+    expect(entry?.checkoutPreparation).toBeUndefined()
+  })
+
+  it('failure kinds resolve to their distinct labels in the reducer', () => {
+    const labelFor = (failureKind: string) =>
+      ckApply(ckLive(), ckStatusPayload({phase: 'FAILED', status: 'failed', failureKind})).runs['run-ck-001']?.reasonLabel
+    expect(labelFor('workspace-unreachable')).toBe('Workspace unreachable')
+    expect(labelFor('workspace-unavailable')).toBe('Workspace unavailable')
+    expect(labelFor('checkout-substituted')).toBe('Checkout mismatch')
+  })
+
+  it('status frames before ready are not stored', () => {
+    const state = ckApply(INITIAL_STATE, ckStatusPayload({checkoutProvenance: observed}))
+    expect(Object.keys(state.runs)).toHaveLength(0)
+  })
+
+  it('per-run isolation: one run’s fields never appear on another', () => {
+    let state = ckApply(ckLive(), ckStatusPayload({checkoutProvenance: observed}))
+    state = ckApply(state, ckStatusPayload({runId: 'run-ck-002'}))
+    expect(state.runs['run-ck-001']?.checkoutProvenance).toBeDefined()
+    const other = state.runs['run-ck-002']
+    expect(other !== undefined && 'checkoutProvenance' in other).toBe(false)
+  })
+
+  it('toSafeRunView stays closed: neither key reaches the safe view', () => {
+    const state = ckApply(ckLive(), ckStatusPayload({checkoutProvenance: observed}))
+    const entry = state.runs['run-ck-001']
+    expect(entry).toBeDefined()
+    if (entry !== undefined) {
+      const view = toSafeRunView(entry)
+      expect(Object.keys(view).toSorted()).toEqual(['phase', 'runId', 'stale', 'startedAt', 'status'])
+      expect(JSON.stringify(view)).not.toContain('fixture-main')
+    }
+  })
+
+  it('the run entry carries exactly the two checkout keys beyond its baseline shape — no raw identity', () => {
+    const failed = {phase: 'FAILED', status: 'failed'}
+    const baselineRunning = ckApply(ckLive(), ckStatusPayload()).runs['run-ck-001']
+    const baselineFailed = ckApply(ckLive(), ckStatusPayload(failed)).runs['run-ck-001']
+    const withProv = ckApply(ckLive(), ckStatusPayload({checkoutProvenance: observed})).runs['run-ck-001']
+    const withPrep = ckApply(ckLive(), ckStatusPayload({...failed, checkoutPreparation: prepared})).runs['run-ck-001']
+    const extra = (entry: object | undefined, baseline: object | undefined) =>
+      Object.keys(entry ?? {}).filter(key => !Object.keys(baseline ?? {}).includes(key))
+    expect(extra(withProv, baselineRunning)).toEqual(['checkoutProvenance'])
+    expect(extra(withPrep, baselineFailed)).toEqual(['checkoutPreparation'])
+    for (const entry of [baselineRunning, baselineFailed, withProv, withPrep]) {
+      expect(Object.keys(entry ?? {})).not.toContain('entityRef')
+      expect(Object.keys(entry ?? {})).not.toContain('surface')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Leak guard — sentinel `fixture-` strings stay inside in-memory state
+// ---------------------------------------------------------------------------
+
+function ckSentinelStatus(): Record<string, unknown> {
+  return ckStatusPayload({
+    phase: 'FAILED',
+    status: 'failed',
+    checkoutProvenance: ckObserved({
+      observation: ckObservation({head: {kind: 'attached', branch: 'fixture-sentinel-branch', sha: CK_SHA_A}}),
+      remote: {kind: 'checked', defaultBranch: 'fixture-sentinel-default', sha: CK_SHA_B, checkedAt: 'fixture-sentinel-checked-at', change: 'unchanged'},
+    }),
+    checkoutPreparation: {
+      outcome: 'refused',
+      reason: 'obstructed',
+      obstructions: [{path: 'fixture-sentinel-path', kind: 'exact-conflict'}],
+    },
+  })
+}
+
+/** A stand-in global that records the name of every property read or written on it. */
+function ckAccessRecorder(log: string[]): object {
+  return new Proxy({}, {
+    get(_target, prop) {
+      log.push(String(prop))
+      return () => {}
+    },
+    set(_target, prop) {
+      log.push(String(prop))
+      return true
+    },
+  })
+}
+
+/** A fake element that records every value written to it — text, attributes, classes, dataset, style. */
+function ckRecordingElement(writes: string[]): Record<string, unknown> {
+  const dataset = new Proxy({}, {
+    set(_target, prop, value) {
+      writes.push(`dataset.${String(prop)}=${String(value)}`)
+      return true
+    },
+  })
+  const target: Record<string, unknown> = {
+    textContent: '',
+    className: '',
+    hidden: false,
+    dataset,
+    classList: {add: (...tokens: string[]) => writes.push(...tokens), remove: () => {}},
+    style: {setProperty: (name: string, value: string) => writes.push(`${name}=${value}`)},
+    setAttribute: (name: string, value: string) => writes.push(`${name}=${value}`),
+  }
+  return new Proxy(target, {
+    set(object, prop, value) {
+      object[String(prop)] = value
+      writes.push(`${String(prop)}=${String(value)}`)
+      return true
+    },
+  })
+}
+
+describe('checkout fields — leak guard', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('production source contains no console, web-storage, IndexedDB, CacheStorage, history or location writes', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-stream.js', 'utf8')
+    expect(src).not.toMatch(/console\.(?:log|error|warn|info|debug|trace)\s*\(/)
+    expect(src).not.toMatch(/\b(?:localStorage|sessionStorage|indexedDB)\b/)
+    expect(src).not.toMatch(/\bcaches\.(?:open|put|match|delete)/)
+    expect(src).not.toMatch(/\bhistory\.(?:pushState|replaceState)/)
+    expect(src).not.toMatch(/\blocation(?:\.(?:assign|replace|hash|search|href)\b|\s*=[^=])/)
+  })
+
+  it('the checkout code never writes to the DOM: no innerHTML/outerHTML/insertAdjacentHTML/document.write near the new fields', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-stream.js', 'utf8')
+    expect(src).not.toMatch(/(?:innerHTML|outerHTML|insertAdjacentHTML|document\.write)\s*(?:=|\()/)
+  })
+
+  it('a full stream carrying sentinels touches no console, storage, cache, history or location, and writes no sentinel to any element', async () => {
+    const consoleSpies = (['log', 'info', 'warn', 'error', 'debug', 'trace'] as const).map(method => vi.spyOn(console, method).mockImplementation(() => {}))
+    const storageCalls: string[] = []
+    const storage = ckAccessRecorder(storageCalls)
+    vi.stubGlobal('localStorage', storage)
+    vi.stubGlobal('sessionStorage', storage)
+    const idbCalls: string[] = []
+    vi.stubGlobal('indexedDB', ckAccessRecorder(idbCalls))
+    const cacheCalls: string[] = []
+    vi.stubGlobal('caches', ckAccessRecorder(cacheCalls))
+    const historyCalls: string[] = []
+    vi.stubGlobal('history', ckAccessRecorder(historyCalls))
+    const locationWrites: string[] = []
+    vi.stubGlobal('location', ckAccessRecorder(locationWrites))
+
+    const writes: string[] = []
+
+    const encoder = new TextEncoder()
+    const body = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\nevent: status\ndata: ${JSON.stringify(ckSentinelStatus())}\n\n`
+    let read = 0
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {getReader: () => ({read: async () => (read++ === 0 ? {done: false, value: encoder.encode(body)} : {done: true})})},
+    }))
+
+    const handle = initOperatorStream({
+      runId: 'run-ck-001',
+      statusEl: ckRecordingElement(writes),
+      noticeEl: ckRecordingElement(writes),
+      reasonEl: ckRecordingElement(writes),
+      endpointBase: '/operator',
+    })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    handle.close()
+
+    for (const spy of consoleSpies) expect(spy).not.toHaveBeenCalled()
+    expect(storageCalls).toEqual([])
+    expect(idbCalls).toEqual([])
+    expect(cacheCalls).toEqual([])
+    expect(historyCalls).toEqual([])
+    expect(locationWrites).toEqual([])
+    expect(writes.join('\n')).not.toContain('fixture-')
+    expect(writes.length).toBeGreaterThan(0)
+  })
+
+  it('sentinels live only in the closed DTOs inside in-memory run state', () => {
+    const sentinel = ckSentinelStatus()
+    const provenanceOnly = ckApply(ckLive(), {...sentinel, phase: 'EXECUTING', status: 'running', checkoutPreparation: undefined})
+    const preparationOnly = ckApply(ckLive(), {...sentinel, checkoutProvenance: undefined})
+    for (const [state, key, needle] of [
+      [provenanceOnly, 'checkoutProvenance', 'fixture-sentinel-branch'],
+      [preparationOnly, 'checkoutPreparation', 'fixture-sentinel-path'],
+    ] as const) {
+      const entry = state.runs['run-ck-001'] as unknown as Record<string, unknown>
+      const {[key]: dto, ...rest} = entry
+      expect(JSON.stringify(dto)).toContain(needle)
+      expect(JSON.stringify(rest)).not.toContain('fixture-')
     }
   })
 })

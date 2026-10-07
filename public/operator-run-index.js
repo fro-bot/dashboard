@@ -45,6 +45,8 @@ const VALID_FAILURE_KINDS = new Set([
   'stream-ended',
   'workspace-unreachable',
   'session-error',
+  'checkout-substituted',
+  'workspace-unavailable',
   'unknown',
 ])
 
@@ -58,8 +60,10 @@ export const FAILURE_REASON_LABELS = {
   'inactivity-timeout': 'No recent activity',
   'max-duration-timeout': 'Run timed out',
   'stream-ended': 'Stream ended early',
-  'workspace-unreachable': 'Workspace unavailable',
+  'workspace-unreachable': 'Workspace unreachable',
   'session-error': 'Session error',
+  'checkout-substituted': 'Checkout mismatch',
+  'workspace-unavailable': 'Workspace unavailable',
   unknown: 'Unknown failure',
 }
 
