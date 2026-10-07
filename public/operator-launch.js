@@ -575,6 +575,14 @@ export async function initOperatorLaunch(opts) {
       // Get selected repo from the select element (rendered by picker) or fallback
       const repoSelectEl = document.querySelector('#launch-repo-select')
       const repo = repoSelectEl?.value ?? formData.get('repo')?.toString() ?? ''
+      // Snapshot the picker value now, before the await below: only the submit button
+      // is disabled in flight, so the picker can change and the optimistic card must
+      // still be labelled with the repo that was actually launched. Non-null only when
+      // the validated picker exists.
+      const pickerRepo =
+        repoSelectEl !== null && repoSelectEl !== undefined && typeof repoSelectEl.value === 'string'
+          ? repoSelectEl.value
+          : null
       if (repo === '') {
         _launching = false
         if (launchError !== null) {
@@ -633,6 +641,7 @@ export async function initOperatorLaunch(opts) {
           const card = document.createElement('div')
           card.className = 'run-card'
           card.tabIndex = 0
+          card.setAttribute('role', 'button')
           card.setAttribute('aria-label', 'New run, status: Pending')
           card.dataset.testid = 'run-card'
           card.dataset.runId = runId
@@ -656,6 +665,18 @@ export async function initOperatorLaunch(opts) {
 
           card.append(statusGroup)
 
+          // Repo label. Shown only when the value came from the validated repo picker
+          // (options built from the gateway's listRepos result); the unvalidated
+          // form-data fallback is never rendered. Left empty otherwise and filled
+          // from the fetched view on adoption. textContent only.
+          const repoSpan = document.createElement('span')
+          repoSpan.className = 'run-repo'
+          repoSpan.dataset.role = 'run-repo'
+          if (pickerRepo !== null) {
+            repoSpan.textContent = pickerRepo
+          }
+          card.append(repoSpan)
+
           // Hidden per-card substructure for the stream renderer.
           const outputEl = document.createElement('div')
           outputEl.dataset.role = 'run-output'
@@ -676,6 +697,18 @@ export async function initOperatorLaunch(opts) {
           badgeEl.dataset.role = 'approval-badge'
           badgeEl.hidden = true
           card.append(badgeEl)
+
+          // Cancel control region — populated by initOperatorStream once the stream
+          // attaches (below), so it must exist before attach, as on a fetched card.
+          const cancelEl = document.createElement('div')
+          cancelEl.dataset.role = 'run-cancel'
+          cancelEl.hidden = true
+          card.append(cancelEl)
+
+          // Click/keyboard expansion wiring is bound by the run-index module
+          // (markCardExpandedForLaunch, via the runtime's onRunLaunched handoff) — it owns
+          // toggleCardExpansion and its single-open bookkeeping; this separately loaded
+          // module instance cannot reach it without a second, uncoordinated state copy.
 
           // Prepend — a fresh launch is the newest active run and belongs at the top
           // of the unified list, ahead of the fetched cards.

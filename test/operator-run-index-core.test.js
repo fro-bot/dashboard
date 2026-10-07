@@ -1056,6 +1056,9 @@ function makeElStub() {
       this._listeners[type].push(fn)
     },
     dispatchEvent(event) {
+      // Like the DOM, an event dispatched directly on an element targets it, unless a
+      // test simulates bubbling from a nested element by passing an explicit target.
+      if (event.target === undefined) event.target = this
       const fns = this._listeners[event.type] ?? []
       for (const fn of fns) fn(event)
     },
@@ -1423,7 +1426,11 @@ function makeSubstructureElStub() {
     hidden: false,
     attributes: {},
     setAttribute(name, value) { this.attributes[name] = value },
-    append(...els) { this._children.push(...els) },
+    _parentEl: null,
+    append(...els) {
+      for (const el of els) el._parentEl = this
+      this._children.push(...els)
+    },
     remove() {
       if (this._parentList !== null) {
         const idx = this._parentList.children.indexOf(this)
@@ -1437,13 +1444,19 @@ function makeSubstructureElStub() {
       return this._parentList.children[idx + 1] ?? null
     },
     before(el) {
-      if (this._parentList !== null) this._parentList.insertBefore(el, this)
+      if (this._parentEl !== null) {
+        el._parentEl = this._parentEl
+        this._parentEl._children.splice(this._parentEl._children.indexOf(this), 0, el)
+      } else if (this._parentList !== null) {
+        this._parentList.insertBefore(el, this)
+      }
     },
     addEventListener(type, fn) {
       this._listeners[type] = this._listeners[type] ?? []
       this._listeners[type].push(fn)
     },
     dispatchEvent(event) {
+      if (event.target === undefined) event.target = this
       const fns = this._listeners[event.type] ?? []
       for (const fn of fns) fn(event)
     },
@@ -2461,5 +2474,435 @@ describe('run-index failure reason labels', () => {
 
     expect(statusEl?.textContent).toBe('Running')
     expect(reasonEl?.textContent).toBe('')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Optimistic (launch-created) card — adoption yields full fetched-card anatomy
+// ---------------------------------------------------------------------------
+
+/** Count a card's direct children carrying a given data-role. */
+function countRole(card, role) {
+  return card._children.filter(child => child.dataset?.role === role).length
+}
+
+/** A launch-created card as it shipped when the bug was reported: status anatomy only. */
+function makeStatusOnlyOptimisticCard(cards, runId) {
+  const card = renderRunCardForTest(cards, {runId, status: 'queued', statusLabel: 'Pending'})
+  card.dataset.optimistic = 'true'
+  card.querySelector('[data-role="run-status"]').className = 'run-status status-queued'
+  return card
+}
+
+function stubFetchRuns(runs) {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ok: true, status: 200, json: async () => ({runs})}))
+}
+
+describe('optimistic launch card — adoption by a fetch gains full fetched-card anatomy', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  const UPDATED_AT = '2026-06-26T13:00:00.000Z'
+
+  it('an adopted optimistic card gains repo text, a <time>, a run-cancel region and role=button — and is click/keyboard expandable', async () => {
+    const runId = 'run-adopt-anatomy-001'
+    const onSelectRun = vi.fn()
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+    expect(optimistic.querySelector('[data-role="run-repo"]')).toBeNull()
+
+    stubFetchRuns([makeValidSummary({runId, status: 'failed', repo: 'fro-bot/agent', updatedAt: UPDATED_AT})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+
+    // Same node adopted, flag cleared.
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toBe(optimistic)
+    expect(optimistic.dataset.optimistic).toBeUndefined()
+
+    expect(optimistic.attributes.role).toBe('button')
+    expect(optimistic.querySelector('[data-role="run-repo"]').textContent).toBe('fro-bot/agent')
+    const timeEl = optimistic.querySelector('[data-role="run-updated-at"]')
+    expect(timeEl).not.toBeNull()
+    expect(timeEl.attributes.datetime).toBe(UPDATED_AT)
+    expect(timeEl.textContent).not.toBe('')
+    const cancelEl = optimistic.querySelector('[data-role="run-cancel"]')
+    expect(cancelEl).not.toBeNull()
+    expect(cancelEl.hidden).toBe(true)
+
+    // Late-added time lands before the hidden substructure, as on a fetched card.
+    const roles = optimistic._children.map(child => child.dataset.role)
+    expect(roles.indexOf('run-updated-at')).toBeLessThan(roles.indexOf('run-output'))
+    expect(roles.indexOf('run-repo')).toBeLessThan(roles.indexOf('run-output'))
+
+    // Click expands, Enter collapses, Space expands (and is default-prevented).
+    optimistic.dispatchEvent({type: 'click'})
+    expect(optimistic.dataset.expanded).toBe('true')
+    expect(onSelectRun).toHaveBeenLastCalledWith(runId)
+
+    optimistic.dispatchEvent({type: 'keydown', key: 'Enter', preventDefault: vi.fn()})
+    expect(optimistic.dataset.expanded).toBe('false')
+
+    const preventDefault = vi.fn()
+    optimistic.dispatchEvent({type: 'keydown', key: ' ', preventDefault})
+    expect(optimistic.dataset.expanded).toBe('true')
+    expect(preventDefault).toHaveBeenCalled()
+    expect(onSelectRun).toHaveBeenCalledTimes(3)
+  })
+
+  it('omits the <time> when the fetched view has no updatedAt (parity with renderRunCard)', async () => {
+    const runId = 'run-adopt-no-time-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    expect(optimistic.querySelector('[data-role="run-repo"]').textContent).toBe('fro-bot/agent')
+    expect(optimistic.querySelector('[data-role="run-updated-at"]')).toBeNull()
+  })
+
+  it('repeated diffs do not duplicate anatomy elements or expansion listeners', async () => {
+    const runId = 'run-adopt-idempotent-001'
+    const onSelectRun = vi.fn()
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+
+    for (let i = 0; i < 3; i++) {
+      stubFetchRuns([makeValidSummary({runId, status: 'running', updatedAt: UPDATED_AT})])
+      await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+    }
+
+    for (const role of ['run-repo', 'run-updated-at', 'run-cancel', 'run-output', 'run-approvals']) {
+      expect(countRole(optimistic, role), `exactly one ${role}`).toBe(1)
+    }
+    expect(optimistic._listeners.click).toHaveLength(1)
+    expect(optimistic._listeners.keydown).toHaveLength(1)
+
+    // One click → exactly one selection, not one per diff.
+    optimistic.dispatchEvent({type: 'click'})
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
+  })
+
+  it('an optimistic card that already has repo/cancel regions (launch anatomy) is not given duplicates on adoption', async () => {
+    const runId = 'run-adopt-launch-anatomy-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+    for (const [role, tag] of [['run-repo', 'span'], ['run-cancel', 'div']]) {
+      const el = document.createElement(tag)
+      el.dataset.role = role
+      optimistic.append(el)
+    }
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running', repo: 'fro-bot/agent', updatedAt: UPDATED_AT})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    expect(countRole(optimistic, 'run-repo')).toBe(1)
+    expect(countRole(optimistic, 'run-cancel')).toBe(1)
+    expect(optimistic.querySelector('[data-role="run-repo"]').textContent).toBe('fro-bot/agent')
+  })
+
+  it('the active-stream optimistic card is left untouched while active, then upgrades on the first diff after it stops being active', async () => {
+    const runId = 'run-adopt-active-001'
+    const onSelectRun = vi.fn()
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+    markRunStreamAttached(runId)
+    const childCountBefore = optimistic._children.length
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running', repo: 'fro-bot/agent', updatedAt: UPDATED_AT})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+
+    // Write-protected while active: no anatomy, attributes, listeners, or flag change.
+    expect(optimistic._children).toHaveLength(childCountBefore)
+    expect(optimistic.querySelector('[data-role="run-repo"]')).toBeNull()
+    expect(optimistic.querySelector('[data-role="run-updated-at"]')).toBeNull()
+    expect(optimistic.querySelector('[data-role="run-cancel"]')).toBeNull()
+    expect(optimistic.attributes.role).toBeUndefined()
+    expect(optimistic._listeners.click).toBeUndefined()
+    expect(optimistic.dataset.optimistic).toBe('true')
+
+    // The stream moves on (another run becomes the active one) — this card is no longer active.
+    markRunStreamAttached('run-some-other-run')
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toBe(optimistic)
+    expect(optimistic.dataset.optimistic).toBeUndefined()
+    expect(optimistic.attributes.role).toBe('button')
+    expect(optimistic.querySelector('[data-role="run-repo"]').textContent).toBe('fro-bot/agent')
+    expect(optimistic.querySelector('[data-role="run-updated-at"]')).not.toBeNull()
+    expect(optimistic.querySelector('[data-role="run-cancel"]')).not.toBeNull()
+
+    optimistic.dispatchEvent({type: 'click'})
+    expect(optimistic.dataset.expanded).toBe('true')
+    expect(onSelectRun).toHaveBeenCalledWith(runId)
+  })
+
+  it('an expanded (position-frozen) optimistic card is upgraded in place without being repositioned', async () => {
+    const runId = 'run-adopt-frozen-001'
+    const otherId = 'run-adopt-frozen-other-001'
+    const onSelectRun = vi.fn()
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    // Fetch an ordinary card first (init also registers onSelectRun), then prepend the optimistic one.
+    stubFetchRuns([makeValidSummary({runId: otherId, status: 'running'})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+    const other = cards[0]
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+    cards.splice(cards.indexOf(optimistic), 1)
+    cards.unshift(optimistic)
+
+    markCardExpandedForLaunch(runId) // expanded -> re-sort lock
+    expect(optimistic.dataset.expanded).toBe('true')
+
+    // The fetch ranks the optimistic run after the other one; the lock must hold it first.
+    stubFetchRuns([
+      makeValidSummary({runId: otherId, status: 'running'}),
+      makeValidSummary({runId, status: 'succeeded', repo: 'fro-bot/agent', updatedAt: UPDATED_AT}),
+    ])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+
+    expect(cards.indexOf(optimistic)).toBeLessThan(cards.indexOf(other))
+    expect(optimistic.dataset.expanded).toBe('true')
+    expect(optimistic.querySelector('[data-role="run-repo"]').textContent).toBe('fro-bot/agent')
+    expect(optimistic.querySelector('[data-role="run-updated-at"]')).not.toBeNull()
+    expect(optimistic.querySelector('[data-role="run-cancel"]')).not.toBeNull()
+  })
+})
+
+describe('optimistic launch card — operable before any fetch adopts it', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('markCardExpandedForLaunch wires click/keyboard expansion on a launch-created card: first click collapses, next expands', async () => {
+    const runId = 'run-prefetch-operable-001'
+    const onSelectRun = vi.fn()
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    // The run-index is initialised (runtime does this before any launch); no run lists the new id yet.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ok: true, status: 200, json: async () => ({runs: []})}))
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+
+    const optimistic = renderRunCardForTest(cards, {runId, status: 'queued', statusLabel: 'Pending'})
+    optimistic.dataset.optimistic = 'true'
+    expect(optimistic._listeners.click).toBeUndefined()
+
+    // The runtime seam's onRunLaunched: attach stream, then mark expanded.
+    markRunStreamAttached(runId)
+    markCardExpandedForLaunch(runId)
+    expect(optimistic.dataset.expanded).toBe('true')
+    expect(onSelectRun).not.toHaveBeenCalled()
+
+    optimistic.dispatchEvent({type: 'click'})
+    expect(optimistic.dataset.expanded).toBe('false')
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
+    expect(onSelectRun).toHaveBeenCalledWith(runId)
+
+    optimistic.dispatchEvent({type: 'keydown', key: 'Enter', preventDefault: vi.fn()})
+    expect(optimistic.dataset.expanded).toBe('true')
+    expect(onSelectRun).toHaveBeenCalledTimes(2)
+  })
+
+  it('calling markCardExpandedForLaunch repeatedly does not double-bind listeners', async () => {
+    const runId = 'run-prefetch-idempotent-001'
+    const onSelectRun = vi.fn()
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ok: true, status: 200, json: async () => ({runs: []})}))
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+
+    const optimistic = renderRunCardForTest(cards, {runId, status: 'queued', statusLabel: 'Pending'})
+    optimistic.dataset.optimistic = 'true'
+
+    markCardExpandedForLaunch(runId)
+    markCardExpandedForLaunch(runId)
+
+    expect(optimistic._listeners.click).toHaveLength(1)
+    expect(optimistic._listeners.keydown).toHaveLength(1)
+  })
+
+  it('a pre-wired optimistic card is not re-bound when a later fetch adopts it (one click → one selection)', async () => {
+    const runId = 'run-prefetch-adopt-001'
+    const onSelectRun = vi.fn()
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ok: true, status: 200, json: async () => ({runs: []})}))
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+
+    const optimistic = renderRunCardForTest(cards, {runId, status: 'queued', statusLabel: 'Pending'})
+    optimistic.dataset.optimistic = 'true'
+    markCardExpandedForLaunch(runId) // wired + expanded
+    optimistic.dispatchEvent({type: 'click'}) // collapse
+    expect(optimistic.dataset.expanded).toBe('false')
+    onSelectRun.mockClear()
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({runs: [makeValidSummary({runId, status: 'running', updatedAt: '2026-06-26T13:00:00.000Z'})]}),
+    }))
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+
+    expect(optimistic._listeners.click).toHaveLength(1)
+    optimistic.dispatchEvent({type: 'click'})
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Card keyboard activation is scoped to the card itself
+// ---------------------------------------------------------------------------
+
+describe('card keyboard activation — scoped to the card, not nested controls', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('Space/Enter bubbling from a nested control (e.g. a run-cancel button) neither toggles expansion nor is default-prevented; Space/Enter on the card itself still toggle', async () => {
+    const runId = 'run-kbd-scope-001'
+    const onSelectRun = vi.fn()
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([makeValidSummary({runId})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+
+    expect(cards).toHaveLength(1)
+    const card = cards[0]
+    const nestedButton = document.createElement('button')
+    nestedButton._parentEl = card.querySelector('[data-role="run-cancel"]')
+
+    for (const key of [' ', 'Enter']) {
+      const preventDefault = vi.fn()
+      card.dispatchEvent({type: 'keydown', key, target: nestedButton, preventDefault})
+      expect(preventDefault, `nested ${JSON.stringify(key)} must not be default-prevented`).not.toHaveBeenCalled()
+    }
+    expect(onSelectRun).not.toHaveBeenCalled()
+    expect(card.dataset.expanded).toBeUndefined()
+
+    // Same keys on the card itself still drive expansion.
+    const spaceDefault = vi.fn()
+    card.dispatchEvent({type: 'keydown', key: ' ', preventDefault: spaceDefault})
+    expect(card.dataset.expanded).toBe('true')
+    expect(spaceDefault).toHaveBeenCalled()
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
+
+    card.dispatchEvent({type: 'keydown', key: 'Enter', preventDefault: vi.fn()})
+    expect(card.dataset.expanded).toBe('false')
+    expect(onSelectRun).toHaveBeenCalledTimes(2)
+    expect(onSelectRun).toHaveBeenLastCalledWith(runId)
+  })
+
+  it('the same scoping holds on an adopted optimistic card', async () => {
+    const runId = 'run-kbd-scope-optimistic-001'
+    const onSelectRun = vi.fn()
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+
+    stubFetchRuns([makeValidSummary({runId})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+
+    const nestedButton = document.createElement('button')
+    const preventDefault = vi.fn()
+    optimistic.dispatchEvent({type: 'keydown', key: ' ', target: nestedButton, preventDefault})
+    expect(preventDefault).not.toHaveBeenCalled()
+    expect(onSelectRun).not.toHaveBeenCalled()
+
+    optimistic.dispatchEvent({type: 'keydown', key: ' ', preventDefault: vi.fn()})
+    expect(optimistic.dataset.expanded).toBe('true')
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A card without updatedAt gains its <time> later, once a view carries one
+// ---------------------------------------------------------------------------
+
+describe('late <time> — a card first shown without updatedAt gains it when a later view has one', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  const LATE_UPDATED_AT = '2026-06-26T14:00:00.000Z'
+
+  function expectSingleTimeBeforeOutput(card) {
+    expect(countRole(card, 'run-updated-at')).toBe(1)
+    const roles = card._children.map(child => child.dataset.role)
+    expect(roles.indexOf('run-repo')).toBeLessThan(roles.indexOf('run-updated-at'))
+    expect(roles.indexOf('run-updated-at')).toBeLessThan(roles.indexOf('run-output'))
+    const timeEl = card.querySelector('[data-role="run-updated-at"]')
+    expect(timeEl.className).toBe('run-updated-at')
+    expect(timeEl.attributes.datetime).toBe(LATE_UPDATED_AT)
+    expect(timeEl.textContent).not.toBe('')
+  }
+
+  it('an optimistic card adopted without updatedAt gets a <time> on a later diff, with no duplicates on repeats', async () => {
+    const runId = 'run-late-time-optimistic-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    expect(optimistic.dataset.optimistic).toBeUndefined() // flag cleared on first adoption
+    expect(optimistic.querySelector('[data-role="run-updated-at"]')).toBeNull()
+
+    for (let i = 0; i < 3; i++) {
+      stubFetchRuns([makeValidSummary({runId, status: 'running', updatedAt: LATE_UPDATED_AT})])
+      await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    }
+
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toBe(optimistic)
+    expectSingleTimeBeforeOutput(optimistic)
+  })
+
+  it('a fetched card first rendered without updatedAt gets a <time> on a later diff, with no duplicates on repeats', async () => {
+    const runId = 'run-late-time-fetched-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    const card = cards[0]
+    expect(card.querySelector('[data-role="run-updated-at"]')).toBeNull()
+
+    for (let i = 0; i < 3; i++) {
+      stubFetchRuns([makeValidSummary({runId, status: 'running', updatedAt: LATE_UPDATED_AT})])
+      await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    }
+
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toBe(card)
+    expectSingleTimeBeforeOutput(card)
+  })
+
+  it('does not add a <time> to the active-stream card (write-protected) even when the view has updatedAt', async () => {
+    const runId = 'run-late-time-active-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    const card = cards[0]
+    markRunStreamAttached(runId)
+    const childCountBefore = card._children.length
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running', updatedAt: LATE_UPDATED_AT})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    expect(card._children).toHaveLength(childCountBefore)
+    expect(card.querySelector('[data-role="run-updated-at"]')).toBeNull()
   })
 })

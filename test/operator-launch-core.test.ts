@@ -341,6 +341,55 @@ describe('optimistic pending card anatomy — status-group parity with renderRun
   })
 })
 
+async function readLaunchSource() {
+  const fs = await import('node:fs/promises')
+  return fs.readFile('public/operator-launch.js', 'utf8')
+}
+
+describe('optimistic pending card anatomy — operable before a fetch adopts it', () => {
+  // initOperatorLaunch's submit path dynamically imports an absolute /static URL and
+  // cannot run under Node, so (like the rest of this file) the launch-built card is
+  // pinned at the source-contract level. The run-index side of the contract —
+  // expansion wiring bound by markCardExpandedForLaunch, upgrade-on-adoption — is
+  // exercised behaviorally in test/operator-run-index-core.test.js.
+  it('gives the optimistic card the run-cancel region so the stream can populate it once attached', async () => {
+    const src = await readLaunchSource()
+    expect(src).toContain(`cancelEl.dataset.role = 'run-cancel'`)
+    expect(src).toMatch(/cancelEl\.hidden\s*=\s*true/)
+  })
+
+  it('marks the optimistic card role=button and includes the run-repo span', async () => {
+    const src = await readLaunchSource()
+    expect(src).toContain(`card.setAttribute('role', 'button')`)
+    expect(src).toContain(`repoSpan.dataset.role = 'run-repo'`)
+  })
+
+  it('fills the repo label only from the validated picker select, via textContent (never innerHTML, never the form-data fallback)', async () => {
+    const src = await readLaunchSource()
+    expect(src).toContain('repoSpan.textContent = pickerRepo')
+    expect(src).not.toMatch(/repoSpan\.textContent\s*=\s*repo\b/)
+    expect(src).not.toMatch(/repoSpan\.textContent\s*=\s*repoSelectEl/)
+    expect(src).not.toMatch(/\.innerHTML\s*=/)
+  })
+
+  it('snapshots the picker value before awaiting submitLaunch, so a mid-flight picker change cannot mislabel the card', async () => {
+    const src = await readLaunchSource()
+    const snapshotAt = src.indexOf('const pickerRepo')
+    const awaitAt = src.indexOf('await submitLaunch(')
+    expect(snapshotAt).toBeGreaterThan(-1)
+    expect(awaitAt).toBeGreaterThan(-1)
+    expect(snapshotAt).toBeLessThan(awaitAt)
+    // The picker element is never re-read after the await.
+    expect(src.slice(awaitAt)).not.toMatch(/repoSelectEl\.value/)
+  })
+
+  it('does not couple to operator-run-index.js (separate module instance owns expansion state)', async () => {
+    const src = await readLaunchSource()
+    expect(src).not.toMatch(/^\s*import\s.*operator-run-index/m)
+    expect(src).not.toMatch(/import\(.*operator-run-index/)
+  })
+})
+
 describe('validateRepoItem — per-item validation for listRepos', () => {
   it('accepts a valid item with owner and repo strings', () => {
     expect(validateRepoItem({owner: 'fro-bot', repo: 'agent'})).toBe(true)
