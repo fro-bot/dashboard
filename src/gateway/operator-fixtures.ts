@@ -102,14 +102,14 @@ export const ALL_FIXTURE_RUNS: readonly RunSnapshotDto[] = [
 ]
 
 // ---------------------------------------------------------------------------
-// Failure-reason (Gateway 1.6.0) fixture constants — shared across the fixture
+// Failure-reason fixture constants — shared across the fixture
 // harness route and SSE scenario builders so known/unknown reason values stay
 // in lockstep. See src/gateway/operator-contract/run-status.ts for the
 // canonical OPERATOR_FAILURE_KINDS allowlist.
 // ---------------------------------------------------------------------------
 
 /**
- * A known Gateway 1.6.0 operator failure-reason code, used by both the
+ * A known operator failure-reason code, used by both the
  * fixture-harness recent-run entries and the live-stream reason scenarios so
  * a single known-reason case exercises both surfaces with the same value.
  */
@@ -165,7 +165,7 @@ export const FIXTURE_RUN_TIMELINE: readonly RunStreamEvent[] = [
 ]
 
 // ---------------------------------------------------------------------------
-// Run approval fixtures — 1.4.0 per-run routes
+// Run approval fixtures — per-run routes
 // ---------------------------------------------------------------------------
 
 export const FIXTURE_RUN_APPROVAL: RunApprovalSummary = {

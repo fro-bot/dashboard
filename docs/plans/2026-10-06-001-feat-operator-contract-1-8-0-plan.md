@@ -416,7 +416,7 @@ flowchart LR
 
 **Verification:** The fixture harness renders correctly in both themes and at narrow width, and the design gate passes. Copy is reviewed after design.
 
-- [ ] **Unit 5: Fixture scenarios and assembled check**
+- [x] **Unit 5: Fixture scenarios and assembled check**
 
 **Goal:** The harness exercises every branch, and the assembled UI is checked.
 
