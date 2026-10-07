@@ -134,8 +134,9 @@ Pin the contract version on the client; the first `ready` frame's version must m
 or the consumer enters an absorbing drift state and renders nothing. When the
 provider bumps the contract, bump the pin in *every* consumer — a stale pin fails
 closed against the live provider, which looks like "output never renders." The
-dashboard maintains two independent pins (TypeScript vendored constant and browser
-runtime literal); both must move together.
+dashboard carries the version in three places (the TypeScript vendored constant, the
+browser runtime literal, and the fixture SSE `ready` frames); all three must move
+together.
 
 ## Prevention
 

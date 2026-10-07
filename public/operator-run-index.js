@@ -35,6 +35,25 @@ const STATUS_LABELS = {
 }
 
 /**
+ * data-role of the hidden checkout-detail region (provenance / preparation). Unit-3 anatomy
+ * only: this module creates and shows/hides the region; operator-stream.js renders into it.
+ */
+const CHECKOUT_DETAIL_ROLE = 'run-checkout-detail'
+
+/**
+ * The card's hidden substructure regions in DOM order. The checkout-detail region leads the
+ * list, so anything inserted "before the first hidden region" lands ahead of it too.
+ */
+const SUBSTRUCTURE_ROLES = [
+  CHECKOUT_DETAIL_ROLE,
+  'run-output',
+  'run-output-coalesced',
+  'run-approvals',
+  'approval-badge',
+  'run-cancel',
+]
+
+/**
  * Allowlisted OperatorFailureKind values — out-of-set values
  * normalize to absent, never parsed through.
  * Mirrors src/gateway/operator-contract/run-status.ts OPERATOR_FAILURE_KINDS.
@@ -45,6 +64,8 @@ const VALID_FAILURE_KINDS = new Set([
   'stream-ended',
   'workspace-unreachable',
   'session-error',
+  'checkout-substituted',
+  'workspace-unavailable',
   'unknown',
 ])
 
@@ -58,8 +79,10 @@ export const FAILURE_REASON_LABELS = {
   'inactivity-timeout': 'No recent activity',
   'max-duration-timeout': 'Run timed out',
   'stream-ended': 'Stream ended early',
-  'workspace-unreachable': 'Workspace unavailable',
+  'workspace-unreachable': 'Workspace unreachable',
   'session-error': 'Session error',
+  'checkout-substituted': 'Checkout mismatch',
+  'workspace-unavailable': 'Workspace unavailable',
   unknown: 'Unknown failure',
 }
 
@@ -259,6 +282,12 @@ let _activeStreamRunId = null
 // Owned by this DOM shell only — the runtime seam separately owns the stream handle.
 let _expandedRunId = null
 
+// The selection handler from the most recent init, retained so a card created
+// outside this module (the launch handoff) can be wired for expansion by
+// markCardExpandedForLaunch. operator-launch.js is a separate module instance and
+// deliberately does not import this one, so it cannot reach toggleCardExpansion.
+let _onSelectRun
+
 function isRunIndexInitStale(generation) {
   return generation !== _runIndexGeneration
 }
@@ -291,6 +320,7 @@ export function resetRunIndexState() {
   }
   _activeStreamRunId = null
   _expandedRunId = null
+  _onSelectRun = undefined
 }
 
 export async function initOperatorRunIndex(opts) {
@@ -309,6 +339,8 @@ export async function initOperatorRunIndex(opts) {
 
   if (isRunIndexInitStale(myGeneration)) return
   if (typeof document === 'undefined') return
+
+  if (typeof onSelectRun === 'function') _onSelectRun = onSelectRun
 
   const runIndexSection = document.querySelector('[data-role="run-index"]')
   const runIndexList = document.querySelector('[data-role="run-index-list"]')
@@ -516,6 +548,12 @@ function diffRunIndexList(list, views, opts) {
       // Non-active card with a fetched view: normal in-place attribute update is
       // safe (no concurrent writer). A frozen-but-fetched card is still updated
       // in place (status/label/time) — only its DOM position is locked.
+      if (card.dataset.optimistic === 'true') {
+        // First non-active adoption of a launch-created card: it was built with
+        // only the status anatomy, so add what a fetched card has (repo, time,
+        // cancel region, role, expansion listeners) before filling it from the view.
+        ensureRunCardAnatomy(card, view, onSelectRun)
+      }
       updateCardInPlace(card, view)
       if (card.dataset.optimistic === 'true') delete card.dataset.optimistic
     }
@@ -554,7 +592,9 @@ function cardShowsTerminalStatus(card) {
 /**
  * Update a card's safe-view-derived fields in place. Closed attribute-mutation set:
  * className (status-* only), textContent (safe-view text children), datetime (on <time>).
- * Never touches data-run-id, data-expanded, or creates any new attribute.
+ * Never touches data-run-id or data-expanded on the card itself. The one structural
+ * addition is a missing <time> (see below), built with the same safe-DOM shape as renderRunCard.
+ * Never called for the active-stream card (the diff write-protects it).
  */
 function updateCardInPlace(card, view) {
   card.setAttribute(
@@ -574,8 +614,16 @@ function updateCardInPlace(card, view) {
       repoEl.textContent = view.repo
     }
 
-    const timeEl = card.querySelector('[data-role="run-updated-at"]')
-    if ('updatedAt' in view && view.updatedAt !== undefined && timeEl !== null && timeEl !== undefined) {
+    if ('updatedAt' in view && view.updatedAt !== undefined) {
+      let timeEl = card.querySelector('[data-role="run-updated-at"]')
+      if (timeEl === null || timeEl === undefined) {
+        // A card first rendered/adopted without updatedAt gains its <time> the first
+        // time a view carries one — same class/role/slot as renderRunCard gives it.
+        timeEl = document.createElement('time')
+        timeEl.className = 'run-updated-at'
+        timeEl.dataset.role = 'run-updated-at'
+        insertBeforeFirstRole(card, timeEl, SUBSTRUCTURE_ROLES)
+      }
       timeEl.setAttribute('datetime', view.updatedAt)
       timeEl.textContent = formatRelativeTime(view.updatedAt)
     }
@@ -644,6 +692,17 @@ function renderRunCard(view, onSelectRun) {
   // Revealed on expansion. Safe-DOM only: createElement + textContent/
   // hidden/dataset, never innerHTML. No run field beyond the closed safe-view
   // reaches these elements at creation time.
+
+  // Checkout-detail region — the stream renders what a run started from (provenance) or
+  // why checkout preparation refused/failed, here. SLOT: the first hidden region, directly
+  // after the header row (status group, repo, time) and before run-output, so on expansion
+  // the checkout facts sit right under the status/reason line. Every card shape (this
+  // renderer, the optimistic launch card, and ensureRunCardAnatomy) places it in this slot.
+  const checkoutEl = document.createElement('div')
+  checkoutEl.dataset.role = CHECKOUT_DETAIL_ROLE
+  checkoutEl.hidden = true
+  card.append(checkoutEl)
+
   const outputEl = document.createElement('div')
   outputEl.dataset.role = 'run-output'
   outputEl.hidden = true
@@ -673,20 +732,103 @@ function renderRunCard(view, onSelectRun) {
   card.append(cancelEl)
 
   // Wire click and keyboard activation to the expand/collapse toggle.
-  if (typeof onSelectRun === 'function') {
-    const runId = view.runId
-    const activate = () => {
-      toggleCardExpansion(card, runId, onSelectRun)
-    }
-    card.addEventListener('click', activate)
-    card.addEventListener('keydown', e => {
-      if (e.key !== 'Enter' && e.key !== ' ') return
-      if (e.key === ' ') e.preventDefault()
-      activate()
-    })
-  }
+  bindCardActivation(card, view.runId, onSelectRun)
 
   return card
+}
+
+/**
+ * Cards that already carry the click/keydown expansion listeners. Listener
+ * registration is idempotent per card: a launch-created card is wired once by
+ * markCardExpandedForLaunch and must not be re-bound when a later diff adopts it.
+ * A WeakSet (not a data-* attribute) keeps the closed attribute set intact.
+ */
+const _activatableCards = new WeakSet()
+
+/**
+ * Wire click and Enter/Space activation to the expand/collapse toggle, at most
+ * once per card. No-op when onSelectRun is not a function (card stays inert, as
+ * with a fetched card rendered without a selection handler).
+ */
+function bindCardActivation(card, runId, onSelectRun) {
+  if (typeof onSelectRun !== 'function') return
+  if (_activatableCards.has(card)) return
+  _activatableCards.add(card)
+
+  const activate = () => {
+    toggleCardExpansion(card, runId, onSelectRun)
+  }
+  card.addEventListener('click', activate)
+  card.addEventListener('keydown', e => {
+    // Keys bubbling up from nested controls (e.g. the run-cancel buttons) belong to
+    // those controls: only a keydown on the card itself toggles expansion.
+    if (e.target !== card) return
+    if (e.key !== 'Enter' && e.key !== ' ') return
+    if (e.key === ' ') e.preventDefault()
+    activate()
+  })
+}
+
+/**
+ * Insert `el` before the first of the card's direct children matching one of
+ * `roles` (so late-added anatomy lands in the same slot renderRunCard gives it),
+ * or append when none exist. Safe-DOM only.
+ */
+function insertBeforeFirstRole(card, el, roles) {
+  for (const role of roles) {
+    const ref = card.querySelector(`[data-role="${role}"]`)
+    if (ref !== null && ref !== undefined && typeof ref.before === 'function') {
+      ref.before(el)
+      return
+    }
+  }
+  card.append(el)
+}
+
+/**
+ * Upgrade a launch-created (optimistic) card to full fetched-card anatomy IN PLACE.
+ *
+ * In place, not replace-with-renderRunCard, on purpose: the runtime seam and
+ * operator-stream.js hold references into the optimistic card's substructure
+ * (run-status element, etc.), and node identity also preserves DOM position, the
+ * expanded/frozen lock, and focus. Replacing the node would orphan those references.
+ *
+ * Idempotent: only creates what is missing and binds listeners at most once, so
+ * repeated calls never duplicate elements or handlers. Never called on the
+ * active-stream card (the caller guards) — that card is write-protected.
+ * Text/datetime values (and the <time> element, which any card may gain late) are
+ * handled by updateCardInPlace; this only adds the remaining anatomy.
+ * Safe-DOM only: createElement + dataset.role/className, never innerHTML.
+ */
+function ensureRunCardAnatomy(card, view, onSelectRun) {
+  card.setAttribute('role', 'button')
+  card.tabIndex = 0
+
+  if (card.querySelector('[data-role="run-repo"]') === null) {
+    const repoSpan = document.createElement('span')
+    repoSpan.className = 'run-repo'
+    repoSpan.dataset.role = 'run-repo'
+    insertBeforeFirstRole(card, repoSpan, ['run-updated-at', ...SUBSTRUCTURE_ROLES])
+  }
+
+  // Checkout-detail region: same slot renderRunCard gives it (ahead of every other
+  // hidden region). Only created when missing — exactly one per card, however often
+  // the diff re-adopts it.
+  if (card.querySelector(`[data-role="${CHECKOUT_DETAIL_ROLE}"]`) === null) {
+    const checkoutEl = document.createElement('div')
+    checkoutEl.dataset.role = CHECKOUT_DETAIL_ROLE
+    checkoutEl.hidden = true
+    insertBeforeFirstRole(card, checkoutEl, SUBSTRUCTURE_ROLES)
+  }
+
+  if (card.querySelector('[data-role="run-cancel"]') === null) {
+    const cancelEl = document.createElement('div')
+    cancelEl.dataset.role = 'run-cancel'
+    cancelEl.hidden = true
+    card.append(cancelEl)
+  }
+
+  bindCardActivation(card, view.runId, onSelectRun)
 }
 
 /**
@@ -743,6 +885,12 @@ export function markCardExpandedForLaunch(runId) {
   if (typeof document === 'undefined') return
   const card = document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
   if (card === null || card === undefined) return
+
+  // Make the launch-created card operable before any fetch adopts it: bind the
+  // same click/Enter/Space expansion wiring a fetched card has. Idempotent, and
+  // touches only listeners — never the stream-owned substructure.
+  bindCardActivation(card, runId, _onSelectRun)
+
   if (card.dataset.expanded === 'true') return // already expanded — nothing to do
 
   if (_expandedRunId !== null && _expandedRunId !== runId) {
@@ -794,10 +942,10 @@ function expandCardForRestore(runId, onExpand) {
   onExpand(runId, card)
 }
 
-/** Show/hide a card's four per-card substructure regions in one place. */
+/** Show/hide a card's per-card substructure regions in one place. */
 function setSubstructureHidden(card, hidden) {
   if (typeof card.querySelector !== 'function') return
-  for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge', 'run-cancel']) {
+  for (const role of SUBSTRUCTURE_ROLES) {
     const el = card.querySelector(`[data-role="${role}"]`)
     if (el !== null && el !== undefined) el.hidden = hidden
   }

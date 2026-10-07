@@ -13,6 +13,8 @@ export type FailureKind =
   | 'stream-ended'
   | 'workspace-unreachable'
   | 'session-error'
+  | 'checkout-substituted'
+  | 'workspace-unavailable'
   | 'unknown'
 
 /** Parsed run summary — closed DTO with only declared fields. */
