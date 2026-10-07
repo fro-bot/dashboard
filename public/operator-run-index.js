@@ -569,7 +569,9 @@ function cardShowsTerminalStatus(card) {
 /**
  * Update a card's safe-view-derived fields in place. Closed attribute-mutation set:
  * className (status-* only), textContent (safe-view text children), datetime (on <time>).
- * Never touches data-run-id, data-expanded, or creates any new attribute.
+ * Never touches data-run-id or data-expanded on the card itself. The one structural
+ * addition is a missing <time> (see below), built with the same safe-DOM shape as renderRunCard.
+ * Never called for the active-stream card (the diff write-protects it).
  */
 function updateCardInPlace(card, view) {
   card.setAttribute(
@@ -589,8 +591,16 @@ function updateCardInPlace(card, view) {
       repoEl.textContent = view.repo
     }
 
-    const timeEl = card.querySelector('[data-role="run-updated-at"]')
-    if ('updatedAt' in view && view.updatedAt !== undefined && timeEl !== null && timeEl !== undefined) {
+    if ('updatedAt' in view && view.updatedAt !== undefined) {
+      let timeEl = card.querySelector('[data-role="run-updated-at"]')
+      if (timeEl === null || timeEl === undefined) {
+        // A card first rendered/adopted without updatedAt gains its <time> the first
+        // time a view carries one — same class/role/slot as renderRunCard gives it.
+        timeEl = document.createElement('time')
+        timeEl.className = 'run-updated-at'
+        timeEl.dataset.role = 'run-updated-at'
+        insertBeforeFirstRole(card, timeEl, ['run-output'])
+      }
       timeEl.setAttribute('datetime', view.updatedAt)
       timeEl.textContent = formatRelativeTime(view.updatedAt)
     }
@@ -716,6 +726,9 @@ function bindCardActivation(card, runId, onSelectRun) {
   }
   card.addEventListener('click', activate)
   card.addEventListener('keydown', e => {
+    // Keys bubbling up from nested controls (e.g. the run-cancel buttons) belong to
+    // those controls: only a keydown on the card itself toggles expansion.
+    if (e.target !== card) return
     if (e.key !== 'Enter' && e.key !== ' ') return
     if (e.key === ' ') e.preventDefault()
     activate()
@@ -749,7 +762,8 @@ function insertBeforeFirstRole(card, el, roles) {
  * Idempotent: only creates what is missing and binds listeners at most once, so
  * repeated calls never duplicate elements or handlers. Never called on the
  * active-stream card (the caller guards) — that card is write-protected.
- * Text/datetime values are filled by updateCardInPlace; this only adds elements.
+ * Text/datetime values (and the <time> element, which any card may gain late) are
+ * handled by updateCardInPlace; this only adds the remaining anatomy.
  * Safe-DOM only: createElement + dataset.role/className, never innerHTML.
  */
 function ensureRunCardAnatomy(card, view, onSelectRun) {
@@ -761,13 +775,6 @@ function ensureRunCardAnatomy(card, view, onSelectRun) {
     repoSpan.className = 'run-repo'
     repoSpan.dataset.role = 'run-repo'
     insertBeforeFirstRole(card, repoSpan, ['run-updated-at', 'run-output'])
-  }
-
-  if ('updatedAt' in view && view.updatedAt !== undefined && card.querySelector('[data-role="run-updated-at"]') === null) {
-    const timeEl = document.createElement('time')
-    timeEl.className = 'run-updated-at'
-    timeEl.dataset.role = 'run-updated-at'
-    insertBeforeFirstRole(card, timeEl, ['run-output'])
   }
 
   if (card.querySelector('[data-role="run-cancel"]') === null) {

@@ -575,6 +575,14 @@ export async function initOperatorLaunch(opts) {
       // Get selected repo from the select element (rendered by picker) or fallback
       const repoSelectEl = document.querySelector('#launch-repo-select')
       const repo = repoSelectEl?.value ?? formData.get('repo')?.toString() ?? ''
+      // Snapshot the picker value now, before the await below: only the submit button
+      // is disabled in flight, so the picker can change and the optimistic card must
+      // still be labelled with the repo that was actually launched. Non-null only when
+      // the validated picker exists.
+      const pickerRepo =
+        repoSelectEl !== null && repoSelectEl !== undefined && typeof repoSelectEl.value === 'string'
+          ? repoSelectEl.value
+          : null
       if (repo === '') {
         _launching = false
         if (launchError !== null) {
@@ -664,8 +672,8 @@ export async function initOperatorLaunch(opts) {
           const repoSpan = document.createElement('span')
           repoSpan.className = 'run-repo'
           repoSpan.dataset.role = 'run-repo'
-          if (repoSelectEl !== null && repoSelectEl !== undefined && typeof repoSelectEl.value === 'string') {
-            repoSpan.textContent = repoSelectEl.value
+          if (pickerRepo !== null) {
+            repoSpan.textContent = pickerRepo
           }
           card.append(repoSpan)
 

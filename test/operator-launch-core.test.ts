@@ -366,9 +366,21 @@ describe('optimistic pending card anatomy — operable before a fetch adopts it'
 
   it('fills the repo label only from the validated picker select, via textContent (never innerHTML, never the form-data fallback)', async () => {
     const src = await readLaunchSource()
-    expect(src).toContain('repoSpan.textContent = repoSelectEl.value')
+    expect(src).toContain('repoSpan.textContent = pickerRepo')
     expect(src).not.toMatch(/repoSpan\.textContent\s*=\s*repo\b/)
+    expect(src).not.toMatch(/repoSpan\.textContent\s*=\s*repoSelectEl/)
     expect(src).not.toMatch(/\.innerHTML\s*=/)
+  })
+
+  it('snapshots the picker value before awaiting submitLaunch, so a mid-flight picker change cannot mislabel the card', async () => {
+    const src = await readLaunchSource()
+    const snapshotAt = src.indexOf('const pickerRepo')
+    const awaitAt = src.indexOf('await submitLaunch(')
+    expect(snapshotAt).toBeGreaterThan(-1)
+    expect(awaitAt).toBeGreaterThan(-1)
+    expect(snapshotAt).toBeLessThan(awaitAt)
+    // The picker element is never re-read after the await.
+    expect(src.slice(awaitAt)).not.toMatch(/repoSelectEl\.value/)
   })
 
   it('does not couple to operator-run-index.js (separate module instance owns expansion state)', async () => {
