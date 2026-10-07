@@ -9,6 +9,7 @@ overrides:
   brace-expansion@5: '>=5.0.12 <6.0.0'
   fast-uri@3: '>=3.1.5 <4.0.0'
   katex@0: '>=0.18.2 <1.0.0'
+  toml@4: '>=4.2.0 <5.0.0'
   undici@7: '>=7.29.0 <8.0.0'
 
 importers:
@@ -3695,8 +3696,8 @@ packages:
     resolution: {integrity: sha512-A5F0cM6+mDleacLIEUkmfpkBbnHJFV1d2rprHU2MXNk7mlxHq2zGojA+SRvQD1RoMo9gqjZPWEaKG4v1BQ48lw==}
     engines: {node: ^20.19.0 || ^22.13.0 || >=24}
 
-  toml@4.1.2:
-    resolution: {integrity: sha512-m0vXfHODcw3gk+KONAOlVQ5yNHc3yS3B1ybM3HS1vqDoS0RWTDDVBVVTYi8hH0k+2OM1vmo9fb1WX9EVqjqfHA==}
+  toml@4.3.0:
+    resolution: {integrity: sha512-lVb8X9BsPVuH0M4BKeS91tXAmJvCjQ5UIyAbQFaxkKGyUFK2RPkhwaFSQH8vbpl1d23eu/IBH+dwVMHWaq9A5A==}
     engines: {node: '>=20'}
 
   tough-cookie@6.0.1:
@@ -6077,7 +6078,7 @@ snapshots:
       kubernetes-types: 1.30.0
       msgpackr: 2.0.4
       multipasta: 0.2.8
-      toml: 4.1.2
+      toml: 4.3.0
       uuid: 14.0.1
       yaml: 2.9.1
 
@@ -7956,7 +7957,7 @@ snapshots:
     dependencies:
       eslint-visitor-keys: 5.0.1
 
-  toml@4.1.2: {}
+  toml@4.3.0: {}
 
   tough-cookie@6.0.1:
     dependencies:
