@@ -2382,6 +2382,9 @@ export function renderCancelControl(runId, cancelClient, onCancelDispatch) {
  *   noticeEl    — element to show stream connection state notices
  *   approvalsEl — element with [data-role="run-approvals"] to render approval prompts
  *   badgeEl     — element with [data-role="approval-badge"] for the approval count badge
+ *   checkoutEl  — element with [data-role="run-checkout-detail"], the target for checkout
+ *                 provenance / preparation. Handed over by the runtime; not rendered into
+ *                 yet (the option is accepted and ignored until the renderer lands).
  *   approvalClient — optional pre-built approval client (for testing); if absent,
  *                    buildApprovalClient() is called when the flag is on
  *

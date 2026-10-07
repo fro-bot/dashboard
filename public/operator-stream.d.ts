@@ -520,6 +520,12 @@ export interface InitOptions {
   readonly reasonEl?: Element | null
   /** Cancel control container element (data-role="run-cancel"). */
   readonly cancelEl?: (HTMLElement & {hidden: boolean}) | null
+  /**
+   * Checkout-detail region (data-role="run-checkout-detail"): where checkout provenance /
+   * preparation is rendered. Accepted by initOperatorStream and handed over by the runtime;
+   * nothing is rendered into it yet.
+   */
+  readonly checkoutEl?: (HTMLElement & {hidden: boolean}) | null
   /** Injectable cancel client for testing. If absent, buildCancelClient() is used. */
   readonly cancelClient?: CancelControlClient | null
 }

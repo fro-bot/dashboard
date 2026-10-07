@@ -37,7 +37,7 @@ export const MAX_HASH_ID_LENGTH = 512
 
 /**
  * Discover the per-card render targets for a run's stream (output, coalesced
- * output hint, approval prompt, approval badge). Without these, a stream
+ * output hint, approval prompt, approval badge, reason, cancel, checkout detail). Without these, a stream
  * handle's DOM updates only ever touch statusEl/noticeEl, leaving the card's
  * core content (output + approvals) blank.
  *
@@ -52,6 +52,7 @@ export function discoverCardStreamTargets(runId: string): {
   badgeEl: Element | null
   reasonEl: Element | null
   cancelEl: Element | null
+  checkoutEl: Element | null
 } {
   const card = typeof document !== 'undefined'
     ? document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
@@ -63,6 +64,7 @@ export function discoverCardStreamTargets(runId: string): {
     badgeEl: card?.querySelector('[data-role="approval-badge"]') ?? null,
     reasonEl: card?.querySelector('[data-role="run-reason"]') ?? null,
     cancelEl: card?.querySelector('[data-role="run-cancel"]') ?? null,
+    checkoutEl: card?.querySelector('[data-role="run-checkout-detail"]') ?? null,
   }
 }
 
@@ -262,6 +264,7 @@ async function defaultRuntimeLoader(opts?: {
       badgeEl?: Element | null
       reasonEl?: Element | null
       cancelEl?: Element | null
+      checkoutEl?: Element | null
       endpointBase?: string
       fixtureSessionId?: string
     }) => {close(): void}
@@ -303,7 +306,7 @@ async function defaultRuntimeLoader(opts?: {
 
     // Discover the per-card render targets so live output, coalescing hints,
     // approval prompts, and the approval badge all render — not just status.
-    const {outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, cancelEl} = discoverCardStreamTargets(runId)
+    const {outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, cancelEl, checkoutEl} = discoverCardStreamTargets(runId)
 
     try {
       const handle = streamMod.initOperatorStream({
@@ -316,6 +319,7 @@ async function defaultRuntimeLoader(opts?: {
         badgeEl,
         reasonEl,
         cancelEl,
+        checkoutEl,
         endpointBase: opts?.endpointBase,
         fixtureSessionId: opts?.fixtureSessionId,
       })

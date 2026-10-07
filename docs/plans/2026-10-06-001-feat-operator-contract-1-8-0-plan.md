@@ -291,7 +291,7 @@ flowchart LR
 
 ## Implementation Units
 
-- [ ] **Unit 1: Vendor contract 1.8.0 and move the server pin**
+- [x] **Unit 1: Vendor contract 1.8.0 and move the server pin**
 
 **Goal:** The vendored contract matches upstream 1.8.0 for everything the dashboard consumes, and the server reader carries the new fields through the vendored parsers.
 
@@ -321,7 +321,7 @@ flowchart LR
 
 **Verification:** Server type checks pass, and reader tests prove soft fields with a hard core.
 
-- [ ] **Unit 2: Browser parse, state, and labels**
+- [x] **Unit 2: Browser parse, state, and labels**
 
 **Goal:** The browser stream accepts 1.8.0, stores capped and sanitized DTOs, and has a label for every vendored value.
 
@@ -360,7 +360,7 @@ flowchart LR
 
 **Verification:** A 1.8.0 `ready` frame is accepted. Removing any vendored value from a label map fails the coverage test.
 
-- [ ] **Unit 3: Card anatomy and target plumbing**
+- [x] **Unit 3: Card anatomy and target plumbing**
 
 **Goal:** Every run card shape has the checkout-detail region, and the runtime hands it to the stream.
 

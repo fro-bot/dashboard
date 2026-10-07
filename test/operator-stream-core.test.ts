@@ -8159,6 +8159,8 @@ describe('checkout fields — leak guard', () => {
     vi.stubGlobal('location', ckAccessRecorder(locationWrites))
 
     const writes: string[] = []
+    // The checkout-detail target is accepted but nothing renders into it yet.
+    const checkoutWrites: string[] = []
 
     const encoder = new TextEncoder()
     const body = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\nevent: status\ndata: ${JSON.stringify(ckSentinelStatus())}\n\n`
@@ -8175,6 +8177,7 @@ describe('checkout fields — leak guard', () => {
       statusEl: ckRecordingElement(writes),
       noticeEl: ckRecordingElement(writes),
       reasonEl: ckRecordingElement(writes),
+      checkoutEl: ckRecordingElement(checkoutWrites),
       endpointBase: '/operator',
     })
     await new Promise(resolve => setTimeout(resolve, 50))
@@ -8188,6 +8191,7 @@ describe('checkout fields — leak guard', () => {
     expect(locationWrites).toEqual([])
     expect(writes.join('\n')).not.toContain('fixture-')
     expect(writes.length).toBeGreaterThan(0)
+    expect(checkoutWrites).toEqual([])
   })
 
   it('sentinels live only in the closed DTOs inside in-memory run state', () => {

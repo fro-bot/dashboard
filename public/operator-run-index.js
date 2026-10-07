@@ -35,6 +35,25 @@ const STATUS_LABELS = {
 }
 
 /**
+ * data-role of the hidden checkout-detail region (provenance / preparation). Unit-3 anatomy
+ * only: this module creates and shows/hides the region; operator-stream.js renders into it.
+ */
+const CHECKOUT_DETAIL_ROLE = 'run-checkout-detail'
+
+/**
+ * The card's hidden substructure regions in DOM order. The checkout-detail region leads the
+ * list, so anything inserted "before the first hidden region" lands ahead of it too.
+ */
+const SUBSTRUCTURE_ROLES = [
+  CHECKOUT_DETAIL_ROLE,
+  'run-output',
+  'run-output-coalesced',
+  'run-approvals',
+  'approval-badge',
+  'run-cancel',
+]
+
+/**
  * Allowlisted OperatorFailureKind values — out-of-set values
  * normalize to absent, never parsed through.
  * Mirrors src/gateway/operator-contract/run-status.ts OPERATOR_FAILURE_KINDS.
@@ -603,7 +622,7 @@ function updateCardInPlace(card, view) {
         timeEl = document.createElement('time')
         timeEl.className = 'run-updated-at'
         timeEl.dataset.role = 'run-updated-at'
-        insertBeforeFirstRole(card, timeEl, ['run-output'])
+        insertBeforeFirstRole(card, timeEl, SUBSTRUCTURE_ROLES)
       }
       timeEl.setAttribute('datetime', view.updatedAt)
       timeEl.textContent = formatRelativeTime(view.updatedAt)
@@ -673,6 +692,17 @@ function renderRunCard(view, onSelectRun) {
   // Revealed on expansion. Safe-DOM only: createElement + textContent/
   // hidden/dataset, never innerHTML. No run field beyond the closed safe-view
   // reaches these elements at creation time.
+
+  // Checkout-detail region — the stream renders what a run started from (provenance) or
+  // why checkout preparation refused/failed, here. SLOT: the first hidden region, directly
+  // after the header row (status group, repo, time) and before run-output, so on expansion
+  // the checkout facts sit right under the status/reason line. Every card shape (this
+  // renderer, the optimistic launch card, and ensureRunCardAnatomy) places it in this slot.
+  const checkoutEl = document.createElement('div')
+  checkoutEl.dataset.role = CHECKOUT_DETAIL_ROLE
+  checkoutEl.hidden = true
+  card.append(checkoutEl)
+
   const outputEl = document.createElement('div')
   outputEl.dataset.role = 'run-output'
   outputEl.hidden = true
@@ -778,7 +808,17 @@ function ensureRunCardAnatomy(card, view, onSelectRun) {
     const repoSpan = document.createElement('span')
     repoSpan.className = 'run-repo'
     repoSpan.dataset.role = 'run-repo'
-    insertBeforeFirstRole(card, repoSpan, ['run-updated-at', 'run-output'])
+    insertBeforeFirstRole(card, repoSpan, ['run-updated-at', ...SUBSTRUCTURE_ROLES])
+  }
+
+  // Checkout-detail region: same slot renderRunCard gives it (ahead of every other
+  // hidden region). Only created when missing — exactly one per card, however often
+  // the diff re-adopts it.
+  if (card.querySelector(`[data-role="${CHECKOUT_DETAIL_ROLE}"]`) === null) {
+    const checkoutEl = document.createElement('div')
+    checkoutEl.dataset.role = CHECKOUT_DETAIL_ROLE
+    checkoutEl.hidden = true
+    insertBeforeFirstRole(card, checkoutEl, SUBSTRUCTURE_ROLES)
   }
 
   if (card.querySelector('[data-role="run-cancel"]') === null) {
@@ -902,10 +942,10 @@ function expandCardForRestore(runId, onExpand) {
   onExpand(runId, card)
 }
 
-/** Show/hide a card's four per-card substructure regions in one place. */
+/** Show/hide a card's per-card substructure regions in one place. */
 function setSubstructureHidden(card, hidden) {
   if (typeof card.querySelector !== 'function') return
-  for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge', 'run-cancel']) {
+  for (const role of SUBSTRUCTURE_ROLES) {
     const el = card.querySelector(`[data-role="${role}"]`)
     if (el !== null && el !== undefined) el.hidden = hidden
   }

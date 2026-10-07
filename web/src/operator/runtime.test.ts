@@ -453,6 +453,7 @@ describe('defaultRuntimeLoader — single-open accordion via onSelectRun/onRunLa
     let activeHandle: {close(): void} | null = null
     const attachCalls: string[] = []
     const closeOrder: string[] = []
+    const attachedTargets: {runId: string; checkoutEl: Element | null}[] = []
 
     function closeActive() {
       if (activeHandle !== null) {
@@ -468,7 +469,8 @@ describe('defaultRuntimeLoader — single-open accordion via onSelectRun/onRunLa
       // so these tests exercise the exact same lookup `_attachStream` calls. If the
       // production fix in runtime.ts were reverted, discoverCardStreamTargets would
       // return all-nulls and the regression tests below would fail.
-      const {outputEl, coalescedEl, approvalsEl, badgeEl} = discoverCardStreamTargets(runId)
+      const {outputEl, coalescedEl, approvalsEl, badgeEl, checkoutEl} = discoverCardStreamTargets(runId)
+      attachedTargets.push({runId, checkoutEl})
       const handle = streamMod.initOperatorStream({
         runId,
         statusEl,
@@ -477,6 +479,7 @@ describe('defaultRuntimeLoader — single-open accordion via onSelectRun/onRunLa
         coalescedEl: coalescedEl as unknown as (HTMLElement & {hidden: boolean}) | null,
         approvalsEl: approvalsEl as unknown as (HTMLElement & {hidden: boolean}) | null,
         badgeEl: badgeEl as unknown as (HTMLElement & {hidden: boolean}) | null,
+        checkoutEl: checkoutEl as unknown as (HTMLElement & {hidden: boolean}) | null,
       })
       // Wrap close to observe ordering in tests.
       activeHandle = {
@@ -488,7 +491,7 @@ describe('defaultRuntimeLoader — single-open accordion via onSelectRun/onRunLa
       runIndexMod.markRunStreamAttached(runId)
     }
 
-    return {streamMod, runIndexMod, attach, closeActive, attachCalls, closeOrder}
+    return {streamMod, runIndexMod, attach, closeActive, attachCalls, closeOrder, attachedTargets}
   }
 
   it('happy path: expanding a run attaches exactly one stream', async () => {
@@ -663,6 +666,56 @@ describe('defaultRuntimeLoader — single-open accordion via onSelectRun/onRunLa
 
     closeActive()
   })
+
+  it('selecting a real rendered card hands its checkout-detail region to the stream init, for fetched and optimistic-shaped cards', async () => {
+    const {runIndexMod, attach, attachedTargets, closeActive} = await buildLoaderHarness()
+    runIndexMod.resetRunIndexState()
+    document.body.innerHTML = '<div data-role="run-index-list"></div><div data-role="stream-status" hidden></div>'
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (typeof url === 'string' && url.includes('/runs/')) return new Promise(() => {})
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          runs: [
+            {runId: 'run-ck-sel-a', repo: 'org/repo', status: 'running', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:01:00.000Z'},
+            {runId: 'run-ck-sel-b', repo: 'org/repo', status: 'running', createdAt: '2026-01-01T00:00:00.000Z'},
+          ],
+        }),
+      })
+    }))
+    const onSelectRun = (runId: string) => {
+      const card = document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
+      attach(runId, card?.querySelector('[data-role="run-status"]') ?? null, null)
+    }
+    await runIndexMod.initOperatorRunIndex({onSelectRun})
+
+    for (const runId of ['run-ck-sel-a', 'run-ck-sel-b']) {
+      const card = document.querySelector(`[data-run-id="${runId}"]`) as HTMLElement
+      expect(card.querySelectorAll('[data-role="run-checkout-detail"]')).toHaveLength(1)
+      const region = card.querySelector('[data-role="run-checkout-detail"]') as HTMLElement
+      expect(region.hidden).toBe(true)
+
+      card.click()
+
+      expect(attachedTargets.at(-1)?.runId).toBe(runId)
+      expect(attachedTargets.at(-1)?.checkoutEl).toBe(region)
+      expect(region.hidden).toBe(false)
+      expect(region.textContent).toBe('')
+    }
+    closeActive()
+  })
+
+  it('production _attachStream discovers checkoutEl and passes it to initOperatorStream (source pin)', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const url = await import('node:url')
+    const src = await fs.readFile(path.join(path.dirname(url.fileURLToPath(import.meta.url)), 'runtime.ts'), 'utf8')
+    expect(src).toMatch(/const \{[^}]*\bcheckoutEl\b[^}]*\} = discoverCardStreamTargets\(runId\)/)
+    const call = src.slice(src.indexOf('streamMod.initOperatorStream({'), src.indexOf('_activeStreamHandle = handle'))
+    expect(call).toMatch(/^\s*checkoutEl,$/m)
+    expect(src).toContain(`checkoutEl?: Element | null`)
+  })
 })
 
 describe('discoverCardStreamTargets', () => {
@@ -695,8 +748,23 @@ describe('discoverCardStreamTargets', () => {
     expect(result.badgeEl).toBe(badgeEl)
   })
 
+  it('returns the checkout-detail region when present, and null when absent', () => {
+    const withRegion = document.createElement('div')
+    withRegion.dataset.runId = 'run-with-checkout'
+    const checkoutEl = document.createElement('div')
+    checkoutEl.dataset.role = 'run-checkout-detail'
+    withRegion.append(checkoutEl)
+    const without = document.createElement('div')
+    without.dataset.runId = 'run-no-checkout'
+    document.body.append(withRegion, without)
+
+    expect(discoverCardStreamTargets('run-with-checkout').checkoutEl).toBe(checkoutEl)
+    expect(discoverCardStreamTargets('run-no-checkout').checkoutEl).toBeNull()
+  })
+
   it('returns all nulls when no card matches the runId', () => {
     const result = discoverCardStreamTargets('no-such-run')
+    expect(result.checkoutEl).toBeNull()
 
     expect(result.outputEl).toBeNull()
     expect(result.coalescedEl).toBeNull()
