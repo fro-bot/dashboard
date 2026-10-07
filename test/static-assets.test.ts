@@ -856,3 +856,51 @@ describe('security — raw failure reason codes security invariants', () => {
     }
   })
 })
+
+describe('security — operator-stream.js contract pin and checkout-field boundary', () => {
+  it('holds exactly one version literal (the pin), and imports no server code', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-stream.js', 'utf8')
+    // Strip comments so prose that names a version cannot hide a second pin.
+    const code = src.replaceAll(/\/\*[\s\S]*?\*\//g, '').replaceAll(/(^|[^:])\/\/.*$/gm, '$1')
+    const literals = code.match(/['"`]\d+\.\d+\.\d+['"`]/g) ?? []
+    expect(literals).toHaveLength(1)
+    expect(code).toMatch(/export const PINNED_CONTRACT_VERSION = ['"]\d+\.\d+\.\d+['"]/)
+    expect(code).not.toMatch(/from\s+['"][^'"]*(?:src\/|\.ts['"])/)
+    expect(code).not.toMatch(/\bimport\s*\(/)
+  })
+
+  it('renders checkout provenance and preparation through no HTML sink and puts no raw field in a class or CSS variable', async () => {
+    const fs = await import('node:fs/promises')
+    for (const filePath of ['public/operator-stream.js', 'public/operator-run-index.js']) {
+      const src = await fs.readFile(filePath, 'utf8')
+      expect(src).not.toMatch(/(?:innerHTML|outerHTML|insertAdjacentHTML)\s*=/)
+      expect(src).not.toMatch(/classList\.add\([^)]*checkout(?:Provenance|Preparation)/)
+      expect(src).not.toMatch(/className[^;\n]*checkout(?:Provenance|Preparation)/)
+      expect(src).not.toMatch(/setProperty\([^)]*checkout(?:Provenance|Preparation)/)
+      expect(src).not.toMatch(/dataset\.[A-Za-z]+\s*=[^;\n]*checkout(?:Provenance|Preparation)/)
+    }
+  })
+
+  it('the run-index module never reads checkout fields (summaries do not carry them)', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).not.toMatch(/checkout(?:Provenance|Preparation)/)
+  })
+})
+
+describe('checkout detail styling — selector/emitter parity', () => {
+  it('styles every checkout detail class emitted by operator-stream.js', async () => {
+    const fs = await import('node:fs/promises')
+    const [js, css] = await Promise.all([
+      fs.readFile('public/operator-stream.js', 'utf8'),
+      fs.readFile('web/src/index.css', 'utf8'),
+    ])
+    const emitted = [...js.matchAll(/\bcheckout-detail(?:__[a-z-]+)?\b/g)]
+      .map(match => match[0])
+    expect(emitted.length).toBeGreaterThan(0)
+    for (const className of emitted) {
+      expect(css, `missing CSS rule for .${className}`).toMatch(new RegExp(String.raw`\.${className}(?![\w-])`))
+    }
+  })
+})

@@ -349,7 +349,8 @@ async function readLaunchSource() {
 describe('optimistic pending card anatomy — operable before a fetch adopts it', () => {
   // initOperatorLaunch's submit path dynamically imports an absolute /static URL and
   // cannot run under Node, so (like the rest of this file) the launch-built card is
-  // pinned at the source-contract level. The run-index side of the contract —
+  // pinned at the source-contract level; the checkout-detail region is exercised
+  // behaviorally in web/src/operator/launch-card.test.ts. The run-index side of the contract —
   // expansion wiring bound by markCardExpandedForLaunch, upgrade-on-adoption — is
   // exercised behaviorally in test/operator-run-index-core.test.js.
   it('gives the optimistic card the run-cancel region so the stream can populate it once attached', async () => {

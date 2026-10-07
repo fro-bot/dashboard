@@ -283,6 +283,8 @@ describe('parseRunSummaryItem — failureKind', () => {
       'stream-ended',
       'workspace-unreachable',
       'session-error',
+      'checkout-substituted',
+      'workspace-unavailable',
       'unknown',
     ]
     for (const failureKind of kinds) {
@@ -2311,6 +2313,30 @@ describe('failure reason label map parity (stream ↔ run-index)', () => {
   })
 })
 
+describe('failure reason label copy (workspace and checkout kinds)', () => {
+  it('workspace-unreachable, workspace-unavailable and checkout-substituted have three distinct labels, identical in both maps', () => {
+    const kinds = ['workspace-unreachable', 'workspace-unavailable', 'checkout-substituted']
+    for (const kind of kinds) {
+      expect(RUN_INDEX_FAILURE_REASON_LABELS[kind]).toBe(STREAM_FAILURE_REASON_LABELS[kind])
+    }
+    const labels = kinds.map(kind => RUN_INDEX_FAILURE_REASON_LABELS[kind])
+    expect(new Set(labels).size).toBe(3)
+    expect(labels).toEqual(['Workspace unreachable', 'Workspace unavailable', 'Checkout mismatch'])
+  })
+
+  it('a failed summary with each new kind resolves its own reason label in the safe view', () => {
+    const view = kind => buildRunSafeView(makeValidSummary({status: 'failed', failureKind: kind}))
+    expect(view('workspace-unreachable').reasonLabel).toBe('Workspace unreachable')
+    expect(view('workspace-unavailable').reasonLabel).toBe('Workspace unavailable')
+    expect(view('checkout-substituted').reasonLabel).toBe('Checkout mismatch')
+  })
+
+  it('a non-failed summary carrying a new kind renders no reason', () => {
+    const view = buildRunSafeView(makeValidSummary({status: 'running', failureKind: 'checkout-substituted'}))
+    expect('reasonLabel' in view).toBe(false)
+  })
+})
+
 describe('failure reason label coverage gate', () => {
   it('every vendored upstream OperatorFailureKind has an explicit dashboard label decision', () => {
     for (const kind of OPERATOR_FAILURE_KINDS) {
@@ -2904,5 +2930,240 @@ describe('late <time> — a card first shown without updatedAt gains it when a l
 
     expect(card._children).toHaveLength(childCountBefore)
     expect(card.querySelector('[data-role="run-updated-at"]')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Checkout-detail region — one hidden region per card, in one slot, on every card shape
+// ---------------------------------------------------------------------------
+
+const CHECKOUT_ROLE = 'run-checkout-detail'
+
+/** The roles of a card's direct children, in DOM order. */
+function childRoles(card) {
+  return card._children.map(child => child.dataset?.role)
+}
+
+/**
+ * Slot contract: after the header row (status group, repo, time) and ahead of every other
+ * hidden substructure region — so Unit 4 can render it right under the status/reason line.
+ */
+function expectCheckoutSlot(card) {
+  const roles = childRoles(card)
+  const at = roles.indexOf(CHECKOUT_ROLE)
+  expect(at, 'checkout region present').toBeGreaterThanOrEqual(0)
+  for (const header of ['run-status-group', 'run-repo', 'run-updated-at']) {
+    const index = roles.indexOf(header)
+    if (index !== -1) expect(index, `${header} precedes the checkout region`).toBeLessThan(at)
+  }
+  for (const hidden of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge', 'run-cancel']) {
+    const index = roles.indexOf(hidden)
+    if (index !== -1) expect(index, `checkout region precedes ${hidden}`).toBeGreaterThan(at)
+  }
+}
+
+describe('checkout-detail region — fetched cards (renderRunCard)', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('every fetched card has exactly one hidden, empty checkout-detail div, with or without updatedAt', async () => {
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([
+      makeValidSummary({runId: 'run-ck-fetched-1', updatedAt: '2026-06-26T13:00:00.000Z'}),
+      makeValidSummary({runId: 'run-ck-fetched-2'}),
+    ])
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(2)
+    for (const card of cards) {
+      expect(countRole(card, CHECKOUT_ROLE)).toBe(1)
+      const region = card.querySelector(`[data-role="${CHECKOUT_ROLE}"]`)
+      expect(region.hidden).toBe(true)
+      expect(region.textContent).toBe('')
+      expect(region._children).toHaveLength(0)
+      // Closed attribute set: only the role marker and hidden — nothing run-derived.
+      expect(Object.keys(region.dataset)).toEqual(['role'])
+      expect(Object.keys(region.attributes)).toEqual([])
+      expectCheckoutSlot(card)
+    }
+  })
+
+  it('the region carries no run field (id, repo) at creation', async () => {
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([makeValidSummary({runId: 'run-ck-leak-001', repo: 'fro-bot/fixture-secret-repo'})])
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    const region = cards[0].querySelector(`[data-role="${CHECKOUT_ROLE}"]`)
+    expect(region.textContent).not.toContain('run-ck-leak-001')
+    expect(region.textContent).not.toContain('fixture-secret-repo')
+  })
+
+  it('repeated diffs of the same card never duplicate the region', async () => {
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    for (let i = 0; i < 3; i++) {
+      stubFetchRuns([makeValidSummary({runId: 'run-ck-repeat-001', updatedAt: '2026-06-26T13:00:00.000Z'})])
+      await initOperatorRunIndex({endpointBase: '/operator'})
+    }
+    expect(cards).toHaveLength(1)
+    expect(countRole(cards[0], CHECKOUT_ROLE)).toBe(1)
+  })
+
+  it('a <time> added late (first view carrying updatedAt) still lands ahead of the checkout region', async () => {
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([makeValidSummary({runId: 'run-ck-late-time-001'})])
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    expect(cards[0].querySelector('[data-role="run-updated-at"]')).toBeNull()
+
+    stubFetchRuns([makeValidSummary({runId: 'run-ck-late-time-001', updatedAt: '2026-06-26T13:00:00.000Z'})])
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards[0].querySelector('[data-role="run-updated-at"]')).not.toBeNull()
+    expect(countRole(cards[0], CHECKOUT_ROLE)).toBe(1)
+    expectCheckoutSlot(cards[0])
+  })
+
+  it('expanding reveals the region, collapsing hides it, and expanding another card hides the first one’s', async () => {
+    const onSelectRun = vi.fn()
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([makeValidSummary({runId: 'run-ck-accordion-a'}), makeValidSummary({runId: 'run-ck-accordion-b'})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+    const [cardA, cardB] = cards
+    const region = card => card.querySelector(`[data-role="${CHECKOUT_ROLE}"]`)
+
+    cardA.dispatchEvent({type: 'click'})
+    expect(region(cardA).hidden).toBe(false)
+    expect(region(cardB).hidden).toBe(true)
+
+    cardB.dispatchEvent({type: 'click'})
+    expect(region(cardA).hidden).toBe(true)
+    expect(region(cardB).hidden).toBe(false)
+
+    cardB.dispatchEvent({type: 'click'})
+    expect(region(cardB).hidden).toBe(true)
+  })
+
+  it('a launch-marked card reveals its region on markCardExpandedForLaunch', async () => {
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([makeValidSummary({runId: 'run-ck-launch-expand-001'})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    markCardExpandedForLaunch('run-ck-launch-expand-001')
+
+    expect(cards[0].querySelector(`[data-role="${CHECKOUT_ROLE}"]`).hidden).toBe(false)
+  })
+
+  it('source: the region is created via createElement and never via innerHTML', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).toMatch(/const CHECKOUT_DETAIL_ROLE = 'run-checkout-detail'/)
+    expect(src).not.toMatch(/\.innerHTML\s*=/)
+  })
+})
+
+describe('checkout-detail region — adopted optimistic cards (ensureRunCardAnatomy)', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  const UPDATED_AT = '2026-06-26T13:00:00.000Z'
+
+  it('a status-only optimistic card gains exactly one hidden region, in the shared slot, even across repeated diffs', async () => {
+    const runId = 'run-ck-adopt-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+    expect(optimistic.querySelector(`[data-role="${CHECKOUT_ROLE}"]`)).toBeNull()
+
+    for (let i = 0; i < 3; i++) {
+      stubFetchRuns([makeValidSummary({runId, status: 'running', updatedAt: UPDATED_AT})])
+      await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    }
+
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toBe(optimistic)
+    expect(countRole(optimistic, CHECKOUT_ROLE)).toBe(1)
+    expect(optimistic.querySelector(`[data-role="${CHECKOUT_ROLE}"]`).hidden).toBe(true)
+    expectCheckoutSlot(optimistic)
+  })
+
+  it('a launch-built card that already carries the region is not given a second one', async () => {
+    const runId = 'run-ck-adopt-launch-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+    // Mirror the launch module's anatomy: the region sits ahead of run-output.
+    const region = document.createElement('div')
+    region.dataset.role = CHECKOUT_ROLE
+    region.hidden = true
+    optimistic._children.splice(optimistic._children.findIndex(child => child.dataset?.role === 'run-output'), 0, region)
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running', updatedAt: UPDATED_AT})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    expect(countRole(optimistic, CHECKOUT_ROLE)).toBe(1)
+    expect(optimistic.querySelector(`[data-role="${CHECKOUT_ROLE}"]`)).toBe(region)
+    expectCheckoutSlot(optimistic)
+  })
+
+  it('the active-stream optimistic card is write-protected: no region is added until it stops being active', async () => {
+    const runId = 'run-ck-adopt-active-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+    markRunStreamAttached(runId)
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running', updatedAt: UPDATED_AT})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    expect(optimistic.querySelector(`[data-role="${CHECKOUT_ROLE}"]`)).toBeNull()
+
+    markRunStreamAttached('run-some-other-run')
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    expect(countRole(optimistic, CHECKOUT_ROLE)).toBe(1)
+    expectCheckoutSlot(optimistic)
+  })
+
+  it('an adopted card collapses and expands its region like a fetched card', async () => {
+    const runId = 'run-ck-adopt-toggle-001'
+    const onSelectRun = vi.fn()
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+    stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+    const region = optimistic.querySelector(`[data-role="${CHECKOUT_ROLE}"]`)
+
+    optimistic.dispatchEvent({type: 'click'})
+    expect(region.hidden).toBe(false)
+    optimistic.dispatchEvent({type: 'click'})
+    expect(region.hidden).toBe(true)
+  })
+
+  it('anatomy parity: fetched, adopted and launch-shaped cards expose the same ordered hidden regions', async () => {
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([makeValidSummary({runId: 'run-ck-parity-fetched', updatedAt: UPDATED_AT})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    const optimistic = makeStatusOnlyOptimisticCard(cards, 'run-ck-parity-adopted')
+    stubFetchRuns([
+      makeValidSummary({runId: 'run-ck-parity-fetched', updatedAt: UPDATED_AT}),
+      makeValidSummary({runId: 'run-ck-parity-adopted', status: 'running', updatedAt: UPDATED_AT}),
+    ])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    const fetched = cards.find(card => card.dataset.runId === 'run-ck-parity-fetched')
+    const hiddenRoles = card => childRoles(card).filter(role => role !== undefined && !['run-status-group', 'run-repo', 'run-updated-at'].includes(role))
+    expect(hiddenRoles(optimistic)).toEqual(hiddenRoles(fetched))
+    expect(hiddenRoles(fetched)[0]).toBe(CHECKOUT_ROLE)
   })
 })

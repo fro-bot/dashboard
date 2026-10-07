@@ -7,7 +7,7 @@
  * interface (which requires ApprovalActor) are omitted in this vendored copy.
  * The PUBLIC frozen type OperatorDecisionState is present and correct.
  *
- * ### v1.1 promotion candidates (kept in coordinator.ts for v1 to bound fan-out)
+ * ### Later promotion candidates (kept in coordinator.ts for now to bound fan-out)
  * - `PermissionRequest`    (11-file fan-out)
  * - `PermissionReplyEvent` (2-file fan-out)
  * - `SettlementReason`     (5-file fan-out)

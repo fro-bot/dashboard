@@ -678,6 +678,14 @@ export async function initOperatorLaunch(opts) {
           card.append(repoSpan)
 
           // Hidden per-card substructure for the stream renderer.
+
+          // Checkout-detail region — same slot as a fetched card: the first hidden region,
+          // directly after the header row and before run-output. Rendered into by the stream.
+          const checkoutEl = document.createElement('div')
+          checkoutEl.dataset.role = 'run-checkout-detail'
+          checkoutEl.hidden = true
+          card.append(checkoutEl)
+
           const outputEl = document.createElement('div')
           outputEl.dataset.role = 'run-output'
           outputEl.hidden = true

@@ -20,8 +20,12 @@ import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
 import {Buffer} from 'node:buffer'
 import process from 'node:process'
 import {afterEach, beforeEach, describe, expect, it} from 'vitest'
+import {parseSseFrame as browserParseSseFrame, nextStreamState, PINNED_CONTRACT_VERSION} from '../public/operator-stream.js'
+import {CHECKOUT_REFUSAL_REASONS, OBSTRUCTION_KINDS, OPERATOR_CONTRACT_VERSION} from '../src/gateway/operator-contract/index.ts'
+import {isOperatorFailureKind} from '../src/gateway/operator-contract/run-status.ts'
 import {FIXTURE_OPERATOR_PREFIX} from '../src/gateway/operator-fixture-routes.ts'
-import {FIXTURE_SCENARIO_NAMES} from '../src/gateway/operator-fixture-sse.ts'
+import {FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../src/gateway/operator-fixture-sse.ts'
+import {parseSseChunk as serverParseSseChunk} from '../src/gateway/operator-sse-reader.ts'
 import {resetFixtureHarnessForTesting} from '../src/routes/operator-fixture-harness.ts'
 import {buildDashboardApp, resetRateLimitForTesting} from '../src/server.ts'
 import {SessionManager} from '../src/session.ts'
@@ -733,7 +737,7 @@ async function launchAndStream(scenario: string, idempotencyKey: string) {
   return {app, runId, sseText}
 }
 
-describe('fixture launch — failure-reason scenarios (Gateway 1.6.0)', () => {
+describe('fixture launch — failure-reason scenarios', () => {
   it('terminal_failure_known_reason: failed status frame carries the expected reason and preserves final output', async () => {
     const {sseText} = await launchAndStream(
       FIXTURE_SCENARIO_NAMES.terminal_failure_known_reason,
@@ -2273,4 +2277,340 @@ describe('fixture push routes — production guard (each route 404s when any sin
       ).rejects.toThrow(/fixture.*loopback|loopback.*fixture/i)
     })
   }
+})
+
+// ---------------------------------------------------------------------------
+// Checkout provenance / preparation scenarios
+// ---------------------------------------------------------------------------
+
+type CheckoutScenarioKey = Extract<keyof typeof FIXTURE_SCENARIO_NAMES, `checkout_${string}` | 'workspace_unavailable'>
+
+const CHECKOUT_SCENARIO_KEYS = Object.keys(FIXTURE_SCENARIO_NAMES).filter(
+  (key): key is CheckoutScenarioKey => key.startsWith('checkout_') || key === 'workspace_unavailable',
+)
+
+interface ScenarioExpectation {
+  /** The run reached EXECUTING: provenance on the running and terminal frames. */
+  readonly provenance: boolean
+  /** The terminal FAILED frame carries a valid preparation. */
+  readonly preparation: boolean
+  readonly failureKind?: string
+}
+
+function expectationFor(key: CheckoutScenarioKey): ScenarioExpectation {
+  if (key.startsWith('checkout_provenance_')) return {provenance: true, preparation: false}
+  if (key === 'workspace_unavailable') return {provenance: false, preparation: false, failureKind: 'workspace-unavailable'}
+  // The malformed field must degrade to absent on both parsers.
+  if (key === 'checkout_malformed_preparation') return {provenance: false, preparation: false, failureKind: 'checkout-substituted'}
+  if (key === 'checkout_refused_substituted') return {provenance: false, preparation: true, failureKind: 'checkout-substituted'}
+  return {provenance: false, preparation: true}
+}
+
+interface StatusView {
+  readonly phase: string
+  readonly status: string
+  readonly failureKind: string | undefined
+  readonly hasProvenance: boolean
+  readonly hasPreparation: boolean
+}
+
+function viewOf(data: {phase: string; status: string; failureKind?: string}): StatusView & Record<string, unknown> {
+  const record = data as Record<string, unknown>
+  return {
+    phase: data.phase,
+    status: data.status,
+    failureKind: data.failureKind,
+    hasProvenance: 'checkoutProvenance' in record,
+    hasPreparation: 'checkoutPreparation' in record,
+  }
+}
+
+function serverStatusViews(sse: string): StatusView[] {
+  const views: StatusView[] = []
+  for (const result of serverParseSseChunk(sse)) {
+    if (result.success && result.frame.type === 'status') views.push(viewOf(result.frame.data))
+  }
+  return views
+}
+
+function browserStatusViews(sse: string): StatusView[] {
+  const views: StatusView[] = []
+  for (const record of sse.split('\n\n')) {
+    if (record.trim() === '') continue
+    const result = browserParseSseFrame(record)
+    if (result !== null && result.success && result.frame.type === 'status') views.push(viewOf(result.frame.data))
+  }
+  return views
+}
+
+function browserTerminalStatus(sse: string) {
+  let terminal
+  for (const record of sse.split('\n\n')) {
+    if (record.trim() === '') continue
+    const result = browserParseSseFrame(record)
+    if (result !== null && result.success && result.frame.type === 'status') terminal = result.frame.data
+  }
+  return terminal
+}
+
+describe('checkout fixture scenarios — registry and manifest', () => {
+  it('registers every checkout scenario and lists it in the manifest', async () => {
+    expect(CHECKOUT_SCENARIO_KEYS).toHaveLength(24)
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const body = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}`)).json() as {scenarios: string[]}
+    for (const key of CHECKOUT_SCENARIO_KEYS) {
+      expect(body.scenarios).toContain(FIXTURE_SCENARIO_NAMES[key])
+    }
+  })
+
+  it('every scenario launches (valid scenario name) and serializes', async () => {
+    for (const key of CHECKOUT_SCENARIO_KEYS) {
+      const bytes = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES[key], 'run-fixture-serialize-001')
+      expect(bytes.length).toBeGreaterThan(0)
+    }
+  })
+})
+
+describe('checkout fixture scenarios — frames parse under both parsers to the expected presence', () => {
+  for (const key of CHECKOUT_SCENARIO_KEYS) {
+    it(`${key}: ready reads the pin, and server and browser agree frame by frame`, () => {
+      const expected = expectationFor(key)
+      const sse = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES[key], 'run-fixture-parity-001')
+
+      // The ready frame carries the server constant and the browser accepts it (no drift).
+      const ready = serverParseSseChunk(sse)[0]
+      expect(ready?.success && ready.frame.type === 'ready' ? ready.frame.data.contractVersion : undefined).toBe(OPERATOR_CONTRACT_VERSION)
+      let state = nextStreamState({connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}, {
+        type: 'ready',
+        data: {contractVersion: OPERATOR_CONTRACT_VERSION},
+      })
+      expect(state.connection).toBe('live')
+
+      const server = serverStatusViews(sse)
+      const browser = browserStatusViews(sse)
+      expect(browser).toEqual(server.map(view => ({...view})))
+      expect(server.length).toBeGreaterThanOrEqual(2)
+
+      const terminal = server.at(-1)
+      expect(terminal?.status).toBe(expected.provenance ? 'succeeded' : 'failed')
+      expect(terminal?.failureKind).toBe(expected.failureKind)
+
+      if (expected.provenance) {
+        // Provenance only from EXECUTING on: not on the queued frame, on the running and terminal frames.
+        expect(server.map(view => [view.phase, view.hasProvenance])).toEqual([
+          ['PENDING', false],
+          ['EXECUTING', true],
+          ['COMPLETED', true],
+        ])
+        expect(server.some(view => view.hasPreparation)).toBe(false)
+      } else {
+        // Never reached EXECUTING: no EXECUTING frame, preparation only on the terminal frame, no provenance.
+        expect(server.map(view => view.phase)).toEqual(['PENDING', 'FAILED'])
+        expect(server.some(view => view.hasProvenance)).toBe(false)
+        expect(server.map(view => view.hasPreparation)).toEqual([false, expected.preparation])
+      }
+
+      // The browser reducer terminalizes the run and stores the fields exactly as the parsers saw them.
+      for (const record of sse.split('\n\n')) {
+        if (record.trim() === '') continue
+        const result = browserParseSseFrame(record)
+        if (result !== null && result.success && result.frame.type !== 'ready') {
+          state = nextStreamState(state, result.frame)
+        }
+      }
+      const entry = state.runs['run-fixture-parity-001']
+      expect(entry?.terminal).toBe(true)
+      expect(state.connection).toBe('closed')
+      expect(entry !== undefined && 'checkoutProvenance' in entry).toBe(expected.provenance)
+      expect(entry !== undefined && 'checkoutPreparation' in entry).toBe(expected.preparation)
+    })
+  }
+
+  it('the output frame always precedes the terminal status frame, empty for runs that never executed', () => {
+    for (const key of CHECKOUT_SCENARIO_KEYS) {
+      const sse = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES[key], 'run-fixture-order-001')
+      const kinds = serverParseSseChunk(sse).flatMap(result => (result.success ? [result.frame.type] : []))
+      expect(kinds.at(-1)).toBe('status')
+      expect(kinds.lastIndexOf('output')).toBeLessThan(kinds.length - 1)
+      expect(kinds.lastIndexOf('output')).toBeGreaterThan(-1)
+    }
+  })
+})
+
+describe('checkout fixture scenarios — the malformed scenario still terminalizes with its label', () => {
+  it('both parsers drop the corrupted preparation and keep the failureKind; the card ends failed with "Checkout mismatch"', () => {
+    const sse = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES.checkout_malformed_preparation, 'run-fixture-malformed-prep-001')
+    // The wire really does carry the corrupted field...
+    expect(sse).toContain('"checkoutPreparation"')
+    expect(sse).toContain('"changedPaths":["fixture/ok.txt",7]')
+    // ...and both parsers accept the frame without it.
+    const terminal = browserTerminalStatus(sse)
+    expect(terminal?.status).toBe('failed')
+    expect(terminal?.failureKind).toBe('checkout-substituted')
+    expect('checkoutPreparation' in (terminal ?? {})).toBe(false)
+
+    let state = nextStreamState({connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}, {
+      type: 'ready',
+      data: {contractVersion: PINNED_CONTRACT_VERSION},
+    })
+    for (const record of sse.split('\n\n')) {
+      const result = record.trim() === '' ? null : browserParseSseFrame(record)
+      if (result !== null && result.success && result.frame.type !== 'ready') state = nextStreamState(state, result.frame)
+    }
+    const entry = state.runs['run-fixture-malformed-prep-001']
+    expect(entry?.status).toBe('failed')
+    expect(entry?.terminal).toBe(true)
+    expect(entry?.reasonLabel).toBe('Checkout mismatch')
+    expect(entry !== undefined && 'checkoutPreparation' in entry).toBe(false)
+  })
+})
+
+function serverTerminalData(sse: string) {
+  let data
+  for (const result of serverParseSseChunk(sse)) {
+    if (result.success && result.frame.type === 'status') data = result.frame.data
+  }
+  return data
+}
+
+function terminalPreparation(key: CheckoutScenarioKey) {
+  const sse = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES[key], 'run-fixture-values-001')
+  return {server: serverTerminalData(sse)?.checkoutPreparation, browser: browserTerminalStatus(sse)?.checkoutPreparation}
+}
+
+describe('checkout fixture scenarios — values and bounds', () => {
+  it('checkout_refused_dirty: 14 wire paths become 10 entries plus "4 more", none over 256 characters', () => {
+    const {server, browser} = terminalPreparation('checkout_refused_dirty')
+    expect(server?.outcome === 'refused' && server.reason === 'dirty' ? server.changedPaths : []).toHaveLength(14)
+    expect(browser?.outcome === 'refused' && browser.reason === 'dirty' ? browser.changedPaths.items : []).toHaveLength(10)
+    expect(browser?.outcome === 'refused' && browser.reason === 'dirty' ? browser.changedPaths.more : -1).toBe(4)
+    for (const entry of browser?.outcome === 'refused' && browser.reason === 'dirty' ? browser.changedPaths.items : []) {
+      expect(entry.length).toBeLessThanOrEqual(256)
+    }
+  })
+
+  it('checkout_refused_obstructed: every obstruction kind appears with its path', () => {
+    const {browser} = terminalPreparation('checkout_refused_obstructed')
+    const items = browser?.outcome === 'refused' && browser.reason === 'obstructed' ? browser.obstructions.items : []
+    expect(items.map(item => item.kind).toSorted()).toEqual([...OBSTRUCTION_KINDS].toSorted())
+  })
+
+  it('checkout_refused_bidi_path: the server keeps the raw strings; the browser strips bidi/control characters and drops the bidi-only path', () => {
+    const {server, browser} = terminalPreparation('checkout_refused_bidi_path')
+    const raw = server?.outcome === 'refused' && server.reason === 'dirty' ? server.changedPaths : []
+    expect(raw).toHaveLength(5)
+    // eslint-disable-next-line no-control-regex
+    const unsafe = /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/
+    expect(raw.some(path => unsafe.test(path))).toBe(true)
+
+    const items = browser?.outcome === 'refused' && browser.reason === 'dirty' ? browser.changedPaths.items : []
+    expect(items).toHaveLength(4)
+    expect(items.some(path => unsafe.test(path))).toBe(false)
+    expect(items).toContain('fixture/gpj.txt')
+  })
+
+  it('failed updates cover each flag line: permanent+possibly, mutated, and transient (none)', () => {
+    const flags = (key: CheckoutScenarioKey) => {
+      const {browser} = terminalPreparation(key)
+      return browser?.outcome === 'failed' ? [browser.permanent, browser.mutationStarted] : undefined
+    }
+    expect(flags('checkout_update_failed_permanent')).toEqual([true, 'possibly'])
+    expect(flags('checkout_update_failed_mutated')).toEqual([false, true])
+    expect(flags('checkout_update_failed_transient')).toEqual([false, false])
+  })
+
+  it('the scenarios together cover every refusal reason, every remote variant, and both new failure kinds', () => {
+    const reasons = new Set<string>()
+    const remotes = new Set<string>()
+    const failureKinds = new Set<string>()
+    for (const key of CHECKOUT_SCENARIO_KEYS) {
+      const data = browserTerminalStatus(serializeScenarioToSse(FIXTURE_SCENARIO_NAMES[key], 'run-fixture-coverage-001'))
+      if (data?.failureKind !== undefined) failureKinds.add(data.failureKind)
+      if (data?.checkoutPreparation?.outcome === 'refused') reasons.add(data.checkoutPreparation.reason)
+      const provenance = data?.checkoutProvenance
+      if (provenance !== undefined) {
+        remotes.add(provenance.remote.kind === 'checked' ? `checked-${provenance.remote.change}` : provenance.remote.kind)
+        if (provenance.kind === 'unavailable') remotes.add('unavailable-provenance')
+        else if (provenance.worktree.kind === 'dirty') remotes.add('dirty-worktree')
+        if (provenance.kind === 'observed' && provenance.operation !== 'none') remotes.add('operation-in-progress')
+      }
+    }
+    expect([...reasons].toSorted()).toEqual([...CHECKOUT_REFUSAL_REASONS].toSorted())
+    for (const variant of ['not-checked', 'checked-unchanged', 'checked-fast-forward', 'unavailable-provenance', 'dirty-worktree', 'operation-in-progress']) {
+      expect(remotes.has(variant), variant).toBe(true)
+    }
+    expect(failureKinds.has('workspace-unavailable')).toBe(true)
+    expect(failureKinds.has('checkout-substituted')).toBe(true)
+  })
+})
+
+describe('checkout fixture scenarios — recent-runs rows', () => {
+  it('every checkout scenario has a fixture-prefixed row bound to its own stream, with a valid status and failureKind', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const {fixtureSessionId} = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)).json() as {fixtureSessionId: string}
+    const {runs} = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)).json() as {
+      runs: {runId: string; repo: string; status: string; failureKind?: string}[]
+    }
+
+    for (const key of CHECKOUT_SCENARIO_KEYS) {
+      const runId = `run-fixture-index-${key.replaceAll('_', '-')}`
+      const row = runs.find(candidate => candidate.runId === runId)
+      expect(row, `${key} row`).toBeDefined()
+      expect(row?.repo).toMatch(/fixture/)
+      expect(['running', 'failed']).toContain(row?.status)
+      if (row?.failureKind !== undefined) expect(isOperatorFailureKind(row.failureKind)).toBe(true)
+      expect(row?.failureKind).toBe(expectationFor(key).failureKind)
+
+      const streamRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream?fixtureSessionId=${fixtureSessionId}`)
+      expect(streamRes.status).toBe(200)
+      expect(await streamRes.text()).toBe(serializeScenarioToSse(FIXTURE_SCENARIO_NAMES[key], runId))
+    }
+  })
+
+  it('the original rows keep their order at the top of the list', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const {runs} = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)).json() as {runs: {runId: string}[]}
+    expect(runs.slice(0, 3).map(run => run.runId)).toEqual([
+      'run-fixture-index-queued-001',
+      'run-fixture-index-running-002',
+      'run-fixture-index-succeeded-003',
+    ])
+    expect(runs.length).toBeLessThanOrEqual(100)
+    expect(new Set(runs.map(run => run.runId)).size).toBe(runs.length)
+  })
+
+  it('a launched run can use any checkout scenario (POST /runs accepts every name)', async () => {
+    for (const key of CHECKOUT_SCENARIO_KEYS) {
+      const {sseText} = await launchAndStream(FIXTURE_SCENARIO_NAMES[key], `fixture-idem-key-checkout-${key}`)
+      expect(sseText).toContain('event: ready')
+    }
+  })
+})
+
+describe('checkout fixture scenarios — production artifacts carry no scenario names or fixture values', () => {
+  const DISTINCTIVE_VALUES = ['fixture-vendor/alpha', 'fixture.hooksPath', 'fixture-feature/checkout-detail', 'fixture/changed-01.txt']
+
+  it('web/dist, the service worker, and the shipped browser modules contain none of them', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const files = ['web/dist/sw.js', 'web/dist/index.html', 'public/operator-stream.js', 'public/operator-launch.js', 'public/operator-run-index.js']
+    for (const file of await fs.readdir('web/dist/assets')) {
+      if (file.endsWith('.js') || file.endsWith('.css')) files.push(path.join('web/dist/assets', file))
+    }
+    for (const file of files) {
+      const src = await fs.readFile(file, 'utf8')
+      for (const key of CHECKOUT_SCENARIO_KEYS) {
+        expect(src, `${file} must not contain scenario ${key}`).not.toContain(FIXTURE_SCENARIO_NAMES[key])
+      }
+      for (const value of DISTINCTIVE_VALUES) {
+        expect(src, `${file} must not contain ${value}`).not.toContain(value)
+      }
+    }
+  })
+
+  it('the fixture row run IDs never appear in production files', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).not.toContain('run-fixture-index-')
+  })
 })

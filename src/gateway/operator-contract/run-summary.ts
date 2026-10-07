@@ -1,7 +1,7 @@
 /**
  * RunSummary type and parse helpers for the operator contract.
  *
- * Mirrors the gateway's RunSummary from fro-bot/agent v0.83.1.
+ * Mirrors the gateway's RunSummary from fro-bot/agent.
  * Error messages are fixed strings — never echo or interpolate input.
  * Extra fields are ignored (permissive structural subtyping).
  * Oversized strings are rejected without logging raw values.
