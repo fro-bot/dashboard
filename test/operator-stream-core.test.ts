@@ -8257,8 +8257,15 @@ describe('checkout fields — leak guard', () => {
   })
 })
 
-/** Streams the given status payloads on a live, still-open connection and returns the rendered elements. */
-async function renderCheckoutStatuses(payloads: Record<string, unknown>[]) {
+/**
+ * Streams the given status payloads and returns the rendered elements. By default the connection
+ * stays live and open; `closeStream` ends the body after the payloads, and `withoutReasonEl`
+ * omits the reason element.
+ */
+async function renderCheckoutStatuses(
+  payloads: Record<string, unknown>[],
+  options: {closeStream?: boolean; withoutReasonEl?: boolean} = {},
+) {
   const region = makeFakeEl('section')
   const reason = makeFakeEl('p')
   const body = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n${payloads
@@ -8274,9 +8281,15 @@ async function renderCheckoutStatuses(payloads: Record<string, unknown>[]) {
     ok: true, status: 200, headers: {get: () => 'text/event-stream'},
     body: {getReader: () => ({read: async () => read++ === 0
       ? {done: false, value: new TextEncoder().encode(body)}
-      : new Promise(() => {})})},
+      : options.closeStream === true ? {done: true} : new Promise(() => {})})},
   }))
-  const handle = initOperatorStream({runId: 'run-ck-001', statusEl: makeFakeEl(), noticeEl: makeFakeEl(), reasonEl: reason, checkoutEl: region as never})
+  const handle = initOperatorStream({
+    runId: 'run-ck-001',
+    statusEl: makeFakeEl(),
+    noticeEl: makeFakeEl(),
+    ...(options.withoutReasonEl === true ? {} : {reasonEl: reason}),
+    checkoutEl: region as never,
+  })
   await new Promise(resolve => setTimeout(resolve, 30))
   handle.close()
   const textOf = (element: FakeElement): string => element.textContent + element.children.map(textOf).join('')
@@ -8437,6 +8450,34 @@ describe('checkout rendering — labelled safe detail region', () => {
     expect(after.reason.textContent).toBe('')
     expect(after.reason.dataset.reasonState).toBeUndefined()
     expect(after.regionText).not.toContain('Checkout refused')
+  })
+
+  it('keeps the preparation reason in the region when the connection is not live and the headline is cleared', async () => {
+    const preparation = {outcome: 'refused', reason: 'detached'}
+    const closed = await renderCheckoutStatuses(
+      [ckStatusPayload({phase: 'PENDING', status: 'queued', checkoutPreparation: preparation})],
+      {closeStream: true},
+    )
+    expect(closed.reason.textContent).toBe('')
+    expect(closed.regionText).toBe('detached HEAD')
+  })
+
+  it('keeps the preparation reason in the region when no reason element exists', async () => {
+    const preparation = {outcome: 'refused', reason: 'detached'}
+    const {regionText} = await renderCheckoutStatuses(
+      [ckStatusPayload({phase: 'PENDING', status: 'queued', checkoutPreparation: preparation})],
+      {withoutReasonEl: true},
+    )
+    expect(regionText).toBe('detached HEAD')
+  })
+
+  it('omits the preparation reason from the region while the live headline already shows it', async () => {
+    const preparation = {outcome: 'refused', reason: 'detached'}
+    const {reason, regionText} = await renderCheckoutStatuses([
+      ckStatusPayload({phase: 'PENDING', status: 'queued', checkoutPreparation: preparation}),
+    ])
+    expect(reason.textContent).toBe('Checkout refused: detached HEAD')
+    expect(regionText).toBe('')
   })
 
   it('renders an operation-in-progress refusal with operation none as fixed copy, without a blank operation name', async () => {

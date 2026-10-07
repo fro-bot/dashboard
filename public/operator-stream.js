@@ -2465,7 +2465,7 @@ function formatCheckoutPreparation(region, preparation, omitRepeatedReason) {
   }
 }
 
-function renderCheckoutDetail(region, runEntry) {
+function renderCheckoutDetail(region, runEntry, reasonShownElsewhere) {
   region.textContent = ''
   const provenance = runEntry?.checkoutProvenance
   const preparation = runEntry?.checkoutPreparation
@@ -2480,11 +2480,7 @@ function renderCheckoutDetail(region, runEntry) {
   group.setAttribute('aria-label', 'Checkout details')
   if (provenance !== undefined) formatCheckoutProvenance(group, provenance)
   if (preparation !== undefined) {
-    const repeatedInHeadline = runEntry?.reasonLabel === undefined || (
-      runEntry.reasonLabel === FAILURE_REASON_LABELS['checkout-substituted'] &&
-      preparation.outcome === 'refused' && preparation.reason === 'checkout-substituted'
-    )
-    formatCheckoutPreparation(group, preparation, repeatedInHeadline)
+    formatCheckoutPreparation(group, preparation, reasonShownElsewhere)
   }
   region.append(group)
   region.hidden = false
@@ -2671,6 +2667,9 @@ export function initOperatorStream(opts) {
       }
     }
 
+    // True when reasonEl was painted in this pass with a failure label that already states the
+    // preparation's reason (a checkout-substituted refusal), so the region need not repeat it.
+    let failureLabelStatesPreparation = false
     if (reasonEl) {
       const runEntry = state.runs[runId]
       const runIsTerminal = runEntry !== undefined && runEntry.terminal === true
@@ -2680,6 +2679,9 @@ export function initOperatorStream(opts) {
           reasonEl.textContent = view.reasonLabel
           if (reasonEl.dataset) reasonEl.dataset.reasonState = 'present'
           paintedPreparationHeadline = false
+          const preparation = runEntry.checkoutPreparation
+          failureLabelStatesPreparation = view.reasonLabel === FAILURE_REASON_LABELS['checkout-substituted'] &&
+            preparation?.outcome === 'refused' && preparation.reason === 'checkout-substituted'
         } else if (runEntry.checkoutPreparation !== undefined) {
           const preparation = runEntry.checkoutPreparation
           const template = CHECKOUT_PREPARATION_HEADLINE_LABELS[preparation.outcome]
@@ -2709,7 +2711,7 @@ export function initOperatorStream(opts) {
       }
     }
 
-    if (checkoutEl) renderCheckoutDetail(checkoutEl, state.runs[runId])
+    if (checkoutEl) renderCheckoutDetail(checkoutEl, state.runs[runId], paintedPreparationHeadline || failureLabelStatesPreparation)
 
     // Run output: render the accumulated answer via textContent only — `text` is
     // free-form agent output and must NEVER be interpolated as HTML. droppedCount is
