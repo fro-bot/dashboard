@@ -32,6 +32,8 @@ export type FailureKind =
   | 'stream-ended'
   | 'workspace-unreachable'
   | 'session-error'
+  | 'checkout-substituted'
+  | 'workspace-unavailable'
   | 'unknown'
 
 /**
@@ -40,6 +42,180 @@ export type FailureKind =
  * public/operator-run-index.js — parity is enforced by tests.
  */
 export declare const FAILURE_REASON_LABELS: Readonly<Record<FailureKind, string>>
+
+// ---------------------------------------------------------------------------
+// Checkout provenance / checkout preparation (closed browser DTOs)
+//
+// These are NOT the wire shapes: free-form strings are already sanitized and
+// capped, lists are bounded, SHAs are validated 40-hex, and the upstream
+// timestamps (observedAt, checkedAt) are not carried.
+// ---------------------------------------------------------------------------
+
+export type CheckoutOperation = 'none' | 'merge' | 'rebase' | 'am' | 'cherry-pick' | 'revert' | 'bisect'
+
+export type CheckoutLayoutReason =
+  | 'core-worktree'
+  | 'gitfile'
+  | 'symlinked-git-dir'
+  | 'symlinked-config'
+  | 'alternates'
+  | 'replace-refs'
+  | 'grafts'
+  | 'shallow'
+  | 'partial-clone'
+  | 'linked-worktree'
+  | 'unsupported-index-flag'
+  | 'bare-repository'
+
+export type CheckoutObstructionKind = 'exact-conflict' | 'prefix-conflict' | 'identical-content' | 'symlink-ancestor'
+
+export type CheckoutUpdateFailureReason =
+  | 'aborted'
+  | 'inspection-failed'
+  | 'fetch-auth-rejected'
+  | 'fetch-not-found'
+  | 'fetch-forbidden'
+  | 'fetch-rate-limited'
+  | 'fetch-unreachable'
+  | 'fetch-timeout'
+  | 'fetch-failed'
+  | 'remote-moved'
+  | 'apply-failed'
+  | 'termination-unconfirmed'
+
+export type CheckoutRefusalReason =
+  | 'needs-recovery'
+  | 'checkout-substituted'
+  | 'unsupported-layout'
+  | 'unsupported-config'
+  | 'operation-in-progress'
+  | 'dirty'
+  | 'submodule-initialized'
+  | 'detached'
+  | 'non-default-branch'
+  | 'diverged'
+  | 'ahead'
+  | 'obstructed'
+  | 'maintenance-hold'
+
+/** At most MAX_CHECKOUT_LIST_ENTRIES sanitized entries plus a count of the rest. */
+export interface CheckoutBoundedList<T> {
+  readonly items: readonly T[]
+  readonly more: number
+}
+
+export type CheckoutHead =
+  | {readonly kind: 'attached'; readonly branch: string; readonly sha: string}
+  | {readonly kind: 'detached'; readonly sha: string}
+
+export type CheckoutWorktree =
+  | {readonly kind: 'clean'}
+  | {
+    readonly kind: 'dirty'
+    readonly staged: number
+    readonly unstaged: number
+    readonly untracked: number
+    readonly conflicted: number
+  }
+
+export type CheckoutRemote =
+  | {readonly kind: 'not-checked'}
+  | {
+    readonly kind: 'checked'
+    readonly change: 'unchanged'
+    readonly defaultBranch: string
+    readonly sha: string
+  }
+  | {
+    readonly kind: 'checked'
+    readonly change: 'fast-forward'
+    readonly defaultBranch: string
+    readonly sha: string
+    readonly fromSha: string
+  }
+
+export type CheckoutProvenance =
+  | {
+    readonly kind: 'observed'
+    readonly head: CheckoutHead
+    readonly worktree: CheckoutWorktree
+    readonly operation: CheckoutOperation
+    readonly remote: CheckoutRemote
+  }
+  | {readonly kind: 'unavailable'; readonly remote: CheckoutRemote}
+
+export type CheckoutPreparationRefused =
+  | {readonly outcome: 'refused'; readonly reason: 'needs-recovery'}
+  | {readonly outcome: 'refused'; readonly reason: 'checkout-substituted'}
+  | {readonly outcome: 'refused'; readonly reason: 'unsupported-layout'; readonly layoutReason: CheckoutLayoutReason}
+  | {
+    readonly outcome: 'refused'
+    readonly reason: 'unsupported-config'
+    readonly disallowedKeys: CheckoutBoundedList<string>
+  }
+  | {readonly outcome: 'refused'; readonly reason: 'operation-in-progress'; readonly operation: CheckoutOperation}
+  | {readonly outcome: 'refused'; readonly reason: 'dirty'; readonly changedPaths: CheckoutBoundedList<string>}
+  | {
+    readonly outcome: 'refused'
+    readonly reason: 'submodule-initialized'
+    readonly submodules: CheckoutBoundedList<string>
+  }
+  | {readonly outcome: 'refused'; readonly reason: 'detached'}
+  | {readonly outcome: 'refused'; readonly reason: 'non-default-branch'; readonly branch: string}
+  | {readonly outcome: 'refused'; readonly reason: 'diverged'}
+  | {readonly outcome: 'refused'; readonly reason: 'ahead'}
+  | {
+    readonly outcome: 'refused'
+    readonly reason: 'obstructed'
+    readonly obstructions: CheckoutBoundedList<{readonly path: string; readonly kind: CheckoutObstructionKind}>
+  }
+  | {readonly outcome: 'refused'; readonly reason: 'maintenance-hold'}
+
+export interface CheckoutPreparationFailed {
+  readonly outcome: 'failed'
+  readonly reason: CheckoutUpdateFailureReason
+  readonly mutationStarted: boolean | 'possibly'
+  readonly permanent: boolean
+}
+
+export type CheckoutPreparation = CheckoutPreparationRefused | CheckoutPreparationFailed
+
+/** Per-string cap for every free-form checkout string. */
+export declare const MAX_CHECKOUT_STRING_CHARS: number
+/** Entries kept per free-form checkout list. */
+export declare const MAX_CHECKOUT_LIST_ENTRIES: number
+
+/** Dashboard-owned labels. Each map's keys equal the vendored vocabulary; tests enforce it. */
+export declare const CHECKOUT_REFUSAL_REASON_LABELS: Readonly<Record<CheckoutRefusalReason, string>>
+export declare const CHECKOUT_UPDATE_FAILURE_REASON_LABELS: Readonly<Record<CheckoutUpdateFailureReason, string>>
+export declare const CHECKOUT_LAYOUT_REASON_LABELS: Readonly<Record<CheckoutLayoutReason, string>>
+export declare const CHECKOUT_OBSTRUCTION_KIND_LABELS: Readonly<Record<CheckoutObstructionKind, string>>
+/** Every operation except `none`, which deliberately renders nothing. */
+export declare const CHECKOUT_OPERATION_LABELS: Readonly<Record<Exclude<CheckoutOperation, 'none'>, string>>
+export declare const CHECKOUT_PREPARATION_HEADLINE_LABELS: Readonly<Record<'refused' | 'failed', string>>
+export declare const CHECKOUT_FAILURE_FLAG_LABELS: Readonly<
+  Record<'permanent' | 'mutationStarted' | 'mutationPossibly', string>
+>
+export declare const CHECKOUT_PROVENANCE_LABELS: Readonly<
+  Record<
+    | 'headAttached'
+    | 'headDetached'
+    | 'worktreeClean'
+    | 'worktreeDirty'
+    | 'operationInProgress'
+    | 'remoteNotChecked'
+    | 'remoteUpToDate'
+    | 'remoteFastForwarded'
+    | 'unavailable',
+    string
+  >
+>
+
+/** Fill `{name}` tokens in a label template in a single pass; values are never re-scanned. */
+export declare function fillLabelTemplate(template: string, values: Readonly<Record<string, string | number>>): string
+
+/** Strip control and bidi characters, then cap with a trailing ellipsis (within the cap). */
+export declare function sanitizeCheckoutText(value: string, cap?: number): string
 
 // ---------------------------------------------------------------------------
 // Frame types (mirrors src/gateway/operator-contract/sse-frames.ts shapes)
@@ -59,6 +235,10 @@ export interface StatusFrameData {
   readonly stale: boolean
   /** Operator-safe failure-reason code. Optional; failed statuses only. */
   readonly failureKind?: FailureKind
+  /** Closed, sanitized DTO. Omitted when absent or invalid. */
+  readonly checkoutProvenance?: CheckoutProvenance
+  /** Closed, sanitized DTO. Omitted when absent or invalid. */
+  readonly checkoutPreparation?: CheckoutPreparation
 }
 
 export interface ResetFrameData {
@@ -145,6 +325,17 @@ export interface RunEntry {
    * raw failureKind wire value.
    */
   readonly reasonLabel?: string
+  /**
+   * What the run started from. Latest valid value wins; an absent or invalid frame value
+   * keeps this one. Exclusive with `checkoutPreparation`. In-memory only; never part of
+   * toSafeRunView.
+   */
+  readonly checkoutProvenance?: CheckoutProvenance
+  /**
+   * Why checkout preparation refused or failed. Latest valid value wins; exclusive with
+   * `checkoutProvenance`. In-memory only; never part of toSafeRunView.
+   */
+  readonly checkoutPreparation?: CheckoutPreparation
   /**
    * Null-prototype map of open (non-tombstoned) approval prompts, keyed by requestID.
    * Absent until the first approval frame is received for this run.
@@ -329,6 +520,11 @@ export interface InitOptions {
   readonly reasonEl?: Element | null
   /** Cancel control container element (data-role="run-cancel"). */
   readonly cancelEl?: (HTMLElement & {hidden: boolean}) | null
+  /**
+   * Checkout-detail region (data-role="run-checkout-detail"): where checkout provenance /
+   * preparation is rendered from the sanitized closed DTOs carried by the run entry.
+   */
+  readonly checkoutEl?: (HTMLElement & {hidden: boolean}) | null
   /** Injectable cancel client for testing. If absent, buildCancelClient() is used. */
   readonly cancelClient?: CancelControlClient | null
 }

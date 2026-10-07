@@ -11,10 +11,12 @@ applies_when:
   - Trivy reports Debian package CVEs with no upstream fixed version
   - An automated report frames inherited OS CVEs as an outstanding gap
   - Considering a base-image swap to clear inherited operating-system findings
+  - The release Trivy enforcement pass fails on fixable HIGH/CRITICAL base-image CVEs
 tags:
   - trivy
   - docker
   - debian
+  - trixie
   - base-image
   - unfixed-cves
   - release-gate
@@ -25,25 +27,16 @@ tags:
 
 ## Context
 
-An automated daily report flagged "33 Trivy base-image CVEs, several critical" as
-an outstanding security gap. The framing was wrong, and re-deriving that each
-time the report runs is pure cost.
+The release image is built `FROM node:24-trixie-slim` (Debian 13), digest-pinned,
+in all three Dockerfile stages (`builder`, `prod-deps`, runtime). An automated
+daily report can flag the open `trivy/release-image` code-scanning alerts as an
+outstanding security gap. The framing is wrong, and re-deriving that each time
+the report runs is pure cost.
 
-Code scanning shows 37 open Trivy alerts in the `trivy/release-image` category:
-4 CRITICAL, 29 HIGH, 2 medium, 2 low. They collapse to 14 unique CVEs inherited
-from Debian OS packages in the base image.
-
-| Package family | CVEs | Count |
-| --- | --- | ---: |
-| `perl-base` | CVE-2026-13221, CVE-2026-42496, CVE-2026-8376, CVE-2026-42497, CVE-2026-48962, CVE-2026-57432, CVE-2026-57433, CVE-2026-9538 | 8 |
-| `util-linux` family (`util-linux`, `util-linux-extra`, `mount`, `libuuid1`, `libsmartcols1`, `libmount1`, `libblkid1`, `bsdutils`) | CVE-2026-53613, CVE-2026-53615 | 2 |
-| `zlib1g` | CVE-2023-45853 | 1 |
-| `ncurses` family (`ncurses-base`, `ncurses-bin`, `libtinfo6`) | CVE-2025-69720 | 1 |
-| `libacl1` | CVE-2026-54369 | 1 |
-| `gzip` | CVE-2026-41992 | 1 |
-
-Every alert body has an empty `Fixed Version:` field. There is no upstream
-package version to move to.
+As of PR #576 the reporting pass lists 43 HIGH and 0 CRITICAL findings. They are
+inherited Debian OS packages in the base image. Each is either unfixed or marked
+`fix_deferred` by Debian. Both leave `Fixed Version:` empty, so there is no
+upstream package version to move to.
 
 ## Guidance
 
@@ -63,7 +56,7 @@ token=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=r
   | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).token')
 curl -s -H "Authorization: Bearer $token" \
   -H "Accept: application/vnd.oci.image.index.v1+json" \
-  -D- -o /dev/null "https://registry-1.docker.io/v2/library/node/manifests/24-slim" \
+  -D- -o /dev/null "https://registry-1.docker.io/v2/library/node/manifests/24-trixie-slim" \
   | grep -i docker-content-digest
 ```
 
@@ -79,7 +72,16 @@ Renovate already keeps this pin current, so a match is the expected result.
 
 An open alert is therefore not a blocked release. Confirm this rather than
 assume it: releases `2026.08.31` through `2026.08.34` all built and shipped with
-these alerts open.
+alerts open.
+
+The gate passes today only because no remaining finding has a fix. It fails
+again, by design, when Debian ships one. That is the control working, not a
+reason to weaken it.
+
+A green Release run is not evidence the image is clean. When the release guard
+skips a run (for example a devDependency-only change), no image is built or
+scanned. Read the enforcement step's result, or confirm an image was built,
+before drawing a conclusion.
 
 **4. Assess reachability before considering a swap.** The deployed container
 runs `read_only: true`, `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`,
@@ -109,13 +111,39 @@ justifying work that cannot succeed.
 
 This is an accepted, bounded posture — not a suppressed vulnerability. Keep the
 findings visible. Do not change application code, the release gate, or the
-Dockerfile solely to reduce the alert count.
+Dockerfile solely to reduce the alert count, and do not add ignores or loosen
+the enforcement pass to make a failing release go green.
+
+The `node:24-trixie-slim` base is not a policy artifact to preserve or revert
+for alert-count reasons. It is the current base because it carries fixes the
+previous Debian release's tag did not (next section). Move it only for a
+concrete reason, and move all three stages together.
+
+## Why the base is trixie: fixable CVEs blocked the gate
+
+The enforcement pass began failing every image release once Debian fixed
+`perl-base` CVE-2026-13221, CVE-2026-42496, CVE-2026-8376 (critical) and
+CVE-2026-42497, CVE-2026-48962, CVE-2026-57432, CVE-2026-57433 (high) in
+`5.36.0-7+deb12u4`, while the `node:24-slim` tag head still shipped
+`5.36.0-7+deb12u3`. These findings were fixable, so the gate was right to fail,
+but a digest bump could not help until upstream rebuilt the tag.
+
+PR #576 moved all three Dockerfile stages to `node:24-trixie-slim`. They move
+together because `prod-deps` compiles native modules that are copied into the
+runtime stage, so the glibc must match. After the move, the Release run for #576
+(Actions run 37574091492) passed the enforcement pass on Debian 13.7, where
+`perl-base` is `5.40.1-6+deb13u1`. The remaining reporting-pass findings stay
+visible in code scanning.
+
+A further `perl-base` CVE, CVE-2026-9538, is `fix_deferred` on both Debian 12 and
+13. It has no fixed version, so it never blocked the gate, and it stays visible.
 
 ## When to Apply
 
 - An automated report or audit flags `trivy/release-image` alerts as outstanding
 - Trivy reports OS package CVEs with no fixed version
 - Someone proposes a base-image swap to clear inherited findings
+- The enforcement pass fails because a fixable base-image CVE appeared
 - Planning a runtime base upgrade for reasons other than these alerts
 
 ## Examples
@@ -128,7 +156,7 @@ every unfixed finding look fixed:
 
 ```js
 // WRONG — \s crosses the newline and captures the following "Link:" line,
-// so all 37 alerts appear to have a fix.
+// so every alert appears to have a fix.
 const wrong = /Fixed Version:\s*(.*)/
 
 // RIGHT — [^\S\n] is horizontal whitespace only, so the capture stops
@@ -142,28 +170,13 @@ Count fix availability explicitly before drawing any conclusion:
 gh api repos/fro-bot/dashboard/code-scanning/alerts --paginate
 ```
 
-For this image the answer was 0 fixable out of 37.
+### What a further base swap would and would not buy
 
-### What a base swap would and would not buy
-
-Each alternative below was scanned as an actual built image, and each booted
-successfully with HTTP 302:
-
-| Runtime base | CRITICAL | HIGH | Size | Of the 14 CVEs |
-| --- | ---: | ---: | ---: | --- |
-| `node:24-slim` (current) | 4 | 26 | 264 MB | all 14 present |
-| `node:24-trixie-slim` | 3 | 12 | 275 MB | 11 remain |
-| `gcr.io/distroless/nodejs24-debian12:nonroot` | 1 | 5 | 170 MB | 0 remain |
-
-Trixie is a half-measure. It clears only 3 of 14 — the `zlib1g` finding and the
-two `util-linux` findings. All 8 `perl-base` CVEs survive, including 3 of the 4
-criticals; Debian 13 ships `perl-base 5.40.1-6` and those CVEs remain unfixed
-there. It costs 11 MB more for a marginal reduction.
-
-Distroless is deferred, not rejected. It removes all 14 by omitting those
-packages and cuts the image to 170 MB, but it is not a one-line swap. Distroless
-has no `node` account while deployment pins `user: node`. Making it work
-requires coordinated changes in `marcusrbrown/infra` to Compose `user:`,
+Distroless is deferred, not rejected. It removes the Debian OS package findings
+by omitting those packages and measured about 170 MB as a built image that booted
+successfully with HTTP 302, but it is not a one-line swap. Distroless has no
+`node` account while deployment pins `user: node`. Making it work requires
+coordinated changes in `marcusrbrown/infra` to Compose `user:`,
 `install -d -o 1000 -g 1000`, the recursive `chown`, the post-deploy `stat`
 assertion that requires `1000:1000:700:directory`, and the mounted GitHub App
 PEM's `1000:1000:0600` ownership — against a live droplet whose deploy fails
@@ -175,33 +188,15 @@ native modules (`@swc/core` and `unrs-resolver`, allowed by
 into the runtime stage. Moving only the runtime stage to musl would not work;
 all stages and native-module builds would have to move together.
 
-The comparison scans were built on arm64 because `--platform linux/amd64`
-segfaulted under qemu during `pnpm build:web` with `qemu: uncaught target signal
-11`. CI publishes amd64. Package sets should be near-identical, but this is not
-a byte-exact reproduction of the CI image.
-
-### Root cause of the unfixability
-
-`node:24-slim` resolves to Debian 12 bookworm, now oldstable with LTS-only
-security support:
-
-```text
-perl-base 5.36.0-7+deb12u3
-util-linux 2.38.1-5+deb12u3
-zlib1g 1:1.2.13.dfsg-1
-```
-
-The pinned digest
-`sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e`
-matches the current published `node:24-slim`. There is no newer digest to move
-to.
+The distroless comparison scan was built on arm64 because
+`--platform linux/amd64` segfaulted under qemu during `pnpm build:web` with
+`qemu: uncaught target signal 11`. CI publishes amd64. Package sets should be
+near-identical, but this is not a byte-exact reproduction of the CI image.
 
 ## When to revisit
 
-- A `Fixed Version:` appears for one of these alerts. The enforcement scan will
+- A `Fixed Version:` appears for a remaining alert. The enforcement scan will
   then correctly fail the release until the package is updated.
-- `node:24-slim` moves to trixie upstream, changing the support window and
-  package set.
 - The coordinated distroless UID and deployment changes become worth the
   operational cost in `marcusrbrown/infra`.
 

@@ -16,7 +16,7 @@ import type {RunSummary} from '../gateway/operator-contract/run-summary.ts'
 import {createHash} from 'node:crypto'
 import {Hono} from 'hono'
 import {FIXTURE_OPERATOR_PREFIX} from '../gateway/operator-fixture-routes.ts'
-import {FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../gateway/operator-fixture-sse.ts'
+import {FIXTURE_CHECKOUT_SCENARIO_ROWS, FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../gateway/operator-fixture-sse.ts'
 import {
   FIXTURE_CSRF,
   FIXTURE_KNOWN_FAILURE_REASON,
@@ -36,7 +36,7 @@ const FIXTURE_REPOS = [
 const FIXTURE_APPROVAL = {requestID: 'req-fixture-harness-001', permission: 'tool_use', command: 'bash'}
 
 // Sorted newest-first; updatedAt absent on some entries to exercise the optional field.
-const FIXTURE_RUN_SUMMARIES: readonly RunSummary[] = [
+const FIXTURE_BASE_RUN_SUMMARIES: readonly RunSummary[] = [
   {
     runId: 'run-fixture-index-queued-001',
     repo: 'fixture-org/fixture-repo',
@@ -108,11 +108,30 @@ const FIXTURE_RUN_SUMMARIES: readonly RunSummary[] = [
   },
 ]
 
-// Run IDs bound to a specific reason-bearing stream scenario, distinct from the
-// generic terminal_failure default. Extends the failed→scenario binding below.
-const RUN_ID_TO_REASON_SCENARIO: ReadonlyMap<string, string> = new Map([
+// One recent-runs row per checkout scenario (provenance, preparation, new failure kinds), so each
+// is selectable in the assembled UI by expanding its row. Older than every base row, so the base
+// list keeps its order at the top. Run IDs are derived from the scenario name.
+const FIXTURE_CHECKOUT_RUN_SUMMARIES: readonly RunSummary[] = FIXTURE_CHECKOUT_SCENARIO_ROWS.map((row, index) => {
+  const createdAt = new Date(Date.UTC(2026, 5, 28, 9, 59, 59 - index * 30)).toISOString().replace('.000Z', 'Z')
+  const updatedAt = new Date(Date.UTC(2026, 5, 28, 9, 59, 59 - index * 30 + 15)).toISOString().replace('.000Z', 'Z')
+  return {
+    runId: `run-fixture-index-${row.scenario.replaceAll('_', '-')}`,
+    repo: index % 2 === 0 ? 'fixture-org/fixture-repo' : 'fixture-org/fixture-repo-2',
+    status: row.summaryStatus,
+    createdAt,
+    updatedAt,
+    ...(row.failureKind === undefined ? {} : {failureKind: row.failureKind}),
+  }
+})
+
+const FIXTURE_RUN_SUMMARIES: readonly RunSummary[] = [...FIXTURE_BASE_RUN_SUMMARIES, ...FIXTURE_CHECKOUT_RUN_SUMMARIES]
+
+// Run IDs bound to a specific stream scenario, distinct from the generic terminal_failure /
+// success default chosen by summary status. Extends the failed→scenario binding below.
+const RUN_ID_TO_SCENARIO: ReadonlyMap<string, string> = new Map([
   ['run-fixture-index-failed-reason-006', FIXTURE_SCENARIO_NAMES.terminal_failure_known_reason],
   ['run-fixture-index-failed-unknown-reason-007', FIXTURE_SCENARIO_NAMES.terminal_failure_unknown_reason],
+  ...FIXTURE_CHECKOUT_SCENARIO_ROWS.map((row, index): [string, string] => [FIXTURE_CHECKOUT_RUN_SUMMARIES[index]?.runId ?? '', row.scenario]),
 ])
 
 // In-memory state — scoped by (fixtureSessionId, idempotencyKey). Resets on restart.
@@ -283,7 +302,7 @@ export function buildFixtureHarnessRouter(): Hono {
     if (requestSessionId !== undefined) {
       for (const summary of FIXTURE_RUN_SUMMARIES) {
         if (!runScenarioMap.has(summary.runId)) {
-          const reasonScenario = RUN_ID_TO_REASON_SCENARIO.get(summary.runId)
+          const reasonScenario = RUN_ID_TO_SCENARIO.get(summary.runId)
           const scenario =
             reasonScenario ??
             (summary.status === 'failed' || summary.status === 'cancelled'
@@ -524,7 +543,7 @@ export function buildFixtureHarnessRouter(): Hono {
 
     if (isIndexedRunId(runId) && !runScenarioMap.has(runId)) {
       const summary = FIXTURE_RUN_SUMMARIES.find(s => s.runId === runId)
-      const reasonScenario = summary === undefined ? undefined : RUN_ID_TO_REASON_SCENARIO.get(summary.runId)
+      const reasonScenario = summary === undefined ? undefined : RUN_ID_TO_SCENARIO.get(summary.runId)
       const scenario =
         reasonScenario ??
         (summary?.status === 'failed' || summary?.status === 'cancelled'

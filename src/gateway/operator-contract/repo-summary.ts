@@ -1,7 +1,7 @@
 /**
  * RepoSummary type and parse helpers for the operator contract.
  *
- * Mirrors the gateway's RepoSummary from fro-bot/agent v0.73.0 (PR #968).
+ * Mirrors the gateway's RepoSummary from fro-bot/agent (PR #968).
  * No upstream parse helper exists for this type — the guards below are authored
  * locally following the same hand-rolled type-guard + fixed-reason-string pattern
  * used in parse.ts.

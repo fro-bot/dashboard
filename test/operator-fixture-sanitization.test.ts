@@ -11,6 +11,8 @@ import {readFileSync} from 'node:fs'
 import {resolve} from 'node:path'
 import process from 'node:process'
 import {describe, expect, it} from 'vitest'
+import {OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
+import {FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../src/gateway/operator-fixture-sse.ts'
 import {FIXTURE_KNOWN_FAILURE_REASON, FIXTURE_UNKNOWN_FAILURE_REASON} from '../src/gateway/operator-fixtures.ts'
 
 const FIXTURE_FILES = [
@@ -250,14 +252,7 @@ describe('fixture no-leak guard — explicit bad-fixture rejection', () => {
 
 describe('fixture no-leak guard — failure-reason values', () => {
   it('known production reason codes do not trip any forbidden pattern', () => {
-    const KNOWN_REASON_CODES = [
-      'inactivity-timeout',
-      'max-duration-timeout',
-      'stream-ended',
-      'workspace-unreachable',
-      'session-error',
-      'unknown',
-    ]
+    const KNOWN_REASON_CODES = [...OPERATOR_FAILURE_KINDS]
     for (const code of KNOWN_REASON_CODES) {
       const line = `failureKind: '${code}'`
       for (const [label, pattern] of FORBIDDEN_PATTERNS) {
@@ -274,14 +269,7 @@ describe('fixture no-leak guard — failure-reason values', () => {
   })
 
   it('the exported fixture reason constants are a known code and a fixture-prefixed synthetic code, respectively', () => {
-    const KNOWN_REASON_CODES = new Set([
-      'inactivity-timeout',
-      'max-duration-timeout',
-      'stream-ended',
-      'workspace-unreachable',
-      'session-error',
-      'unknown',
-    ])
+    const KNOWN_REASON_CODES = new Set<string>(OPERATOR_FAILURE_KINDS)
 
     expect(KNOWN_REASON_CODES.has(FIXTURE_KNOWN_FAILURE_REASON)).toBe(true)
 
@@ -293,14 +281,7 @@ describe('fixture no-leak guard — failure-reason values', () => {
   })
 
   it('committed fixture files only use the fixture-prefixed unknown reason value, never a bare non-fixture unknown string', () => {
-    const KNOWN_REASON_CODES = new Set([
-      'inactivity-timeout',
-      'max-duration-timeout',
-      'stream-ended',
-      'workspace-unreachable',
-      'session-error',
-      'unknown',
-    ])
+    const KNOWN_REASON_CODES = new Set<string>(OPERATOR_FAILURE_KINDS)
     const FAILURE_KIND_LITERAL_PATTERN = /failureKind:\s*['"]([^'"]+)['"]/g
 
     for (const filePath of FIXTURE_FILES) {
@@ -323,14 +304,67 @@ describe('fixture no-leak guard — failure-reason values', () => {
 
   it('an unrecognized non-fixture-prefixed reason value fails the guard (explicit rejection)', () => {
     const badValue = 'totally-made-up-reason'
-    const KNOWN_REASON_CODES = new Set([
-      'inactivity-timeout',
-      'max-duration-timeout',
-      'stream-ended',
-      'workspace-unreachable',
-      'session-error',
-      'unknown',
-    ])
+    const KNOWN_REASON_CODES = new Set<string>(OPERATOR_FAILURE_KINDS)
     expect(KNOWN_REASON_CODES.has(badValue) || badValue.startsWith('fixture-')).toBe(false)
+  })
+})
+
+describe('fixture no-leak guard — checkout scenarios', () => {
+  // eslint-disable-next-line no-control-regex
+  const STRIPPED = /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g
+  const CHECKOUT_KEYS = Object.keys(FIXTURE_SCENARIO_NAMES).filter(key => key.startsWith('checkout_'))
+
+  /** Collect every string under the checkout fields of every status frame the scenario emits. */
+  function checkoutStrings(sse: string): {key: string; value: string}[] {
+    const found: {key: string; value: string}[] = []
+    const walk = (node: unknown, key: string): void => {
+      if (typeof node === 'string') found.push({key, value: node})
+      else if (Array.isArray(node)) for (const entry of node) walk(entry, key)
+      else if (node !== null && typeof node === 'object') {
+        for (const [childKey, child] of Object.entries(node)) walk(child, childKey)
+      }
+    }
+    for (const record of sse.split('\n\n')) {
+      const data = record.split('\n').find(line => line.startsWith('data:'))
+      if (data === undefined || !record.includes('event: status')) continue
+      const parsed = JSON.parse(data.slice('data:'.length)) as Record<string, unknown>
+      walk(parsed.checkoutProvenance, 'checkoutProvenance')
+      walk(parsed.checkoutPreparation, 'checkoutPreparation')
+    }
+    return found
+  }
+
+  const ENUM_KEYS = new Set(['kind', 'outcome', 'reason', 'layoutReason', 'operation', 'operationInProgress', 'change', 'mutationStarted'])
+  const TIMESTAMP_KEYS = new Set(['observedAt', 'checkedAt'])
+  const SHA_KEYS = new Set(['sha', 'fromSha'])
+
+  it('every free-form checkout value is fixture-prefixed (ignoring bidi/control characters), and every SHA is an obviously synthetic repeated pair', () => {
+    expect(CHECKOUT_KEYS.length).toBeGreaterThan(10)
+    for (const key of CHECKOUT_KEYS) {
+      const sse = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES[key as keyof typeof FIXTURE_SCENARIO_NAMES], 'run-fixture-leak-001')
+      for (const {key: field, value} of checkoutStrings(sse)) {
+        if (ENUM_KEYS.has(field) || TIMESTAMP_KEYS.has(field)) continue
+        if (SHA_KEYS.has(field)) {
+          expect(value, `${key} ${field}`).toMatch(/^([\da-f]{2})\1{19}$/)
+          continue
+        }
+        const visible = value.replaceAll(STRIPPED, '')
+        expect(visible === '' || visible.startsWith('fixture'), `${key}.${field} = ${JSON.stringify(visible.slice(0, 40))} is not fixture-prefixed`).toBe(true)
+      }
+    }
+  })
+
+  it('the bidi/control values in the unsafe-path scenario are the only non-printing characters in any checkout scenario', () => {
+    for (const key of CHECKOUT_KEYS) {
+      const sse = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES[key as keyof typeof FIXTURE_SCENARIO_NAMES], 'run-fixture-leak-001')
+      const hasUnsafe = checkoutStrings(sse).some(({value}) => value !== value.replaceAll(STRIPPED, ''))
+      expect(hasUnsafe, key).toBe(key === 'checkout_refused_bidi_path')
+    }
+  })
+
+  it('no fixture source contains a literal 40-hex SHA', () => {
+    for (const filePath of FIXTURE_FILES) {
+      expect(stripComments(readFixtureFile(filePath))).not.toMatch(/\b[\da-f]{40}\b/i)
+    }
   })
 })
