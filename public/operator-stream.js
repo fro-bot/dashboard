@@ -109,6 +109,15 @@ export const FIRST_FRAME_TIMEOUT_MS = 15_000
 /** Terminal OperatorWebStatus values — a run in one of these states will not progress. */
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
 
+/**
+ * Statuses a run-list summary can carry (the run index parser keeps only these). The optional
+ * `summaryStatus` init option is accepted only from this set; anything else is dropped.
+ */
+const SUMMARY_STATUSES = new Set(['queued', 'running', 'succeeded', 'failed', 'cancelled'])
+
+/** In-card copy for an expired run snapshot (#583). Dashboard-owned; never wire text. */
+const OUTPUT_UNAVAILABLE_COPY = 'Output no longer available.'
+
 /** Valid ResetReason values from the gateway SSE surface. */
 const VALID_RESET_REASONS = new Set([
   'no-snapshot',
@@ -933,6 +942,10 @@ export function resetQuestionPageStore() {
  *   runs: Object.create(null) — null-prototype map keyed by runId
  *   retryCount: number
  *   shouldReconnect: boolean
+ *   summaryStatus?: the run-list summary status for the stream's run (optional; set at init).
+ *                   A terminal value lets `reset` (no-snapshot) close the card without a status frame.
+ *   snapshotMissing?: null-prototype map of runId → true after a no-snapshot reset that left the
+ *                     run live. Cleared by an output frame; read by a terminal status frame.
  *
  * Events (discriminated by type):
  *   { type: 'ready', data: { contractVersion } }
@@ -1036,6 +1049,11 @@ export function nextStreamState(current, event) {
         if (prevStatusEntry?.questionOpen !== undefined) {
           nextEntry.questionOpen = new Map()
           nextEntry.questionClaimedExempt = new Set()
+        }
+        // A terminal status after a no-snapshot reset with no output since: the snapshot (and the
+        // output it carried) expired, so say so in the card. An output frame clears the mark.
+        if (current.snapshotMissing?.[runId] === true && typeof prevStatusEntry?.outputSeq !== 'number') {
+          nextEntry.outputUnavailable = true
         }
       }
       const updatedRuns = Object.assign(Object.create(null), current.runs, {[runId]: nextEntry})
@@ -1196,18 +1214,24 @@ export function nextStreamState(current, event) {
       }
 
       const base = prev ?? {runId, status: '', phase: '', startedAt: '', stale: false, terminal: false}
-      const updatedRuns = Object.assign(Object.create(null), current.runs, {
-        [runId]: {
-          ...base,
-          runId,
-          outputText: nextText,
-          outputSeq: nextSeq,
-          outputFinal: final ? true : (prev?.outputFinal ?? false),
-          outputCoalesced: coalesced,
-          outputTruncated: truncated,
-        },
-      })
-      return {...current, runs: updatedRuns}
+      const nextOutputEntry = {
+        ...base,
+        runId,
+        outputText: nextText,
+        outputSeq: nextSeq,
+        outputFinal: final ? true : (prev?.outputFinal ?? false),
+        outputCoalesced: coalesced,
+        outputTruncated: truncated,
+      }
+      // An output frame proves the snapshot is not missing: clear the mark and any unavailable state.
+      delete nextOutputEntry.outputUnavailable
+      const updatedRuns = Object.assign(Object.create(null), current.runs, {[runId]: nextOutputEntry})
+      if (current.snapshotMissing?.[runId] !== true) {
+        return {...current, runs: updatedRuns}
+      }
+      const remainingMissing = Object.assign(Object.create(null), current.snapshotMissing)
+      delete remainingMissing[runId]
+      return {...current, runs: updatedRuns, snapshotMissing: remainingMissing}
     }
 
     case 'reset': {
@@ -1235,22 +1259,51 @@ export function nextStreamState(current, event) {
         }
       }
 
-      // no-snapshot: the gateway has no terminal replay entry for this run. For a
-      // known-terminal run this is a stable fact, not a transient hiccup — every
-      // retry gets the same byte-identical reset, so reconnecting can never help.
-      // Unlike max-duration, an unknown run entry must still fall through and
-      // retry: no-snapshot on a live run is a legitimate transient condition (the
-      // stream attached before the first snapshot), and "unknown" is not evidence
-      // the run is terminal.
+      // no-snapshot (#583): the gateway has no replay entry for this run (expired after its
+      // retention window, or lost on restart) and KEEPS THE SUBSCRIPTION OPEN afterwards, so a
+      // reconnect would park on a reader that never ends and strand the card on "Connecting".
+      // Never reconnect for it:
+      //   - the run is known terminal (from the stream, or from its run-list summary): show that
+      //     terminal status plus the unavailable state, and close;
+      //   - otherwise the run's state is unknown, which is not evidence of terminal: stay live,
+      //     spend no retry, and mark the snapshot missing so a later terminal status with no
+      //     output since can show the unavailable state.
       if (reason === 'no-snapshot') {
-        const runEntry = current.runs[event.data.runId]
-        const runIsKnownTerminal = runEntry !== undefined && runEntry.terminal
-        if (runIsKnownTerminal) {
+        const resetRunId = event.data.runId
+        const runEntry = current.runs[resetRunId]
+        const summaryStatus = current.summaryStatus
+        const summaryIsTerminal = typeof summaryStatus === 'string' && TERMINAL_STATUSES.has(summaryStatus)
+        if (runEntry?.terminal === true || summaryIsTerminal) {
+          const knownTerminal = runEntry?.terminal === true
+          const terminalEntry = knownTerminal
+            ? {...runEntry}
+            : {
+                phase: '',
+                startedAt: '',
+                stale: false,
+                ...runEntry,
+                runId: resetRunId,
+                status: summaryStatus,
+                terminal: true,
+                cancelInFlight: false,
+                approvalOpenPrompts: Object.create(null),
+                ...(runEntry?.questionOpen === undefined
+                  ? {}
+                  : {questionOpen: new Map(), questionClaimedExempt: new Set()}),
+              }
+          if (typeof terminalEntry.outputSeq !== 'number') {
+            terminalEntry.outputUnavailable = true
+          }
           return {
             ...current,
+            runs: Object.assign(Object.create(null), current.runs, {[resetRunId]: terminalEntry}),
             connection: 'closed',
             shouldReconnect: false,
           }
+        }
+        return {
+          ...current,
+          snapshotMissing: Object.assign(Object.create(null), current.snapshotMissing, {[resetRunId]: true}),
         }
       }
 
@@ -2864,6 +2917,9 @@ function renderCheckoutDetail(region, runEntry, reasonShownElsewhere) {
  *   badgeEl     — element with [data-role="approval-badge"] for the approval count badge
  *   checkoutEl  — element with [data-role="run-checkout-detail"], the target for checkout
  *                 provenance / preparation, rendered only from the sanitized closed DTOs.
+ *   summaryStatus — optional run-list summary status for this run (queued | running | succeeded |
+ *                 failed | cancelled). A terminal value lets an expired run (reset no-snapshot)
+ *                 show its status plus "Output no longer available." without a status frame.
  *   approvalClient — optional pre-built approval client (for testing); if absent,
  *                    buildApprovalClient() is called when the flag is on
  *
@@ -2878,6 +2934,12 @@ function renderCheckoutDetail(region, runEntry, reasonShownElsewhere) {
  */
 export function initOperatorStream(opts) {
   const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, checkoutEl, cancelEl, approvalClient: injectedApprovalClient, cancelClient: injectedCancelClient, endpointBase, fixtureSessionId} = opts
+
+  // The run-list summary status for this run, when the caller has one. Only a known summary status
+  // is kept; it lets a no-snapshot reset close an expired terminal run without a status frame.
+  const summaryStatus = typeof opts.summaryStatus === 'string' && SUMMARY_STATUSES.has(opts.summaryStatus)
+    ? opts.summaryStatus
+    : undefined
 
   if (checkoutEl) {
     checkoutEl.textContent = ''
@@ -2923,6 +2985,7 @@ export function initOperatorStream(opts) {
     runs: Object.create(null), // null-prototype to guard against __proto__ key pollution
     retryCount: 0,
     shouldReconnect: false,
+    ...(summaryStatus === undefined ? {} : {summaryStatus}),
   }
 
   let abortController = null
@@ -3086,10 +3149,17 @@ export function initOperatorStream(opts) {
     if (outputEl) {
       const runEntry = state.runs[runId]
       const outputText = runEntry?.outputText
-      if (typeof outputText === 'string' && outputText !== '') {
+      if (runEntry?.outputUnavailable === true) {
+        // Expired snapshot (#583): fixed dashboard copy as a single text node, never wire text.
+        outputEl.textContent = OUTPUT_UNAVAILABLE_COPY
+        outputEl.hidden = false
+        outputEl.classList?.add('run-output-unavailable')
+      } else if (typeof outputText === 'string' && outputText !== '') {
         outputEl.textContent = outputText
         outputEl.hidden = false
+        outputEl.classList?.remove('run-output-unavailable')
       } else {
+        outputEl.classList?.remove('run-output-unavailable')
         // No output (or an authoritative empty final): clear any stale text and re-hide.
         outputEl.textContent = ''
         outputEl.hidden = true
@@ -3302,8 +3372,14 @@ export function initOperatorStream(opts) {
     // and wrongly dispatch first-frame-timeout on a recovering stream.
     clearFirstFrameTimer()
 
-    abortController = new AbortController()
-    const signal = abortController.signal
+    const connectionController = new AbortController()
+    abortController = connectionController
+    const signal = connectionController.signal
+
+    // Set when this connection aborts its own request because the reducer reached a
+    // non-reading terminal state. The resulting abort rejection is intentional: it must
+    // not dispatch unexpected-close or schedule a reconnect.
+    let abortedByUs = false
 
     // Arm the first-frame timeout. If no ready/status/reset frame arrives within
     // FIRST_FRAME_TIMEOUT_MS, the run is considered submitted but not yet observable.
@@ -3419,7 +3495,10 @@ export function initOperatorStream(opts) {
                 boundary = buffer.indexOf('\n\n')
               }
 
-              // Continue reading if still connected
+              // Continue reading if still connected; otherwise release the socket. The
+              // gateway keeps a subscriber open (no frames) after a client-side close such as
+              // reset:no-snapshot for a terminal run, so merely ceasing to read would leak the
+              // stream and its subscriber slot until the gateway's max duration.
               if (
                 state.connection !== 'closed' &&
                 state.connection !== 'failed' &&
@@ -3428,9 +3507,14 @@ export function initOperatorStream(opts) {
                 state.connection !== 'submitted-unobservable' // stop reading after first-frame timeout
               ) {
                 readChunk()
+              } else {
+                abortedByUs = true
+                clearFirstFrameTimer()
+                connectionController.abort()
               }
             })
             .catch(() => {
+              if (abortedByUs) return
               // Stream read error — fail closed, no logging of error details
               clearFirstFrameTimer()
               dispatch({type: 'unexpected-close'})
@@ -3443,6 +3527,7 @@ export function initOperatorStream(opts) {
         readChunk()
       })
       .catch(() => {
+        if (abortedByUs) return
         // Network error — fail closed, no logging of error details
         clearFirstFrameTimer()
         dispatch({type: 'network-error'})

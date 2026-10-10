@@ -913,9 +913,10 @@ describe('nextStreamState — reset frame', () => {
       type: 'ready',
       data: {contractVersion: PINNED_CONTRACT_VERSION},
     })
+    // no-snapshot no longer reconnects (#583); a transient reason still does.
     const state = nextStreamState(liveState, {
       type: 'reset',
-      data: {runId: 'run-abc', reason: 'no-snapshot'},
+      data: {runId: 'run-abc', reason: 'writer-error'},
     })
     expect(state.connection).toBe('reconnecting')
     expect(state.shouldReconnect).toBe(true)
@@ -991,7 +992,7 @@ describe('nextStreamState — reset frame', () => {
     expect(state.retryCount).toBe(withTerminal.retryCount)
   })
 
-  it('reconnects on no-snapshot reset when the run is still active', () => {
+  it('keeps the connection live on no-snapshot reset when the run is still active (#583)', () => {
     const liveState = nextStreamState(INITIAL_STATE, {
       type: 'ready',
       data: {contractVersion: PINNED_CONTRACT_VERSION},
@@ -1000,31 +1001,31 @@ describe('nextStreamState — reset frame', () => {
       type: 'status',
       data: ACTIVE_STATUS,
     })
-    // no-snapshot on a live run is legitimate: the stream attached before the first
-    // snapshot was taken, so retrying is expected to succeed once one exists.
+    // The gateway keeps the subscription open after no-snapshot, so a reconnect would park on a
+    // reader that never ends. Stay live, spend no retry, and keep accepting frames.
     const state = nextStreamState(withActive, {
       type: 'reset',
       data: {runId: 'run-abc', reason: 'no-snapshot'},
     })
-    expect(state.connection).toBe('reconnecting')
-    expect(state.shouldReconnect).toBe(true)
-    expect(state.retryCount).toBe(withActive.retryCount + 1)
+    expect(state.connection).toBe('live')
+    expect(state.shouldReconnect).toBe(false)
+    expect(state.retryCount).toBe(withActive.retryCount)
   })
 
-  it('reconnects on no-snapshot reset when the run entry is unknown', () => {
+  it('keeps the connection live on no-snapshot reset when the run entry is unknown (#583)', () => {
     const liveState = nextStreamState(INITIAL_STATE, {
       type: 'ready',
       data: {contractVersion: PINNED_CONTRACT_VERSION},
     })
-    // No status frame has been applied for run-abc, so the run entry is unknown —
-    // must fall through to the generic retry branch exactly as before the fix.
+    // No status frame and no terminal summary: unknown is not evidence of terminal, so the
+    // connection stays live instead of reconnecting.
     const state = nextStreamState(liveState, {
       type: 'reset',
       data: {runId: 'run-abc', reason: 'no-snapshot'},
     })
-    expect(state.connection).toBe('reconnecting')
-    expect(state.shouldReconnect).toBe(true)
-    expect(state.retryCount).toBe(liveState.retryCount + 1)
+    expect(state.connection).toBe('live')
+    expect(state.shouldReconnect).toBe(false)
+    expect(state.retryCount).toBe(liveState.retryCount)
   })
 
   it('ends the production ready → reset:no-snapshot sequence for a terminal run in a settled, non-reconnecting state', () => {
@@ -1333,7 +1334,7 @@ describe('nextStreamState — reset retryCount capping', () => {
     })
     const state1 = nextStreamState(liveState, {
       type: 'reset',
-      data: {runId: 'run-abc', reason: 'no-snapshot'},
+      data: {runId: 'run-abc', reason: 'shutdown'},
     })
     expect(state1.retryCount).toBe(1)
     expect(state1.shouldReconnect).toBe(true)
@@ -1354,7 +1355,7 @@ describe('nextStreamState — reset retryCount capping', () => {
     }
     const state = nextStreamState(exhausted, {
       type: 'reset',
-      data: {runId: 'run-abc', reason: 'no-snapshot'},
+      data: {runId: 'run-abc', reason: 'shutdown'},
     })
     expect(state.connection).toBe('failed')
     expect(state.shouldReconnect).toBe(false)
@@ -1368,7 +1369,7 @@ describe('nextStreamState — reset retryCount capping', () => {
     for (let i = 0; i < RETRY_MAX_COUNT + 5; i++) {
       state = nextStreamState(state, {
         type: 'reset',
-        data: {runId: 'run-abc', reason: 'no-snapshot'},
+        data: {runId: 'run-abc', reason: 'shutdown'},
       })
     }
     expect(state.connection).toBe('failed')
@@ -4014,7 +4015,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('integration: ghost prompt A absent from complete recovery set is pruned on reconnect', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', command: 'echo A', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     const conn1Chunks = [readyChunk, openAChunk, resetChunk]
     const conn2Chunks = [readyChunk]
@@ -4069,7 +4070,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('error path: listRunApprovals failure → open prompts preserved, no prune', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let listCallCount = 0
     const listCalls: string[] = []
@@ -4206,7 +4207,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('happy: recovery returns [A,B] while only A locally open → B added, A retained, nothing pruned', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let fetchCount = 0
     const client = {
@@ -4270,7 +4271,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('edge (truncation): recovery size >= cap → pruneIds empty, open prompts preserved', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     // Recovery returns exactly GATEWAY_PENDING_APPROVALS_CAP entries (none is req-A)
     const bigRecovery = Array.from({length: GATEWAY_PENDING_APPROVALS_CAP}, (_, i) => ({
@@ -4326,7 +4327,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
     const openBChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-B', permission: 'network', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let fetchCount = 0
     const client = {
@@ -4420,7 +4421,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
     const openBChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-B', permission: 'network', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let fetchCount = 0
     const client = {
@@ -4473,7 +4474,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('stale-reconcile discard: first reconcile resolved after second connect → stale result discarded, no wrong prune', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let resolveFirstList!: (v: {success: true; data: {approvals: []}}) => void
     const firstListPromise = new Promise<{success: true; data: {approvals: []}}>(resolve => {
@@ -4534,7 +4535,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('error path (http 500): listRunApprovals http-500 failure → open prompts preserved', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let listCallCount = 0
     const client = {
@@ -4588,7 +4589,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('error path (protocol): listRunApprovals protocol failure → open prompts preserved', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let listCallCount = 0
     const client = {
@@ -4642,7 +4643,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('truncation boundary (allow-prune): valid size === CAP-1 → prune IS performed', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     const nearCapRecovery = Array.from({length: GATEWAY_PENDING_APPROVALS_CAP - 1}, (_, i) => ({
       requestID: `req-recovered-${i}`,
@@ -4699,7 +4700,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
     const openBChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-B', permission: 'network', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let fetchCount = 0
     const client = {
@@ -4764,7 +4765,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('stale reconcile with a non-empty pre-GET snapshot bails on epoch mismatch — the prompt is NOT pruned', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let resolveStaleList!: (v: {success: true; data: {approvals: []}}) => void
     const staleListPromise = new Promise<{success: true; data: {approvals: []}}>(resolve => {
@@ -9213,5 +9214,302 @@ describe('question status — label, wire acceptance and styling', () => {
     const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
     expect(css).toMatch(/\.run-status\.status-waiting-for-question\b/)
     expect(css).toMatch(/\[data-theme="light"\] \.run-status\.status-waiting-for-question\b/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #583 — expired snapshot handling
+// ---------------------------------------------------------------------------
+
+function nsLive(summaryStatus?: string): StreamState {
+  const initial = {...INITIAL_STATE, ...(summaryStatus === undefined ? {} : {summaryStatus})} as StreamState
+  return nextStreamState(initial, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+}
+
+describe('nextStreamState — expired snapshot (#583)', () => {
+  const NS_RUN = 'run-abc'
+
+  const noSnapshot = (state: StreamState): StreamState =>
+    nextStreamState(state, {type: 'reset', data: {runId: NS_RUN, reason: 'no-snapshot'}})
+  const statusFrame = (state: StreamState, data: typeof ACTIVE_STATUS): StreamState =>
+    nextStreamState(state, {type: 'status', data} as never)
+  const outputFrame = (state: StreamState, seq: number, text: string): StreamState =>
+    nextStreamState(state, {type: 'output', data: {runId: NS_RUN, text, final: false, seq}})
+  const unavailable = (state: StreamState): boolean => state.runs[NS_RUN]?.outputUnavailable === true
+
+  it('summary succeeded: no-snapshot with no later frame shows the terminal status, the unavailable state, and closes', () => {
+    const before = nsLive('succeeded')
+    const state = noSnapshot(before)
+    expect(state.connection).toBe('closed')
+    expect(state.shouldReconnect).toBe(false)
+    expect(state.retryCount).toBe(before.retryCount)
+    expect(state.runs[NS_RUN]?.status).toBe('succeeded')
+    expect(state.runs[NS_RUN]?.terminal).toBe(true)
+    expect(unavailable(state)).toBe(true)
+  })
+
+  it.each(['failed', 'cancelled'])('summary %s is terminal too', summary => {
+    const state = noSnapshot(nsLive(summary))
+    expect(state.connection).toBe('closed')
+    expect(state.runs[NS_RUN]?.status).toBe(summary)
+    expect(unavailable(state)).toBe(true)
+  })
+
+  it('no summary: no-snapshot then a terminal status frame shows the status and the unavailable state, never reconnecting', () => {
+    const afterReset = noSnapshot(nsLive())
+    expect(afterReset.connection).toBe('live')
+    expect(afterReset.shouldReconnect).toBe(false)
+    expect(afterReset.retryCount).toBe(0)
+    expect(unavailable(afterReset)).toBe(false)
+    const state = statusFrame(afterReset, TERMINAL_STATUS)
+    expect(state.connection).not.toBe('reconnecting')
+    expect(state.connection).toBe('closed')
+    expect(state.retryCount).toBe(0)
+    expect(state.runs[NS_RUN]?.status).toBe('succeeded')
+    expect(unavailable(state)).toBe(true)
+  })
+
+  it('summary running: no-snapshot, a running status, then output renders output with no unavailable state', () => {
+    let state = noSnapshot(nsLive('running'))
+    expect(state.connection).toBe('live')
+    expect(state.retryCount).toBe(0)
+    state = statusFrame(state, ACTIVE_STATUS)
+    expect(state.runs[NS_RUN]?.status).toBe('running')
+    expect(unavailable(state)).toBe(false)
+    state = outputFrame(state, 0, 'hello')
+    expect(state.connection).toBe('live')
+    expect(state.runs[NS_RUN]?.outputText).toBe('hello')
+    expect(unavailable(state)).toBe(false)
+  })
+
+  it('a non-terminal summary (queued) does not count as terminal', () => {
+    const state = noSnapshot(nsLive('queued'))
+    expect(state.connection).toBe('live')
+    expect(state.shouldReconnect).toBe(false)
+    expect(unavailable(state)).toBe(false)
+  })
+
+  it('a run already terminal in the stream closes on no-snapshot, as before', () => {
+    const terminal = statusFrame(nsLive(), TERMINAL_STATUS)
+    const live: StreamState = {...terminal, connection: 'live'}
+    const state = noSnapshot(live)
+    expect(state.connection).toBe('closed')
+    expect(state.shouldReconnect).toBe(false)
+    expect(state.retryCount).toBe(live.retryCount)
+    expect(state.runs[NS_RUN]?.status).toBe('succeeded')
+  })
+
+  it('a known-terminal run that already has output is not marked unavailable', () => {
+    const withOutput = outputFrame(nsLive(), 0, 'final answer')
+    const terminal = statusFrame(withOutput, TERMINAL_STATUS)
+    const state = noSnapshot({...terminal, connection: 'live'})
+    expect(state.connection).toBe('closed')
+    expect(state.runs[NS_RUN]?.outputText).toBe('final answer')
+    expect(unavailable(state)).toBe(false)
+  })
+
+  it('snapshot-missing, then output, then terminal: no unavailable state', () => {
+    let state = noSnapshot(nsLive())
+    state = outputFrame(state, 0, 'partial')
+    state = statusFrame(state, TERMINAL_STATUS)
+    expect(state.connection).toBe('closed')
+    expect(state.runs[NS_RUN]?.outputText).toBe('partial')
+    expect(unavailable(state)).toBe(false)
+  })
+
+  it('a terminal status with no preceding no-snapshot never shows the unavailable state', () => {
+    const state = statusFrame(nsLive(), TERMINAL_STATUS)
+    expect(unavailable(state)).toBe(false)
+  })
+
+  it('snapshot-missing marks only the run that was reset', () => {
+    const state = statusFrame(noSnapshot(nsLive()), {...TERMINAL_STATUS, runId: 'run-other'})
+    expect(state.runs['run-other']?.outputUnavailable).not.toBe(true)
+  })
+
+  it.each(['shutdown', 'overflow', 'writer-error'])('other reset reason %s still reconnects and spends a retry', reason => {
+    const before = nsLive('succeeded')
+    const state = nextStreamState(before, {type: 'reset', data: {runId: NS_RUN, reason}} as never)
+    expect(state.connection).toBe('reconnecting')
+    expect(state.shouldReconnect).toBe(true)
+    expect(state.retryCount).toBe(before.retryCount + 1)
+    expect(unavailable(state)).toBe(false)
+  })
+
+  it('reason terminal still closes, and a summary status does not turn max-duration into a close', () => {
+    expect(nextStreamState(nsLive('succeeded'), {type: 'reset', data: {runId: NS_RUN, reason: 'terminal'}}).connection).toBe('closed')
+    const active = statusFrame(nsLive('succeeded'), ACTIVE_STATUS)
+    const state = nextStreamState(active, {type: 'reset', data: {runId: NS_RUN, reason: 'max-duration'}})
+    expect(state.connection).toBe('reconnecting')
+  })
+})
+
+describe('initOperatorStream — expired snapshot DOM (#583)', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  const RUN = 'run-abc'
+  const record = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+  const readyRecord = record('ready', {contractVersion: PINNED_CONTRACT_VERSION})
+  const resetRecord = record('reset', {runId: RUN, reason: 'no-snapshot'})
+
+  // The gateway keeps the subscription open after `reset`: one chunk, then a reader that never ends.
+  async function paint(records: string[], summaryStatus?: string) {
+    const statusEl = makeFakeEl('span')
+    statusEl.classList.add = (cls: string) => {
+      statusEl.className = `${statusEl.className} ${cls}`.trim()
+    }
+    const outputEl = makeFakeEl('pre')
+    outputEl.hidden = true
+    const noticeEl = makeFakeEl('div')
+    let read = 0
+    vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag)})
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, headers: {get: () => 'text/event-stream'},
+      body: {getReader: () => ({read: async () => read++ === 0
+        ? {done: false, value: new TextEncoder().encode(records.join(''))}
+        : new Promise(() => {})})},
+    }))
+    const handle = initOperatorStream({
+      runId: RUN,
+      statusEl: statusEl as never,
+      noticeEl: noticeEl as never,
+      outputEl: outputEl as never,
+      ...(summaryStatus === undefined ? {} : {summaryStatus: summaryStatus as never}),
+    })
+    await new Promise(resolve => setTimeout(resolve, 30))
+    handle.close()
+    return {statusEl, outputEl, noticeEl}
+  }
+
+  it('summary succeeded + reset no-snapshot: status Succeeded, unavailable text in the output region, empty notice', async () => {
+    const {statusEl, outputEl, noticeEl} = await paint([readyRecord, resetRecord], 'succeeded')
+    expect(statusEl.textContent).toBe('Succeeded')
+    expect(outputEl.textContent).toBe('Output no longer available.')
+    expect(outputEl.hidden).toBe(false)
+    expect(noticeEl.textContent).toBe('')
+    expect(noticeEl.hidden).toBe(true)
+    expect(noticeEl.dataset.connectionState).toBe('closed')
+  })
+
+  it('no summary + reset no-snapshot + terminal status frame: status shown, unavailable text, empty notice', async () => {
+    const {statusEl, outputEl, noticeEl} = await paint([readyRecord, resetRecord, record('status', TERMINAL_STATUS)])
+    expect(statusEl.textContent).toBe('Succeeded')
+    expect(outputEl.textContent).toBe('Output no longer available.')
+    expect(noticeEl.textContent).toBe('')
+    expect(noticeEl.hidden).toBe(true)
+    expect(noticeEl.dataset.connectionState).not.toBe('reconnecting')
+  })
+
+  it('no summary + reset no-snapshot and nothing else: stays live with an empty notice, not "Connecting"', async () => {
+    const {outputEl, noticeEl} = await paint([readyRecord, resetRecord])
+    expect(noticeEl.dataset.connectionState).toBe('live')
+    expect(noticeEl.textContent).toBe('')
+    expect(noticeEl.hidden).toBe(true)
+    expect(outputEl.hidden).toBe(true)
+    expect(outputEl.textContent).toBe('')
+  })
+
+  it('summary running + reset + running status + output: output renders, no unavailable state', async () => {
+    const {statusEl, outputEl, noticeEl} = await paint([
+      readyRecord,
+      resetRecord,
+      record('status', ACTIVE_STATUS),
+      record('output', {runId: RUN, text: 'working on it', final: false, seq: 0}),
+    ], 'running')
+    expect(statusEl.textContent).toBe('Running')
+    expect(outputEl.textContent).toBe('working on it')
+    expect(outputEl.hidden).toBe(false)
+    expect(noticeEl.textContent).toBe('')
+    expect(noticeEl.dataset.connectionState).toBe('live')
+  })
+})
+
+describe('initOperatorStream — releases the socket on client-side terminal close (#583)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  const RUN = 'run-abc'
+  const record = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+  const readyRecord = record('ready', {contractVersion: PINNED_CONTRACT_VERSION})
+  const resetRecord = record('reset', {runId: RUN, reason: 'no-snapshot'})
+
+  // One chunk, then either a reader that never ends or a server-side `done`. A read pending
+  // when the request is aborted rejects, like a real fetch body.
+  async function run(records: string[], opts: {summaryStatus?: string; serverEnds?: boolean} = {}) {
+    vi.useFakeTimers()
+    const statusEl = makeFakeEl('span')
+    const outputEl = makeFakeEl('pre')
+    const noticeEl = makeFakeEl('div')
+    let signal: AbortSignal | undefined
+    let reads = 0
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: {signal: AbortSignal}) => {
+      signal = init.signal
+      return {
+        ok: true, status: 200, headers: {get: () => 'text/event-stream'},
+        body: {getReader: () => ({read: async () => {
+          if (reads++ === 0) return {done: false, value: new TextEncoder().encode(records.join(''))}
+          if (opts.serverEnds === true) return {done: true, value: undefined}
+          return new Promise((_, reject) => {
+            init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+          })
+        }})},
+      }
+    })
+    vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag)})
+    vi.stubGlobal('fetch', fetchMock)
+    const handle = initOperatorStream({
+      runId: RUN,
+      statusEl: statusEl as never,
+      noticeEl: noticeEl as never,
+      outputEl: outputEl as never,
+      ...(opts.summaryStatus === undefined ? {} : {summaryStatus: opts.summaryStatus as never}),
+    })
+    // Past any reconnect backoff, so a scheduled reconnect would have fired.
+    await vi.advanceTimersByTimeAsync(10_000)
+    // Observed BEFORE handle.close(), which aborts on its own.
+    const aborted = signal?.aborted ?? false
+    const connectionState = noticeEl.dataset.connectionState
+    handle.close()
+    return {aborted, connectionState, fetchCalls: fetchMock.mock.calls.length, statusEl, outputEl, noticeEl}
+  }
+
+  it('summary succeeded + ready + reset no-snapshot with a never-ending reader aborts the request and stays closed', async () => {
+    const result = await run([readyRecord, resetRecord], {summaryStatus: 'succeeded'})
+    expect(result.aborted).toBe(true)
+    expect(result.connectionState).toBe('closed')
+    expect(result.fetchCalls).toBe(1)
+    expect(result.statusEl.textContent).toBe('Succeeded')
+    expect(result.outputEl.textContent).toBe('Output no longer available.')
+    expect(result.noticeEl.textContent).toBe('')
+  })
+
+  it('a terminal status frame followed by the server ending the stream stays closed with no abort-induced state change', async () => {
+    const result = await run([readyRecord, record('status', TERMINAL_STATUS)], {serverEnds: true})
+    expect(result.connectionState).toBe('closed')
+    expect(result.fetchCalls).toBe(1)
+    expect(result.statusEl.textContent).toBe('Succeeded')
+    expect(result.noticeEl.textContent).toBe('')
+    expect(result.noticeEl.hidden).toBe(true)
+  })
+
+  it('a contract-version drift close aborts the request and neither reopens nor reconnects', async () => {
+    const result = await run([record('ready', {contractVersion: '9.9.9'})])
+    expect(result.aborted).toBe(true)
+    expect(result.connectionState).toBe('drift')
+    expect(result.fetchCalls).toBe(1)
+  })
+})
+
+describe('expired snapshot — selector/emitter parity (#583)', () => {
+  it('styles the class the unavailable state emits', async () => {
+    const fs = await import('node:fs/promises')
+    const [js, css] = await Promise.all([
+      fs.readFile('public/operator-stream.js', 'utf8'),
+      fs.readFile('web/src/index.css', 'utf8'),
+    ])
+    expect(js).toContain("'run-output-unavailable'")
+    expect(css).toMatch(/\.run-output-unavailable(?![\w-])/)
   })
 })

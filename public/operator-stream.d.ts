@@ -406,6 +406,12 @@ export interface RunEntry {
   /** True once a question reconcile result has been applied for this run. Gates the `running` fallback. */
   readonly questionReconcileDone?: boolean
   /**
+   * True when the run's output is gone because its gateway snapshot expired (#583): set by a
+   * `reset` (`no-snapshot`) for a run known terminal, or by a terminal status frame after such a
+   * reset with no output since. Cleared by an output frame. Rendered as fixed in-card copy.
+   */
+  readonly outputUnavailable?: boolean
+  /**
    * True while a browser-dispatched cancel POST is outstanding for this run.
    * Internal-only — set by the `cancel` action, cleared by a terminal status
    * frame from any source (terminal-wins). Never exposed via toSafeRunView.
@@ -423,11 +429,25 @@ export interface CancelActionEvent {
   readonly data: {readonly runId: string}
 }
 
+/** Statuses a run-list summary can carry. */
+export type RunSummaryStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+
 export interface StreamState {
   readonly connection: ConnectionStatus
   readonly runs: Readonly<Record<string, RunEntry>>
   readonly retryCount: number
   readonly shouldReconnect: boolean
+  /**
+   * The run-list summary status for the stream's run, when the caller has one. A terminal value lets
+   * a `reset` (`no-snapshot`) close the card with that status and the unavailable state, without
+   * waiting for a status frame the gateway may never send (#583).
+   */
+  readonly summaryStatus?: RunSummaryStatus
+  /**
+   * Null-prototype map of runId → true after a `reset` (`no-snapshot`) left the run live. A terminal
+   * status frame with no output since shows the unavailable state; an output frame clears the mark.
+   */
+  readonly snapshotMissing?: Readonly<Record<string, true>>
 }
 
 // ---------------------------------------------------------------------------
@@ -636,6 +656,12 @@ export interface InitOptions {
   readonly checkoutEl?: (HTMLElement & {hidden: boolean}) | null
   /** Injectable cancel client for testing. If absent, buildCancelClient() is used. */
   readonly cancelClient?: CancelControlClient | null
+  /**
+   * The run-list summary status for this run, when the caller has one. A terminal value lets an
+   * expired run (`reset` with `no-snapshot`) show its status plus "Output no longer available."
+   * without a status frame. Unknown values are ignored.
+   */
+  readonly summaryStatus?: RunSummaryStatus
 }
 
 export declare function initOperatorStream(opts: InitOptions): StreamHandle

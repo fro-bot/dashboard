@@ -541,6 +541,12 @@
   color: var(--color-text-muted);
 }
 
+/* Expired snapshot (#583): a quiet sentence, not terminal output. */
+.run-output-unavailable {
+  font-family: var(--font-body);
+  white-space: normal;
+}
+
 [data-role="run-output-coalesced"] {
   display: inline-block;
   position: sticky;
