@@ -28,12 +28,45 @@ inlined boundary types for RunPhase/Surface/RunState).
   Accept/reject behavior is unchanged. The dashboard server reader calls both parsers on status
   frames. It applies no length caps or sanitizing: the browser is the sanitization
   boundary, so any future server-side consumer must apply the same caps first.
+- `output.ts` — carries upstream's note that after `reset` (`no-snapshot`) a terminal run sends
+  only the terminal status frame and no output frame, reworded to fit the dashboard's existing
+  comment. `run-status.ts` adds `waiting_for_question` to `OperatorWebStatus`, in upstream's
+  position and wording (precedence: `waiting_for_approval` wins).
+- `question-frame.ts` — vendored from the operator-contract barrel. The upstream file is
+  types only, so its types are copied verbatim, apart from one comment reworded so no
+  version literal remains and whitespace changes from the repo's lint autofix. Everything after the marker comment near the end of the file is
+  dashboard-authored and has no upstream counterpart. The deviations, all additions:
+  - `QUESTION_DECISION_STATES` and `QUESTION_INVALID_REASONS` are exported runtime lists of the
+    decision states and invalid-answer reasons (a union is erased at runtime, so coverage tests
+    and the browser need values to read). Compile-time checks
+    (`QuestionDecisionStatesAreExact`, `QuestionInvalidReasonsAreExact`) fail the type check if a
+    list and its union differ in either direction.
+  - The upstream bounds are exported as constants (`QUESTION_HEADER_MAX_LENGTH`,
+    `QUESTION_TEXT_MAX_LENGTH`, `QUESTION_OPTION_LABEL_MAX_LENGTH`,
+    `QUESTION_OPTION_DESCRIPTION_MAX_LENGTH`, `MAX_QUESTIONS_PER_REQUEST`,
+    `MAX_OPTIONS_PER_QUESTION`). They come from the gateway's `approvals/question-detail.ts`
+    build site, not from the contract barrel.
+  - `sanitizeQuestionText` applies the shared text rule: tab, newline and carriage return become
+    spaces; other C0 and C1 controls, DEL, and every Unicode bidi control (including U+061C and
+    the marks U+200E/U+200F) are removed. The upstream build site removes a narrower set (it keeps
+    the marks and U+061C), so the dashboard removes strictly more. It is the same bidi set the
+    browser's checkout sanitizer uses.
+  - `parseQuestionFrame` validates a `question` frame payload. The gateway builds the same frames
+    but ships no parser, so this is locally authored. It is closed at every level: a key outside
+    the contract (including an own `__proto__`) rejects the frame, and the result is rebuilt field
+    by field, so no input object reaches a caller. It enforces the bounds above on the sanitized
+    text and rejects, never truncates, an over-bound or malformed frame. A request with zero
+    questions and a question with zero options both parse. This differs from the checkout
+    parsers, which drop extra keys; a question frame is a closed wire shape.
+  - `PendingQuestionDTO`, the decision request types, and the decision response types are
+    copied as upstream has them. The dashboard server has no caller for them yet.
 - `sse-frames.ts` — vendored from the gateway's web/sse/ surface
   (packages/gateway/src/web/sse/). This is a parallel surface to
   the contract barrel; it is NOT part of the upstream operator-contract barrel
   export. The SSE frame types (ReadyFrame, StatusFrameData, ResetFrameData,
   RunStreamFrame, ResetReason) are re-exported from the dashboard's contract
-  barrel for convenience.
+  barrel for convenience. `RunStreamFrame` carries a `question` variant whose data is
+  `QuestionFrameData`.
 - `repo-summary.ts` — locally authored (PR #968 adds RepoSummary to the upstream
   contract, but no upstream parse helper exists). The type definition
   is faithful to the upstream interface; the parse guards follow the same

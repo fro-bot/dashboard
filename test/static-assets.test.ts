@@ -13,6 +13,8 @@ import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
 import {Buffer} from 'node:buffer'
 import process from 'node:process'
 import {afterEach, describe, expect, it} from 'vitest'
+import {PINNED_CONTRACT_VERSION} from '../public/operator-stream.js'
+import {OPERATOR_CONTRACT_VERSION} from '../src/gateway/operator-contract/version.ts'
 import {buildDashboardApp} from '../src/server.ts'
 import {SessionManager} from '../src/session.ts'
 
@@ -868,6 +870,10 @@ describe('security — operator-stream.js contract pin and checkout-field bounda
     expect(code).toMatch(/export const PINNED_CONTRACT_VERSION = ['"]\d+\.\d+\.\d+['"]/)
     expect(code).not.toMatch(/from\s+['"][^'"]*(?:src\/|\.ts['"])/)
     expect(code).not.toMatch(/\bimport\s*\(/)
+  })
+
+  it('the browser pin equals the vendored contract version (every pin moves together)', () => {
+    expect(PINNED_CONTRACT_VERSION).toBe(OPERATOR_CONTRACT_VERSION)
   })
 
   it('renders checkout provenance and preparation through no HTML sink and puts no raw field in a class or CSS variable', async () => {

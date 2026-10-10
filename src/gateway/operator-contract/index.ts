@@ -55,6 +55,35 @@ export {
 } from './provenance.ts'
 export type {PushHandoffState, PushSubscriptionMetadata, VapidKeyResponse} from './push.ts'
 export {parsePushHandoffState, parsePushSubscriptionMetadata, parseVapidKeyResponse} from './push.ts'
+export type {
+  PendingQuestionDTO,
+  PendingQuestionsResponse,
+  QuestionAnswerChoice,
+  QuestionAnswerRequest,
+  QuestionDecisionErrorResponse,
+  QuestionDecisionInvalidReason,
+  QuestionDecisionRequest,
+  QuestionDecisionResponse,
+  QuestionDecisionStatesAreExact,
+  QuestionFrameData,
+  QuestionInvalidReasonsAreExact,
+  QuestionOptionDetail,
+  QuestionPromptDetail,
+  QuestionRequestDetail,
+  QuestionSkipRequest,
+} from './question-frame.ts'
+export {
+  MAX_OPTIONS_PER_QUESTION,
+  MAX_QUESTIONS_PER_REQUEST,
+  parseQuestionFrame,
+  QUESTION_DECISION_STATES,
+  QUESTION_HEADER_MAX_LENGTH,
+  QUESTION_INVALID_REASONS,
+  QUESTION_OPTION_DESCRIPTION_MAX_LENGTH,
+  QUESTION_OPTION_LABEL_MAX_LENGTH,
+  QUESTION_TEXT_MAX_LENGTH,
+  sanitizeQuestionText,
+} from './question-frame.ts'
 export {assertRedactionApplied, AUTHORIZATION_OBLIGATION, REDACTION_OBLIGATION} from './redaction.ts'
 export type {RedactionContext} from './redaction.ts'
 export type {RepoSummary} from './repo-summary.ts'

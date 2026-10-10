@@ -12,6 +12,9 @@ import type {
   OperatorRunStatus,
   OperatorUpdateFailureReason,
   OperatorWebStatus,
+  QuestionDecisionInvalidReason,
+  QuestionDecisionResponse,
+  QuestionFrameData,
   ReadyFrame,
   RepoSummary,
   ResetFrameData,
@@ -42,6 +45,8 @@ import {
   CHECKOUT_OPERATIONS,
   CHECKOUT_REFUSAL_REASONS,
   LAYOUT_REFUSAL_REASONS,
+  MAX_OPTIONS_PER_QUESTION,
+  MAX_QUESTIONS_PER_REQUEST,
   OBSTRUCTION_KINDS,
   OPERATOR_CONTRACT_VERSION,
   parseOperatorCancelResponse,
@@ -51,12 +56,19 @@ import {
   parseOperatorError,
   parseOperatorOk,
   parseOperatorSessionInfo,
+  parseQuestionFrame,
   parseRepoSummary,
   parseRepoSummaryList,
   parseRunsListResponse,
   parseRunSummary,
   parseRunSummaryList,
   PHASE_TO_WEB_STATUS,
+  QUESTION_DECISION_STATES,
+  QUESTION_HEADER_MAX_LENGTH,
+  QUESTION_INVALID_REASONS,
+  QUESTION_OPTION_DESCRIPTION_MAX_LENGTH,
+  QUESTION_OPTION_LABEL_MAX_LENGTH,
+  QUESTION_TEXT_MAX_LENGTH,
   RUN_INDEX_CAP,
   UPDATE_FAILURE_REASONS,
 } from '../src/gateway/operator-contract/index.ts'
@@ -188,7 +200,31 @@ const checkApprovalRunStreamFrame: RunStreamFrame = {
     settled: false,
   },
 }
-export {checkApprovalRunStreamFrame, checkReadyFrame, checkResetFrame, checkStatusFrame}
+// Question frame as RunStreamFrame union member: both discriminated variants
+const checkQuestionOpenRunStreamFrame: RunStreamFrame = {
+  type: 'question',
+  data: {
+    runId: 'run-001',
+    requestID: 'req-001',
+    settled: false,
+    questions: [{header: 'h', text: 't', options: [{label: 'l', description: 'd'}], multiple: false, custom: true}],
+  },
+}
+const checkQuestionSettleRunStreamFrame: RunStreamFrame = {
+  type: 'question',
+  data: {runId: 'run-001', requestID: 'req-001', settled: true},
+}
+// waiting_for_question is a member of the web status union
+const checkWaitingForQuestionStatus: OperatorWebStatus = 'waiting_for_question'
+export {
+  checkApprovalRunStreamFrame,
+  checkQuestionOpenRunStreamFrame,
+  checkQuestionSettleRunStreamFrame,
+  checkReadyFrame,
+  checkResetFrame,
+  checkStatusFrame,
+  checkWaitingForQuestionStatus,
+}
 
 const CONTRACT_DIR = join(import.meta.dirname, '../src/gateway/operator-contract')
 
@@ -206,6 +242,7 @@ describe('OPERATOR_CONTRACT_VERSION', () => {
     expect(files).toContain('version.ts')
     expect(files).toContain('README.md')
     expect(files).toContain('provenance.ts')
+    expect(files).toContain('question-frame.ts')
 
     for (const name of files) {
       const text = readFileSync(join(CONTRACT_DIR, name), 'utf8')
@@ -420,6 +457,184 @@ describe('provenance runtime vocabularies', () => {
       expect(parsed?.outcome, reason).toBe('refused')
     }
     expect(parseOperatorCheckoutPreparation({outcome: 'refused', reason: 'fixture-unknown-reason'})).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Question frame: runtime vocabularies and parser
+// ---------------------------------------------------------------------------
+
+// Exhaustive over the unions: adding or removing a member without updating a record fails tsc.
+const QUESTION_STATE_RECORD = {
+  claimed: true,
+  already_claimed: true,
+  already_settled: true,
+  failed_to_settle: true,
+} satisfies Record<QuestionDecisionResponse['state'], true>
+
+const QUESTION_REASON_RECORD = {
+  malformed: true,
+  'arity-mismatch': true,
+  'unknown-option': true,
+  'multiple-not-allowed': true,
+  'empty-value': true,
+  'text-too-long': true,
+} satisfies Record<QuestionDecisionInvalidReason, true>
+
+describe('question runtime vocabularies', () => {
+  it('decision states: the exported list equals the union, with no duplicates', () => {
+    expect([...QUESTION_DECISION_STATES].toSorted()).toEqual(Object.keys(QUESTION_STATE_RECORD).toSorted())
+    expect(new Set(QUESTION_DECISION_STATES).size).toBe(QUESTION_DECISION_STATES.length)
+  })
+
+  it('invalid-answer reasons: the exported list equals the union, with no duplicates', () => {
+    expect([...QUESTION_INVALID_REASONS].toSorted()).toEqual(Object.keys(QUESTION_REASON_RECORD).toSorted())
+    expect(new Set(QUESTION_INVALID_REASONS).size).toBe(QUESTION_INVALID_REASONS.length)
+  })
+
+  it('exports the upstream bounds', () => {
+    expect(QUESTION_HEADER_MAX_LENGTH).toBe(128)
+    expect(QUESTION_TEXT_MAX_LENGTH).toBe(4096)
+    expect(QUESTION_OPTION_LABEL_MAX_LENGTH).toBe(256)
+    expect(QUESTION_OPTION_DESCRIPTION_MAX_LENGTH).toBe(1024)
+    expect(MAX_QUESTIONS_PER_REQUEST).toBe(8)
+    expect(MAX_OPTIONS_PER_QUESTION).toBe(64)
+  })
+})
+
+describe('parseQuestionFrame', () => {
+  const question = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+    header: 'Pick one',
+    text: 'Which path?',
+    options: [{label: 'A', description: 'first'}],
+    multiple: false,
+    custom: true,
+    ...overrides,
+  })
+  const openFrame = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+    runId: 'run-001',
+    requestID: 'req-001',
+    settled: false,
+    questions: [question()],
+    ...overrides,
+  })
+
+  it('parses an open frame with two questions into a closed object', () => {
+    const input = openFrame({
+      questions: [
+        question(),
+        question({header: 'Second', text: 'More?', options: [{label: 'X', description: 'x'}, {label: 'Y', description: 'y'}], multiple: true, custom: false}),
+      ],
+    })
+    const parsed = parseQuestionFrame(input)
+    expect(parsed).toEqual(input)
+    expect(parsed).not.toBe(input)
+    if (parsed === null || parsed.settled) throw new Error('expected open frame')
+    expect(parsed.questions).not.toBe(input.questions)
+    expect(parsed.questions[0]).not.toBe((input.questions as unknown[])[0])
+  })
+
+  it('parses a settle frame to exactly {runId, requestID, settled:true}', () => {
+    const parsed = parseQuestionFrame({runId: 'run-001', requestID: 'req-001', settled: true})
+    expect(parsed).toEqual({runId: 'run-001', requestID: 'req-001', settled: true})
+  })
+
+  it('accepts zero options, custom:false, multiple:true, and a request with zero questions', () => {
+    const noOptions = parseQuestionFrame(openFrame({questions: [question({options: []})]}))
+    expect(noOptions).not.toBeNull()
+    const flags = parseQuestionFrame(openFrame({questions: [question({multiple: true, custom: false})]}))
+    expect(flags).not.toBeNull()
+    const zeroQuestions = parseQuestionFrame(openFrame({questions: []}))
+    expect(zeroQuestions).toEqual({runId: 'run-001', requestID: 'req-001', settled: false, questions: []})
+  })
+
+  it('accepts exactly the upstream bounds', () => {
+    const atBounds = openFrame({
+      questions: Array.from({length: 8}, () =>
+        question({
+          header: 'h'.repeat(128),
+          text: 't'.repeat(4096),
+          options: Array.from({length: 64}, () => ({label: 'l'.repeat(256), description: 'd'.repeat(1024)})),
+        }),
+      ),
+    })
+    expect(parseQuestionFrame(atBounds)).not.toBeNull()
+  })
+
+  it('converts tab, newline and carriage return to spaces', () => {
+    const parsed = parseQuestionFrame(
+      openFrame({questions: [question({text: 'a\tb\nc\rd', options: [{label: 'x\ty', description: 'p\nq'}]})]}),
+    )
+    if (parsed === null || parsed.settled) throw new Error('expected open frame')
+    expect(parsed.questions[0]?.text).toBe('a b c d')
+    expect(parsed.questions[0]?.options[0]).toEqual({label: 'x y', description: 'p q'})
+  })
+
+  it('removes C0, C1 and bidi controls, including U+061C, but keeps ordinary text', () => {
+    const dirty = 'a\u0000b\u001Bc\u007Fd\u0085e\u061Cf\u200Eg\u200Fh\u202Ei\u2066j\u2069k Ünïcode 日本'
+    const parsed = parseQuestionFrame(openFrame({questions: [question({header: dirty, text: dirty})]}))
+    if (parsed === null || parsed.settled) throw new Error('expected open frame')
+    expect(parsed.questions[0]?.header).toBe('abcdefghijk Ünïcode 日本')
+    expect(parsed.questions[0]?.text).toBe('abcdefghijk Ünïcode 日本')
+  })
+
+  it('measures bounds after control removal', () => {
+    const padded = `${'h'.repeat(128)}\u202E\u0000`
+    expect(parseQuestionFrame(openFrame({questions: [question({header: padded})]}))).not.toBeNull()
+  })
+
+  it.each([
+    ['9 questions', openFrame({questions: Array.from({length: 9}, () => question())})],
+    ['65 options', openFrame({questions: [question({options: Array.from({length: 65}, () => ({label: 'l', description: 'd'}))})]})],
+    ['a 129-character header', openFrame({questions: [question({header: 'h'.repeat(129)})]})],
+    ['a 4097-character text', openFrame({questions: [question({text: 't'.repeat(4097)})]})],
+    ['a 257-character label', openFrame({questions: [question({options: [{label: 'l'.repeat(257), description: 'd'}]})]})],
+    ['a 1025-character description', openFrame({questions: [question({options: [{label: 'l', description: 'd'.repeat(1025)}]})]})],
+    ['a non-boolean multiple', openFrame({questions: [question({multiple: 'yes'})]})],
+    ['a missing custom', openFrame({questions: [question({custom: undefined})]})],
+    ['a non-string header', openFrame({questions: [question({header: 5})]})],
+    ['a non-array options', openFrame({questions: [question({options: 'A'})]})],
+    ['a non-object option', openFrame({questions: [question({options: ['A']})]})],
+    ['a non-array questions', openFrame({questions: {}})],
+    ['an extra frame key', openFrame({extra: 1})],
+    ['an extra question key', openFrame({questions: [question({extra: 1})]})],
+    ['an extra option key', openFrame({questions: [question({options: [{label: 'l', description: 'd', extra: 1}]})]})],
+    ['an empty runId', openFrame({runId: ''})],
+    ['an empty requestID', openFrame({requestID: ''})],
+    ['a non-boolean settled', openFrame({settled: 'false'})],
+    ['a missing settled', openFrame({settled: undefined})],
+    ['a settle frame with questions', {runId: 'run-001', requestID: 'req-001', settled: true, questions: []}],
+    ['a settle frame with an extra key', {runId: 'run-001', requestID: 'req-001', settled: true, extra: 1}],
+    ['an open frame without questions', {runId: 'run-001', requestID: 'req-001', settled: false}],
+  ])('rejects %s', (_name, input) => {
+    expect(parseQuestionFrame(input)).toBeNull()
+  })
+
+  it.each([null, undefined, 'x', 5, [], [openFrame()]])('rejects a non-object value (%#)', input => {
+    expect(parseQuestionFrame(input)).toBeNull()
+  })
+
+  it('rejects rather than truncates: an over-bound string never yields a shortened result', () => {
+    const parsed = parseQuestionFrame(openFrame({questions: [question({text: 't'.repeat(5000)})]}))
+    expect(parsed).toBeNull()
+  })
+
+  it('never passes an own __proto__ key through', () => {
+    const polluted = JSON.parse(
+      '{"runId":"run-001","requestID":"req-001","settled":false,"questions":[{"header":"h","text":"t","options":[],"multiple":false,"custom":true,"__proto__":{"polluted":true}}]}',
+    ) as unknown
+    const parsed = parseQuestionFrame(polluted)
+    expect(parsed).toBeNull()
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+
+    const topLevel = JSON.parse('{"runId":"run-001","requestID":"req-001","settled":true,"__proto__":{"polluted":true}}') as unknown
+    const settle = parseQuestionFrame(topLevel)
+    expect(settle === null || !Object.hasOwn(settle, '__proto__')).toBe(true)
+  })
+
+  it('returns a value assignable to QuestionFrameData', () => {
+    const parsed: QuestionFrameData | null = parseQuestionFrame({runId: 'r', requestID: 'q', settled: true})
+    expect(parsed?.settled).toBe(true)
   })
 })
 

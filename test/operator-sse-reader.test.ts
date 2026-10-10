@@ -2651,3 +2651,210 @@ describe('createOperatorSseReader — checkout fields through the reader', () =>
     expect(events.filter(e => e.type === 'status')).toHaveLength(0)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Question frames and the waiting_for_question status
+// ---------------------------------------------------------------------------
+
+const SENTINEL = 'SENTINEL-question-secret-7f3a'
+
+function questionPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    runId: 'run-001',
+    requestID: 'req-001',
+    settled: false,
+    questions: [
+      {
+        header: 'Pick one',
+        text: 'Which path?',
+        options: [{label: 'A', description: 'first'}],
+        multiple: false,
+        custom: true,
+      },
+    ],
+    ...overrides,
+  }
+}
+
+function sseQuestion(payload: unknown): string {
+  return `event: question\ndata: ${JSON.stringify(payload)}\n\n`
+}
+
+function readyText(version: string = OPERATOR_CONTRACT_VERSION): string {
+  return `event: ready\ndata: {"contractVersion":"${version}"}\n\n`
+}
+
+async function runReader(
+  sseText: string,
+  logger?: Logger,
+): Promise<{events: RunStreamFrame[]; errors: Error[]}> {
+  const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseText]))
+  const reader = createOperatorSseReader(logger === undefined ? {fetchImpl} : {fetchImpl, logger})
+  const events: RunStreamFrame[] = []
+  const errors: Error[] = []
+  await reader.open('/operator/runs/run-001/stream', {
+    onEvent: frame => events.push(frame),
+    onError: err => errors.push(err),
+    onClose: () => {},
+  })
+  return {events, errors}
+}
+
+describe('createOperatorSseReader — adjacent contract versions are rejected', () => {
+  const [major, minor, patch] = OPERATOR_CONTRACT_VERSION.split('.').map(Number) as [number, number, number]
+  const previousMinor = `${major}.${minor - 1}.${patch}`
+  const nextMinor = `${major}.${minor + 1}.${patch}`
+
+  it('accepts a ready frame at the pinned version', async () => {
+    const {events, errors} = await runReader(readyText() + sseQuestion(questionPayload()))
+    expect(errors).toHaveLength(0)
+    expect(events.map(e => e.type)).toEqual(['ready', 'question'])
+  })
+
+  it.each([
+    ['the previous minor', previousMinor],
+    ['the next minor', nextMinor],
+  ])('fails closed on %s and dispatches no question frame', async (_name, version) => {
+    const {events, errors} = await runReader(readyText(version) + sseQuestion(questionPayload()))
+    expect(errors).toHaveLength(1)
+    expect(errors[0]?.message).toContain('contract-drift')
+    expect(events).toHaveLength(0)
+  })
+})
+
+describe('parseSseChunk — question frame', () => {
+  it('parses an open frame with two questions into a closed object', () => {
+    const payload = questionPayload({
+      questions: [
+        {header: 'One', text: 'First?', options: [{label: 'A', description: 'a'}], multiple: false, custom: true},
+        {header: 'Two', text: 'Second?', options: [], multiple: true, custom: false},
+      ],
+    })
+    const results = parseSseChunk(sseQuestion(payload))
+    expect(results).toHaveLength(1)
+    const result = results[0]
+    if (result === undefined || !result.success) throw new Error('expected success')
+    expect(result.frame).toEqual({type: 'question', data: payload})
+  })
+
+  it('parses a settle frame to {runId, requestID, settled:true}', () => {
+    const results = parseSseChunk(sseQuestion({runId: 'run-001', requestID: 'req-001', settled: true}))
+    const result = results[0]
+    if (result === undefined || !result.success) throw new Error('expected success')
+    expect(result.frame).toEqual({type: 'question', data: {runId: 'run-001', requestID: 'req-001', settled: true}})
+  })
+
+  it('parses zero options, custom:false, multiple:true, and zero questions', () => {
+    const flags = parseSseChunk(
+      sseQuestion(questionPayload({questions: [{header: 'h', text: 't', options: [], multiple: true, custom: false}]})),
+    )
+    expect(flags[0]?.success).toBe(true)
+    const zero = parseSseChunk(sseQuestion(questionPayload({questions: []})))
+    expect(zero[0]?.success).toBe(true)
+  })
+
+  it('converts tab and newline to spaces and removes bidi controls', () => {
+    const payload = questionPayload({
+      questions: [{header: 'a\tb', text: 'c\nd\u202Ee\u061Cf', options: [], multiple: false, custom: true}],
+    })
+    const result = parseSseChunk(sseQuestion(payload))[0]
+    if (result === undefined || !result.success || result.frame.type !== 'question' || result.frame.data.settled) {
+      throw new Error('expected open question frame')
+    }
+    expect(result.frame.data.questions[0]?.header).toBe('a b')
+    expect(result.frame.data.questions[0]?.text).toBe('c def')
+  })
+
+  const goodQuestion = {header: 'h', text: 't', options: [], multiple: false, custom: true}
+  it.each([
+    ['9 questions', questionPayload({questions: Array.from({length: 9}, () => goodQuestion)})],
+    [
+      '65 options',
+      questionPayload({
+        questions: [{...goodQuestion, options: Array.from({length: 65}, () => ({label: 'l', description: 'd'}))}],
+      }),
+    ],
+    ['a 129-character header', questionPayload({questions: [{...goodQuestion, header: 'h'.repeat(129)}]})],
+    ['a non-boolean multiple', questionPayload({questions: [{...goodQuestion, multiple: 'false'}]})],
+    ['an extra key', questionPayload({extra: true})],
+    ['an extra question key', questionPayload({questions: [{...goodQuestion, extra: true}]})],
+  ])('rejects %s with a fixed error', (_name, payload) => {
+    const results = parseSseChunk(sseQuestion(payload))
+    expect(results).toHaveLength(1)
+    const result = results[0]
+    if (result === undefined || result.success) throw new Error('expected failure')
+    expect(result.error.message).toBe('question frame failed validation')
+  })
+
+  it('never carries an own __proto__ key through', () => {
+    const text =
+      'event: question\ndata: {"runId":"run-001","requestID":"req-001","settled":false,"questions":[{"header":"h","text":"t","options":[],"multiple":false,"custom":true,"__proto__":{"polluted":true}}]}\n\n'
+    const result = parseSseChunk(text)[0]
+    if (result === undefined) throw new Error('expected a result')
+    expect(result.success).toBe(false)
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+  })
+
+  it('does not echo frame content in the error', () => {
+    const results = parseSseChunk(sseQuestion(questionPayload({[SENTINEL]: SENTINEL})))
+    const result = results[0]
+    if (result === undefined || result.success) throw new Error('expected failure')
+    expect(result.error.message).not.toContain(SENTINEL)
+  })
+})
+
+describe('createOperatorSseReader — question frames', () => {
+  it('rejects a bad question frame, logs no frame content, and keeps the stream going', async () => {
+    const {logger, messages} = makeCapturingLogger()
+    const bad = questionPayload({
+      requestID: SENTINEL,
+      questions: [{header: SENTINEL, text: SENTINEL, options: [], multiple: SENTINEL, custom: true}],
+    })
+    const settle = {runId: 'run-001', requestID: 'req-002', settled: true}
+    const {events, errors} = await runReader(readyText() + sseQuestion(bad) + sseQuestion(settle), logger)
+
+    expect(errors).toHaveLength(0)
+    expect(events.map(e => e.type)).toEqual(['ready', 'question'])
+    expect(messages.length).toBeGreaterThan(0)
+    for (const msg of messages) {
+      expect(msg).not.toContain(SENTINEL)
+    }
+  })
+
+  it('logs no sentinel even for an over-bound and extra-key frame', async () => {
+    const {logger, messages} = makeCapturingLogger()
+    const bad = questionPayload({
+      [SENTINEL]: SENTINEL,
+      questions: [{header: SENTINEL.repeat(20), text: 't', options: [], multiple: false, custom: true}],
+    })
+    const {errors} = await runReader(readyText() + sseQuestion(bad), logger)
+    expect(errors).toHaveLength(0)
+    for (const msg of messages) {
+      expect(msg).not.toContain(SENTINEL)
+    }
+  })
+
+  it('dispatches question open and settle frames in order', async () => {
+    const open = questionPayload()
+    const settle = {runId: 'run-001', requestID: 'req-001', settled: true}
+    const {events, errors} = await runReader(readyText() + sseQuestion(open) + sseQuestion(settle))
+    expect(errors).toHaveLength(0)
+    expect(events.map(e => (e.type === 'question' ? e.data.settled : e.type))).toEqual(['ready', false, true])
+  })
+
+  it('parses a status frame with waiting_for_question', async () => {
+    const payload = {
+      runId: 'run-001',
+      entityRef: 'fro-bot/agent',
+      surface: 'github',
+      phase: 'EXECUTING',
+      status: 'waiting_for_question',
+      startedAt: '2026-06-18T20:00:00Z',
+      stale: false,
+    }
+    const {events, errors} = await runReader(`${readyText()}event: status\ndata: ${JSON.stringify(payload)}\n\n`)
+    expect(errors).toHaveLength(0)
+    const status = events.find(e => e.type === 'status')
+    expect(status?.type === 'status' ? status.data.status : undefined).toBe('waiting_for_question')
+  })
+})

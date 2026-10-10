@@ -23,8 +23,10 @@
 
 import type {Logger} from '../logger.ts'
 import type {OperatorApprovalFrame} from './operator-contract/approval-frame.ts'
+import type {OperatorRunStatus} from './operator-contract/run-status.ts'
 import type {ResetReason, RunStreamFrame} from './operator-contract/sse-frames.ts'
 import {parseOperatorCheckoutPreparation, parseOperatorCheckoutProvenance} from './operator-contract/provenance.ts'
+import {parseQuestionFrame} from './operator-contract/question-frame.ts'
 import {isOperatorFailureKind} from './operator-contract/run-status.ts'
 import {OPERATOR_CONTRACT_VERSION} from './operator-contract/version.ts'
 
@@ -44,6 +46,7 @@ const VALID_STATUSES: ReadonlySet<string> = new Set([
   'blocked',
   'running',
   'waiting_for_approval',
+  'waiting_for_question',
   'succeeded',
   'failed',
   'cancelled',
@@ -196,7 +199,7 @@ function parseSseRecord(record: string): SseParseResult | null {
           entityRef: candidate.entityRef,
           surface: candidate.surface as 'github' | 'discord' | 'web',
           phase: candidate.phase as 'PENDING' | 'ACKNOWLEDGED' | 'EXECUTING' | 'COMPLETED' | 'FAILED' | 'CANCELLED',
-          status: candidate.status as 'queued' | 'blocked' | 'running' | 'waiting_for_approval' | 'succeeded' | 'failed' | 'cancelled',
+          status: candidate.status as OperatorRunStatus['status'],
           startedAt: candidate.startedAt,
           stale: candidate.stale,
           ...(failureKind === undefined ? {} : {failureKind}),
@@ -300,6 +303,16 @@ function parseSseRecord(record: string): SseParseResult | null {
       }
       return {success: true, frame: {type: 'approval', data}}
     }
+  }
+
+  if (eventName === 'question') {
+    // The vendored parser is closed and bounded: it rebuilds a fresh object or rejects the whole
+    // frame. The error is a fixed string — question text and IDs are never echoed or logged.
+    const data = parseQuestionFrame(candidate)
+    if (data === null) {
+      return {success: false, error: new Error('question frame failed validation')}
+    }
+    return {success: true, frame: {type: 'question', data}}
   }
 
   // Unknown event name — fixed error string, never echoes the name
