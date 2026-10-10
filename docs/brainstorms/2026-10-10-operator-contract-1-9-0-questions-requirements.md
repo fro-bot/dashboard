@@ -37,7 +37,7 @@ Expanding an older run already leaves "Connecting to run stream…" on screen in
   - **Actors:** A1, A2, A3
   - **Steps:** The run shows `waiting_for_question`, and the card shows the questions. The operator answers every question, then submits once. The question clears when the gateway settles it.
   - **Outcome:** The agent continues with the answer.
-  - **Escape:** The card responds to whatever the gateway reports (R10). It keeps the question while another surface's answer is still in flight. It clears the question with a neutral note if another surface already answered. It keeps the operator's input on any failure.
+  - **Escape:** The card responds to whatever the gateway reports (R10). It keeps the question while another surface's answer is still in flight, and checks again in case that answer fails. It clears the question with a neutral note if the request is no longer open. It keeps the operator's input on any failure.
   - **Covered by:** R3, R4, R5, R6, R7, R9, R10, R11, R12
 
 - F2. Skip a question
@@ -65,30 +65,31 @@ Expanding an older run already leaves "Connecting to run stream…" on screen in
 **Showing questions**
 - R3. The expanded run card shows a pending question request. For each question it shows the header, the text, each option's label and description, and whether multiple choices and free text are allowed. Each question is a labelled group. Single-choice options behave as radio buttons and multiple-choice options as checkboxes. A newly arrived question is announced politely and does not take focus.
 - R4. A request with several questions shows them all, in request order, and is answered in one submission.
-- R5. A pending question appears both when it arrives live and when the operator opens or reopens a run that already has one pending. When the operator opens a run, or the stream resets, the gateway's pending-question list replaces the card's question set. Live frames and the list are deduplicated by request ID.
-- R6. A settled request is removed from the card and never reappears. Settlement arrives as a settle frame, from any surface or the deadline. A run reaching a terminal status also clears its questions, because the gateway sends no settle frame for them. The dashboard remembers settled request IDs for the life of the page, so a late pending-question list cannot re-add one.
+- R5. A pending question appears both when it arrives live and when the operator opens or reopens a run that already has one pending. The dashboard reconciles the card against the gateway's pending-question list whenever the stream becomes live, so questions it missed live appear. Requests missing from the list leave the card. Live frames and the list are deduplicated by request ID.
+- R6. A settled request is removed from the card and never reappears. Settlement arrives as a settle frame, from any surface or the deadline, or as this page's own `claimed` or `already_settled` response. Absence from the pending list removes a request but does not settle it, because a request claimed by another surface is absent until that answer succeeds or fails. A run reaching a terminal status clears its questions, because the gateway sends no settle frame for them. Settled request IDs and unsent input are kept for the life of the page, so collapsing a card or switching runs neither re-adds a settled request nor loses a draft. A terminal status discards the drafts of the questions it clears.
 
 **Answering**
-- R7. The operator answers each question by choosing one option, or several when multiple is allowed, and/or typing free text when free text is allowed. Options are identified by their position in the question, not by their label. One answer is sent per question, in request order.
+- R7. The operator answers each question by choosing options, typing free text when free text is allowed, or both when multiple is allowed. A single-choice question takes either one option or free text, never both, because the gateway rejects the pair. If the operator enters both, the card keeps both and blocks submission until one is removed. Options start unselected. Options are identified by their position in the question, not by their label. One answer is sent per question, in request order.
 - R8. Submit unlocks only when every answerable question has an answer. A question with no options and no free text cannot be answered and is sent unanswered. Skip covers the whole request: it submits immediately, without a confirmation step, and discards anything typed or selected.
 - R9. While a submission is in flight, its controls are disabled, so one decision cannot be sent twice.
 - R10. The card's outcome follows the gateway's reported decision state, not the HTTP status:
-  - `claimed`: the question clears when its settle frame arrives.
-  - `already_settled`: a neutral "answered elsewhere" note, then the question clears.
-  - `already_claimed`: the question stays, with a neutral "being answered elsewhere" note. The gateway reopens the request if that other answer fails.
+  - `claimed`: the question clears.
+  - `already_settled`: a neutral "no longer open" note, then the question clears. The gateway gives no reason, so the copy names none.
+  - `already_claimed`: the question stays, with a neutral "being answered elsewhere" note, even though the pending list omits claimed requests. The gateway reopens the request if that other answer fails and sends no frame when it does, so the card re-checks the pending list a bounded number of times and offers a manual check.
   - `failed_to_settle`: a retryable error.
+  - Unknown outcome after a network failure: the card re-checks the pending list instead of resubmitting.
   - Invalid answer: a retryable error on the question the gateway names, or on the whole request when it names none.
   - Masked not-found: the controls are removed, as in the approval flow's can't-approve state.
 
-  The card shows only dashboard-written copy and never gateway response text. The operator's input survives every failure.
+  The card shows only dashboard-written copy and never gateway response text. The operator's input survives every failure while the request is open. Recovering from an expired session never requires reloading the page.
 - R11. Free text is held to the gateway's 4,000 UTF-16 code-unit limit before submission. Text that is empty after trimming counts as no free-text answer.
 
 **Status and notifications**
-- R12. A running run with at least one open question on the card shows `waiting_for_question`, derived the same way the dashboard derives `waiting_for_approval` from open approvals. A pending approval takes precedence over a question, and a terminal status always wins. The status has its own label everywhere the dashboard labels stream statuses.
+- R12. The dashboard accepts `waiting_for_question` on status frames. A running run with at least one open question on the card also shows `waiting_for_question`, because the gateway applies that status only at lifecycle transitions. A pending approval takes precedence over a question, and a terminal status always wins. The status has its own label everywhere the dashboard labels stream statuses. The run list never carries waiting statuses.
 - R13. A question push notification is accepted, shown with fixed dashboard copy, and opens the dashboard. The payload carries no run identifier and never any question or answer content.
 
 **Expired output (#583)**
-- R14. A completed run whose output has expired shows its terminal status and an in-card "output no longer available" state, with no page-level connection notice.
+- R14. A completed run whose output has expired shows its terminal status and an in-card "output no longer available" state, with no page-level connection notice. This holds even when the gateway sends no status after `reset`, using the terminal status the run list already shows.
 - R15. A running run that receives `no-snapshot` keeps accepting status and output frames as they arrive.
 
 **Text safety and privacy**
@@ -100,8 +101,8 @@ Expanding an older run already leaves "Connecting to run stream…" on screen in
 ## Acceptance Examples
 
 - AE1. **Covers R4, R7, R8.** Given a request with two questions, one single-choice and one allowing several choices plus free text: the operator picks one option for the first and two options plus a note for the second. Submit unlocks only after both questions have an answer. One submission is sent, with the answers in order.
-- AE2. **Covers R6, R10.** Given a question the operator has open: when it is answered in Discord first, the card shows a neutral "answered elsewhere" note, then clears the question. The question does not come back on later frames or from a later pending-question list.
-- AE3. **Covers R10.** Given an operator who submits while another session's answer is still in flight: the gateway reports `already_claimed`, and the card keeps the question with a neutral note. If the other answer then fails and the request reopens, the operator can answer it.
+- AE2. **Covers R6, R10.** Given a question the operator has open: when it is answered in Discord first, the settle frame clears it from the card. The question does not come back on later frames or from a later pending-question list.
+- AE3. **Covers R5, R6, R10.** Given an operator who submits while another session's answer is still in flight: the gateway reports `already_claimed`, and the card keeps the question with a neutral note. If the other answer then fails and the request reopens without a new frame, the card's re-check brings it back and the operator can answer it.
 - AE4. **Covers R5.** Given a run with a pending question: when the operator reloads the page and expands the run, the question appears without waiting for a new live frame.
 - AE5. **Covers R6, R12.** Given a run waiting on a question: when the run fails, the card shows the failed status and the question disappears, though no settle frame arrived.
 - AE6. **Covers R10.** Given an answer the gateway rejects as invalid for question 2: the card marks question 2, keeps the operator's other answers, and allows resubmitting.
@@ -127,6 +128,7 @@ Expanding an older run already leaves "Connecting to run stream…" on screen in
 - No answer history: a settled question leaves no record on the card.
 - No rejection or cancellation of a question from the dashboard. The contract offers only answer and skip.
 - No deep link from a notification to a specific run. The payload carries none.
+- No collapsed-card cue for a waiting run. The run list carries no waiting status, so the operator expands a running run to find a question. Polling every run's pending list is not added; a waiting flag on run summaries would be an upstream request.
 - No change to the approval flow.
 - The infra deploy itself is coordinated in marcusrbrown/infra.
 
@@ -138,9 +140,9 @@ Expanding an older run already leaves "Connecting to run stream…" on screen in
 - **Every answerable question must be answered before submitting.** The gateway accepts blanks, but a blank looks the same as a skip to the agent. Requiring answers prevents accidental omissions. Skip remains the explicit way to decline.
 - **Settled questions clear, as approvals do.** This matches the approval flow and keeps answer text off the card once a request is done.
 - **Skip needs no confirmation.** Skipping lets the agent continue; it does not end the run. Discarding typed text on Skip is an accepted cost.
-- **The waiting status comes from the card's open questions.** The gateway applies `waiting_for_question` to status frames only at lifecycle transitions, so the dashboard derives it as it already derives `waiting_for_approval`.
+- **The waiting status also comes from the card's open questions.** The gateway applies `waiting_for_question` to status frames only at lifecycle transitions, so a run that asks mid-execution would otherwise keep reading `running`. Deriving from open questions is new; `waiting_for_approval` is read from the wire.
 - **Question text follows the same rules as checkout detail and approval action text.** It stays in memory and is rendered as text nodes only, because the contract marks every string as untrusted.
-- **#583 ships with 1.9.0.** The hang already happens on `v0.118.2`, and 1.9.0 changes the frames that follow `reset`. Fixing it now means one change covers both gateway versions.
+- **#583 ships with 1.9.0.** The hang already happens on `v0.118.2`. A 1.9.0 gateway follows `reset` with the terminal status only when its stored run state reads cleanly, so the card also takes the terminal status from the run list.
 - **Follow the approval pattern.** Open and settle frames, run state, a CSRF-guarded single-use decision, and an allowlisted push kind are already proven there.
 
 ---
@@ -158,8 +160,6 @@ Expanding an older run already leaves "Connecting to run stream…" on screen in
 
 ### Deferred to Planning
 
-- [Affects R12][Technical] Can the run list's data ever carry `waiting_for_question`? If it can, collapsed cards show a waiting cue. If it cannot, no new mechanism is added for one.
-- [Affects R16][Technical] Can the checkout-detail sanitizer be reused for question text? No dashboard length caps beyond the gateway's bounds are planned.
 - [Affects R10, R13][Technical] Exact copy for the decision outcomes and the question notification.
 - [Affects R3, R7][Design] Layout of the question region on the run card, including several questions with long option lists at mobile width. Route to @designer and verify on the fixture server.
 
@@ -176,4 +176,5 @@ Expanding an older run already leaves "Connecting to run stream…" on screen in
 - fro-bot/dashboard#583: expired-snapshot behavior and the expected fix.
 - fro-bot/.github#3512: rollout tracker.
 - `docs/solutions/best-practices/consume-gateway-operator-contract-1-8-0-2026-10-07.md`: how the dashboard adopts a contract bump.
-- Approval flow in `public/operator-stream.js` (`hasOpenApprovals`), `web/src/operator/runtime.ts`, and `web/src/push/sw-notification.ts`: the pattern to follow.
+- Approval flow in `public/operator-stream.js`, `web/src/operator/runtime.ts`, and `web/src/push/sw-notification.ts`: the pattern to follow.
+- fro-bot/agent `v0.119.1`, `packages/gateway/src/operator-contract/run-summary.ts`: run summaries carry only `queued`, `running`, `succeeded`, `failed`, and `cancelled`.
