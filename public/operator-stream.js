@@ -1620,11 +1620,8 @@ export function nextStreamState(current, event) {
       // caller could not validate: either way absence proves nothing, so the diff is additive only.
       // Removal never tombstones — the request may return on a later frame or list — and a
       // claimed-exempt request is skipped: the gateway excludes claimed requests from the list,
-      // so its absence says nothing about them.
-      // `endClaimedExemptions` (set by the live-transition check) first ends every claimed
-      // exemption: a request still absent from the list after a reconnect is more likely settled
-      // (the settle frame was missed) than still claimed.
-      if (event.endClaimedExemptions === true) nextExempt.clear()
+      // so its absence says nothing about them. An exemption ends only on a settle frame, a terminal
+      // status, or a list that shows the request open again (the add path below).
       const additiveOnly = partial === true || requests.length >= GATEWAY_PENDING_QUESTIONS_CAP
       if (!additiveOnly) {
         for (const requestID of snapshotIds) {
@@ -1653,6 +1650,18 @@ export function nextStreamState(current, event) {
         questionReconcileDone: true,
       }
       return {...current, runs: Object.assign(Object.create(null), current.runs, {[runId]: updatedEntry})}
+    }
+
+    case 'question-reconcile-reset': {
+      // A new connection cycle starts: the question list applied in the previous cycle says nothing
+      // about this one, so the completed flag clears until the new cycle's list is applied. Only an
+      // existing, non-terminal run entry carries the flag.
+      const prevEntry = current.runs[event.runId]
+      if (prevEntry === undefined || prevEntry.terminal || prevEntry.questionReconcileDone !== true) {
+        return current
+      }
+      const updatedEntry = {...prevEntry, questionReconcileDone: false}
+      return {...current, runs: Object.assign(Object.create(null), current.runs, {[event.runId]: updatedEntry})}
     }
 
     case 'question-resolved': {
@@ -1835,8 +1844,9 @@ export function hasOpenQuestions(runEntry) {
  *   2. Wire `waiting_for_approval` stays (the gateway lets approval win over questions).
  *   3. A `running` run with any open question is `waiting_for_question`.
  *   4. A wire `waiting_for_question` with an open question stays; with none, once a question
- *      reconcile has completed, it is really `running`. (Before that, a missed settle frame
- *      cannot be told from a question the list has not yet shown, so the wire value is kept.)
+ *      reconcile has completed in the current connection cycle, it is really `running`. (Before
+ *      that, a missed settle frame cannot be told from a question the list has not yet shown, so
+ *      the wire value is kept.)
  *   5. Anything else is the wire value (so `queued` and `blocked` stay put).
  *
  * @param {object|undefined|null} runEntry - A RunEntry from the stream state's runs map.
@@ -1873,6 +1883,59 @@ function backoffDelay(attempt) {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// Transport helpers shared by the approval, question and cancel clients
+// ---------------------------------------------------------------------------
+
+/**
+ * Append the fixture session id as a query param. Only appended when a fixtureSessionId is
+ * provided (fixture mode) — never in production.
+ */
+function withFixtureParam(fixtureSessionId, url) {
+  return fixtureSessionId === undefined
+    ? url
+    : `${url}${url.includes('?') ? '&' : '?'}fixtureSessionId=${encodeURIComponent(fixtureSessionId)}`
+}
+
+/**
+ * Same-origin fetch with the cookie riding and redirects refused. A `timeoutMs` bounds the request
+ * with its own timeout signal (where AbortSignal.timeout exists), so a hung socket rejects instead
+ * of waiting forever; that signal is the request's own, never the stream's.
+ */
+function browserFetch(input, init, timeoutMs) {
+  const signal = timeoutMs !== undefined && typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(timeoutMs)
+    : undefined
+  return globalThis.fetch(input, {
+    ...init,
+    credentials: 'include',
+    redirect: 'error',
+    ...(signal === undefined ? {} : {signal}),
+  })
+}
+
+/**
+ * Fetch a fresh CSRF token. Resolves to `{success:true, data:{csrfToken}}`, or
+ * `{success:false, error:{kind:'http', status}}` | `{kind:'protocol'}` | `{kind:'network'}`.
+ */
+async function refreshCsrf(endpointBase, fixtureSessionId, timeoutMs) {
+  try {
+    const res = await browserFetch(
+      withFixtureParam(fixtureSessionId, `${endpointBase}/session/csrf`),
+      {headers: {'content-type': 'application/json'}},
+      timeoutMs,
+    )
+    if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
+    const data = await res.json()
+    if (data === null || typeof data !== 'object' || typeof data.csrfToken !== 'string') {
+      return {success: false, error: {kind: 'protocol'}}
+    }
+    return {success: true, data: {csrfToken: data.csrfToken}}
+  } catch {
+    return {success: false, error: {kind: 'network'}}
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Browser-direct approval client (same-origin relative /operator/* paths)
 // ---------------------------------------------------------------------------
 
@@ -1905,36 +1968,8 @@ function backoffDelay(attempt) {
 export function buildApprovalClient(opts) {
   const endpointBase = opts?.endpointBase ?? '/operator'
   const fixtureSessionId = opts?.fixtureSessionId
-
-  // Append fixtureSessionId as a query param when in fixture mode.
-  // Only appended when fixtureSessionId is provided — never in production.
-  const withFixtureParam = url =>
-    fixtureSessionId === undefined
-      ? url
-      : `${url}${url.includes('?') ? '&' : '?'}fixtureSessionId=${encodeURIComponent(fixtureSessionId)}`
-
-  const browserFetch = (input, init) =>
-    globalThis.fetch(input, {
-      ...init,
-      credentials: 'include',
-      redirect: 'error',
-    })
-
-  async function refreshCsrf() {
-    try {
-      const res = await browserFetch(withFixtureParam(`${endpointBase}/session/csrf`), {
-        headers: {'content-type': 'application/json'},
-      })
-      if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
-      const data = await res.json()
-      if (data === null || typeof data !== 'object' || typeof data.csrfToken !== 'string') {
-        return {success: false, error: {kind: 'protocol'}}
-      }
-      return {success: true, data: {csrfToken: data.csrfToken}}
-    } catch {
-      return {success: false, error: {kind: 'network'}}
-    }
-  }
+  const withFixture = url => withFixtureParam(fixtureSessionId, url)
+  const getCsrf = async () => refreshCsrf(endpointBase, fixtureSessionId)
 
   /**
    * POST a decision for a pending approval.
@@ -1951,7 +1986,7 @@ export function buildApprovalClient(opts) {
     // Get initial CSRF token. Propagate an HTTP failure (e.g. an expired session
     // returning 401/403) so the caller can show the reload state instead of an
     // endless retry; only a true transport failure collapses to 'network'.
-    const csrfResult = await refreshCsrf()
+    const csrfResult = await getCsrf()
     if (!csrfResult.success) {
       return csrfResult.error.kind === 'http'
         ? {success: false, error: {kind: 'http', status: csrfResult.error.status}}
@@ -1959,7 +1994,7 @@ export function buildApprovalClient(opts) {
     }
     const csrfToken = csrfResult.data.csrfToken
 
-    const path = withFixtureParam(`${endpointBase}/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(requestId)}/decision`)
+    const path = withFixture(`${endpointBase}/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(requestId)}/decision`)
     const body = JSON.stringify({decision})
     const makeInit = csrf => ({
       method: 'POST',
@@ -1981,7 +2016,7 @@ export function buildApprovalClient(opts) {
 
     // CSRF-400 retry: refresh CSRF once and retry with the same idempotency key
     if (res.status === 400) {
-      const retrycsrfResult = await refreshCsrf()
+      const retrycsrfResult = await getCsrf()
       if (!retrycsrfResult.success) {
         return retrycsrfResult.error.kind === 'http'
           ? {success: false, error: {kind: 'http', status: retrycsrfResult.error.status}}
@@ -2023,7 +2058,7 @@ export function buildApprovalClient(opts) {
   async function listRunApprovals(runId) {
     try {
       const res = await browserFetch(
-        withFixtureParam(`${endpointBase}/runs/${encodeURIComponent(runId)}/approvals`),
+        withFixture(`${endpointBase}/runs/${encodeURIComponent(runId)}/approvals`),
         {headers: {'content-type': 'application/json'}},
       )
       if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
@@ -2035,7 +2070,7 @@ export function buildApprovalClient(opts) {
     }
   }
 
-  return {refreshCsrf, decideRunApproval, listRunApprovals}
+  return {refreshCsrf: getCsrf, decideRunApproval, listRunApprovals}
 }
 
 // ---------------------------------------------------------------------------
@@ -2060,6 +2095,14 @@ const QUESTION_INVALID_REASON_SET = new Set(QUESTION_INVALID_REASONS)
 
 /** Delays between successive re-lists after an `already_claimed`: about 2, 5, 10 and 20 seconds, then stop. */
 export const QUESTION_CLAIM_RECHECK_DELAYS_MS = Object.freeze([2000, 5000, 10_000, 20_000])
+
+/**
+ * Bound on each fetch of the question client (list, CSRF, decision POST): a hung request must end
+ * as its designed failure (a decision POST as an unknown outcome, a list as a network failure)
+ * instead of holding a question in flight or a list check open forever. It is a separate constant
+ * from the cancel client's bound because the recovery differs, though the value is the same.
+ */
+export const QUESTION_FETCH_TIMEOUT_MS = 10_000
 
 /** One pending-list entry `{requestID, questions}` (no per-item runId), or null when invalid. */
 function parsePendingQuestionEntry(value) {
@@ -2175,7 +2218,10 @@ async function classifyQuestionDecisionResponse(res) {
  * Build the browser-direct question client: list the pending questions of a run and submit one
  * decision. Same transport posture as the approval client (same-origin paths, `credentials`
  * include, `redirect: 'error'`, CSRF fetched first, fixture session id only in fixture mode) and
- * it shares that client's `refreshCsrf`. It does NOT share the approval client's retry-on-any-400.
+ * it shares that client's transport helpers. It does NOT share the approval client's retry-on-any-400.
+ * Every fetch (list, CSRF, decision POST) is bounded by QUESTION_FETCH_TIMEOUT_MS: a timed-out
+ * decision POST is an unknown outcome (it may have been recorded), a timed-out list is a network
+ * failure.
  *
  * Security: never logs or stores a run id, request id, answer text, response text or CSRF token.
  * Path IDs are validated before they are embedded. There is no idempotency key: the gateway's
@@ -2205,25 +2251,15 @@ async function classifyQuestionDecisionResponse(res) {
 export function buildQuestionClient(opts) {
   const endpointBase = opts?.endpointBase ?? '/operator'
   const fixtureSessionId = opts?.fixtureSessionId
-  const {refreshCsrf} = buildApprovalClient(opts)
-
-  const withFixtureParam = url =>
-    fixtureSessionId === undefined
-      ? url
-      : `${url}${url.includes('?') ? '&' : '?'}fixtureSessionId=${encodeURIComponent(fixtureSessionId)}`
-
-  const browserFetch = (input, init) =>
-    globalThis.fetch(input, {
-      ...init,
-      credentials: 'include',
-      redirect: 'error',
-    })
+  const withFixture = url => withFixtureParam(fixtureSessionId, url)
+  const timedFetch = async (input, init) => browserFetch(input, init, QUESTION_FETCH_TIMEOUT_MS)
+  const getCsrf = async () => refreshCsrf(endpointBase, fixtureSessionId, QUESTION_FETCH_TIMEOUT_MS)
 
   async function listRunQuestions(runId) {
     if (!validateDynamicId(runId)) return {success: false, error: {kind: 'invalid-id'}}
     try {
-      const res = await browserFetch(
-        withFixtureParam(`${endpointBase}/runs/${encodeURIComponent(runId)}/questions`),
+      const res = await timedFetch(
+        withFixture(`${endpointBase}/runs/${encodeURIComponent(runId)}/questions`),
         {headers: {'content-type': 'application/json'}},
       )
       if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
@@ -2247,13 +2283,13 @@ export function buildQuestionClient(opts) {
     if (body === null) return {kind: 'failed'}
     const answerCount = body.decision === 'answer' ? body.answers.length : 0
     const payload = JSON.stringify(body)
-    const path = withFixtureParam(
+    const path = withFixture(
       `${endpointBase}/runs/${encodeURIComponent(runId)}/questions/${encodeURIComponent(requestId)}/decision`,
     )
 
     // Two attempts at most, and only a 400 without a `reason` gets the second.
     for (let attempt = 0; attempt < 2; attempt++) {
-      const csrfResult = await refreshCsrf()
+      const csrfResult = await getCsrf()
       if (!csrfResult.success) {
         const {error} = csrfResult
         return error.kind === 'http' && (error.status === 401 || error.status === 403)
@@ -2263,7 +2299,7 @@ export function buildQuestionClient(opts) {
 
       let res
       try {
-        res = await browserFetch(path, {
+        res = await timedFetch(path, {
           method: 'POST',
           redirect: 'error',
           headers: {
@@ -2398,46 +2434,27 @@ export function buildCancelClient(opts) {
   const fixtureSessionId = opts?.fixtureSessionId
   const logger = opts?.logger
 
-  const withFixtureParam = url =>
-    fixtureSessionId === undefined
-      ? url
-      : `${url}${url.includes('?') ? '&' : '?'}fixtureSessionId=${encodeURIComponent(fixtureSessionId)}`
-
-  const browserFetch = (input, init) =>
-    globalThis.fetch(input, {
-      ...init,
-      credentials: 'include',
-      redirect: 'error',
-      signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(CANCEL_FETCH_TIMEOUT_MS) : undefined,
-    })
+  const withFixture = url => withFixtureParam(fixtureSessionId, url)
+  const timedFetch = async (input, init) => browserFetch(input, init, CANCEL_FETCH_TIMEOUT_MS)
 
   const ROUTE_TEMPLATE = '/operator/runs/:runId/cancel'
   const CSRF_ROUTE_TEMPLATE = '/operator/session/csrf'
 
   /**
-   * Fetch a fresh CSRF token for the cancel POST. Mirrors buildApprovalClient's
-   * refreshCsrf — separate instance because this module cannot share module-level
-   * state with buildApprovalClient's closure.
+   * Fetch a fresh CSRF token for the cancel POST: the shared fetch, bounded by
+   * CANCEL_FETCH_TIMEOUT_MS, with each failure logged by static route template only.
    */
-  async function refreshCsrf() {
-    try {
-      const res = await browserFetch(withFixtureParam(`${endpointBase}/session/csrf`), {
-        headers: {'content-type': 'application/json'},
-      })
-      if (!res.ok) {
-        logger?.error('operator-cancel-client: csrf http error', {route: CSRF_ROUTE_TEMPLATE, status: res.status})
-        return {success: false, error: {kind: 'http', status: res.status}}
+  async function getCsrf() {
+    const result = await refreshCsrf(endpointBase, fixtureSessionId, CANCEL_FETCH_TIMEOUT_MS)
+    if (!result.success) {
+      const {error} = result
+      if (error.kind === 'http') {
+        logger?.error('operator-cancel-client: csrf http error', {route: CSRF_ROUTE_TEMPLATE, status: error.status})
+      } else {
+        logger?.error(`operator-cancel-client: csrf ${error.kind} error`, {route: CSRF_ROUTE_TEMPLATE})
       }
-      const data = await res.json()
-      if (data === null || typeof data !== 'object' || typeof data.csrfToken !== 'string') {
-        logger?.error('operator-cancel-client: csrf protocol error', {route: CSRF_ROUTE_TEMPLATE})
-        return {success: false, error: {kind: 'protocol'}}
-      }
-      return {success: true, data: {csrfToken: data.csrfToken}}
-    } catch {
-      logger?.error('operator-cancel-client: csrf network error', {route: CSRF_ROUTE_TEMPLATE})
-      return {success: false, error: {kind: 'network'}}
     }
+    return result
   }
 
   /**
@@ -2464,7 +2481,7 @@ export function buildCancelClient(opts) {
       return {success: false, error: {kind: 'validation', code: 'missing_idempotency_key'}}
     }
 
-    const path = withFixtureParam(`${endpointBase}/runs/${encodeURIComponent(runId)}/cancel`)
+    const path = withFixture(`${endpointBase}/runs/${encodeURIComponent(runId)}/cancel`)
     const init = {
       method: 'POST',
       redirect: 'error',
@@ -2477,7 +2494,7 @@ export function buildCancelClient(opts) {
 
     let res
     try {
-      res = await browserFetch(path, init)
+      res = await timedFetch(path, init)
     } catch {
       logger?.error('operator-cancel-client: network error', {route: ROUTE_TEMPLATE})
       return {success: false, error: {kind: 'network'}}
@@ -2486,7 +2503,7 @@ export function buildCancelClient(opts) {
     // One retry only on HTTP 400, reusing the SAME idempotency key and init.
     if (res.status === 400) {
       try {
-        res = await browserFetch(path, init)
+        res = await timedFetch(path, init)
       } catch {
         logger?.error('operator-cancel-client: network error', {route: ROUTE_TEMPLATE})
         return {success: false, error: {kind: 'network'}}
@@ -2513,7 +2530,7 @@ export function buildCancelClient(opts) {
     return {success: false, error: {kind: 'http', status: res.status}}
   }
 
-  return {cancelRun, refreshCsrf}
+  return {cancelRun, refreshCsrf: getCsrf}
 }
 
 // ---------------------------------------------------------------------------
@@ -3239,6 +3256,7 @@ function makeQuestionNoteCard(status) {
   el.append(message)
   return {
     el,
+    isNote: true,
     update(next) {
       message.textContent = QUESTION_NOTE_COPY[next.kind] ?? ''
     },
@@ -3856,6 +3874,12 @@ export function initOperatorStream(opts) {
       for (const request of requests) {
         presentIds.add(request.requestID)
         let card = renderedQuestionCards.get(request.requestID)
+        // A request that was a note (gone) and is open again needs a real card, not its note.
+        if (card?.isNote === true) {
+          card.el.remove()
+          renderedQuestionCards.delete(request.requestID)
+          card = undefined
+        }
         if (card === undefined) {
           card = makeQuestionCard(request, request.status)
           renderedQuestionCards.set(request.requestID, card)
@@ -3947,8 +3971,10 @@ export function initOperatorStream(opts) {
     if (prevConnection !== 'live' && state.connection === 'live') {
       reconcileApprovals()
       // The question check is its own trigger with its own flag and epoch, not the approval latch.
-      // It also ends claimed exemptions: still absent after a reconnect means the settle was missed.
-      reconcileQuestions({endExemptions: true})
+      // A request claimed elsewhere keeps its exemption across the transition, and its re-list
+      // schedule restarts so a request the claimant released is found.
+      reconcileQuestions()
+      restartClaimedRechecks()
     }
   }
 
@@ -4049,7 +4075,8 @@ export function initOperatorStream(opts) {
   //
   //   {kind:'open'}
   //   {kind:'in-flight'}                         a decision POST is outstanding
-  //   {kind:'claimed-elsewhere'}                 already_claimed; re-listing on a backoff, then manual
+  //   {kind:'claimed-elsewhere'}                 already_claimed; re-listing on a backoff (restarted at
+  //                                              each live transition), then manual
   //   {kind:'checking'}                          a list check is pending (unknown outcome, or manual)
   //   {kind:'gone'}                              unknown outcome, then absent: may have been recorded
   //   {kind:'invalid', reason, questionIndex}    400 with a reason; questionIndex null = whole request
@@ -4094,7 +4121,7 @@ export function initOperatorStream(opts) {
    * Drop statuses the state no longer supports. Runs after every reducer event: a request that
    * left (settle frame, list removal, terminal) loses its status unless it is a settled/gone note;
    * a note whose request returned open is dropped; a claimed request whose exemption ended (a
-   * settle frame, a list that shows it open again, the next live transition) is simply open.
+   * settle frame, a list that shows it open again) is simply open.
    */
   function syncQuestionStatuses() {
     if (questionStatuses.size === 0) return
@@ -4185,7 +4212,7 @@ export function initOperatorStream(opts) {
    * A failure (network, 429, 5xx, non-OK, invalid body) never prunes; it surfaces `check-failed`
    * only on requests whose check was pending, and is never retried automatically.
    */
-  async function runQuestionFlight(flight, endExemptions) {
+  async function runQuestionFlight(flight) {
     try {
       const targets = new Set()
       for (const [requestID, status] of questionStatuses) {
@@ -4222,7 +4249,6 @@ export function initOperatorStream(opts) {
         requests,
         invalidBody: false,
         partial,
-        ...(endExemptions ? {endClaimedExemptions: true} : {}),
       })
       resolveQuestionChecks(targets)
       return true
@@ -4238,7 +4264,7 @@ export function initOperatorStream(opts) {
    * asked for: they wait out an older flight and then run, or join one started after them.
    * Resolves to whether a valid list was applied.
    */
-  async function reconcileQuestions({fresh = false, endExemptions = false} = {}) {
+  async function reconcileQuestions({fresh = false} = {}) {
     if (questionClient === null || aborted) return false
     const askedAfter = questionFlightSeq
     for (;;) {
@@ -4250,7 +4276,7 @@ export function initOperatorStream(opts) {
     }
     const flight = {id: ++questionFlightSeq, epoch: questionEpoch, promise: null}
     questionFlight = flight
-    flight.promise = runQuestionFlight(flight, endExemptions)
+    flight.promise = runQuestionFlight(flight)
     return flight.promise
   }
 
@@ -4271,6 +4297,13 @@ export function initOperatorStream(opts) {
       if (questionStatuses.get(requestID)?.kind === 'claimed-elsewhere') scheduleQuestionRecheck(requestID, attempt + 1)
     }, QUESTION_CLAIM_RECHECK_DELAYS_MS[attempt])
     questionRecheckTimers.set(requestID, timer)
+  }
+
+  /** Start the re-list schedule over for every request that is claimed elsewhere. */
+  function restartClaimedRechecks() {
+    for (const [requestID, status] of questionStatuses) {
+      if (status.kind === 'claimed-elsewhere' && isQuestionOpen(requestID)) scheduleQuestionRecheck(requestID, 0)
+    }
   }
 
   /** Apply a decision outcome. Resolves after the follow-up list check, when there is one. */
@@ -4384,10 +4417,14 @@ export function initOperatorStream(opts) {
 
     // Advance the epoch so any in-flight reconcile from the previous connection
     // cycle sees a stale epoch and discards its result. The question check keeps its own
-    // epoch, and the claimed re-list timers end here: the live transition re-lists anyway.
+    // epoch and its own completed flag, both reset here; the claimed re-list timers end here and
+    // restart at the live transition.
     connectEpoch++
     questionEpoch++
     clearQuestionRechecks()
+    if (state.runs[runId]?.questionReconcileDone === true) {
+      dispatch({type: 'question-reconcile-reset', runId})
+    }
 
     // Clear any previously-pending first-frame timer before arming a new one.
     // Without this, a reconnect would leak the old timer, which could fire later
@@ -4571,7 +4608,6 @@ export function initOperatorStream(opts) {
   connect()
 
   // Return a handle to allow external abort (e.g. page unload)
-  // `close` stays the last member: a runtime test pins its source position.
   return {
     decideQuestion,
     checkQuestions,

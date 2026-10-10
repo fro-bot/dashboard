@@ -1017,39 +1017,64 @@ describe('discoverCardStreamTargets', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Teardown-ordering invariant: initOperatorStream's close() statement order
+// Teardown behavior: initOperatorStream's close() aborts, clears timers, and goes quiet
 // ---------------------------------------------------------------------------
 
-describe('initOperatorStream — close() teardown-ordering invariant (pin, do not regress)', () => {
+describe('initOperatorStream — close() teardown behavior', () => {
   afterEach(() => {
+    vi.useRealTimers()
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
 
-  it("close() sets aborted before touching timers/controller/state (source order pin)", async () => {
-    const fs = await import('node:fs/promises')
-    const path = await import('node:path')
-    const url = await import('node:url')
-    const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
-    const src = await fs.readFile(path.join(__dirname, '../../../public/operator-stream.js'), 'utf8')
+  it('close() aborts the connection, clears the first-frame timer, and a late abort rejection neither reconnects nor writes', async () => {
+    vi.useFakeTimers()
+    const streamMod = await import('../../../public/operator-stream.js')
+    const signals: (AbortSignal | undefined)[] = []
+    let rejectFetch: ((err: unknown) => void) | undefined
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      signals.push(init?.signal ?? undefined)
+      return new Promise((_resolve, reject) => {
+        rejectFetch = reject
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
 
-    // Isolate the close() method body inside the returned handle object.
-    const closeMatch = src.match(/close\(\)\s*\{([\s\S]*?)\n\s*\},\n\s*\}\n\}/)
-    expect(closeMatch).not.toBeNull()
-    const body = closeMatch?.[1] ?? ''
+    const noticeEl = document.createElement('div')
+    const handle = streamMod.initOperatorStream({runId: 'run-close', statusEl: null, noticeEl})
+    expect(signals[0]?.aborted).toBe(false)
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
 
-    const abortedIdx = body.indexOf('aborted = true')
-    const reconnectTimerIdx = body.indexOf('clearTimeout(reconnectTimer)')
-    const firstFrameTimerCallIdx = body.indexOf('clearFirstFrameTimer()')
-    const controllerAbortIdx = body.indexOf('abortController.abort()')
-    const stateTransitionIdx = body.indexOf("nextStreamState(state, {type: 'stream-closed'})")
+    handle.close()
+    expect(signals[0]?.aborted).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
 
-    expect(abortedIdx).toBeGreaterThanOrEqual(0)
-    expect(reconnectTimerIdx).toBeGreaterThan(abortedIdx)
-    expect(firstFrameTimerCallIdx).toBeGreaterThan(abortedIdx)
-    expect(controllerAbortIdx).toBeGreaterThan(reconnectTimerIdx)
-    expect(controllerAbortIdx).toBeGreaterThan(firstFrameTimerCallIdx)
-    expect(stateTransitionIdx).toBeGreaterThan(controllerAbortIdx)
+    rejectFetch?.(new DOMException('The operation was aborted.', 'AbortError'))
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(noticeEl.dataset.connectionState).toBeUndefined()
+  })
+
+  it('close() clears a pending reconnect timer, so no further connection is opened', async () => {
+    vi.useFakeTimers()
+    const streamMod = await import('../../../public/operator-stream.js')
+    const fetchMock = vi.fn().mockResolvedValue({status: 500})
+    vi.stubGlobal('fetch', fetchMock)
+
+    const noticeEl = document.createElement('div')
+    const handle = streamMod.initOperatorStream({runId: 'run-close-retry', statusEl: null, noticeEl})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(noticeEl.dataset.connectionState).toBe('reconnecting')
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+
+    handle.close()
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // The closed handle never repaints: the notice keeps its state from before close().
+    expect(noticeEl.dataset.connectionState).toBe('reconnecting')
   })
 
   it('integration: closing A then immediately opening B absorbs A\'s late abort microtask (no closed->reconnecting regression, no late notice write)', async () => {

@@ -44,6 +44,8 @@ export declare const QUESTION_INVALID_REASONS: readonly [
 ]
 /** Delays between successive re-lists after an `already_claimed`: about 2, 5, 10 and 20 seconds, then stop. */
 export declare const QUESTION_CLAIM_RECHECK_DELAYS_MS: readonly number[]
+/** Bound, in milliseconds, on each fetch of the question client (list, CSRF and decision POST). */
+export declare const QUESTION_FETCH_TIMEOUT_MS: number
 
 /** Operator-safe failure-reason code. */
 export type FailureKind =
@@ -502,7 +504,8 @@ export interface ApprovalReconcileEvent {
  * - partial: the caller dropped invalid entries → additive only.
  *
  * A list of GATEWAY_PENDING_QUESTIONS_CAP or more requests is also additive only. Sets
- * `questionReconcileDone`. Failures (network, 429, 5xx) are never dispatched.
+ * `questionReconcileDone`. A claimed-exempt request ends its exemption only when the list shows it
+ * open. Failures (network, 429, 5xx) are never dispatched.
  */
 export interface QuestionReconcileEvent {
   readonly type: 'question-reconcile'
@@ -511,11 +514,15 @@ export interface QuestionReconcileEvent {
   readonly requests: readonly QuestionRequest[]
   readonly invalidBody: boolean
   readonly partial: boolean
-  /**
-   * Set by the live-transition check: end every claimed exemption before the removal diff, so a
-   * claimed request still absent after a reconnect is removed (its settle frame was likely missed).
-   */
-  readonly endClaimedExemptions?: boolean
+}
+
+/**
+ * A new connection cycle starts: clear `questionReconcileDone` so a wire `waiting_for_question` is not
+ * read as `running` before the new cycle's question list has been applied.
+ */
+export interface QuestionReconcileResetEvent {
+  readonly type: 'question-reconcile-reset'
+  readonly runId: string
 }
 
 /**
@@ -549,6 +556,7 @@ export type StreamEvent =
   | {readonly type: 'first-frame-timeout'}
   | ApprovalReconcileEvent
   | QuestionReconcileEvent
+  | QuestionReconcileResetEvent
   | QuestionResolvedEvent
   | QuestionClaimedEvent
   | CancelActionEvent

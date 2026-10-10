@@ -1,3 +1,9 @@
+import type {RunSummaryStatus as BrowserRunIndexSummaryStatus} from '../public/operator-run-index.js'
+import type {
+  QUESTION_DECISION_STATES as BROWSER_QUESTION_DECISION_STATES,
+  QUESTION_INVALID_REASONS as BROWSER_QUESTION_INVALID_REASONS,
+  RunSummaryStatus as BrowserStreamRunSummaryStatus,
+} from '../public/operator-stream.js'
 import type {ApprovalDecisionState, RunStatus} from '../src/gateway/operator-client.ts'
 import type {
   OperatorApprovalFrame,
@@ -480,6 +486,25 @@ const QUESTION_REASON_RECORD = {
   'empty-value': true,
   'text-too-long': true,
 } satisfies Record<QuestionDecisionInvalidReason, true>
+
+// The browser declaration files re-declare these vocabularies by hand. Each alias below is `true`
+// only while the browser copy and the contract union are the same set, so a copy that drifts
+// fails `check-types` here.
+type IsExactMatch<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false
+type AssertTrue<T extends true> = T
+
+export type BrowserQuestionDecisionStatesAreExact = AssertTrue<
+  IsExactMatch<(typeof BROWSER_QUESTION_DECISION_STATES)[number], QuestionDecisionResponse['state']>
+>
+export type BrowserQuestionInvalidReasonsAreExact = AssertTrue<
+  IsExactMatch<(typeof BROWSER_QUESTION_INVALID_REASONS)[number], QuestionDecisionInvalidReason>
+>
+export type BrowserStreamRunSummaryStatusIsExact = AssertTrue<
+  IsExactMatch<BrowserStreamRunSummaryStatus, RunSummaryType['status']>
+>
+export type BrowserRunIndexSummaryStatusIsExact = AssertTrue<
+  IsExactMatch<BrowserRunIndexSummaryStatus, RunSummaryType['status']>
+>
 
 describe('question runtime vocabularies', () => {
   it('decision states: the exported list equals the union, with no duplicates', () => {

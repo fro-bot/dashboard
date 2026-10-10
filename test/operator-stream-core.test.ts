@@ -61,6 +61,7 @@ import {
   PINNED_CONTRACT_VERSION,
   QUESTION_CLAIM_RECHECK_DELAYS_MS,
   QUESTION_DECISION_STATES,
+  QUESTION_FETCH_TIMEOUT_MS,
   QUESTION_INVALID_REASONS,
   renderApprovalPrompt,
   renderCancelControl,
@@ -9055,6 +9056,39 @@ describe('question region — answer controls and decision bodies', () => {
     expect(region.hidden).toBe(false)
     handle.close()
   })
+
+  it('a request whose note is "gone" and that a later list shows open gets a real question card with its draft', async () => {
+    let listCalls = 0
+    const listed = (...ids: string[]): QuestionListResult => ({
+      success: true,
+      data: {requests: ids.map(requestID => ({requestID, questions: [qQuestion()] as never})), invalidBody: false, partial: false},
+    })
+    const {region, handle} = await renderQuestionFrames(
+      [qOpen('req-back', [qQuestion()])],
+      async () => ({kind: 'unknown'}),
+      async () => {
+        listCalls += 1
+        return listCalls === 3 ? listed('req-back') : listed()
+      },
+    )
+    const field = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    field.value = 'draft that must survive'
+    field.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain('Your answer may have been recorded.'))
+    expect(qFakeFindAll(region, node => node.tagName === 'fieldset')).toHaveLength(0)
+
+    await handle.checkQuestions()
+    expect(listCalls).toBe(3)
+    const cards = region.children.filter(child => child.className.includes('question-region__request'))
+    expect(cards).toHaveLength(1)
+    expect(qFakeFindAll(region, node => node.tagName === 'fieldset').length).toBeGreaterThan(0)
+    expect(qFakeFindAll(region, node => node.className === 'question-region__submit')).toHaveLength(1)
+    expect(qFakeText(region)).not.toContain('Your answer may have been recorded.')
+    const restored = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    expect(restored.value).toBe('draft that must survive')
+    handle.close()
+  })
 })
 
 function qBrowser(payload: unknown) {
@@ -10033,9 +10067,10 @@ function u4Start(opts: U4Options = {}) {
     return {ok: true, status: 200, headers: {get: () => 'text/event-stream'}, body}
   })
 
+  const statusEl = makeFakeEl('span')
   const handle = initOperatorStream({
     runId: Q_RUN,
-    statusEl: makeFakeEl('span') as never,
+    statusEl: statusEl as never,
     noticeEl: makeFakeEl('div') as never,
     questionClient: client,
   })
@@ -10043,6 +10078,7 @@ function u4Start(opts: U4Options = {}) {
 
   return {
     handle,
+    statusEl,
     listCalls,
     decideCalls,
     flush: async (ms = 0) => vi.advanceTimersByTimeAsync(ms),
@@ -10338,17 +10374,73 @@ describe('question re-list triggers — unknown outcome, claim lifecycle, failur
     expect(h.listCalls).toHaveLength(1)
   })
 
-  it('claim exemption ends at the next live transition when the list still omits the request', async () => {
+  it('a live transition keeps a claimed-elsewhere request on its card when the list still omits it', async () => {
     const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed')})
     await h.flush()
     await h.handle.decideQuestion('A', SKIP)
     expect(h.ids()).toEqual(['A'])
     await h.reconnect()
-    expect(h.listCalls).toHaveLength(2)
-    expect(h.ids()).toEqual([])
-    expect(h.handle.getQuestionStatus('A')).toBeNull()
-    // Removed by absence, not settled.
+    expect(h.listCalls.length).toBeGreaterThanOrEqual(2)
+    expect(h.ids()).toEqual(['A'])
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
     expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(false)
+  })
+
+  it('a live transition restarts the claimed re-list schedule, so a request the claimant then released is found', async () => {
+    const h = u4Start({
+      initial: [u4Chunks('A')],
+      decide: () => u4Decided('already_claimed'),
+      list: n => (n === 5 ? u4Listed('A') : u4Listed()),
+    })
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.reconnect()
+    // The old schedule ended at the reconnect; the restarted one still re-lists on its own.
+    const afterReconnect = h.listCalls.length
+    await h.flush(300_000)
+    expect(h.listCalls.length).toBeGreaterThan(afterReconnect)
+    expect(h.listCalls).toHaveLength(5)
+    expect(h.ids()).toEqual(['A'])
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'open'})
+    // Open again, so it can be answered again.
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed-elsewhere'})
+  })
+
+  it('a live transition does not end a claimed exemption: only a settle frame, a terminal status, or an open listing does', async () => {
+    const settled = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed')})
+    await settled.flush()
+    await settled.handle.decideQuestion('A', SKIP)
+    await settled.reconnect()
+    expect(settled.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+    settled.push(1, qSse(qSettle('A')))
+    await settled.flush()
+    expect(settled.ids()).toEqual([])
+    expect(settled.handle.getQuestionStatus('A')).toBeNull()
+    u4Cleanup()
+
+    const terminal = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed')})
+    await terminal.flush()
+    await terminal.handle.decideQuestion('A', SKIP)
+    await terminal.reconnect()
+    terminal.push(1, u4Status('succeeded'))
+    await terminal.flush(300_000)
+    expect(terminal.ids()).toEqual([])
+    expect(terminal.handle.getQuestionStatus('A')).toBeNull()
+  })
+
+  it('questionReconcileDone is reset on reconnect: a wire waiting_for_question is not painted as running until the new reconcile completes', async () => {
+    const relist = u4Deferred<QuestionListResult>()
+    const waiting = [U4_READY, u4Status('waiting_for_question')]
+    const h = u4Start({initial: [waiting, waiting], list: async n => (n === 2 ? relist.promise : u4Listed())})
+    await h.flush()
+    // The first reconcile completed with no open question: the stale wire status reads as running.
+    expect(h.statusEl.textContent).toBe('Running')
+    await h.reconnect()
+    expect(h.listCalls).toHaveLength(2)
+    expect(h.statusEl.textContent).toBe('Waiting for answer')
+    relist.resolve(u4Listed())
+    await h.flush()
+    expect(h.statusEl.textContent).toBe('Running')
   })
 
   it('claim exemption survives the next live transition when the list shows the request open (it is simply open)', async () => {
@@ -10505,6 +10597,127 @@ describe('question re-list triggers — unknown outcome, claim lifecycle, failur
     await vi.advanceTimersByTimeAsync(10)
     expect(urls).toContain(`/operator/runs/${Q_RUN}/questions`)
     expect(handle.getQuestions().map(request => request.requestID)).toEqual(['W'])
+  })
+})
+
+interface U4TimeoutRoutes {
+  /** Decision POST: a response, or 'hang' for one that only ends when its signal aborts. */
+  decide?: {status: number; body: unknown} | 'hang'
+  /** Per list GET (1-based): the requests it returns, or 'hang'. */
+  list?: (call: number) => string[] | 'hang'
+}
+
+/**
+ * Stub fetch and AbortSignal.timeout for the REAL question client behind a live stream, so a hung
+ * request ends on fake time. A hung request settles only when its signal aborts, as a hung socket
+ * would; AbortSignal.timeout is driven by the (fake) setTimeout.
+ */
+function u4StartTimeoutHandle(routes: U4TimeoutRoutes) {
+  vi.useFakeTimers()
+  const timeouts: number[] = []
+  vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
+    timeouts.push(ms)
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(new DOMException('timed out', 'TimeoutError')), ms)
+    return controller.signal
+  })
+  const counts = {stream: 0, list: 0, decide: 0}
+  const hang = async (init: RequestInit | undefined): Promise<never> => new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+  })
+  vi.stubGlobal('document', {
+    createElement: (tag: string) => makeFakeEl(tag),
+    createTextNode: (text: string) => {
+      const node = makeFakeEl('#text')
+      node.textContent = text
+      return node
+    },
+  })
+  vi.stubGlobal('addEventListener', () => {})
+  vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/stream')) {
+      counts.stream += 1
+      return {ok: true, status: 200, headers: {get: () => 'text/event-stream'}, body: u4SseBody(u4Chunks('A').join(''))}
+    }
+    if (url.includes('/session/csrf')) return {ok: true, status: 200, json: async () => ({csrfToken: 'csrf'})}
+    if (url.includes('/decision')) {
+      counts.decide += 1
+      const decide = routes.decide ?? {status: 200, body: {state: 'claimed'}}
+      if (decide === 'hang') return hang(init)
+      return {ok: decide.status === 200, status: decide.status, json: async () => decide.body}
+    }
+    counts.list += 1
+    const listed = routes.list?.(counts.list) ?? []
+    if (listed === 'hang') return hang(init)
+    return {ok: true, status: 200, json: async () => ({requests: listed.map(requestID => ({requestID, questions: [qQuestion()]}))})}
+  })
+  const handle = initOperatorStream({
+    runId: Q_RUN,
+    statusEl: makeFakeEl('span') as never,
+    noticeEl: makeFakeEl('div') as never,
+    questionsEl: makeFakeEl('div') as never,
+  })
+  u4Handles.push(handle)
+  return {handle, counts, timeouts}
+}
+
+describe('question client — bounded fetches', () => {
+  afterEach(u4Cleanup)
+
+  it('a decision POST that never resolves ends as an unknown outcome: a fresh re-list, never a resubmit', async () => {
+    const h = u4StartTimeoutHandle({decide: 'hang', list: call => (call === 1 ? ['A'] : [])})
+    await vi.advanceTimersByTimeAsync(10)
+    expect(h.handle.getQuestions().map(request => request.requestID)).toEqual(['A'])
+    expect(h.counts.list).toBe(1)
+
+    const pending = h.handle.decideQuestion('A', SKIP)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'in-flight'})
+    await vi.advanceTimersByTimeAsync(QUESTION_FETCH_TIMEOUT_MS - 1)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'in-flight'})
+    expect(h.counts.list).toBe(1)
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(await pending).toEqual({kind: 'gone'})
+    expect(h.counts.decide).toBe(1)
+    expect(h.counts.list).toBe(2)
+    expect(h.timeouts).toContain(QUESTION_FETCH_TIMEOUT_MS)
+    // The request's own timeout is not the stream's abort: the stream was not torn down or reconnected.
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(h.counts.stream).toBe(1)
+  })
+
+  it('a list GET that never resolves fails its checks without pruning, and a later check is not wedged behind it', async () => {
+    const h = u4StartTimeoutHandle({
+      decide: {status: 200, body: {state: 'already_claimed'}},
+      list: call => (call === 2 ? 'hang' : ['A']),
+    })
+    await vi.advanceTimersByTimeAsync(10)
+    await h.handle.decideQuestion('A', SKIP)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+
+    const check = h.handle.checkQuestions('A')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'checking'})
+    expect(h.counts.list).toBe(2)
+    await vi.advanceTimersByTimeAsync(QUESTION_FETCH_TIMEOUT_MS)
+    await check
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'check-failed'})
+    expect(h.handle.getQuestions().map(request => request.requestID)).toEqual(['A'])
+    expect(h.counts.stream).toBe(1)
+
+    await h.handle.checkQuestions('A')
+    expect(h.counts.list).toBe(3)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'open'})
+  })
+
+  it('every question client fetch carries a timeout signal', async () => {
+    const calls = u4Http([{status: 200, body: {state: 'claimed'}}, {status: 200, body: {requests: []}}])
+    const client = buildQuestionClient()
+    await client.decideRunQuestion('run-1', 'req-1', SKIP)
+    await client.listRunQuestions('run-1')
+    expect(calls.length).toBeGreaterThanOrEqual(3)
+    for (const call of calls) expect(call.init.signal).toBeInstanceOf(AbortSignal)
   })
 })
 
@@ -10891,7 +11104,7 @@ describe('question client — vocabulary parity and privacy', () => {
   })
 })
 
-describe('nextStreamState — question-claimed, question-resolved and endClaimedExemptions', () => {
+describe('nextStreamState — question-claimed, question-resolved and question-reconcile-reset', () => {
   beforeEach(() => resetQuestionPageStore())
   afterEach(() => resetQuestionPageStore())
 
@@ -10933,9 +11146,9 @@ describe('nextStreamState — question-claimed, question-resolved and endClaimed
     expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(false)
   })
 
-  it('a reconcile with endClaimedExemptions removes a claimed request the list omits, and one without keeps it', () => {
+  it('a reconcile keeps a claimed request the list omits, and ends the exemption only when the list shows it open', () => {
     const claimed = nextStreamState(open('A', 'B'), {type: 'question-claimed', runId: Q_RUN, requestID: 'A'})
-    const base: QuestionReconcileEvent = {
+    const omitting: QuestionReconcileEvent = {
       type: 'question-reconcile',
       runId: Q_RUN,
       snapshotIds: ['A', 'B'],
@@ -10943,24 +11156,34 @@ describe('nextStreamState — question-claimed, question-resolved and endClaimed
       invalidBody: false,
       partial: false,
     }
-    expect(qIds(nextStreamState(claimed, base))).toEqual(['A', 'B'])
-    const ended = nextStreamState(claimed, {...base, endClaimedExemptions: true})
-    expect(qIds(ended)).toEqual(['B'])
-    expect(qEntry(ended).questionClaimedExempt?.size).toBe(0)
+    const kept = nextStreamState(claimed, omitting)
+    expect(qIds(kept)).toEqual(['A', 'B'])
+    expect(qEntry(kept).questionClaimedExempt?.has('A')).toBe(true)
+    const reopened = nextStreamState(kept, {
+      ...omitting,
+      requests: [
+        {requestID: 'A', questions: [qQuestion()] as never},
+        {requestID: 'B', questions: [qQuestion()] as never},
+      ],
+    })
+    expect(qIds(reopened)).toEqual(['A', 'B'])
+    expect(qEntry(reopened).questionClaimedExempt?.has('A')).toBe(false)
   })
 
-  it('an invalid-body reconcile does not end exemptions even when asked to', () => {
-    const claimed = nextStreamState(open('A'), {type: 'question-claimed', runId: Q_RUN, requestID: 'A'})
-    const result = nextStreamState(claimed, {
-      type: 'question-reconcile',
-      runId: Q_RUN,
-      snapshotIds: ['A'],
-      requests: [],
-      invalidBody: true,
-      partial: false,
-      endClaimedExemptions: true,
-    })
-    expect(result).toBe(claimed)
+  it('question-reconcile-reset clears the completed flag, so a wire waiting_for_question reads as waiting again', () => {
+    let state = qStatus(qLive(), 'waiting_for_question')
+    state = qReconcile(state, [])
+    expect(getEffectiveStatus(qEntry(state))).toBe('running')
+    const reset = nextStreamState(state, {type: 'question-reconcile-reset', runId: Q_RUN})
+    expect(qEntry(reset).questionReconcileDone).toBe(false)
+    expect(getEffectiveStatus(qEntry(reset))).toBe('waiting_for_question')
+    expect(qEntry(reset).status).toBe('waiting_for_question')
+  })
+
+  it('question-reconcile-reset leaves a state without the run, and a terminal run, unchanged', () => {
+    expect(nextStreamState(INITIAL_STATE, {type: 'question-reconcile-reset', runId: Q_RUN})).toBe(INITIAL_STATE)
+    const terminal = qStatus(open('A'), 'succeeded')
+    expect(nextStreamState(terminal, {type: 'question-reconcile-reset', runId: Q_RUN})).toBe(terminal)
   })
 })
 

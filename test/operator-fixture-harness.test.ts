@@ -16,6 +16,7 @@
  * - /operator redirects to /; production /operator/* data routes remain absent.
  * - Fixture routes are public (no auth required) when flag is on.
  */
+import type {StreamFrame} from '../public/operator-stream.js'
 import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
 import {Buffer} from 'node:buffer'
 import process from 'node:process'
@@ -2633,22 +2634,40 @@ interface WireFrame {
   readonly data: Record<string, unknown>
 }
 
+function isWireFrame(value: unknown): value is WireFrame {
+  return typeof value === 'object' && value !== null &&
+    'type' in value && typeof value.type === 'string' &&
+    'data' in value && typeof value.data === 'object' && value.data !== null
+}
+
 function serverFrames(sse: string): WireFrame[] {
   const frames: WireFrame[] = []
   for (const result of serverParseSseChunk(sse)) {
     expect(result.success, 'server reader accepts every fixture frame').toBe(true)
-    if (result.success) frames.push(result.frame as unknown as WireFrame)
+    if (!result.success) continue
+    expect(isWireFrame(result.frame), 'server frame has a type and a data object').toBe(true)
+    if (isWireFrame(result.frame)) frames.push(result.frame)
+  }
+  return frames
+}
+
+/** The browser parser's frames, typed as the reducer takes them. */
+function browserStreamFrames(sse: string): StreamFrame[] {
+  const frames: StreamFrame[] = []
+  for (const record of sse.split('\n\n')) {
+    if (record.trim() === '') continue
+    const result = browserParseSseFrame(record)
+    expect(result?.success, 'browser parseSseFrame accepts every fixture frame').toBe(true)
+    if (result !== null && result.success) frames.push(result.frame)
   }
   return frames
 }
 
 function browserFrames(sse: string): WireFrame[] {
   const frames: WireFrame[] = []
-  for (const record of sse.split('\n\n')) {
-    if (record.trim() === '') continue
-    const result = browserParseSseFrame(record)
-    expect(result?.success, 'browser parseSseFrame accepts every fixture frame').toBe(true)
-    if (result !== null && result.success) frames.push(result.frame as unknown as WireFrame)
+  for (const frame of browserStreamFrames(sse)) {
+    expect(isWireFrame(frame), 'browser frame has a type and a data object').toBe(true)
+    if (isWireFrame(frame)) frames.push(frame)
   }
   return frames
 }
@@ -2841,8 +2860,8 @@ function reduceQuestionScenario(key: string, summaryStatus: string) {
     {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false, summaryStatus} as Parameters<typeof nextStreamState>[0],
     {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}},
   )
-  for (const frame of browserFrames(serializeScenarioToSse(key, runId)).slice(1)) {
-    state = nextStreamState(state, frame as unknown as Parameters<typeof nextStreamState>[1])
+  for (const frame of browserStreamFrames(serializeScenarioToSse(key, runId)).slice(1)) {
+    state = nextStreamState(state, frame)
   }
   return {state, entry: state.runs[runId] as Record<string, unknown> | undefined}
 }
