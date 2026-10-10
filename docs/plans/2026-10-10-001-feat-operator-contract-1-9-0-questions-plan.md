@@ -248,7 +248,7 @@ stateDiagram-v2
 
 `public/operator-stream.js` is edited by Units 1 through 6, so they land in this order: Unit 1; Units 2, 3, 4; Units 5 and 6; then Unit 8. Unit 7 is independent.
 
-- [ ] **Unit 1: Vendor contract 1.9.0, move the pins, parse questions on the server reader**
+- [x] **Unit 1: Vendor contract 1.9.0, move the pins, parse questions on the server reader**
 
 **Goal:** The vendored contract matches 1.9.0, every pin moves together, and the server reader accepts question frames and `waiting_for_question`.
 
@@ -284,7 +284,7 @@ stateDiagram-v2
 
 **Verification:** check-types and the conformance and reader suites pass; README lists the new file and its edits.
 
-- [ ] **Unit 2: Browser question state, page store, effective status, labels**
+- [x] **Unit 2: Browser question state, page store, effective status, labels**
 
 **Goal:** The browser stream parses question frames, keeps open questions per run, tombstones and drafts per page, clears on terminal, and renders the effective status.
 
@@ -319,7 +319,7 @@ stateDiagram-v2
 
 **Verification:** stream-core suite passes, including the extended leak guard.
 
-- [ ] **Unit 3: Expired-snapshot handling (#583)**
+- [x] **Unit 3: Expired-snapshot handling (#583)**
 
 **Goal:** `no-snapshot` never strands the card. A run known terminal from the stream or its run-list summary shows its status and "Output no longer available"; any other run stays live.
 
@@ -352,7 +352,7 @@ stateDiagram-v2
 
 **Verification:** the updated and new reducer tests pass; the fixture scenarios in Unit 8 show the state in a browser.
 
-- [ ] **Unit 4: Question client and reconcile triggers**
+- [x] **Unit 4: Question client and reconcile triggers**
 
 **Goal:** The browser can list pending questions and submit decisions, with outcomes classified by response state and the three re-list triggers wired.
 
@@ -386,7 +386,7 @@ stateDiagram-v2
 
 **Verification:** stream-core suite passes; no new log calls carry dynamic values.
 
-- [ ] **Unit 5: Question region and summary status on every card shape**
+- [x] **Unit 5: Question region and summary status on every card shape**
 
 **Goal:** Every run card carries one hidden question region, discovered by the runtime and passed to the stream with the run's summary status.
 
@@ -413,7 +413,7 @@ stateDiagram-v2
 
 **Verification:** run-index, runtime, and launch-card suites pass.
 
-- [ ] **Unit 6: Question region UI**
+- [x] **Unit 6: Question region UI**
 
 **Goal:** The region renders every open request and lets the operator answer or skip, with every outcome state.
 
@@ -453,7 +453,7 @@ stateDiagram-v2
 
 **Verification:** suites pass; @designer verifies the region on the fixture server at desktop and 390px in both themes.
 
-- [ ] **Unit 7: Question push kind**
+- [x] **Unit 7: Question push kind**
 
 **Goal:** A `question` push shows fixed copy and opens the dashboard.
 
@@ -474,7 +474,7 @@ stateDiagram-v2
 
 **Verification:** push suite passes.
 
-- [ ] **Unit 8: Fixtures and harness routes**
+- [x] **Unit 8: Fixtures and harness routes**
 
 **Goal:** The local fixture harness exercises every question shape, decision outcome, and #583 path through the real runtime.
 
