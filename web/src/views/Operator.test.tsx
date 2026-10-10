@@ -312,6 +312,18 @@ describe('Operator — fixture scenario selector', () => {
         'no_output',
         'stream_reset',
         'approval_flow',
+        'question_single',
+        'question_multi_shapes',
+        'question_settled_elsewhere',
+        'question_terminal_pending',
+        'question_already_claimed_reopens',
+        'question_failed_to_settle',
+        'question_invalid_answer',
+        'question_masked_404',
+        'question_text_sentinels',
+        'expired_completed_terminal_frame',
+        'expired_completed_silent',
+        'running_after_no_snapshot',
       ].sort(),
     )
   })
