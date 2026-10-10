@@ -82,6 +82,23 @@ export const MAX_OPEN_APPROVALS = 100
 export const GATEWAY_PENDING_APPROVALS_CAP = 50
 
 /**
+ * Hard cap on the per-run open-questions map. It equals the gateway's pending-question
+ * list cap (50). Excess opens for unseen requestIDs are rejected, never evicting a real
+ * pending question: losing one the operator can still answer is worse than dropping overflow.
+ */
+export const MAX_OPEN_QUESTIONS = 50
+
+/**
+ * Mirrors the gateway's pending-question list cap (50) from fro-bot/agent
+ * `GET /operator/runs/:runId/questions`. A list at or above this size may be truncated, so
+ * the question reconcile treats it as additive only and never prunes from it.
+ *
+ * NOTE: External contract value with no in-repo source of truth. A stale mirror tightens
+ * the guard (ghosts persist) but never wipes real questions — the safe direction.
+ */
+export const GATEWAY_PENDING_QUESTIONS_CAP = 50
+
+/**
  * Bounded timeout in milliseconds for receiving the first SSE frame after opening
  * a stream. If no frame arrives within this window, the connection transitions to
  * 'submitted-unobservable' — the run was accepted but is not yet streaming (e.g.
@@ -108,6 +125,7 @@ const VALID_STATUSES = new Set([
   'blocked',
   'running',
   'waiting_for_approval',
+  'waiting_for_question',
   'succeeded',
   'failed',
   'cancelled',
@@ -136,6 +154,7 @@ const STATUS_LABELS = {
   blocked: 'Blocked',
   running: 'Running',
   waiting_for_approval: 'Waiting for approval',
+  waiting_for_question: 'Waiting for answer',
   succeeded: 'Succeeded',
   failed: 'Failed',
   cancelled: 'Cancelled',
@@ -556,6 +575,101 @@ function normalizeCrlf(text) {
 }
 
 // ---------------------------------------------------------------------------
+// Question frame parser
+//
+// Behaves identically to the server reader's parseQuestionFrame
+// (src/gateway/operator-contract/question-frame.ts); a parity test feeds the same
+// inputs to both. Question and answer text is untrusted: the text rule converts tab,
+// newline and carriage return to spaces and removes every other control and bidi
+// character. Bounds are enforced after that rule. A frame that is malformed, closed-
+// object-violating (any extra key, including an own __proto__) or over-bound is
+// rejected whole — never truncated. Zero questions is valid.
+// ---------------------------------------------------------------------------
+
+const QUESTION_HEADER_MAX_LENGTH = 128
+const QUESTION_TEXT_MAX_LENGTH = 4096
+const QUESTION_OPTION_LABEL_MAX_LENGTH = 256
+const QUESTION_OPTION_DESCRIPTION_MAX_LENGTH = 1024
+const MAX_QUESTIONS_PER_REQUEST = 8
+const MAX_OPTIONS_PER_QUESTION = 64
+
+// Removed outright: C0 controls except tab/LF/CR, DEL, C1 controls, and every Unicode bidi control
+// (marks U+200E/U+200F/U+061C, embeddings and overrides U+202A-U+202E, isolates U+2066-U+2069).
+// eslint-disable-next-line no-control-regex
+const QUESTION_REMOVED_CHARS = /[\u0000-\u0008\v\f\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g
+const QUESTION_WHITESPACE_CHARS = /[\t\n\r]/g
+
+function sanitizeQuestionText(value) {
+  return value.replaceAll(QUESTION_WHITESPACE_CHARS, ' ').replaceAll(QUESTION_REMOVED_CHARS, '')
+}
+
+function isQuestionRecord(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** True when the value's own enumerable keys are exactly `keys`. An own `__proto__` counts as a key, so it fails. */
+function hasExactKeys(value, keys) {
+  const own = Object.keys(value)
+  return own.length === keys.length && keys.every(key => Object.hasOwn(value, key))
+}
+
+/** Sanitize a bounded string, or null when it is not a string or is over its bound after sanitizing. */
+function boundedQuestionText(value, maxLength) {
+  if (typeof value !== 'string') return null
+  const clean = sanitizeQuestionText(value)
+  return clean.length <= maxLength ? clean : null
+}
+
+function parseQuestionOption(value) {
+  if (!isQuestionRecord(value) || !hasExactKeys(value, ['label', 'description'])) return null
+  const label = boundedQuestionText(value.label, QUESTION_OPTION_LABEL_MAX_LENGTH)
+  const description = boundedQuestionText(value.description, QUESTION_OPTION_DESCRIPTION_MAX_LENGTH)
+  if (label === null || description === null) return null
+  return {label, description}
+}
+
+function parseQuestionPrompt(value) {
+  if (!isQuestionRecord(value) || !hasExactKeys(value, ['header', 'text', 'options', 'multiple', 'custom'])) return null
+  const header = boundedQuestionText(value.header, QUESTION_HEADER_MAX_LENGTH)
+  const text = boundedQuestionText(value.text, QUESTION_TEXT_MAX_LENGTH)
+  if (header === null || text === null) return null
+  if (typeof value.multiple !== 'boolean' || typeof value.custom !== 'boolean') return null
+  if (!Array.isArray(value.options) || value.options.length > MAX_OPTIONS_PER_QUESTION) return null
+  const options = []
+  for (const entry of value.options) {
+    const option = parseQuestionOption(entry)
+    if (option === null) return null
+    options.push(option)
+  }
+  return {header, text, options, multiple: value.multiple, custom: value.custom}
+}
+
+/**
+ * Validate one `question` frame payload (already JSON-parsed) into a closed frame object, or
+ * null when it is malformed or out of bounds. Never throws; the result is rebuilt field by
+ * field so no input object or nested part reaches a caller.
+ */
+function parseQuestionFramePayload(value) {
+  if (!isQuestionRecord(value) || typeof value.settled !== 'boolean') return null
+  if (!isNonEmptyString(value.runId) || !isNonEmptyString(value.requestID)) return null
+
+  if (value.settled) {
+    if (!hasExactKeys(value, ['runId', 'requestID', 'settled'])) return null
+    return {runId: value.runId, requestID: value.requestID, settled: true}
+  }
+
+  if (!hasExactKeys(value, ['runId', 'requestID', 'settled', 'questions'])) return null
+  if (!Array.isArray(value.questions) || value.questions.length > MAX_QUESTIONS_PER_REQUEST) return null
+  const questions = []
+  for (const entry of value.questions) {
+    const question = parseQuestionPrompt(entry)
+    if (question === null) return null
+    questions.push(question)
+  }
+  return {runId: value.runId, requestID: value.requestID, settled: false, questions}
+}
+
+// ---------------------------------------------------------------------------
 // Pure SSE frame parser
 // ---------------------------------------------------------------------------
 
@@ -757,8 +871,53 @@ export function parseSseFrame(record) {
     }
   }
 
+  if (eventName === 'question') {
+    // The reject path returns a fixed string: question text and IDs are never echoed or logged.
+    const data = parseQuestionFramePayload(parsed)
+    if (data === null) {
+      return {success: false, error: 'question frame failed validation'}
+    }
+    return {success: true, frame: {type: 'question', data}}
+  }
+
   // Unknown event name — fixed error string, never echoes the name
   return {success: false, error: 'sse record has unrecognized event name'}
+}
+
+// ---------------------------------------------------------------------------
+// Question page store
+//
+// Tombstones and drafts outlive stream handles: stream state is created fresh on each
+// attach, so keeping them there would let a late pending list resurrect a settled
+// request after a card collapses and re-expands. The store is a module-level map keyed
+// by run ID, in memory only (never persisted), and dies with the page — logout navigates.
+//
+// Tombstones are NOT evicted: they grow only with questions actually settled, which keeps
+// "a settled request never reappears" true for the page. Drafts are keyed by requestID.
+//
+// The reducer reads and writes this store directly. That makes nextStreamState impure for
+// question frames by design: the store must be visible to a new handle for the same run,
+// which a value held in the reducer's own state can never be.
+// ---------------------------------------------------------------------------
+
+const questionPageStore = new Map()
+
+/**
+ * The page-level question record for a run: `{tombstones: Set<requestID>, drafts: Map<requestID, draft>}`.
+ * Created on first use. The returned object is live — callers mutate it directly.
+ */
+export function getQuestionPageStore(runId) {
+  let record = questionPageStore.get(runId)
+  if (record === undefined) {
+    record = {tombstones: new Set(), drafts: new Map()}
+    questionPageStore.set(runId, record)
+  }
+  return record
+}
+
+/** Drop every run's tombstones and drafts. For tests and logout-equivalent teardown. */
+export function resetQuestionPageStore() {
+  questionPageStore.clear()
 }
 
 // ---------------------------------------------------------------------------
@@ -868,6 +1027,16 @@ export function nextStreamState(current, event) {
       if (checkoutPreparation !== undefined) {
         nextEntry.checkoutPreparation = checkoutPreparation
         delete nextEntry.checkoutProvenance
+      }
+      // Terminal clears the run's open questions, the claimed exemption, and every draft in the
+      // page store — with NO tombstone (the gateway sends no settle frame at terminal; terminal
+      // is absorbing, so nothing can reopen). Tombstones stay: they are the page's memory.
+      if (isTerminal) {
+        questionPageStore.get(runId)?.drafts.clear()
+        if (prevStatusEntry?.questionOpen !== undefined) {
+          nextEntry.questionOpen = new Map()
+          nextEntry.questionClaimedExempt = new Set()
+        }
       }
       const updatedRuns = Object.assign(Object.create(null), current.runs, {[runId]: nextEntry})
       // If all observed runs are terminal, close the stream
@@ -1267,6 +1436,141 @@ export function nextStreamState(current, event) {
       return {...current, runs: updatedRuns}
     }
 
+    case 'question': {
+      // Question frames before ready (connection !== 'live') are ignored — mirrors approval gating.
+      if (current.connection !== 'live') {
+        return current
+      }
+      const {runId, requestID, settled} = event.data
+      const prevEntry = current.runs[runId]
+
+      // Terminal is absorbing: once the run is terminal, all question frames are ignored.
+      if (prevEntry !== undefined && prevEntry.terminal) {
+        return current
+      }
+
+      const base = prevEntry ?? {
+        runId,
+        status: '',
+        phase: '',
+        startedAt: '',
+        stale: false,
+        terminal: false,
+      }
+      const store = getQuestionPageStore(runId)
+      const prevOpen = base.questionOpen ?? new Map()
+      const prevExempt = base.questionClaimedExempt ?? new Set()
+
+      if (settled) {
+        // Settle frame: tombstone for the page, remove the request, its draft, and any claimed
+        // exemption. A settle for a request never seen open still tombstones (settle-before-open).
+        store.tombstones.add(requestID)
+        store.drafts.delete(requestID)
+        const nextOpen = new Map(prevOpen)
+        nextOpen.delete(requestID)
+        const nextExempt = new Set(prevExempt)
+        nextExempt.delete(requestID)
+        const updatedEntry = {...base, questionOpen: nextOpen, questionClaimedExempt: nextExempt}
+        return {...current, runs: Object.assign(Object.create(null), current.runs, {[runId]: updatedEntry})}
+      }
+
+      // Open frame: a tombstoned request is ignored (open-after-settle / id-reuse guard).
+      if (store.tombstones.has(requestID)) {
+        return current
+      }
+      // A repeated open keeps the existing entry and its draft — replayed opens add nothing.
+      if (prevOpen.has(requestID)) {
+        return current
+      }
+      // Cap: reject the overflow open; never evict a real pending question.
+      if (prevOpen.size >= MAX_OPEN_QUESTIONS) {
+        return current
+      }
+      const nextOpen = new Map(prevOpen)
+      nextOpen.set(requestID, {requestID, questions: event.data.questions})
+      const updatedEntry = {
+        ...base,
+        questionOpen: nextOpen,
+        questionClaimedExempt: prevExempt,
+      }
+      return {...current, runs: Object.assign(Object.create(null), current.runs, {[runId]: updatedEntry})}
+    }
+
+    case 'question-reconcile': {
+      // Result of a pending-question list check. Like approval-reconcile, the caller computes the
+      // inputs from a pre-GET snapshot (`snapshotIds`) — the ids open locally BEFORE the request —
+      // so anything that opened over SSE during the await is never eligible for removal.
+      //
+      //   invalidBody  the response body failed validation: change nothing (not even the flag)
+      //   partial      the caller dropped invalid entries: the list is not a complete picture
+      //   requests     the valid listed requests, `{requestID, questions}`
+      //
+      // Failures (network, 429, 5xx) never reach here — the caller dispatches nothing for them.
+      //
+      // Before ready (connection !== 'live') → ignore (mirrors question/approval gating).
+      if (current.connection !== 'live') {
+        return current
+      }
+      const {runId, snapshotIds, requests, invalidBody, partial} = event
+      if (invalidBody === true) {
+        return current
+      }
+      const prevEntry = current.runs[runId]
+
+      // Terminal is absorbing.
+      if (prevEntry !== undefined && prevEntry.terminal) {
+        return current
+      }
+
+      const base = prevEntry ?? {
+        runId,
+        status: '',
+        phase: '',
+        startedAt: '',
+        stale: false,
+        terminal: false,
+      }
+      const store = getQuestionPageStore(runId)
+      const nextOpen = new Map(base.questionOpen ?? new Map())
+      const nextExempt = new Set(base.questionClaimedExempt ?? new Set())
+      const listedIds = new Set(requests.map(request => request.requestID))
+
+      // --- Removal path ---
+      // A full list may be truncated at the gateway cap, and a partial one is missing entries the
+      // caller could not validate: either way absence proves nothing, so the diff is additive only.
+      // Removal never tombstones — the request may return on a later frame or list — and a
+      // claimed-exempt request is skipped: the gateway excludes claimed requests from the list,
+      // so its absence says nothing about them.
+      const additiveOnly = partial === true || requests.length >= GATEWAY_PENDING_QUESTIONS_CAP
+      if (!additiveOnly) {
+        for (const requestID of snapshotIds) {
+          if (!listedIds.has(requestID) && !nextExempt.has(requestID)) {
+            nextOpen.delete(requestID)
+          }
+        }
+      }
+
+      // --- Add path ---
+      // Listed and not tombstoned → add (unless already open or at the cap). A list that shows a
+      // claimed-exempt request ends its exemption: the claimant failed and it is open again.
+      for (const request of requests) {
+        const {requestID} = request
+        if (nextExempt.has(requestID)) nextExempt.delete(requestID)
+        if (store.tombstones.has(requestID)) continue
+        if (nextOpen.has(requestID)) continue
+        if (nextOpen.size >= MAX_OPEN_QUESTIONS) continue
+        nextOpen.set(requestID, {requestID, questions: request.questions})
+      }
+
+      const updatedEntry = {
+        ...base,
+        questionOpen: nextOpen,
+        questionClaimedExempt: nextExempt,
+        questionReconcileDone: true,
+      }
+      return {...current, runs: Object.assign(Object.create(null), current.runs, {[runId]: updatedEntry})}
+    }
+
     case 'buffer-overflow': {
       // A stream that exceeds the buffer cap is hostile or broken — fail closed
       // terminally with no reconnect, regardless of retry budget.
@@ -1364,6 +1668,66 @@ export function getOpenApprovals(runEntry) {
   const openPrompts = runEntry.approvalOpenPrompts
   if (openPrompts === undefined || openPrompts === null) return []
   return Object.values(openPrompts)
+}
+
+// ---------------------------------------------------------------------------
+// Question derivation helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the open questions for a run entry in arrival order. Each element is
+ * `{requestID, questions}` where `questions` are the parsed, sanitized prompts.
+ * Returns an empty array when there are none.
+ *
+ * @param {object} runEntry - A RunEntry from the stream state's runs map.
+ * @returns {Array} The open question requests, or an empty array.
+ */
+export function getOpenQuestions(runEntry) {
+  if (runEntry === undefined || runEntry === null) return []
+  const open = runEntry.questionOpen
+  if (open === undefined || open === null) return []
+  return [...open.values()]
+}
+
+/**
+ * Returns true iff the run entry has at least one open question request.
+ *
+ * @param {object} runEntry - A RunEntry from the stream state's runs map.
+ * @returns {boolean} True iff the run has at least one open question request.
+ */
+export function hasOpenQuestions(runEntry) {
+  if (runEntry === undefined || runEntry === null) return false
+  const open = runEntry.questionOpen
+  return open !== undefined && open !== null && open.size > 0
+}
+
+/**
+ * The status to render for a run: the wire status adjusted by what the browser knows about
+ * open questions. Computed at render and NEVER stored — the next `running` frame would
+ * overwrite a stored derived value.
+ *
+ *   1. Terminal wins.
+ *   2. Wire `waiting_for_approval` stays (the gateway lets approval win over questions).
+ *   3. A `running` run with any open question is `waiting_for_question`.
+ *   4. A wire `waiting_for_question` with an open question stays; with none, once a question
+ *      reconcile has completed, it is really `running`. (Before that, a missed settle frame
+ *      cannot be told from a question the list has not yet shown, so the wire value is kept.)
+ *   5. Anything else is the wire value (so `queued` and `blocked` stay put).
+ *
+ * @param {object|undefined|null} runEntry - A RunEntry from the stream state's runs map.
+ * @returns {string} The status value to label and style; '' when there is no entry.
+ */
+export function getEffectiveStatus(runEntry) {
+  if (runEntry === undefined || runEntry === null) return ''
+  const wire = runEntry.status
+  if (runEntry.terminal === true) return wire
+  if (wire === 'waiting_for_approval') return wire
+  if (wire === 'running') return hasOpenQuestions(runEntry) ? 'waiting_for_question' : wire
+  if (wire === 'waiting_for_question') {
+    if (hasOpenQuestions(runEntry)) return wire
+    return runEntry.questionReconcileDone === true ? 'running' : wire
+  }
+  return wire
 }
 
 // ---------------------------------------------------------------------------
@@ -2641,13 +3005,15 @@ export function initOperatorStream(opts) {
     if (statusEl) {
       const runEntry = state.runs[runId]
       if (runEntry && (state.connection === 'live' || runEntry.terminal)) {
-        const view = toSafeRunView(runEntry)
+        // The effective status folds open questions into the wire status; it is derived here
+        // on every render and never stored.
+        const effectiveStatus = getEffectiveStatus(runEntry)
         // Render label from local map, never the raw wire string into textContent
-        const label = STATUS_LABELS[view.status] ?? ''
+        const label = STATUS_LABELS[effectiveStatus] ?? ''
         statusEl.textContent = label
         // Update status class for styling — use allowlisted status value (no whitespace)
         statusEl.className = statusEl.className.replaceAll(/\bstatus-\S+/g, '')
-        statusEl.classList.add(`status-${view.status.replaceAll('_', '-')}`)
+        statusEl.classList.add(`status-${effectiveStatus.replaceAll('_', '-')}`)
       } else if (!aborted) {
         const conn = state.connection
         const runIsTerminal = runEntry !== undefined && runEntry.terminal === true

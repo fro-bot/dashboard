@@ -254,6 +254,15 @@
   background: rgba(230, 81, 0, 0.1);
 }
 
+.run-status.status-waiting-for-question {
+  background: rgba(255, 193, 7, 0.1);
+  color: var(--color-warning);
+  border-color: rgba(255, 193, 7, 0.2);
+}
+[data-theme="light"] .run-status.status-waiting-for-question {
+  background: rgba(230, 81, 0, 0.1);
+}
+
 .run-status.status-pending,
 .run-status.status-queued,
 .run-status.status-cancelled {

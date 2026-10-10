@@ -11,7 +11,13 @@
  * - No console output of frame data.
  */
 
-import type {ApprovalFrameDataOpen, OutputFrameData, RunEntry, StreamState} from '../public/operator-stream.js'
+import type {
+  ApprovalFrameDataOpen,
+  OutputFrameData,
+  QuestionReconcileEvent,
+  RunEntry,
+  StreamState,
+} from '../public/operator-stream.js'
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {
   bootstrapOperatorStreams,
@@ -30,11 +36,17 @@ import {
   fillLabelTemplate,
   FIRST_FRAME_TIMEOUT_MS,
   GATEWAY_PENDING_APPROVALS_CAP,
+  GATEWAY_PENDING_QUESTIONS_CAP,
+  getEffectiveStatus,
   getOpenApprovals,
+  getOpenQuestions,
+  getQuestionPageStore,
   hasOpenApprovals,
+  hasOpenQuestions,
   initOperatorStream,
   MAX_APPROVAL_TOMBSTONES,
   MAX_OPEN_APPROVALS,
+  MAX_OPEN_QUESTIONS,
   MAX_OUTPUT_TEXT_CHARS,
   MAX_SSE_BUFFER_BYTES,
   nextStreamState,
@@ -44,6 +56,7 @@ import {
   renderApprovalPrompt,
   renderCancelControl,
   resetBootstrapState,
+  resetQuestionPageStore,
   RETRY_BASE_MS,
   RETRY_FACTOR,
   RETRY_MAX_COUNT,
@@ -54,14 +67,22 @@ import {
   CHECKOUT_OPERATIONS,
   CHECKOUT_REFUSAL_REASONS,
   LAYOUT_REFUSAL_REASONS,
+  MAX_OPTIONS_PER_QUESTION,
+  MAX_QUESTIONS_PER_REQUEST,
   OBSTRUCTION_KINDS,
   OPERATOR_CONTRACT_VERSION,
+  QUESTION_HEADER_MAX_LENGTH,
+  QUESTION_OPTION_DESCRIPTION_MAX_LENGTH,
+  QUESTION_OPTION_LABEL_MAX_LENGTH,
+  QUESTION_TEXT_MAX_LENGTH,
   UPDATE_FAILURE_REASONS,
   PHASE_TO_WEB_STATUS as VENDORED_PHASE_TO_WEB_STATUS,
 } from '../src/gateway/operator-contract/index.ts'
 import {OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
 import {FIXTURE_RUN_ID_FOR_TESTS, FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../src/gateway/operator-fixture-sse.ts'
 import {parseSseChunk} from '../src/gateway/operator-sse-reader.ts'
+
+const Q_RUN = 'run-q-001'
 
 const ACTIVE_STATUS = {
   runId: 'run-abc',
@@ -8255,6 +8276,114 @@ describe('checkout fields — leak guard', () => {
       expect(JSON.stringify(rest)).not.toContain('fixture-')
     }
   })
+
+  it('a stream carrying question sentinels touches no console, storage, cache, history, location or HTML sink, and writes no sentinel to any element', async () => {
+    const consoleSpies = (['log', 'info', 'warn', 'error', 'debug', 'trace'] as const).map(method => vi.spyOn(console, method).mockImplementation(() => {}))
+    const storageCalls: string[] = []
+    const storage = ckAccessRecorder(storageCalls)
+    vi.stubGlobal('localStorage', storage)
+    vi.stubGlobal('sessionStorage', storage)
+    const idbCalls: string[] = []
+    vi.stubGlobal('indexedDB', ckAccessRecorder(idbCalls))
+    const cacheCalls: string[] = []
+    vi.stubGlobal('caches', ckAccessRecorder(cacheCalls))
+    const historyCalls: string[] = []
+    vi.stubGlobal('history', ckAccessRecorder(historyCalls))
+    const locationWrites: string[] = []
+    vi.stubGlobal('location', ckAccessRecorder(locationWrites))
+
+    const writes: string[] = []
+    vi.stubGlobal('document', {
+      createElement: () => ckRecordingElement(writes),
+      createTextNode: (text: string) => {
+        const node = ckRecordingElement(writes)
+        node.textContent = text
+        return node
+      },
+    })
+
+    const open = qOpen('req-q-sentinel', [
+      qQuestion({
+        header: 'fixture-q-header',
+        text: 'fixture-q-text <img src=x onerror=alert(1)> [link](https://example.invalid)',
+        options: [{label: 'fixture-q-label', description: 'fixture-q-description'}],
+      }),
+    ])
+    // Three rejected frames, each carrying a sentinel: over-bound, extra key, truncated JSON.
+    const overBound = qOpen('req-q-bad', [qQuestion({header: `fixture-q-reject-${'x'.repeat(QUESTION_HEADER_MAX_LENGTH)}`})])
+    const extraKey = {...qOpen('req-q-extra'), 'fixture-q-extra-key': 'fixture-q-extra-value'}
+    const encoder = new TextEncoder()
+    const body = [
+      `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`,
+      `event: status\ndata: ${JSON.stringify(ckStatusPayload({runId: Q_RUN}))}\n\n`,
+      qSse(open),
+      qSse(overBound),
+      qSse(extraKey),
+      'event: question\ndata: {"fixture-q-truncated\n\n',
+    ].join('')
+    let read = 0
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {getReader: () => ({read: async () => (read++ === 0 ? {done: false, value: encoder.encode(body)} : new Promise(() => {}))})},
+    }))
+
+    const handle = initOperatorStream({
+      runId: Q_RUN,
+      statusEl: ckRecordingElement(writes) as never,
+      noticeEl: ckRecordingElement(writes) as never,
+      reasonEl: ckRecordingElement(writes) as never,
+      endpointBase: '/operator',
+    })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    handle.close()
+
+    for (const spy of consoleSpies) expect(spy).not.toHaveBeenCalled()
+    expect(storageCalls).toEqual([])
+    expect(idbCalls).toEqual([])
+    expect(cacheCalls).toEqual([])
+    expect(historyCalls).toEqual([])
+    expect(locationWrites).toEqual([])
+    // The valid question reached the reducer: the derived status label is painted.
+    expect(writes.join('\n')).toContain('Waiting for answer')
+    // No question text, accepted or rejected, reaches a text node, attribute, class, dataset or style.
+    expect(writes.join('\n')).not.toContain('fixture-q-')
+    expect(writes.join('\n')).not.toContain('onerror')
+    expect(writes.some(write => /^(?:innerHTML|outerHTML)=/.test(write))).toBe(false)
+    // The page store holds ids and drafts only; the stream never writes question text into it.
+    const store = getQuestionPageStore(Q_RUN)
+    expect(JSON.stringify({tombstones: [...store.tombstones], drafts: [...store.drafts]})).not.toContain('fixture-q-')
+  })
+
+  it('the browser question parser rejects bad frames with a fixed error and no log call carrying a sentinel', () => {
+    const consoleSpies = (['log', 'info', 'warn', 'error', 'debug', 'trace'] as const).map(method => vi.spyOn(console, method).mockImplementation(() => {}))
+    const rejected = [
+      qOpen('req-q-bad', [qQuestion({header: `fixture-q-reject-${'x'.repeat(QUESTION_HEADER_MAX_LENGTH)}`})]),
+      {...qOpen('req-q-extra'), 'fixture-q-extra-key': 'fixture-q-extra-value'},
+      qOpen('req-q-multiple', [qQuestion({text: 'fixture-q-reject', multiple: 'fixture-q-reject'})]),
+      'fixture-q-reject-not-json',
+    ]
+    for (const payload of rejected) {
+      const result = parseSseFrame(qSse(payload))
+      expect(result).not.toBeNull()
+      expect(result?.success).toBe(false)
+      expect(JSON.stringify(result)).not.toContain('fixture-q-')
+    }
+    for (const spy of consoleSpies) expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('question sentinels live only in the open-question entries of in-memory run state', () => {
+    resetQuestionPageStore()
+    const sentinel = qOpen('req-q-sentinel', [qQuestion({header: 'fixture-q-header', text: 'fixture-q-text'})])
+    const state = qFrameApply(qStatus(qLive(), 'running'), sentinel)
+    const entry = qEntry(state) as unknown as Record<string, unknown>
+    const {questionOpen, ...rest} = entry
+    expect(JSON.stringify([...(questionOpen as Map<string, unknown>).values()])).toContain('fixture-q-header')
+    expect(JSON.stringify({...rest, questionClaimedExempt: [...(rest.questionClaimedExempt as Set<string>)]})).not.toContain('fixture-q-')
+    expect(JSON.stringify(toSafeRunView(qEntry(state)))).not.toContain('fixture-q-')
+    expect(Object.keys(toSafeRunView(qEntry(state))).toSorted()).toEqual(['phase', 'runId', 'stale', 'startedAt', 'status'])
+  })
 })
 
 /**
@@ -8500,5 +8629,589 @@ describe('checkout rendering — labelled safe detail region', () => {
     })
     const {regionText} = await renderCheckoutStatuses([payload])
     expect(regionText).not.toContain('in progress')
+  })
+})
+
+// ===========================================================================
+// Agent questions — browser parser, run-entry state, page store, effective status
+// ===========================================================================
+
+function qQuestion(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    header: 'Pick one',
+    text: 'Which option?',
+    options: [{label: 'alpha', description: 'The first option'}],
+    multiple: false,
+    custom: true,
+    ...overrides,
+  }
+}
+
+function qOpen(requestID = 'req-q-1', questions: unknown[] = [qQuestion()], runId = Q_RUN): Record<string, unknown> {
+  return {runId, requestID, settled: false, questions}
+}
+
+function qSettle(requestID = 'req-q-1', runId = Q_RUN): Record<string, unknown> {
+  return {runId, requestID, settled: true}
+}
+
+/** A `question` SSE record. A string payload is used as the raw data line. */
+function qSse(payload: unknown): string {
+  return `event: question\ndata: ${typeof payload === 'string' ? payload : JSON.stringify(payload)}\n\n`
+}
+
+function qBrowser(payload: unknown) {
+  const result = parseSseFrame(qSse(payload))
+  if (result === null || !result.success || result.frame.type !== 'question') return undefined
+  return result.frame.data
+}
+
+function qServer(payload: unknown) {
+  const result = parseSseChunk(qSse(payload))[0]
+  if (result === undefined || !result.success || result.frame.type !== 'question') return undefined
+  return result.frame.data
+}
+
+function qLive(): StreamState {
+  return ckLive()
+}
+
+function qFrameApply(state: StreamState, payload: unknown): StreamState {
+  const data = qBrowser(payload)
+  if (data === undefined) throw new Error('fixture question frame did not parse')
+  return nextStreamState(state, {type: 'question', data})
+}
+
+function qStatus(state: StreamState, status: string, runId = Q_RUN): StreamState {
+  const terminal = ['succeeded', 'failed', 'cancelled'].includes(status)
+  return ckApply(state, ckStatusPayload({runId, status, phase: terminal ? 'COMPLETED' : 'EXECUTING'}))
+}
+
+function qEntry(state: StreamState, runId = Q_RUN): RunEntry {
+  const entry = state.runs[runId]
+  if (entry === undefined) throw new Error(`expected run ${runId} in state`)
+  return entry
+}
+
+function qIds(state: StreamState, runId = Q_RUN): string[] {
+  return getOpenQuestions(state.runs[runId]).map(request => request.requestID)
+}
+
+function qWithExempt(state: StreamState, ids: string[]): StreamState {
+  return {...state, runs: {...state.runs, [Q_RUN]: {...qEntry(state), questionClaimedExempt: new Set(ids)}}}
+}
+
+function qReconcile(
+  state: StreamState,
+  listed: string[],
+  options: {snapshot?: string[]; invalidBody?: boolean; partial?: boolean} = {},
+): StreamState {
+  const event: QuestionReconcileEvent = {
+    type: 'question-reconcile',
+    runId: Q_RUN,
+    snapshotIds: options.snapshot ?? qIds(state),
+    requests: listed.map(requestID => ({requestID, questions: [qQuestion()] as never})),
+    invalidBody: options.invalidBody ?? false,
+    partial: options.partial ?? false,
+  }
+  return nextStreamState(state, event)
+}
+
+describe('question frames — browser parser agrees with the server parser', () => {
+  const longText = (length: number) => 'x'.repeat(length)
+  const parityCases: [string, unknown, boolean][] = [
+    ['open frame with two questions', qOpen('req-q-1', [qQuestion(), qQuestion({header: 'Second', multiple: true, custom: false})]), true],
+    ['settle frame', qSettle(), true],
+    ['request with zero questions', qOpen('req-q-1', []), true],
+    ['zero options, custom false, multiple true', qOpen('req-q-1', [qQuestion({options: [], custom: false, multiple: true})]), true],
+    ['tab, newline and carriage return in text', qOpen('req-q-1', [qQuestion({text: 'a\tb\nc\rd'})]), true],
+    ['a bidi override in text', qOpen('req-q-1', [qQuestion({text: 'a\u202Eb'})]), true],
+    ['header at its bound', qOpen('req-q-1', [qQuestion({header: longText(QUESTION_HEADER_MAX_LENGTH)})]), true],
+    ['header over its bound', qOpen('req-q-1', [qQuestion({header: longText(QUESTION_HEADER_MAX_LENGTH + 1)})]), false],
+    ['text at its bound', qOpen('req-q-1', [qQuestion({text: longText(QUESTION_TEXT_MAX_LENGTH)})]), true],
+    ['text over its bound', qOpen('req-q-1', [qQuestion({text: longText(QUESTION_TEXT_MAX_LENGTH + 1)})]), false],
+    ['text over its bound only before control removal', qOpen('req-q-1', [qQuestion({text: `${longText(QUESTION_TEXT_MAX_LENGTH)}\u0007\u202E`})]), true],
+    ['text over its bound after tab becomes one space', qOpen('req-q-1', [qQuestion({text: `${longText(QUESTION_TEXT_MAX_LENGTH)}\t`})]), false],
+    ['label at its bound', qOpen('req-q-1', [qQuestion({options: [{label: longText(QUESTION_OPTION_LABEL_MAX_LENGTH), description: ''}]})]), true],
+    ['label over its bound', qOpen('req-q-1', [qQuestion({options: [{label: longText(QUESTION_OPTION_LABEL_MAX_LENGTH + 1), description: ''}]})]), false],
+    ['description at its bound', qOpen('req-q-1', [qQuestion({options: [{label: 'a', description: longText(QUESTION_OPTION_DESCRIPTION_MAX_LENGTH)}]})]), true],
+    ['description over its bound', qOpen('req-q-1', [qQuestion({options: [{label: 'a', description: longText(QUESTION_OPTION_DESCRIPTION_MAX_LENGTH + 1)}]})]), false],
+    ['questions at the cap', qOpen('req-q-1', Array.from({length: MAX_QUESTIONS_PER_REQUEST}, () => qQuestion())), true],
+    ['questions over the cap', qOpen('req-q-1', Array.from({length: MAX_QUESTIONS_PER_REQUEST + 1}, () => qQuestion())), false],
+    ['options at the cap', qOpen('req-q-1', [qQuestion({options: Array.from({length: MAX_OPTIONS_PER_QUESTION}, (_, index) => ({label: `o${index}`, description: ''}))})]), true],
+    ['options over the cap', qOpen('req-q-1', [qQuestion({options: Array.from({length: MAX_OPTIONS_PER_QUESTION + 1}, (_, index) => ({label: `o${index}`, description: ''}))})]), false],
+    ['non-boolean multiple', qOpen('req-q-1', [qQuestion({multiple: 'yes'})]), false],
+    ['non-boolean custom', qOpen('req-q-1', [qQuestion({custom: 1})]), false],
+    ['missing custom', qOpen('req-q-1', [(({custom: _custom, ...rest}) => rest)(qQuestion() as {custom: unknown})]), false],
+    ['extra key on the frame', {...qOpen(), extra: 1}, false],
+    ['extra key on a question', qOpen('req-q-1', [qQuestion({extra: 1})]), false],
+    ['extra key on an option', qOpen('req-q-1', [qQuestion({options: [{label: 'a', description: 'b', extra: 1}]})]), false],
+    ['extra key on a settle frame', {...qSettle(), questions: []}, false],
+    ['open frame without questions', {runId: Q_RUN, requestID: 'req-q-1', settled: false}, false],
+    ['non-array questions', qOpen('req-q-1', 'nope' as never), false],
+    ['non-array options', qOpen('req-q-1', [qQuestion({options: 'nope'})]), false],
+    ['non-string header', qOpen('req-q-1', [qQuestion({header: 7})]), false],
+    ['non-string label', qOpen('req-q-1', [qQuestion({options: [{label: 7, description: ''}]})]), false],
+    ['non-object question', qOpen('req-q-1', ['nope']), false],
+    ['array as a question', qOpen('req-q-1', [[]]), false],
+    ['settled as a string', {...qSettle(), settled: 'true'}, false],
+    ['missing runId', {requestID: 'req-q-1', settled: true}, false],
+    ['empty requestID', qSettle(''), false],
+    ['non-string requestID', {...qSettle(), requestID: 5}, false],
+    ['an own __proto__ key on the frame', '{"runId":"run-q-001","requestID":"req-q-1","settled":true,"__proto__":{"x":1}}', false],
+    ['an own __proto__ key on a question', `{"runId":"run-q-001","requestID":"req-q-1","settled":false,"questions":[{"header":"h","text":"t","options":[],"multiple":false,"custom":true,"__proto__":{"x":1}}]}`, false],
+  ]
+
+  for (const [name, payload, accepted] of parityCases) {
+    it(`${name} → ${accepted ? 'accepted' : 'rejected'} by both, and equal when accepted`, () => {
+      const server = qServer(payload)
+      const browser = qBrowser(payload)
+      expect(server !== undefined).toBe(accepted)
+      expect(browser !== undefined).toBe(accepted)
+      if (accepted) expect(browser).toEqual(server)
+    })
+  }
+
+  it('applies the same text rule to every control, bidi and whitespace code unit', () => {
+    const removed = new Set<number>([
+      ...Array.from({length: 0x20}, (_, code) => code),
+      ...Array.from({length: 0x21}, (_, offset) => 0x7F + offset),
+      0x061C, 0x200E, 0x200F,
+      ...Array.from({length: 5}, (_, offset) => 0x202A + offset),
+      ...Array.from({length: 4}, (_, offset) => 0x2066 + offset),
+    ])
+    for (const code of [...removed, 0x20, 0x41, 0xA0, 0x2028, 0x200B]) {
+      const char = String.fromCharCode(code)
+      const payload = qOpen('req-q-1', [qQuestion({text: `a${char}b`, header: `a${char}b`})])
+      const expected = [9, 10, 13].includes(code) ? 'a b' : removed.has(code) ? 'ab' : `a${char}b`
+      const browser = qBrowser(payload)
+      const server = qServer(payload)
+      expect(browser, `code unit ${code}`).toBeDefined()
+      expect(browser, `code unit ${code}`).toEqual(server)
+      expect(browser !== undefined && !browser.settled ? browser.questions[0]?.text : undefined, `code unit ${code}`).toBe(expected)
+    }
+  })
+
+  it('rebuilds a closed object: the parsed result shares nothing with the input', () => {
+    const input = qOpen('req-q-1', [qQuestion()])
+    const browser = qBrowser(input)
+    expect(browser).toEqual({runId: Q_RUN, requestID: 'req-q-1', settled: false, questions: [qQuestion()]})
+    expect(Object.getPrototypeOf(browser)).toBe(Object.prototype)
+  })
+
+  it('rejects with a fixed error that never echoes the input', () => {
+    const result = parseSseFrame(qSse(qOpen('req-q-1', [qQuestion({header: `fixture-q-echo-${longText(QUESTION_HEADER_MAX_LENGTH)}`})])))
+    expect(result?.success).toBe(false)
+    expect(JSON.stringify(result)).not.toContain('fixture-q-echo')
+    const again = parseSseFrame(qSse(qOpen('req-q-1', [qQuestion({multiple: 'x'})])))
+    expect(again).toEqual(result)
+  })
+})
+
+describe('nextStreamState — question frames', () => {
+  beforeEach(() => resetQuestionPageStore())
+  afterEach(() => resetQuestionPageStore())
+
+  it('open then settle: the question is present, then removed and tombstoned for the page', () => {
+    let state = qFrameApply(qLive(), qOpen('req-q-1'))
+    expect(qIds(state)).toEqual(['req-q-1'])
+    expect(hasOpenQuestions(qEntry(state))).toBe(true)
+    expect(getOpenQuestions(qEntry(state))[0]?.questions).toEqual([qQuestion()])
+    state = qFrameApply(state, qSettle('req-q-1'))
+    expect(qIds(state)).toEqual([])
+    expect(hasOpenQuestions(qEntry(state))).toBe(false)
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('req-q-1')).toBe(true)
+  })
+
+  it('settle before open tombstones the request, so a later open is ignored', () => {
+    let state = qFrameApply(qLive(), qSettle('req-q-1'))
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('req-q-1')).toBe(true)
+    state = qFrameApply(state, qOpen('req-q-1'))
+    expect(qIds(state)).toEqual([])
+  })
+
+  it('a settle frame removes the request draft and the claimed exemption', () => {
+    let state = qWithExempt(qFrameApply(qLive(), qOpen('req-q-1')), ['req-q-1'])
+    getQuestionPageStore(Q_RUN).drafts.set('req-q-1', {fixture: 'draft'})
+    state = qFrameApply(state, qSettle('req-q-1'))
+    expect(getQuestionPageStore(Q_RUN).drafts.has('req-q-1')).toBe(false)
+    expect(qEntry(state).questionClaimedExempt?.has('req-q-1')).toBe(false)
+  })
+
+  it('a duplicate open keeps one entry and the existing draft', () => {
+    let state = qFrameApply(qLive(), qOpen('req-q-1'))
+    const draft = {fixture: 'draft'}
+    getQuestionPageStore(Q_RUN).drafts.set('req-q-1', draft)
+    state = qFrameApply(state, qOpen('req-q-1', [qQuestion({text: 'replayed'})]))
+    expect(qIds(state)).toEqual(['req-q-1'])
+    expect(getQuestionPageStore(Q_RUN).drafts.get('req-q-1')).toBe(draft)
+  })
+
+  it('keeps requests in arrival order, including integer-like request ids', () => {
+    let state = qLive()
+    for (const id of ['10', '2', 'req-b', '1']) state = qFrameApply(state, qOpen(id))
+    expect(qIds(state)).toEqual(['10', '2', 'req-b', '1'])
+  })
+
+  it('rejects the 51st open on a run and keeps the first 50', () => {
+    expect(MAX_OPEN_QUESTIONS).toBe(50)
+    let state = qLive()
+    for (let index = 0; index < MAX_OPEN_QUESTIONS; index++) state = qFrameApply(state, qOpen(`req-q-${index}`))
+    const full = state
+    state = qFrameApply(state, qOpen('req-q-overflow'))
+    expect(state).toBe(full)
+    expect(qIds(state)).toHaveLength(MAX_OPEN_QUESTIONS)
+    expect(qIds(state)).not.toContain('req-q-overflow')
+    expect(qIds(state)[0]).toBe('req-q-0')
+    // A duplicate of an existing request at the cap is still a no-op, and a settle still frees a slot.
+    expect(qFrameApply(state, qOpen('req-q-0'))).toBe(state)
+    state = qFrameApply(qFrameApply(state, qSettle('req-q-0')), qOpen('req-q-overflow'))
+    expect(qIds(state)).toHaveLength(MAX_OPEN_QUESTIONS)
+    expect(qIds(state)).toContain('req-q-overflow')
+  })
+
+  it('ignores question frames before ready', () => {
+    expect(qFrameApply(INITIAL_STATE, qOpen('req-q-1')).runs[Q_RUN]).toBeUndefined()
+    expect(getQuestionPageStore(Q_RUN).tombstones.size).toBe(0)
+    qFrameApply(INITIAL_STATE, qSettle('req-q-1'))
+    expect(getQuestionPageStore(Q_RUN).tombstones.size).toBe(0)
+  })
+
+  it('ignores question frames after a terminal status, including settles', () => {
+    let state = qStatus(qLive(), 'running')
+    state = qStatus(state, 'succeeded')
+    const terminal = state
+    expect(qFrameApply(state, qOpen('req-q-1'))).toBe(terminal)
+    expect(qFrameApply(state, qSettle('req-q-2'))).toBe(terminal)
+    expect(getQuestionPageStore(Q_RUN).tombstones.size).toBe(0)
+  })
+
+  it('a terminal status clears open questions and their drafts without tombstoning them', () => {
+    let state = qStatus(qLive(), 'running')
+    state = qFrameApply(qFrameApply(state, qOpen('req-q-1')), qOpen('req-q-2'))
+    state = qWithExempt(state, ['req-q-2'])
+    const store = getQuestionPageStore(Q_RUN)
+    store.drafts.set('req-q-1', {fixture: 'draft-1'})
+    store.drafts.set('req-q-2', {fixture: 'draft-2'})
+    store.tombstones.add('req-q-old')
+    state = qStatus(state, 'failed')
+    expect(qIds(state)).toEqual([])
+    expect(qEntry(state).questionClaimedExempt?.size).toBe(0)
+    expect(store.drafts.size).toBe(0)
+    expect([...store.tombstones]).toEqual(['req-q-old'])
+    expect(getEffectiveStatus(qEntry(state))).toBe('failed')
+  })
+
+  it('a non-terminal status keeps open questions and drafts', () => {
+    let state = qFrameApply(qStatus(qLive(), 'running'), qOpen('req-q-1'))
+    getQuestionPageStore(Q_RUN).drafts.set('req-q-1', {fixture: 'draft'})
+    state = qStatus(state, 'running')
+    expect(qIds(state)).toEqual(['req-q-1'])
+    expect(getQuestionPageStore(Q_RUN).drafts.has('req-q-1')).toBe(true)
+  })
+
+  it('keeps questions per run', () => {
+    let state = qFrameApply(qLive(), qOpen('req-q-1'))
+    state = qFrameApply(state, qOpen('req-q-2', [qQuestion()], 'run-q-002'))
+    expect(qIds(state, Q_RUN)).toEqual(['req-q-1'])
+    expect(qIds(state, 'run-q-002')).toEqual(['req-q-2'])
+    expect(getQuestionPageStore('run-q-002').tombstones.size).toBe(0)
+  })
+
+  it('a new handle for the same run sees the earlier tombstone and draft', () => {
+    // First handle: a question settles, another is drafted.
+    let first = qFrameApply(qLive(), qOpen('req-q-1'))
+    first = qFrameApply(qFrameApply(first, qOpen('req-q-2')), qSettle('req-q-1'))
+    const draft = {fixture: 'draft'}
+    getQuestionPageStore(Q_RUN).drafts.set('req-q-2', draft)
+    expect(qIds(first)).toEqual(['req-q-2'])
+    // Collapse and re-expand: a fresh state, a fresh run entry, the same page.
+    let second = qLive()
+    expect(qIds(second)).toEqual([])
+    second = qFrameApply(second, qOpen('req-q-1'))
+    expect(qIds(second)).toEqual([])
+    second = qFrameApply(second, qOpen('req-q-2'))
+    expect(qIds(second)).toEqual(['req-q-2'])
+    expect(getQuestionPageStore(Q_RUN).drafts.get('req-q-2')).toBe(draft)
+  })
+
+  it('page store accessors return one record per run and reset clears every run', () => {
+    const store = getQuestionPageStore(Q_RUN)
+    expect(getQuestionPageStore(Q_RUN)).toBe(store)
+    store.tombstones.add('req-q-1')
+    expect(getQuestionPageStore('run-q-002')).not.toBe(store)
+    resetQuestionPageStore()
+    expect(getQuestionPageStore(Q_RUN).tombstones.size).toBe(0)
+  })
+})
+
+describe('getEffectiveStatus — derived from the wire status and open questions', () => {
+  beforeEach(() => resetQuestionPageStore())
+  afterEach(() => resetQuestionPageStore())
+
+  const withQuestion = (status: string) => qFrameApply(qStatus(qLive(), status), qOpen('req-q-1'))
+
+  it('running with an open question is waiting_for_question', () => {
+    expect(getEffectiveStatus(qEntry(withQuestion('running')))).toBe('waiting_for_question')
+  })
+
+  it('never stores the derived value: the wire status stays and the next frame cannot overwrite it', () => {
+    let state = withQuestion('running')
+    expect(qEntry(state).status).toBe('running')
+    state = qStatus(state, 'running')
+    expect(getEffectiveStatus(qEntry(state))).toBe('waiting_for_question')
+    expect(qEntry(state).status).toBe('running')
+  })
+
+  it('wire waiting_for_approval wins over an open question', () => {
+    expect(getEffectiveStatus(qEntry(withQuestion('waiting_for_approval')))).toBe('waiting_for_approval')
+  })
+
+  it('queued with an open question stays queued', () => {
+    expect(getEffectiveStatus(qEntry(withQuestion('queued')))).toBe('queued')
+  })
+
+  it('blocked with an open question stays blocked', () => {
+    expect(getEffectiveStatus(qEntry(withQuestion('blocked')))).toBe('blocked')
+  })
+
+  it('terminal wins over a stale question, and the terminal frame clears the question and its draft', () => {
+    let state = withQuestion('running')
+    getQuestionPageStore(Q_RUN).drafts.set('req-q-1', {fixture: 'draft'})
+    state = qStatus(state, 'succeeded')
+    expect(getEffectiveStatus(qEntry(state))).toBe('succeeded')
+    expect(qIds(state)).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).drafts.size).toBe(0)
+    // Even an entry that still carries a question (hand-built) reports its terminal status.
+    const stale: RunEntry = {
+      ...qEntry(state),
+      status: 'succeeded',
+      terminal: true,
+      questionOpen: new Map([['req-q-1', {requestID: 'req-q-1', questions: []}]]),
+    }
+    expect(getEffectiveStatus(stale)).toBe('succeeded')
+  })
+
+  it('wire waiting_for_question with an open question stays waiting_for_question', () => {
+    expect(getEffectiveStatus(qEntry(withQuestion('waiting_for_question')))).toBe('waiting_for_question')
+  })
+
+  it('wire waiting_for_question with no open question is kept until a reconcile completes, then shows running', () => {
+    let state = qStatus(qLive(), 'waiting_for_question')
+    expect(getEffectiveStatus(qEntry(state))).toBe('waiting_for_question')
+    state = qReconcile(state, [])
+    expect(qEntry(state).questionReconcileDone).toBe(true)
+    expect(getEffectiveStatus(qEntry(state))).toBe('running')
+    expect(qEntry(state).status).toBe('waiting_for_question')
+  })
+
+  it('wire waiting_for_question settled by a frame shows running only after a reconcile', () => {
+    let state = qFrameApply(qStatus(qLive(), 'waiting_for_question'), qOpen('req-q-1'))
+    state = qFrameApply(state, qSettle('req-q-1'))
+    expect(getEffectiveStatus(qEntry(state))).toBe('waiting_for_question')
+    state = qReconcile(state, [])
+    expect(getEffectiveStatus(qEntry(state))).toBe('running')
+  })
+
+  it('running with no question is running; other statuses pass through', () => {
+    for (const status of ['queued', 'blocked', 'running', 'waiting_for_approval', 'succeeded', 'failed', 'cancelled']) {
+      expect(getEffectiveStatus(qEntry(qStatus(qLive(), status)))).toBe(status)
+    }
+  })
+
+  it('is total: an absent entry or one without question fields reports its own status', () => {
+    expect(getEffectiveStatus(undefined)).toBe('')
+    expect(getEffectiveStatus(null)).toBe('')
+    expect(getEffectiveStatus({runId: 'r', status: 'running', phase: 'EXECUTING', startedAt: '', stale: false, terminal: false})).toBe('running')
+  })
+})
+
+describe('nextStreamState — question-reconcile', () => {
+  beforeEach(() => resetQuestionPageStore())
+  afterEach(() => resetQuestionPageStore())
+
+  const withOpen = (...ids: string[]): StreamState => {
+    let state = qStatus(qLive(), 'running')
+    for (const id of ids) state = qFrameApply(state, qOpen(id))
+    return state
+  }
+
+  it('snapshot {A,B}, list {B,C}: A is removed without a tombstone, B stays, C is added', () => {
+    const state = qReconcile(withOpen('A', 'B'), ['B', 'C'])
+    expect(qIds(state)).toEqual(['B', 'C'])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(false)
+    expect(qEntry(state).questionReconcileDone).toBe(true)
+    // Removed by absence, so it can return on a later frame.
+    expect(qIds(qFrameApply(state, qOpen('A')))).toEqual(['B', 'C', 'A'])
+  })
+
+  it('keeps the draft of a request removed by absence, so a return restores it', () => {
+    getQuestionPageStore(Q_RUN).drafts.set('A', {fixture: 'draft'})
+    const state = qReconcile(withOpen('A', 'B'), ['B'])
+    expect(qIds(state)).toEqual(['B'])
+    expect(getQuestionPageStore(Q_RUN).drafts.get('A')).toEqual({fixture: 'draft'})
+  })
+
+  it('a claimed-exempt request survives a list that omits it', () => {
+    const state = qReconcile(qWithExempt(withOpen('A', 'B'), ['A']), ['B', 'C'])
+    expect(qIds(state)).toEqual(['A', 'B', 'C'])
+    expect(qEntry(state).questionClaimedExempt?.has('A')).toBe(true)
+  })
+
+  it('a list that shows a claimed-exempt request open again ends the exemption', () => {
+    const state = qReconcile(qWithExempt(withOpen('A'), ['A']), ['A'])
+    expect(qIds(state)).toEqual(['A'])
+    expect(qEntry(state).questionClaimedExempt?.has('A')).toBe(false)
+  })
+
+  it('a list at the cap of 50 is additive only', () => {
+    expect(GATEWAY_PENDING_QUESTIONS_CAP).toBe(50)
+    const listed = Array.from({length: GATEWAY_PENDING_QUESTIONS_CAP}, (_, index) => `L${index}`)
+    const state = qReconcile(withOpen('A', 'B'), listed)
+    expect(qIds(state)).toContain('A')
+    expect(qIds(state)).toContain('B')
+    expect(qIds(state)).toHaveLength(MAX_OPEN_QUESTIONS)
+    expect(qIds(state).slice(0, 2)).toEqual(['A', 'B'])
+    expect(qIds(state)).toContain('L0')
+    expect(qIds(state)).not.toContain('L48')
+  })
+
+  it('a list just under the cap still prunes', () => {
+    const listed = Array.from({length: GATEWAY_PENDING_QUESTIONS_CAP - 1}, (_, index) => `L${index}`)
+    const state = qReconcile(withOpen('A'), listed)
+    expect(qIds(state)).not.toContain('A')
+    expect(qIds(state)).toHaveLength(GATEWAY_PENDING_QUESTIONS_CAP - 1)
+  })
+
+  it('an invalid body changes nothing, not even the completed flag', () => {
+    const before = withOpen('A', 'B')
+    const after = qReconcile(before, ['C'], {invalidBody: true})
+    expect(after).toBe(before)
+    expect(qEntry(after).questionReconcileDone).toBeUndefined()
+  })
+
+  it('a list with dropped invalid entries is additive only', () => {
+    const state = qReconcile(withOpen('A', 'B'), ['B', 'C'], {partial: true})
+    expect(qIds(state)).toEqual(['A', 'B', 'C'])
+    expect(qEntry(state).questionReconcileDone).toBe(true)
+  })
+
+  it('a tombstoned request in the list stays out', () => {
+    let state = withOpen('B')
+    state = qFrameApply(state, qSettle('T'))
+    state = qReconcile(state, ['B', 'T'])
+    expect(qIds(state)).toEqual(['B'])
+  })
+
+  it('a request that opened after the pre-GET snapshot is never pruned', () => {
+    const snapshot = ['A']
+    let state = withOpen('A')
+    state = qFrameApply(state, qOpen('N'))
+    state = qReconcile(state, [], {snapshot})
+    expect(qIds(state)).toEqual(['N'])
+  })
+
+  it('an authoritative empty list prunes every snapshot request that is not claimed-exempt', () => {
+    const state = qReconcile(qWithExempt(withOpen('A', 'B'), ['B']), [])
+    expect(qIds(state)).toEqual(['B'])
+  })
+
+  it('does not exceed the open-question cap when adding', () => {
+    const listed = Array.from({length: 49}, (_, index) => `L${index}`)
+    let state = withOpen(...Array.from({length: 49}, (_, index) => `K${index}`))
+    state = qReconcile(state, [...listed, 'extra-1', 'extra-2'].slice(0, 49), {partial: true})
+    expect(qIds(state).length).toBeLessThanOrEqual(MAX_OPEN_QUESTIONS)
+  })
+
+  it('is ignored before ready and after a terminal status', () => {
+    const before = qReconcile(INITIAL_STATE, ['A'])
+    expect(before.runs[Q_RUN]).toBeUndefined()
+    const terminal = qStatus(qStatus(qLive(), 'running'), 'succeeded')
+    expect(qReconcile(terminal, ['A'])).toBe(terminal)
+  })
+
+  it('creates a run entry for a run it has not seen a status for, as approvals do', () => {
+    const state = qReconcile(qLive(), ['A'], {snapshot: []})
+    expect(qIds(state)).toEqual(['A'])
+  })
+
+  it('ignores an own __proto__ id without polluting', () => {
+    const state = qReconcile(withOpen('A'), ['__proto__', 'B'])
+    expect(qIds(state)).toContain('B')
+    expect(({} as Record<string, unknown>).requestID).toBeUndefined()
+  })
+})
+
+async function paintedStatus(records: string[]) {
+  const status = makeFakeEl('span')
+  status.classList.add = (cls: string) => {
+    status.className = `${status.className} ${cls}`.trim()
+  }
+  const body = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n${records.join('')}`
+  let read = 0
+  vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag), createTextNode: (text: string) => {
+    const node = makeFakeEl('#text')
+    node.textContent = text
+    return node
+  }})
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    ok: true, status: 200, headers: {get: () => 'text/event-stream'},
+    body: {getReader: () => ({read: async () => read++ === 0
+      ? {done: false, value: new TextEncoder().encode(body)}
+      : new Promise(() => {})})},
+  }))
+  const handle = initOperatorStream({runId: Q_RUN, statusEl: status as never, noticeEl: makeFakeEl() as never})
+  await new Promise(resolve => setTimeout(resolve, 30))
+  handle.close()
+  return status
+}
+
+describe('question status — label, wire acceptance and styling', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('accepts waiting_for_question on a status frame', () => {
+    const result = parseSseFrame(`event: status\ndata: ${JSON.stringify(ckStatusPayload({status: 'waiting_for_question'}))}\n\n`)
+    expect(result?.success).toBe(true)
+    expect(result?.success && result.frame.type === 'status' ? result.frame.data.status : '').toBe('waiting_for_question')
+  })
+
+  const statusRecord = (status: string) => `event: status\ndata: ${JSON.stringify(ckStatusPayload({runId: Q_RUN, status}))}\n\n`
+
+  it('paints "Waiting for answer" for a wire waiting_for_question status', async () => {
+    resetQuestionPageStore()
+    const status = await paintedStatus([statusRecord('waiting_for_question')])
+    expect(status.textContent).toBe('Waiting for answer')
+    expect(status.className).toContain('status-waiting-for-question')
+  })
+
+  it('paints "Waiting for answer" for a running run with an open question, and "Running" once it settles', async () => {
+    resetQuestionPageStore()
+    const waiting = await paintedStatus([statusRecord('running'), qSse(qOpen('req-q-1'))])
+    expect(waiting.textContent).toBe('Waiting for answer')
+    expect(waiting.className).toContain('status-waiting-for-question')
+    resetQuestionPageStore()
+    const settled = await paintedStatus([statusRecord('running'), qSse(qOpen('req-q-1')), qSse(qSettle('req-q-1'))])
+    expect(settled.textContent).toBe('Running')
+    expect(settled.className).toContain('status-running')
+  })
+
+  it('keeps "Waiting for approval" over an open question', async () => {
+    resetQuestionPageStore()
+    const status = await paintedStatus([statusRecord('waiting_for_approval'), qSse(qOpen('req-q-1'))])
+    expect(status.textContent).toBe('Waiting for approval')
+  })
+
+  it('keeps "Queued" with an open question and shows the terminal label after a terminal status', async () => {
+    resetQuestionPageStore()
+    expect((await paintedStatus([statusRecord('queued'), qSse(qOpen('req-q-1'))])).textContent).toBe('Queued')
+    resetQuestionPageStore()
+    expect((await paintedStatus([statusRecord('running'), qSse(qOpen('req-q-1')), statusRecord('succeeded')])).textContent).toBe('Succeeded')
+  })
+
+  it('has a CSS rule matching the class the status emitter produces, in both themes', async () => {
+    const fs = await import('node:fs/promises')
+    const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
+    expect(css).toMatch(/\.run-status\.status-waiting-for-question\b/)
+    expect(css).toMatch(/\[data-theme="light"\] \.run-status\.status-waiting-for-question\b/)
   })
 })

@@ -24,6 +24,13 @@ export declare const FIRST_FRAME_TIMEOUT_MS: number
  * Used by reconcileApprovals to guard against truncated recovery responses.
  */
 export declare const GATEWAY_PENDING_APPROVALS_CAP: number
+/** Cap on open questions per run (the gateway's list cap). Excess opens are rejected, never evicting. */
+export declare const MAX_OPEN_QUESTIONS: number
+/**
+ * Mirrors the gateway's pending-question list cap (50). A list at or above it may be
+ * truncated, so the question reconcile is additive only for it.
+ */
+export declare const GATEWAY_PENDING_QUESTIONS_CAP: number
 
 /** Operator-safe failure-reason code. */
 export type FailureKind =
@@ -271,12 +278,47 @@ export interface ApprovalFrameDataSettle {
 
 export type ApprovalFrameData = ApprovalFrameDataOpen | ApprovalFrameDataSettle
 
+/** One selectable option. Both strings are sanitized, bounded, untrusted plain text. */
+export interface QuestionOption {
+  readonly label: string
+  readonly description: string
+}
+
+/** One question of a request. All strings are sanitized, bounded, untrusted plain text. */
+export interface QuestionPrompt {
+  readonly header: string
+  readonly text: string
+  readonly options: readonly QuestionOption[]
+  readonly multiple: boolean
+  readonly custom: boolean
+}
+
+/** A pending question request: the request ID and its parsed prompts, in question order. */
+export interface QuestionRequest {
+  readonly requestID: string
+  readonly questions: readonly QuestionPrompt[]
+}
+
+export interface QuestionFrameDataOpen extends QuestionRequest {
+  readonly runId: string
+  readonly settled: false
+}
+
+export interface QuestionFrameDataSettle {
+  readonly runId: string
+  readonly requestID: string
+  readonly settled: true
+}
+
+export type QuestionFrameData = QuestionFrameDataOpen | QuestionFrameDataSettle
+
 export type StreamFrame =
   | {readonly type: 'ready'; readonly data: ReadyFrameData}
   | {readonly type: 'status'; readonly data: StatusFrameData}
   | {readonly type: 'reset'; readonly data: ResetFrameData}
   | {readonly type: 'output'; readonly data: OutputFrameData}
   | {readonly type: 'approval'; readonly data: ApprovalFrameData}
+  | {readonly type: 'question'; readonly data: QuestionFrameData}
 
 // ---------------------------------------------------------------------------
 // Parse result
@@ -349,6 +391,21 @@ export interface RunEntry {
    */
   readonly approvalTombstones?: Readonly<Record<string, true>>
   /**
+   * Open question requests keyed by requestID, in arrival order (capped at MAX_OPEN_QUESTIONS).
+   * Absent until the first question frame or reconcile for this run. Use
+   * `getOpenQuestions(runEntry)` to read. Tombstones and drafts are NOT here: they live in the
+   * page store so they outlast this run entry.
+   */
+  readonly questionOpen?: ReadonlyMap<string, QuestionRequest>
+  /**
+   * Request IDs this page got `already_claimed` for. The gateway omits claimed requests from the
+   * pending list, so the question reconcile never removes these for being absent. Empty until the
+   * question client populates it.
+   */
+  readonly questionClaimedExempt?: ReadonlySet<string>
+  /** True once a question reconcile result has been applied for this run. Gates the `running` fallback. */
+  readonly questionReconcileDone?: boolean
+  /**
    * True while a browser-dispatched cancel POST is outstanding for this run.
    * Internal-only — set by the `cancel` action, cleared by a terminal status
    * frame from any source (terminal-wins). Never exposed via toSafeRunView.
@@ -401,6 +458,28 @@ export interface ApprovalReconcileEvent {
   }[]
 }
 
+/**
+ * Result of a pending-question list check, applied as a diff against a pre-GET snapshot.
+ *
+ * - snapshotIds: request IDs open locally BEFORE the GET. Only these may be removed, so a request
+ *   that opened over SSE during the await is never pruned.
+ * - requests: the valid listed requests. Listed and not tombstoned → added. A request in
+ *   `snapshotIds` and absent from here is removed WITHOUT a tombstone, unless it is claimed-exempt.
+ * - invalidBody: the response body failed validation → no change at all.
+ * - partial: the caller dropped invalid entries → additive only.
+ *
+ * A list of GATEWAY_PENDING_QUESTIONS_CAP or more requests is also additive only. Sets
+ * `questionReconcileDone`. Failures (network, 429, 5xx) are never dispatched.
+ */
+export interface QuestionReconcileEvent {
+  readonly type: 'question-reconcile'
+  readonly runId: string
+  readonly snapshotIds: readonly string[]
+  readonly requests: readonly QuestionRequest[]
+  readonly invalidBody: boolean
+  readonly partial: boolean
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle events
 // ---------------------------------------------------------------------------
@@ -414,6 +493,7 @@ export type StreamEvent =
   | {readonly type: 'buffer-overflow'}
   | {readonly type: 'first-frame-timeout'}
   | ApprovalReconcileEvent
+  | QuestionReconcileEvent
   | CancelActionEvent
 
 // ---------------------------------------------------------------------------
@@ -474,6 +554,35 @@ export declare function hasOpenApprovals(runEntry: RunEntry | undefined | null):
  * Returns an empty array when there are no open prompts.
  */
 export declare function getOpenApprovals(runEntry: RunEntry | undefined | null): readonly ApprovalFrameDataOpen[]
+
+/** The run's open question requests in arrival order; empty when there are none. */
+export declare function getOpenQuestions(runEntry: RunEntry | undefined | null): readonly QuestionRequest[]
+
+/** True iff the run has at least one open question request. */
+export declare function hasOpenQuestions(runEntry: RunEntry | undefined | null): boolean
+
+/**
+ * The status to render: terminal wins; else wire `waiting_for_approval`; else a `running` run with
+ * an open question → `waiting_for_question`; else a wire `waiting_for_question` with no open question
+ * after a completed reconcile → `running`; else the wire value. Derived at render, never stored.
+ * Returns '' for an absent entry.
+ */
+export declare function getEffectiveStatus(runEntry: RunEntry | undefined | null): string
+
+/**
+ * Page-level question record for a run. Tombstones (settled requests, never evicted) and drafts
+ * outlive stream handles so a collapsed and re-expanded card sees them. In memory only; the record
+ * is live and callers mutate it directly. Created on first use.
+ */
+export interface QuestionPageRecord {
+  readonly tombstones: Set<string>
+  readonly drafts: Map<string, unknown>
+}
+
+export declare function getQuestionPageStore(runId: string): QuestionPageRecord
+
+/** Drop every run's tombstones and drafts (tests; page teardown). */
+export declare function resetQuestionPageStore(): void
 
 // ---------------------------------------------------------------------------
 // DOM shell (browser-only — never called at module top-level)
@@ -560,7 +669,7 @@ export type CancelTerminalPhase = 'COMPLETED' | 'FAILED' | 'CANCELLED'
 export type RunPhase = 'PENDING' | 'ACKNOWLEDGED' | 'EXECUTING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
 
 /**
- * The 7-value operator-facing web status set. Mirrors
+ * The operator-facing web status set. Mirrors
  * src/gateway/operator-contract/run-status.ts OperatorWebStatus.
  */
 export type OperatorWebStatus =
@@ -568,6 +677,7 @@ export type OperatorWebStatus =
   | 'blocked'
   | 'running'
   | 'waiting_for_approval'
+  | 'waiting_for_question'
   | 'succeeded'
   | 'failed'
   | 'cancelled'
