@@ -929,6 +929,24 @@ export function resetQuestionPageStore() {
   questionPageStore.clear()
 }
 
+/**
+ * Tombstone a question request for the page and drop it from the run entry: its open request, its
+ * draft, and any claimed exemption. Shared by the settle frame and by this page's own
+ * `claimed` / `already_settled` decision response, which settle a request the same way. A request
+ * never seen open still tombstones (settle-before-open). `base` is the run entry (or its stub).
+ */
+function settleQuestionInState(current, base, runId, requestID) {
+  const store = getQuestionPageStore(runId)
+  store.tombstones.add(requestID)
+  store.drafts.delete(requestID)
+  const nextOpen = new Map(base.questionOpen ?? new Map())
+  nextOpen.delete(requestID)
+  const nextExempt = new Set(base.questionClaimedExempt ?? new Set())
+  nextExempt.delete(requestID)
+  const updatedEntry = {...base, questionOpen: nextOpen, questionClaimedExempt: nextExempt}
+  return {...current, runs: Object.assign(Object.create(null), current.runs, {[runId]: updatedEntry})}
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle state machine
 // ---------------------------------------------------------------------------
@@ -1517,14 +1535,7 @@ export function nextStreamState(current, event) {
       if (settled) {
         // Settle frame: tombstone for the page, remove the request, its draft, and any claimed
         // exemption. A settle for a request never seen open still tombstones (settle-before-open).
-        store.tombstones.add(requestID)
-        store.drafts.delete(requestID)
-        const nextOpen = new Map(prevOpen)
-        nextOpen.delete(requestID)
-        const nextExempt = new Set(prevExempt)
-        nextExempt.delete(requestID)
-        const updatedEntry = {...base, questionOpen: nextOpen, questionClaimedExempt: nextExempt}
-        return {...current, runs: Object.assign(Object.create(null), current.runs, {[runId]: updatedEntry})}
+        return settleQuestionInState(current, base, runId, requestID)
       }
 
       // Open frame: a tombstoned request is ignored (open-after-settle / id-reuse guard).
@@ -1594,6 +1605,10 @@ export function nextStreamState(current, event) {
       // Removal never tombstones — the request may return on a later frame or list — and a
       // claimed-exempt request is skipped: the gateway excludes claimed requests from the list,
       // so its absence says nothing about them.
+      // `endClaimedExemptions` (set by the live-transition check) first ends every claimed
+      // exemption: a request still absent from the list after a reconnect is more likely settled
+      // (the settle frame was missed) than still claimed.
+      if (event.endClaimedExemptions === true) nextExempt.clear()
       const additiveOnly = partial === true || requests.length >= GATEWAY_PENDING_QUESTIONS_CAP
       if (!additiveOnly) {
         for (const requestID of snapshotIds) {
@@ -1621,6 +1636,47 @@ export function nextStreamState(current, event) {
         questionClaimedExempt: nextExempt,
         questionReconcileDone: true,
       }
+      return {...current, runs: Object.assign(Object.create(null), current.runs, {[runId]: updatedEntry})}
+    }
+
+    case 'question-resolved': {
+      // This page's own decision got `claimed` or `already_settled`: the request is settled, so it is
+      // tombstoned and removed exactly as a settle frame would. Unlike the frame it is not gated on
+      // the connection — the POST can resolve while the stream is reconnecting. Terminal is absorbing.
+      const {runId, requestID} = event
+      const prevEntry = current.runs[runId]
+      if (prevEntry !== undefined && prevEntry.terminal) {
+        return current
+      }
+      const base = prevEntry ?? {
+        runId,
+        status: '',
+        phase: '',
+        startedAt: '',
+        stale: false,
+        terminal: false,
+      }
+      return settleQuestionInState(current, base, runId, requestID)
+    }
+
+    case 'question-claimed': {
+      // This page got `already_claimed` for an open request: the gateway omits claimed requests from
+      // the pending list, so exempt it from removal by absence. A request that is not open (or is
+      // tombstoned) has nothing to protect.
+      const {runId, requestID} = event
+      const prevEntry = current.runs[runId]
+      if (prevEntry === undefined || prevEntry.terminal) {
+        return current
+      }
+      if (prevEntry.questionOpen?.has(requestID) !== true) {
+        return current
+      }
+      if (getQuestionPageStore(runId).tombstones.has(requestID)) {
+        return current
+      }
+      const nextExempt = new Set(prevEntry.questionClaimedExempt ?? new Set())
+      nextExempt.add(requestID)
+      const updatedEntry = {...prevEntry, questionClaimedExempt: nextExempt}
       return {...current, runs: Object.assign(Object.create(null), current.runs, {[runId]: updatedEntry})}
     }
 
@@ -1964,6 +2020,257 @@ export function buildApprovalClient(opts) {
   }
 
   return {refreshCsrf, decideRunApproval, listRunApprovals}
+}
+
+// ---------------------------------------------------------------------------
+// Browser-direct question client (same-origin relative /operator/* paths)
+// ---------------------------------------------------------------------------
+
+/** Decision states a 200 can carry. Mirrors the vendored QUESTION_DECISION_STATES (a test pins parity). */
+export const QUESTION_DECISION_STATES = Object.freeze(['claimed', 'already_claimed', 'already_settled', 'failed_to_settle'])
+
+/** Reasons a 400 can carry. Mirrors the vendored QUESTION_INVALID_REASONS (a test pins parity). */
+export const QUESTION_INVALID_REASONS = Object.freeze([
+  'malformed',
+  'arity-mismatch',
+  'unknown-option',
+  'multiple-not-allowed',
+  'empty-value',
+  'text-too-long',
+])
+
+const QUESTION_DECISION_STATE_SET = new Set(QUESTION_DECISION_STATES)
+const QUESTION_INVALID_REASON_SET = new Set(QUESTION_INVALID_REASONS)
+
+/** Delays between successive re-lists after an `already_claimed`: about 2, 5, 10 and 20 seconds, then stop. */
+export const QUESTION_CLAIM_RECHECK_DELAYS_MS = Object.freeze([2000, 5000, 10_000, 20_000])
+
+/** One pending-list entry `{requestID, questions}` (no per-item runId), or null when invalid. */
+function parsePendingQuestionEntry(value) {
+  if (!isQuestionRecord(value) || !hasExactKeys(value, ['requestID', 'questions'])) return null
+  if (!isNonEmptyString(value.requestID)) return null
+  if (!Array.isArray(value.questions) || value.questions.length > MAX_QUESTIONS_PER_REQUEST) return null
+  const questions = []
+  for (const entry of value.questions) {
+    const question = parseQuestionPrompt(entry)
+    if (question === null) return null
+    questions.push(question)
+  }
+  return {requestID: value.requestID, questions}
+}
+
+/**
+ * Validate a pending-list body `{requests:[...]}`. Null when the whole body is invalid (not exactly
+ * that shape, or more entries than the gateway's cap). Otherwise the valid entries plus `partial`:
+ * true when any entry was dropped (invalid or duplicate), because the list is then not a complete
+ * picture. Never throws; the result shares nothing with the input.
+ */
+function parsePendingQuestionsBody(body) {
+  if (!isQuestionRecord(body) || !hasExactKeys(body, ['requests'])) return null
+  if (!Array.isArray(body.requests) || body.requests.length > GATEWAY_PENDING_QUESTIONS_CAP) return null
+  const requests = []
+  const seen = new Set()
+  let partial = false
+  for (const entry of body.requests) {
+    const parsed = parsePendingQuestionEntry(entry)
+    if (parsed === null || seen.has(parsed.requestID)) {
+      partial = true
+      continue
+    }
+    seen.add(parsed.requestID)
+    requests.push(parsed)
+  }
+  return {requests, partial}
+}
+
+/** Rebuild a decision as a closed request body, or null when it is not an answer/skip shape. */
+function buildQuestionDecisionBody(decision) {
+  if (!isQuestionRecord(decision)) return null
+  if (decision.decision === 'skip') return {decision: 'skip'}
+  if (decision.decision !== 'answer' || !Array.isArray(decision.answers)) return null
+  const answers = []
+  for (const answer of decision.answers) {
+    if (!isQuestionRecord(answer)) return null
+    const out = {}
+    if (answer.options !== undefined) {
+      if (!Array.isArray(answer.options)) return null
+      if (!answer.options.every(index => Number.isSafeInteger(index) && index >= 0)) return null
+      out.options = [...answer.options]
+    }
+    if (answer.text !== undefined) {
+      if (typeof answer.text !== 'string') return null
+      out.text = answer.text
+    }
+    answers.push(out)
+  }
+  return {decision: 'answer', answers}
+}
+
+const QUESTION_REQUEST_LEVEL_INVALID = Object.freeze({kind: 'invalid', reason: null, questionIndex: null})
+
+/**
+ * Read a 400. Null when it carries no `reason` — the browser guard's refusal (CSRF, Origin, Fetch
+ * Metadata), which fires before the handler and is the only 400 worth a CSRF retry. Otherwise the
+ * invalid-answer outcome: a known reason with an in-range question index, or a request-level one
+ * (unknown reason; missing, non-integer or out-of-range index). The body is never kept or logged.
+ */
+async function readQuestionBadRequest(res, answerCount) {
+  let data = null
+  try {
+    data = await res.json()
+  } catch {
+    data = null
+  }
+  if (!isQuestionRecord(data) || !Object.hasOwn(data, 'reason')) return null
+  if (typeof data.reason !== 'string' || !QUESTION_INVALID_REASON_SET.has(data.reason)) {
+    return QUESTION_REQUEST_LEVEL_INVALID
+  }
+  const {questionIndex} = data
+  const inRange = Number.isInteger(questionIndex) && questionIndex >= 0 && questionIndex < answerCount
+  return {kind: 'invalid', reason: data.reason, questionIndex: inRange ? questionIndex : null}
+}
+
+/**
+ * Classify every response of a question decision except a 400, which the caller handles.
+ *   200, known state → {kind:'decided', state}
+ *   200, unknown state → {kind:'failed'} (request-level, retryable)
+ *   200, unreadable body, 429, 5xx, anything else → {kind:'unknown'} (outcome unknown: re-list, never resubmit)
+ *   401/403 → {kind:'session-expired'}; 404 (the masked denial) → {kind:'cant-answer'}
+ */
+async function classifyQuestionDecisionResponse(res) {
+  if (res.ok) {
+    let data
+    try {
+      data = await res.json()
+    } catch {
+      return {kind: 'unknown'}
+    }
+    const state = isQuestionRecord(data) ? data.state : undefined
+    return typeof state === 'string' && QUESTION_DECISION_STATE_SET.has(state)
+      ? {kind: 'decided', state}
+      : {kind: 'failed'}
+  }
+  if (res.status === 401 || res.status === 403) return {kind: 'session-expired'}
+  if (res.status === 404) return {kind: 'cant-answer'}
+  return {kind: 'unknown'}
+}
+
+/**
+ * Build the browser-direct question client: list the pending questions of a run and submit one
+ * decision. Same transport posture as the approval client (same-origin paths, `credentials`
+ * include, `redirect: 'error'`, CSRF fetched first, fixture session id only in fixture mode) and
+ * it shares that client's `refreshCsrf`. It does NOT share the approval client's retry-on-any-400.
+ *
+ * Security: never logs or stores a run id, request id, answer text, response text or CSRF token.
+ * Path IDs are validated before they are embedded. There is no idempotency key: the gateway's
+ * question route does not read one; single settlement comes from its claim states.
+ *
+ * `listRunQuestions(runId)` →
+ *   {success:true, data:{requests, invalidBody, partial}}  — 2xx; `invalidBody` when the body fails
+ *       validation (requests is then empty), `partial` when entries were dropped
+ *   {success:false, error:{kind:'http', status}} | {kind:'network'} | {kind:'invalid-id'}
+ *
+ * `decideRunQuestion(runId, requestId, decision)` → one of
+ *   {kind:'decided', state}                 — 200 with a known state
+ *   {kind:'invalid', reason, questionIndex} — 400 with a `reason` (both null when request-level)
+ *   {kind:'cant-answer'}                    — 404, the masked denial
+ *   {kind:'session-expired'}                — 401/403, from the CSRF fetch or the POST
+ *   {kind:'unknown'}                        — network failure or an unclassifiable response after the
+ *                                             POST was sent: it may have been recorded
+ *   {kind:'failed'}                         — request-level and retryable: not sent, or an unknown state
+ *
+ * A 400 without a `reason` refreshes CSRF and retries once; a second one is request-level invalid.
+ * A 400 with a `reason` is never retried.
+ *
+ * @param {object} [opts] - Optional configuration.
+ * @param {string} [opts.endpointBase] - The endpoint base path. Defaults to '/operator'.
+ * @param {string} [opts.fixtureSessionId] - Fixture session ID (fixture mode only).
+ */
+export function buildQuestionClient(opts) {
+  const endpointBase = opts?.endpointBase ?? '/operator'
+  const fixtureSessionId = opts?.fixtureSessionId
+  const {refreshCsrf} = buildApprovalClient(opts)
+
+  const withFixtureParam = url =>
+    fixtureSessionId === undefined
+      ? url
+      : `${url}${url.includes('?') ? '&' : '?'}fixtureSessionId=${encodeURIComponent(fixtureSessionId)}`
+
+  const browserFetch = (input, init) =>
+    globalThis.fetch(input, {
+      ...init,
+      credentials: 'include',
+      redirect: 'error',
+    })
+
+  async function listRunQuestions(runId) {
+    if (!validateDynamicId(runId)) return {success: false, error: {kind: 'invalid-id'}}
+    try {
+      const res = await browserFetch(
+        withFixtureParam(`${endpointBase}/runs/${encodeURIComponent(runId)}/questions`),
+        {headers: {'content-type': 'application/json'}},
+      )
+      if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
+      let body
+      try {
+        body = await res.json()
+      } catch {
+        body = null
+      }
+      const parsed = parsePendingQuestionsBody(body)
+      if (parsed === null) return {success: true, data: {requests: [], invalidBody: true, partial: false}}
+      return {success: true, data: {requests: parsed.requests, invalidBody: false, partial: parsed.partial}}
+    } catch {
+      return {success: false, error: {kind: 'network'}}
+    }
+  }
+
+  async function decideRunQuestion(runId, requestId, decision) {
+    if (!validateDynamicId(runId) || !validateDynamicId(requestId)) return {kind: 'failed'}
+    const body = buildQuestionDecisionBody(decision)
+    if (body === null) return {kind: 'failed'}
+    const answerCount = body.decision === 'answer' ? body.answers.length : 0
+    const payload = JSON.stringify(body)
+    const path = withFixtureParam(
+      `${endpointBase}/runs/${encodeURIComponent(runId)}/questions/${encodeURIComponent(requestId)}/decision`,
+    )
+
+    // Two attempts at most, and only a 400 without a `reason` gets the second.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const csrfResult = await refreshCsrf()
+      if (!csrfResult.success) {
+        const {error} = csrfResult
+        return error.kind === 'http' && (error.status === 401 || error.status === 403)
+          ? {kind: 'session-expired'}
+          : {kind: 'failed'}
+      }
+
+      let res
+      try {
+        res = await browserFetch(path, {
+          method: 'POST',
+          redirect: 'error',
+          headers: {
+            'content-type': 'application/json',
+            'x-csrf-token': csrfResult.data.csrfToken,
+          },
+          body: payload,
+        })
+      } catch {
+        return {kind: 'unknown'}
+      }
+
+      if (res.status === 400) {
+        const invalid = await readQuestionBadRequest(res, answerCount)
+        if (invalid === null) continue
+        return invalid
+      }
+      return classifyQuestionDecisionResponse(res)
+    }
+    return QUESTION_REQUEST_LEVEL_INVALID
+  }
+
+  return {listRunQuestions, decideRunQuestion}
 }
 
 // ---------------------------------------------------------------------------
@@ -2933,7 +3240,7 @@ function renderCheckoutDetail(region, runEntry, reasonShownElsewhere) {
  * - Read-only: GET only for stream; approval decisions are operator-forwarded writes.
  */
 export function initOperatorStream(opts) {
-  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, checkoutEl, cancelEl, approvalClient: injectedApprovalClient, cancelClient: injectedCancelClient, endpointBase, fixtureSessionId} = opts
+  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, checkoutEl, cancelEl, questionsEl, approvalClient: injectedApprovalClient, cancelClient: injectedCancelClient, questionClient: injectedQuestionClient, endpointBase, fixtureSessionId} = opts
 
   // The run-list summary status for this run, when the caller has one. Only a known summary status
   // is kept; it lets a no-snapshot reset close an expired terminal run without a status frame.
@@ -2959,6 +3266,21 @@ export function initOperatorStream(opts) {
             },
       ))
     : null
+
+  // Build the question client only when the caller wires questions: an injected client, or the
+  // question region element. A stream with neither never touches the questions routes.
+  const questionClient = injectedQuestionClient ?? (
+    questionsEl !== undefined && questionsEl !== null
+      ? buildQuestionClient(
+          endpointBase === undefined && fixtureSessionId === undefined
+            ? undefined
+            : {
+                ...(endpointBase === undefined ? {} : {endpointBase}),
+                ...(fixtureSessionId === undefined ? {} : {fixtureSessionId}),
+              },
+        )
+      : null
+  )
 
   // Build the cancel client lazily (only if cancelEl is present).
   const cancelClient = cancelEl !== undefined && cancelEl !== null
@@ -3259,11 +3581,15 @@ export function initOperatorStream(opts) {
   function dispatch(event) {
     const prevConnection = state.connection
     state = nextStreamState(state, event)
+    syncQuestionStatuses()
     updateDOM()
     // Trigger reconcile when the stream first goes live (or re-goes live after reconnect).
     // This is the one-shot GET on (re)connect.
     if (prevConnection !== 'live' && state.connection === 'live') {
       reconcileApprovals()
+      // The question check is its own trigger with its own flag and epoch, not the approval latch.
+      // It also ends claimed exemptions: still absent after a reconnect means the settle was missed.
+      reconcileQuestions({endExemptions: true})
     }
   }
 
@@ -3355,6 +3681,345 @@ export function initOperatorStream(opts) {
     dispatch({type: 'approval-reconcile', runId, pruneIds, addPrompts})
   }
 
+  // -------------------------------------------------------------------------
+  // Questions: per-request status, decisions, and the three re-list triggers
+  //
+  // The reducer stays pure; everything with a clock or a network lives here. Per-request status
+  // is stream state, NOT page-store state: the page store holds only tombstones and drafts.
+  // A request with no entry in `questionStatuses` is simply `open`.
+  //
+  //   {kind:'open'}
+  //   {kind:'in-flight'}                         a decision POST is outstanding
+  //   {kind:'claimed-elsewhere'}                 already_claimed; re-listing on a backoff, then manual
+  //   {kind:'checking'}                          a list check is pending (unknown outcome, or manual)
+  //   {kind:'gone'}                              unknown outcome, then absent: may have been recorded
+  //   {kind:'invalid', reason, questionIndex}    400 with a reason; questionIndex null = whole request
+  //   {kind:'failed-to-settle'}                  failed_to_settle, or any retryable request-level error
+  //   {kind:'cant-answer'}                       masked 404 (applies to every open request of the run)
+  //   {kind:'session-expired'}                   401/403
+  //   {kind:'check-failed'}                      a check that surfaced to the operator failed
+  //   {kind:'claimed'} | {kind:'already-settled'}  settled; note for a request that is no longer open
+  //
+  // Never logs, and never stores, request bodies, answer text or response text.
+  // -------------------------------------------------------------------------
+
+  // Statuses kept for a request that is no longer open (a note until the card collapses). Every
+  // other status leaves with its request.
+  const QUESTION_NOTE_KINDS = new Set(['claimed', 'already-settled', 'gone'])
+
+  const questionStatuses = new Map() // requestID → status
+  const questionRecheckTimers = new Map() // requestID → timer
+  let questionsCantAnswer = false // masked 404: the run's questions cannot be answered by this session
+  let questionEpoch = 0 // advanced by every connect(); a flight from an older epoch is discarded
+  let questionFlight = null // the in-flight list check, if any: {id, epoch, promise}
+  let questionFlightSeq = 0
+
+  function isQuestionOpen(requestID) {
+    return state.runs[runId]?.questionOpen?.has(requestID) === true
+  }
+
+  function setQuestionStatus(requestID, status) {
+    questionStatuses.set(requestID, status)
+    updateDOM()
+  }
+
+  function clearQuestionRecheck(requestID) {
+    const timer = questionRecheckTimers.get(requestID)
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      questionRecheckTimers.delete(requestID)
+    }
+  }
+
+  function clearQuestionRechecks() {
+    for (const timer of questionRecheckTimers.values()) clearTimeout(timer)
+    questionRecheckTimers.clear()
+  }
+
+  /**
+   * Drop statuses the state no longer supports. Runs after every reducer event: a request that
+   * left (settle frame, list removal, terminal) loses its status unless it is a settled/gone note;
+   * a note whose request returned open is dropped; a claimed request whose exemption ended (a
+   * settle frame, a list that shows it open again, the next live transition) is simply open.
+   */
+  function syncQuestionStatuses() {
+    if (questionStatuses.size === 0) return
+    const entry = state.runs[runId]
+    if (entry?.terminal === true) {
+      questionStatuses.clear()
+      clearQuestionRechecks()
+      return
+    }
+    const open = entry?.questionOpen
+    const exempt = entry?.questionClaimedExempt
+    for (const [requestID, status] of [...questionStatuses]) {
+      if (open?.has(requestID) !== true) {
+        if (!QUESTION_NOTE_KINDS.has(status.kind)) {
+          questionStatuses.delete(requestID)
+          clearQuestionRecheck(requestID)
+        }
+      } else if (QUESTION_NOTE_KINDS.has(status.kind)) {
+        questionStatuses.delete(requestID)
+      } else if (status.kind === 'claimed-elsewhere' && exempt?.has(requestID) !== true) {
+        questionStatuses.delete(requestID)
+        clearQuestionRecheck(requestID)
+      }
+    }
+  }
+
+  /** The UI-facing status of one request, or null for a request this stream knows nothing about. */
+  function getQuestionStatus(requestID) {
+    if (!isQuestionOpen(requestID)) return questionStatuses.get(requestID) ?? null
+    if (questionsCantAnswer) return {kind: 'cant-answer'}
+    return questionStatuses.get(requestID) ?? {kind: 'open'}
+  }
+
+  /** Open requests in arrival order, each with its parsed prompts and UI-facing status. */
+  function getQuestions() {
+    return getOpenQuestions(state.runs[runId]).map(request => ({
+      requestID: request.requestID,
+      questions: request.questions,
+      status: getQuestionStatus(request.requestID),
+    }))
+  }
+
+  /** Notes for requests that are no longer open (settled, or gone after an unknown outcome). */
+  function getQuestionNotes() {
+    const notes = []
+    for (const [requestID, status] of questionStatuses) {
+      if (QUESTION_NOTE_KINDS.has(status.kind) && !isQuestionOpen(requestID)) notes.push({requestID, status})
+    }
+    return notes
+  }
+
+  /** Surface a failed check on every request whose check was pending (it was `checking`). */
+  function failQuestionChecks(targets) {
+    for (const requestID of targets) {
+      if (isQuestionOpen(requestID)) questionStatuses.set(requestID, {kind: 'check-failed'})
+    }
+    updateDOM()
+  }
+
+  /**
+   * Settle the pending checks after a good list was applied. A request still open goes back to
+   * claimed-elsewhere if it is still exempt, else to open. A request that is gone from the open set
+   * — and was not tombstoned by a settle, nor cleared by a terminal status — is `gone`: the list
+   * omitted it after an unknown outcome, so the answer may have been recorded.
+   */
+  function resolveQuestionChecks(targets) {
+    const entry = state.runs[runId]
+    const tombstones = getQuestionPageStore(runId).tombstones
+    for (const requestID of targets) {
+      if (isQuestionOpen(requestID)) {
+        const status = questionStatuses.get(requestID)
+        if (status?.kind !== 'checking' && status?.kind !== 'check-failed') continue
+        if (entry?.questionClaimedExempt?.has(requestID) === true) {
+          questionStatuses.set(requestID, {kind: 'claimed-elsewhere'})
+        } else {
+          questionStatuses.delete(requestID)
+        }
+      } else if (!tombstones.has(requestID) && entry?.terminal !== true) {
+        questionStatuses.set(requestID, {kind: 'gone'})
+      }
+    }
+    updateDOM()
+  }
+
+  /**
+   * One list check: snapshot the open ids BEFORE the GET, list, dispatch the diff, then settle
+   * whatever checks were pending. Resolves true only for a valid list applied in the current epoch.
+   * A failure (network, 429, 5xx, non-OK, invalid body) never prunes; it surfaces `check-failed`
+   * only on requests whose check was pending, and is never retried automatically.
+   */
+  async function runQuestionFlight(flight, endExemptions) {
+    try {
+      const targets = new Set()
+      for (const [requestID, status] of questionStatuses) {
+        if (status.kind === 'checking' || status.kind === 'check-failed') targets.add(requestID)
+      }
+      if (state.connection !== 'live') {
+        failQuestionChecks(targets)
+        return false
+      }
+      const snapshotIds = getOpenQuestions(state.runs[runId]).map(request => request.requestID)
+
+      const result = await questionClient.listRunQuestions(runId)
+
+      // Stale: close() ran, or connect() started a new cycle during the await.
+      if (aborted || flight.epoch !== questionEpoch) return false
+
+      if (!result.success) {
+        failQuestionChecks(targets)
+        return false
+      }
+      const {requests, invalidBody, partial} = result.data
+      if (invalidBody === true || state.connection !== 'live') {
+        // An invalid body changes nothing; a connection that dropped mid-GET ignores the result too.
+        if (invalidBody === true) {
+          dispatch({type: 'question-reconcile', runId, snapshotIds, requests: [], invalidBody: true, partial: false})
+        }
+        failQuestionChecks(targets)
+        return false
+      }
+      dispatch({
+        type: 'question-reconcile',
+        runId,
+        snapshotIds,
+        requests,
+        invalidBody: false,
+        partial,
+        ...(endExemptions ? {endClaimedExemptions: true} : {}),
+      })
+      resolveQuestionChecks(targets)
+      return true
+    } finally {
+      if (questionFlight === flight) questionFlight = null
+    }
+  }
+
+  /**
+   * Re-list the run's pending questions. Has its own in-flight flag and epoch; it is not the
+   * approval `reconcileDone` latch. Calls coalesce into the flight already running, except
+   * `fresh` ones (an unknown outcome, a manual check), which need a list issued after they were
+   * asked for: they wait out an older flight and then run, or join one started after them.
+   * Resolves to whether a valid list was applied.
+   */
+  async function reconcileQuestions({fresh = false, endExemptions = false} = {}) {
+    if (questionClient === null || aborted) return false
+    const askedAfter = questionFlightSeq
+    for (;;) {
+      const running = questionFlight
+      if (running === null || running.epoch !== questionEpoch) break
+      if (!fresh || running.id > askedAfter) return running.promise
+      await running.promise
+      if (aborted) return false
+    }
+    const flight = {id: ++questionFlightSeq, epoch: questionEpoch, promise: null}
+    questionFlight = flight
+    flight.promise = runQuestionFlight(flight, endExemptions)
+    return flight.promise
+  }
+
+  /**
+   * Re-list after `already_claimed`: about 2, 5, 10 and 20 seconds apart, then stop and leave
+   * "Check again" to the operator. The schedule ends early if the request stops being claimed
+   * elsewhere, if the connection is not live, or if a check fails (never retried automatically).
+   */
+  function scheduleQuestionRecheck(requestID, attempt) {
+    clearQuestionRecheck(requestID)
+    if (aborted || attempt >= QUESTION_CLAIM_RECHECK_DELAYS_MS.length) return
+    const timer = setTimeout(async () => {
+      questionRecheckTimers.delete(requestID)
+      if (aborted) return
+      if (questionStatuses.get(requestID)?.kind !== 'claimed-elsewhere' || state.connection !== 'live') return
+      const ok = await reconcileQuestions()
+      if (!ok || aborted) return
+      if (questionStatuses.get(requestID)?.kind === 'claimed-elsewhere') scheduleQuestionRecheck(requestID, attempt + 1)
+    }, QUESTION_CLAIM_RECHECK_DELAYS_MS[attempt])
+    questionRecheckTimers.set(requestID, timer)
+  }
+
+  /** Apply a decision outcome. Resolves after the follow-up list check, when there is one. */
+  async function applyQuestionOutcome(requestID, outcome) {
+    const stillOpen = isQuestionOpen(requestID)
+
+    // This page's own claimed / already_settled settles the request for the page, like a settle
+    // frame: tombstone, remove, drop the draft. A request that is gone already is still tombstoned
+    // so a later list cannot resurrect it; a request cleared by a terminal status is ignored.
+    if (outcome.kind === 'decided' && (outcome.state === 'claimed' || outcome.state === 'already_settled')) {
+      if (state.runs[runId]?.terminal === true) return
+      const store = getQuestionPageStore(runId)
+      store.tombstones.add(requestID)
+      store.drafts.delete(requestID)
+      if (!stillOpen) return
+      dispatch({type: 'question-resolved', runId, requestID})
+      setQuestionStatus(requestID, {kind: outcome.state === 'claimed' ? 'claimed' : 'already-settled'})
+      return
+    }
+
+    // Any other outcome for a request that settled or was cleared meanwhile is ignored.
+    if (!stillOpen) return
+
+    switch (outcome.kind) {
+      case 'decided': {
+        if (outcome.state === 'already_claimed') {
+          // Kept, exempt from removal by absence (the gateway omits claimed requests from the list).
+          setQuestionStatus(requestID, {kind: 'claimed-elsewhere'})
+          dispatch({type: 'question-claimed', runId, requestID})
+          if (questionStatuses.get(requestID)?.kind === 'claimed-elsewhere') scheduleQuestionRecheck(requestID, 0)
+          return
+        }
+        setQuestionStatus(requestID, {kind: 'failed-to-settle'})
+        return
+      }
+      case 'invalid': {
+        setQuestionStatus(requestID, {kind: 'invalid', reason: outcome.reason, questionIndex: outcome.questionIndex})
+        return
+      }
+      case 'cant-answer': {
+        questionsCantAnswer = true
+        questionStatuses.delete(requestID)
+        updateDOM()
+        return
+      }
+      case 'session-expired': {
+        setQuestionStatus(requestID, {kind: 'session-expired'})
+        return
+      }
+      case 'unknown': {
+        // Never resubmit. Re-list with a fresh GET; absent afterwards means it may have been recorded.
+        setQuestionStatus(requestID, {kind: 'checking'})
+        await reconcileQuestions({fresh: true})
+        return
+      }
+      default: {
+        setQuestionStatus(requestID, {kind: 'failed-to-settle'})
+      }
+    }
+  }
+
+  /**
+   * Submit a decision for one open request: `{decision:'skip'}` or
+   * `{decision:'answer', answers:[{options?:number[], text?:string}]}` (one entry per question).
+   * Refused (returns the current status, sends nothing) while the request is in flight, being
+   * checked, or claimed elsewhere, and once the run's questions are known to be unanswerable.
+   * Resolves to the request's status afterwards, or null when the request is not open.
+   */
+  async function decideQuestion(requestID, decision) {
+    if (questionClient === null || aborted) return null
+    if (typeof requestID !== 'string' || !isQuestionOpen(requestID)) return null
+    if (questionsCantAnswer) return getQuestionStatus(requestID)
+    const current = questionStatuses.get(requestID)
+    if (current !== undefined && ['in-flight', 'checking', 'claimed-elsewhere'].includes(current.kind)) return current
+    setQuestionStatus(requestID, {kind: 'in-flight'})
+    const outcome = await questionClient.decideRunQuestion(runId, requestID, decision)
+    if (aborted) return null
+    await applyQuestionOutcome(requestID, outcome)
+    return getQuestionStatus(requestID)
+  }
+
+  /**
+   * "Check again": re-list on demand. With a request ID it targets that request, otherwise every
+   * request that is claimed elsewhere or whose last check failed. Those go `checking`, and a failed
+   * check leaves `check-failed`. A request already being checked or in flight is left alone.
+   */
+  async function checkQuestions(requestID) {
+    if (questionClient === null || aborted || questionsCantAnswer) return
+    const checkable = status => status !== undefined && (status.kind === 'claimed-elsewhere' || status.kind === 'check-failed')
+    if (requestID === undefined) {
+      for (const [id, status] of [...questionStatuses]) {
+        if (checkable(status) && isQuestionOpen(id)) questionStatuses.set(id, {kind: 'checking'})
+      }
+      updateDOM()
+    } else {
+      if (!isQuestionOpen(requestID)) return
+      const status = questionStatuses.get(requestID)
+      if (status?.kind === 'checking' || status?.kind === 'in-flight') return
+      if (checkable(status)) setQuestionStatus(requestID, {kind: 'checking'})
+    }
+    await reconcileQuestions({fresh: true})
+  }
+
   function connect() {
     // Don't fetch if close() was called
     if (aborted) return
@@ -3364,8 +4029,11 @@ export function initOperatorStream(opts) {
     reconcileDone = false
 
     // Advance the epoch so any in-flight reconcile from the previous connection
-    // cycle sees a stale epoch and discards its result.
+    // cycle sees a stale epoch and discards its result. The question check keeps its own
+    // epoch, and the claimed re-list timers end here: the live transition re-lists anyway.
     connectEpoch++
+    questionEpoch++
+    clearQuestionRechecks()
 
     // Clear any previously-pending first-frame timer before arming a new one.
     // Without this, a reconnect would leak the old timer, which could fire later
@@ -3549,7 +4217,13 @@ export function initOperatorStream(opts) {
   connect()
 
   // Return a handle to allow external abort (e.g. page unload)
+  // `close` stays the last member: a runtime test pins its source position.
   return {
+    decideQuestion,
+    checkQuestions,
+    getQuestions,
+    getQuestionNotes,
+    getQuestionStatus,
     close() {
       aborted = true // prevent late timer from fetching
       // Clear any pending timers
@@ -3558,6 +4232,7 @@ export function initOperatorStream(opts) {
         reconnectTimer = null
       }
       clearFirstFrameTimer()
+      clearQuestionRechecks()
       if (abortController) {
         abortController.abort()
       }

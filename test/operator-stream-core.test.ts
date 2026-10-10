@@ -14,8 +14,13 @@
 import type {
   ApprovalFrameDataOpen,
   OutputFrameData,
+  QuestionClient,
+  QuestionDecision,
+  QuestionDecisionOutcome,
+  QuestionListResult,
   QuestionReconcileEvent,
   RunEntry,
+  StreamHandle,
   StreamState,
 } from '../public/operator-stream.js'
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
@@ -23,6 +28,7 @@ import {
   bootstrapOperatorStreams,
   buildApprovalClient,
   buildCancelClient,
+  buildQuestionClient,
   CANCEL_RETRY_MAX_ATTEMPTS,
   CHECKOUT_FAILURE_FLAG_LABELS,
   CHECKOUT_LAYOUT_REASON_LABELS,
@@ -53,6 +59,9 @@ import {
   parseSseFrame,
   PHASE_TO_WEB_STATUS,
   PINNED_CONTRACT_VERSION,
+  QUESTION_CLAIM_RECHECK_DELAYS_MS,
+  QUESTION_DECISION_STATES,
+  QUESTION_INVALID_REASONS,
   renderApprovalPrompt,
   renderCancelControl,
   resetBootstrapState,
@@ -77,6 +86,8 @@ import {
   QUESTION_TEXT_MAX_LENGTH,
   UPDATE_FAILURE_REASONS,
   PHASE_TO_WEB_STATUS as VENDORED_PHASE_TO_WEB_STATUS,
+  QUESTION_DECISION_STATES as VENDORED_QUESTION_DECISION_STATES,
+  QUESTION_INVALID_REASONS as VENDORED_QUESTION_INVALID_REASONS,
 } from '../src/gateway/operator-contract/index.ts'
 import {OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
 import {FIXTURE_RUN_ID_FOR_TESTS, FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../src/gateway/operator-fixture-sse.ts'
@@ -9511,5 +9522,1089 @@ describe('expired snapshot — selector/emitter parity (#583)', () => {
     ])
     expect(js).toContain("'run-output-unavailable'")
     expect(css).toMatch(/\.run-output-unavailable(?![\w-])/)
+  })
+})
+
+// ===========================================================================
+// Agent questions — question client, decision outcomes and the re-list triggers (Unit 4)
+// ===========================================================================
+
+type U4State = Extract<QuestionDecisionOutcome, {kind: 'decided'}>['state']
+
+const U4_READY = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
+const U4_RESET_SHUTDOWN = `event: reset\ndata: ${JSON.stringify({runId: Q_RUN, reason: 'shutdown'})}\n\n`
+
+function u4Status(status: string): string {
+  const terminal = ['succeeded', 'failed', 'cancelled'].includes(status)
+  const payload = ckStatusPayload({runId: Q_RUN, status, phase: terminal ? 'COMPLETED' : 'EXECUTING'})
+  return `event: status\ndata: ${JSON.stringify(payload)}\n\n`
+}
+
+/** Chunks for a connection that goes live, runs, and has the given requests open. */
+function u4Chunks(...openIds: string[]): string[] {
+  return [U4_READY, u4Status('running'), ...openIds.map(id => qSse(qOpen(id)))]
+}
+
+function u4Listed(...ids: string[]): QuestionListResult {
+  return {
+    success: true,
+    data: {requests: ids.map(requestID => ({requestID, questions: [qQuestion()] as never})), invalidBody: false, partial: false},
+  }
+}
+
+const u4Decided = (state: U4State): QuestionDecisionOutcome => ({kind: 'decided', state})
+const SKIP: QuestionDecision = {decision: 'skip'}
+
+/** A one-chunk SSE body that stays open. */
+function u4SseBody(text: string): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(text))
+    },
+  })
+}
+
+function u4Deferred<T>(): {promise: Promise<T>; resolve: (value: T) => void} {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(r => {
+    resolve = r
+  })
+  return {promise, resolve}
+}
+
+interface U4Options {
+  /** Chunks per connection; a connection past the end serves just `ready` + a running status. */
+  initial?: string[][]
+  list?: (call: number) => QuestionListResult | Promise<QuestionListResult>
+  decide?: (call: number, requestId: string, decision: QuestionDecision) => QuestionDecisionOutcome | Promise<QuestionDecisionOutcome>
+}
+
+const u4Handles: StreamHandle[] = []
+
+/** Start a stream with fake timers and an injected question client. Connections stay open until `end`. */
+function u4Start(opts: U4Options = {}) {
+  vi.useFakeTimers()
+  const controllers: ReadableStreamDefaultController<Uint8Array>[] = []
+  const encoder = new TextEncoder()
+  const listCalls: string[] = []
+  const decideCalls: {requestId: string; decision: QuestionDecision}[] = []
+
+  const client: QuestionClient = {
+    listRunQuestions: async runId => {
+      listCalls.push(runId)
+      return opts.list === undefined ? u4Listed() : opts.list(listCalls.length)
+    },
+    decideRunQuestion: async (_runId, requestId, decision) => {
+      decideCalls.push({requestId, decision})
+      return opts.decide === undefined ? u4Decided('claimed') : opts.decide(decideCalls.length, requestId, decision)
+    },
+  }
+
+  vi.stubGlobal('document', {
+    createElement: (tag: string) => makeFakeEl(tag),
+    createTextNode: (text: string) => {
+      const node = makeFakeEl('#text')
+      node.textContent = text
+      return node
+    },
+  })
+  vi.stubGlobal('addEventListener', () => {})
+  vi.stubGlobal('fetch', async () => {
+    const chunks = opts.initial?.[controllers.length] ?? [U4_READY, u4Status('running')]
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controllers.push(controller)
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
+      },
+    })
+    return {ok: true, status: 200, headers: {get: () => 'text/event-stream'}, body}
+  })
+
+  const handle = initOperatorStream({
+    runId: Q_RUN,
+    statusEl: makeFakeEl('span') as never,
+    noticeEl: makeFakeEl('div') as never,
+    questionClient: client,
+  })
+  u4Handles.push(handle)
+
+  return {
+    handle,
+    listCalls,
+    decideCalls,
+    flush: async (ms = 0) => vi.advanceTimersByTimeAsync(ms),
+    push: (connection: number, chunk: string) => controllers[connection]?.enqueue(encoder.encode(chunk)),
+    end: (connection: number) => controllers[connection]?.close(),
+    ids: () => handle.getQuestions().map(request => request.requestID),
+    /** Drop connection 0 and let the stream reconnect and go live again. */
+    reconnect: async () => {
+      controllers[0]?.enqueue(encoder.encode(U4_RESET_SHUTDOWN))
+      controllers[0]?.close()
+      await vi.advanceTimersByTimeAsync(5000)
+    },
+  }
+}
+
+function u4Cleanup() {
+  for (const handle of u4Handles.splice(0)) handle.close()
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+  resetQuestionPageStore()
+}
+
+describe('question decisions — outcomes by response state', () => {
+  afterEach(u4Cleanup)
+
+  it('live transition: lists once on going live and adds a listed request', async () => {
+    const h = u4Start({initial: [[U4_READY, u4Status('running')]], list: () => u4Listed('L1')})
+    await h.flush()
+    expect(h.listCalls).toEqual([Q_RUN])
+    expect(h.ids()).toEqual(['L1'])
+    expect(h.handle.getQuestionStatus('L1')).toEqual({kind: 'open'})
+  })
+
+  it('claimed: the request is tombstoned and removed, and a later list cannot bring it back', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], list: n => (n === 1 ? u4Listed() : u4Listed('A'))})
+    await h.flush()
+    expect(h.ids()).toEqual(['A'])
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed'})
+    expect(h.ids()).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(true)
+    expect(h.handle.getQuestionNotes()).toEqual([{requestID: 'A', status: {kind: 'claimed'}}])
+    await h.handle.checkQuestions()
+    expect(h.listCalls).toHaveLength(2)
+    expect(h.ids()).toEqual([])
+  })
+
+  it('already_settled: tombstoned and removed, as its own note distinct from gone', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_settled')})
+    await h.flush()
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'already-settled'})
+    expect(h.ids()).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(true)
+  })
+
+  it('claimed resolves even while the stream is reconnecting (the reducer event is not gated on live)', async () => {
+    const d = u4Deferred<QuestionDecisionOutcome>()
+    const h = u4Start({initial: [u4Chunks('A')], decide: async () => d.promise})
+    await h.flush()
+    const pending = h.handle.decideQuestion('A', SKIP)
+    h.push(0, U4_RESET_SHUTDOWN)
+    h.end(0)
+    await h.flush(0)
+    d.resolve(u4Decided('claimed'))
+    await pending
+    expect(h.ids()).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(true)
+  })
+
+  it('already_claimed: kept, claimed-exempt, and re-listed on the 2/5/10/20 second schedule, then it stops', async () => {
+    expect([...QUESTION_CLAIM_RECHECK_DELAYS_MS]).toEqual([2000, 5000, 10_000, 20_000])
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed')})
+    await h.flush()
+    expect(h.listCalls).toHaveLength(1)
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed-elsewhere'})
+    expect(h.ids()).toEqual(['A'])
+
+    let lists = 1
+    for (const delay of QUESTION_CLAIM_RECHECK_DELAYS_MS) {
+      await h.flush(delay - 1)
+      expect(h.listCalls).toHaveLength(lists)
+      await h.flush(1)
+      await h.flush(0)
+      lists += 1
+      expect(h.listCalls).toHaveLength(lists)
+      // The gateway omits claimed requests from the list, yet the request stays.
+      expect(h.ids()).toEqual(['A'])
+      expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+    }
+    await h.flush(300_000)
+    expect(h.listCalls).toHaveLength(5)
+    expect(h.ids()).toEqual(['A'])
+  })
+
+  it('failed_to_settle: retryable with the request kept, and a resubmit is allowed', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: n => (n === 1 ? u4Decided('failed_to_settle') : u4Decided('claimed'))})
+    await h.flush()
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'failed-to-settle'})
+    expect(h.ids()).toEqual(['A'])
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed'})
+    expect(h.decideCalls).toHaveLength(2)
+  })
+
+  it('a decision is refused while the request is in flight', async () => {
+    const d = u4Deferred<QuestionDecisionOutcome>()
+    const h = u4Start({initial: [u4Chunks('A')], decide: async () => d.promise})
+    await h.flush()
+    const first = h.handle.decideQuestion('A', SKIP)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'in-flight'})
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'in-flight'})
+    expect(h.decideCalls).toHaveLength(1)
+    d.resolve(u4Decided('claimed'))
+    await first
+  })
+
+  it('a request that is not open is not submitted', async () => {
+    const h = u4Start({initial: [u4Chunks('A')]})
+    await h.flush()
+    expect(await h.handle.decideQuestion('nope', SKIP)).toBeNull()
+    expect(h.decideCalls).toHaveLength(0)
+  })
+
+  it('invalid answer on question 2 (zero-based index 1): marked, input kept, resubmit allowed, nothing retried', async () => {
+    const invalid: QuestionDecisionOutcome = {kind: 'invalid', reason: 'arity-mismatch', questionIndex: 1}
+    const h = u4Start({initial: [u4Chunks('A')], decide: n => (n === 1 ? invalid : u4Decided('claimed'))})
+    await h.flush()
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'invalid', reason: 'arity-mismatch', questionIndex: 1})
+    expect(h.ids()).toEqual(['A'])
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed'})
+  })
+
+  it('request-level invalid and request-level failure surface without a question index', async () => {
+    const h = u4Start({
+      initial: [u4Chunks('A')],
+      decide: n => (n === 1 ? {kind: 'invalid', reason: null, questionIndex: null} : {kind: 'failed'}),
+    })
+    await h.flush()
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'invalid', reason: null, questionIndex: null})
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'failed-to-settle'})
+  })
+
+  it('masked 404: can\'t answer, for this request and every request the run opens later; nothing more is sent', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => ({kind: 'cant-answer'})})
+    await h.flush()
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'cant-answer'})
+    expect(h.ids()).toEqual(['A'])
+    h.push(0, qSse(qOpen('B')))
+    await h.flush()
+    expect(h.handle.getQuestionStatus('B')).toEqual({kind: 'cant-answer'})
+    expect(await h.handle.decideQuestion('B', SKIP)).toEqual({kind: 'cant-answer'})
+    expect(h.decideCalls).toHaveLength(1)
+  })
+
+  it('401/403: session expired, and the operator can try again', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: n => (n === 1 ? {kind: 'session-expired'} : u4Decided('claimed'))})
+    await h.flush()
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'session-expired'})
+    expect(h.ids()).toEqual(['A'])
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed'})
+  })
+})
+
+describe('question re-list triggers — unknown outcome, claim lifecycle, failures, races', () => {
+  afterEach(u4Cleanup)
+
+  it('network failure: no resubmit, a fresh list is issued, and a request the list omits is "gone" (may have been recorded)', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => ({kind: 'unknown'}), list: () => u4Listed()})
+    await h.flush()
+    expect(h.listCalls).toHaveLength(1)
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'gone'})
+    expect(h.decideCalls).toHaveLength(1)
+    expect(h.listCalls).toHaveLength(2)
+    expect(h.ids()).toEqual([])
+    expect(h.handle.getQuestionNotes()).toEqual([{requestID: 'A', status: {kind: 'gone'}}])
+    // Removed by absence, not settled: it is not tombstoned, and "gone" differs from "already settled".
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(false)
+    expect(h.handle.getQuestionStatus('A')).not.toEqual({kind: 'already-settled'})
+  })
+
+  it('network failure: shows "checking" while the list is out, and a request the list still shows goes back to open', async () => {
+    const d = u4Deferred<QuestionListResult>()
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => ({kind: 'unknown'}), list: async n => (n === 1 ? u4Listed() : d.promise)})
+    await h.flush()
+    const pending = h.handle.decideQuestion('A', SKIP)
+    await h.flush()
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'checking'})
+    d.resolve(u4Listed('A'))
+    expect(await pending).toEqual({kind: 'open'})
+    expect(h.ids()).toEqual(['A'])
+  })
+
+  it('network failure: the check itself failing surfaces "check failed", and still never resubmits', async () => {
+    const h = u4Start({
+      initial: [u4Chunks('A')],
+      decide: () => ({kind: 'unknown'}),
+      list: n => (n === 1 ? u4Listed() : {success: false, error: {kind: 'network'}}),
+    })
+    await h.flush()
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'check-failed'})
+    expect(h.ids()).toEqual(['A'])
+    expect(h.decideCalls).toHaveLength(1)
+  })
+
+  it('settle frame before the POST resolves: the late response is ignored', async () => {
+    for (const late of [u4Decided('failed_to_settle'), u4Decided('already_claimed'), u4Decided('claimed'), {kind: 'invalid', reason: 'malformed', questionIndex: null} as const]) {
+      const d = u4Deferred<QuestionDecisionOutcome>()
+      const h = u4Start({initial: [u4Chunks('A')], decide: async () => d.promise})
+      await h.flush()
+      const pending = h.handle.decideQuestion('A', SKIP)
+      h.push(0, qSse(qSettle('A')))
+      await h.flush()
+      expect(h.ids()).toEqual([])
+      d.resolve(late)
+      expect(await pending).toBeNull()
+      expect(h.handle.getQuestionStatus('A')).toBeNull()
+      expect(h.handle.getQuestionNotes()).toEqual([])
+      expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(true)
+      u4Cleanup()
+    }
+  })
+
+  it('list removal before the POST resolves: a late claimed still tombstones, so a later list cannot resurrect the request', async () => {
+    const d = u4Deferred<QuestionDecisionOutcome>()
+    const h = u4Start({initial: [u4Chunks('A')], decide: async () => d.promise, list: n => (n === 3 ? u4Listed('A') : u4Listed())})
+    await h.flush()
+    const pending = h.handle.decideQuestion('A', SKIP)
+    await h.handle.checkQuestions() // list #2 omits A: removed by absence, not tombstoned
+    expect(h.ids()).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(false)
+    d.resolve(u4Decided('claimed'))
+    expect(await pending).toBeNull()
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(true)
+    await h.handle.checkQuestions() // list #3 shows A again, but it is settled for the page
+    expect(h.listCalls).toHaveLength(3)
+    expect(h.ids()).toEqual([])
+  })
+
+  it('terminal status before the POST resolves: the late response is ignored and nothing is tombstoned', async () => {
+    const d = u4Deferred<QuestionDecisionOutcome>()
+    const h = u4Start({initial: [u4Chunks('A')], decide: async () => d.promise})
+    await h.flush()
+    const pending = h.handle.decideQuestion('A', SKIP)
+    h.push(0, u4Status('succeeded'))
+    await h.flush()
+    expect(h.ids()).toEqual([])
+    d.resolve(u4Decided('claimed'))
+    expect(await pending).toBeNull()
+    expect(h.handle.getQuestionNotes()).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(false)
+  })
+
+  it('claim reopen: omitted by a list it stays, shown open by a later list it is back to open and the schedule stops', async () => {
+    const h = u4Start({
+      initial: [u4Chunks('A')],
+      decide: () => u4Decided('already_claimed'),
+      list: n => (n === 3 ? u4Listed('A') : u4Listed()),
+    })
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.flush(2000)
+    expect(h.listCalls).toHaveLength(2)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+    await h.flush(5000)
+    expect(h.listCalls).toHaveLength(3)
+    expect(h.ids()).toEqual(['A'])
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'open'})
+    await h.flush(300_000)
+    expect(h.listCalls).toHaveLength(3)
+    // Open again, so it can be answered again.
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed-elsewhere'})
+  })
+
+  it('a settle frame ends a claim: the request is removed and the schedule stops', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed')})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    h.push(0, qSse(qSettle('A')))
+    await h.flush()
+    expect(h.ids()).toEqual([])
+    expect(h.handle.getQuestionStatus('A')).toBeNull()
+    await h.flush(300_000)
+    expect(h.listCalls).toHaveLength(1)
+  })
+
+  it('a terminal status ends a claim: statuses clear and the schedule stops', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed')})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    h.push(0, u4Status('succeeded'))
+    await h.flush(300_000)
+    expect(h.ids()).toEqual([])
+    expect(h.handle.getQuestionStatus('A')).toBeNull()
+    expect(h.listCalls).toHaveLength(1)
+  })
+
+  it('claim exemption ends at the next live transition when the list still omits the request', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed')})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    expect(h.ids()).toEqual(['A'])
+    await h.reconnect()
+    expect(h.listCalls).toHaveLength(2)
+    expect(h.ids()).toEqual([])
+    expect(h.handle.getQuestionStatus('A')).toBeNull()
+    // Removed by absence, not settled.
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(false)
+  })
+
+  it('claim exemption survives the next live transition when the list shows the request open (it is simply open)', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed'), list: n => (n === 1 ? u4Listed() : u4Listed('A'))})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.reconnect()
+    expect(h.ids()).toEqual(['A'])
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'open'})
+  })
+
+  it.each([
+    ['429', {success: false, error: {kind: 'http', status: 429}}],
+    ['500', {success: false, error: {kind: 'http', status: 500}}],
+    ['network', {success: false, error: {kind: 'network'}}],
+    ['invalid body', {success: true, data: {requests: [], invalidBody: true, partial: false}}],
+  ] as [string, QuestionListResult][])('list %s on a live transition: nothing is pruned, nothing surfaces, and it is never retried', async (_name, failure) => {
+    const h = u4Start({initial: [u4Chunks('A')], list: n => (n === 1 ? u4Listed() : failure)})
+    await h.flush()
+    expect(h.ids()).toEqual(['A'])
+    await h.reconnect()
+    expect(h.listCalls).toHaveLength(2)
+    expect(h.ids()).toEqual(['A'])
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'open'})
+    await h.flush(600_000)
+    expect(h.listCalls).toHaveLength(2)
+  })
+
+  it('a failed re-list during the claim schedule leaves the claim as is and stops the schedule', async () => {
+    const h = u4Start({
+      initial: [u4Chunks('A')],
+      decide: () => u4Decided('already_claimed'),
+      list: n => (n === 1 ? u4Listed() : {success: false, error: {kind: 'http', status: 429}}),
+    })
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.flush(2000)
+    expect(h.listCalls).toHaveLength(2)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+    await h.flush(300_000)
+    expect(h.listCalls).toHaveLength(2)
+  })
+
+  it('"Check again" that fails surfaces "check failed"; one that works restores the claim, and a later one shows it open', async () => {
+    const h = u4Start({
+      initial: [u4Chunks('A')],
+      decide: () => u4Decided('already_claimed'),
+      list: n => (n === 2 ? {success: false, error: {kind: 'http', status: 500}} : n === 4 ? u4Listed('A') : u4Listed()),
+    })
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.handle.checkQuestions('A')
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'check-failed'})
+    // The schedule does not retry a failed check on its own.
+    await h.flush(300_000)
+    expect(h.listCalls).toHaveLength(2)
+    await h.handle.checkQuestions('A')
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+    await h.handle.checkQuestions('A')
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'open'})
+    expect(h.listCalls).toHaveLength(4)
+  })
+
+  it('"Check again" shows "checking" while the list is out; without a request ID it targets every claimed request', async () => {
+    const d = u4Deferred<QuestionListResult>()
+    const h = u4Start({initial: [u4Chunks('A', 'B')], decide: () => u4Decided('already_claimed'), list: async n => (n === 2 ? d.promise : u4Listed())})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.handle.decideQuestion('B', SKIP)
+    const pending = h.handle.checkQuestions()
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'checking'})
+    expect(h.handle.getQuestionStatus('B')).toEqual({kind: 'checking'})
+    d.resolve(u4Listed())
+    await pending
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+    expect(h.handle.getQuestionStatus('B')).toEqual({kind: 'claimed-elsewhere'})
+  })
+
+  it('a manual check waits out a list already in flight and then issues its own fresh one', async () => {
+    const d = u4Deferred<QuestionListResult>()
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed'), list: async n => (n === 2 ? d.promise : u4Listed())})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.flush(2000) // the schedule's list (#2) is now out
+    expect(h.listCalls).toHaveLength(2)
+    const pending = h.handle.checkQuestions('A')
+    await h.flush()
+    expect(h.listCalls).toHaveLength(2)
+    d.resolve(u4Listed())
+    await pending
+    expect(h.listCalls).toHaveLength(3)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+  })
+
+  it('epoch guard: a list that resolves after a reconnect is ignored', async () => {
+    const stale = u4Deferred<QuestionListResult>()
+    const h = u4Start({list: async n => (n === 1 ? stale.promise : u4Listed('B'))})
+    await h.flush()
+    expect(h.listCalls).toHaveLength(1)
+    await h.reconnect()
+    expect(h.listCalls).toHaveLength(2)
+    expect(h.ids()).toEqual(['B'])
+    stale.resolve(u4Listed('A'))
+    await h.flush()
+    expect(h.ids()).toEqual(['B'])
+  })
+
+  it('close() ends the claim schedule and refuses further decisions', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed')})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    h.handle.close()
+    await h.flush(300_000)
+    expect(h.listCalls).toHaveLength(1)
+    expect(await h.handle.decideQuestion('A', SKIP)).toBeNull()
+  })
+
+  it('a handle without a question client or region never calls the questions routes', async () => {
+    vi.useFakeTimers()
+    const urls: string[] = []
+    vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag)})
+    vi.stubGlobal('fetch', async (url: string) => {
+      urls.push(url)
+      return {ok: true, status: 200, headers: {get: () => 'text/event-stream'}, body: u4SseBody(u4Chunks('A').join(''))}
+    })
+    const handle = initOperatorStream({runId: Q_RUN, statusEl: makeFakeEl('span') as never, noticeEl: makeFakeEl('div') as never})
+    u4Handles.push(handle)
+    await vi.advanceTimersByTimeAsync(10)
+    expect(urls.every(url => url.endsWith('/stream'))).toBe(true)
+    expect(handle.getQuestions().map(request => request.requestID)).toEqual(['A'])
+    expect(await handle.decideQuestion('A', SKIP)).toBeNull()
+    await handle.checkQuestions()
+    expect(urls).toHaveLength(1)
+  })
+
+  it('a question region wires the real client: the live transition GETs the run\'s pending list', async () => {
+    vi.useFakeTimers()
+    const urls: string[] = []
+    vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag)})
+    vi.stubGlobal('fetch', async (url: string) => {
+      urls.push(url)
+      if (url.includes('/questions')) {
+        return {ok: true, status: 200, json: async () => ({requests: [{requestID: 'W', questions: [qQuestion()]}]})}
+      }
+      return {ok: true, status: 200, headers: {get: () => 'text/event-stream'}, body: u4SseBody([U4_READY, u4Status('running')].join(''))}
+    })
+    const handle = initOperatorStream({
+      runId: Q_RUN,
+      statusEl: makeFakeEl('span') as never,
+      noticeEl: makeFakeEl('div') as never,
+      questionsEl: makeFakeEl('div') as never,
+    })
+    u4Handles.push(handle)
+    await vi.advanceTimersByTimeAsync(10)
+    expect(urls).toContain(`/operator/runs/${Q_RUN}/questions`)
+    expect(handle.getQuestions().map(request => request.requestID)).toEqual(['W'])
+  })
+})
+
+interface U4Response {
+  status: number
+  body?: unknown
+}
+
+/** Stub fetch: CSRF requests succeed (or fail as told); every other request takes the next scripted response. */
+function u4Http(responses: (U4Response | 'throw')[], opts: {csrfStatus?: number | 'throw'} = {}) {
+  const calls: {url: string; init: RequestInit}[] = []
+  let next = 0
+  vi.stubGlobal('fetch', async (url: string, init: RequestInit = {}) => {
+    calls.push({url, init})
+    if (url.includes('/session/csrf')) {
+      if (opts.csrfStatus === 'throw') throw new Error('csrf network')
+      const status = opts.csrfStatus ?? 200
+      return {ok: status === 200, status, json: async () => ({csrfToken: `csrf-${calls.length}`})}
+    }
+    const scripted = responses[Math.min(next++, responses.length - 1)]
+    if (scripted === undefined || scripted === 'throw') throw new Error('network')
+    return {
+      ok: scripted.status >= 200 && scripted.status < 300,
+      status: scripted.status,
+      json: async () => {
+        if (scripted.body === undefined) throw new Error('no body')
+        return scripted.body
+      },
+    }
+  })
+  return calls
+}
+
+const u4Posts = <T extends {url: string}>(calls: T[]): T[] => calls.filter(call => call.url.includes('/decision'))
+const U4_ANSWER: QuestionDecision = {decision: 'answer', answers: [{options: [0]}, {text: 'hello'}]}
+
+describe('buildQuestionClient — decideRunQuestion', () => {
+  afterEach(u4Cleanup)
+
+  it('POSTs the answer body with x-csrf-token, redirect:error, credentials, and no idempotency key', async () => {
+    const calls = u4Http([{status: 200, body: {state: 'claimed'}}])
+    const result = await buildQuestionClient().decideRunQuestion('run-1', 'req-1', U4_ANSWER)
+    expect(result).toEqual({kind: 'decided', state: 'claimed'})
+    const [post] = u4Posts(calls)
+    expect(post?.url).toBe('/operator/runs/run-1/questions/req-1/decision')
+    expect(post?.init.method).toBe('POST')
+    expect(post?.init.redirect).toBe('error')
+    expect(post?.init.credentials).toBe('include')
+    const headers = post?.init.headers as Record<string, string>
+    expect(headers['x-csrf-token']).toMatch(/^csrf-/)
+    expect(Object.keys(headers).map(key => key.toLowerCase())).not.toContain('idempotency-key')
+    expect(JSON.parse(String(post?.init.body))).toEqual({decision: 'answer', answers: [{options: [0]}, {text: 'hello'}]})
+  })
+
+  it('sends skip as {decision:"skip"} and rebuilds a closed answer body (stray fields are not sent)', async () => {
+    const calls = u4Http([{status: 200, body: {state: 'claimed'}}])
+    const client = buildQuestionClient()
+    await client.decideRunQuestion('run-1', 'req-1', SKIP)
+    await client.decideRunQuestion('run-1', 'req-1', {decision: 'answer', answers: [{options: [1], text: 'x', extra: 'no'}]} as never)
+    const [skip, answer] = u4Posts(calls)
+    expect(JSON.parse(String(skip?.init.body))).toEqual({decision: 'skip'})
+    expect(JSON.parse(String(answer?.init.body))).toEqual({decision: 'answer', answers: [{options: [1], text: 'x'}]})
+  })
+
+  it('an empty answer list is sent as-is (a request with zero questions)', async () => {
+    const calls = u4Http([{status: 200, body: {state: 'claimed'}}])
+    await buildQuestionClient().decideRunQuestion('run-1', 'req-1', {decision: 'answer', answers: []})
+    expect(JSON.parse(String(u4Posts(calls)[0]?.init.body))).toEqual({decision: 'answer', answers: []})
+  })
+
+  it.each(QUESTION_DECISION_STATES)('200 %s is a decided outcome', async state => {
+    u4Http([{status: 200, body: {state}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: 'decided', state})
+  })
+
+  it('200 with an unknown state is a request-level retryable failure', async () => {
+    u4Http([{status: 200, body: {state: 'mystery'}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: 'failed'})
+  })
+
+  it('400 without a reason refreshes CSRF and retries once with the new token', async () => {
+    const calls = u4Http([{status: 400, body: {error: 'bad request'}}, {status: 200, body: {state: 'claimed'}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', U4_ANSWER)).toEqual({kind: 'decided', state: 'claimed'})
+    const posts = u4Posts(calls)
+    expect(posts).toHaveLength(2)
+    expect(calls.filter(call => call.url.includes('/session/csrf'))).toHaveLength(2)
+    const tokens = posts.map(post => (post.init.headers as Record<string, string>)['x-csrf-token'])
+    expect(tokens[0]).not.toBe(tokens[1])
+  })
+
+  it('400 without a reason and with an unreadable body is also a CSRF-style 400', async () => {
+    const calls = u4Http([{status: 400}, {status: 200, body: {state: 'claimed'}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: 'decided', state: 'claimed'})
+    expect(u4Posts(calls)).toHaveLength(2)
+  })
+
+  it('a second 400 without a reason is a request-level invalid outcome, not a third attempt', async () => {
+    const calls = u4Http([{status: 400, body: {error: 'bad request'}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: 'invalid', reason: null, questionIndex: null})
+    expect(u4Posts(calls)).toHaveLength(2)
+  })
+
+  it('400 arity-mismatch with questionIndex 1 is invalid on question 2, and is never retried', async () => {
+    const calls = u4Http([{status: 400, body: {error: 'bad request', reason: 'arity-mismatch', questionIndex: 1}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', U4_ANSWER)).toEqual({
+      kind: 'invalid',
+      reason: 'arity-mismatch',
+      questionIndex: 1,
+    })
+    expect(u4Posts(calls)).toHaveLength(1)
+  })
+
+  it.each(QUESTION_INVALID_REASONS)('400 %s with a null index is a request-level answer problem with the reason kept', async reason => {
+    const calls = u4Http([{status: 400, body: {error: 'bad request', reason, questionIndex: null}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', U4_ANSWER)).toEqual({kind: 'invalid', reason, questionIndex: null})
+    expect(u4Posts(calls)).toHaveLength(1)
+  })
+
+  it('400 with an unknown reason is request-level invalid, never retried', async () => {
+    const calls = u4Http([{status: 400, body: {error: 'bad request', reason: 'brand-new-reason', questionIndex: 0}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', U4_ANSWER)).toEqual({kind: 'invalid', reason: null, questionIndex: null})
+    expect(u4Posts(calls)).toHaveLength(1)
+  })
+
+  it.each([2, -1, 1.5, '1', undefined])('400 with an out-of-range or unusable index (%s) is request-level, never retried', async questionIndex => {
+    const calls = u4Http([{status: 400, body: {error: 'bad request', reason: 'unknown-option', questionIndex}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', U4_ANSWER)).toEqual({
+      kind: 'invalid',
+      reason: 'unknown-option',
+      questionIndex: null,
+    })
+    expect(u4Posts(calls)).toHaveLength(1)
+  })
+
+  it('404 is can\'t-answer, 401 and 403 are session expired, and none is retried', async () => {
+    for (const [status, expected] of [[404, 'cant-answer'], [401, 'session-expired'], [403, 'session-expired']] as const) {
+      const calls = u4Http([{status, body: {}}])
+      expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: expected})
+      expect(u4Posts(calls)).toHaveLength(1)
+    }
+  })
+
+  it('a 401 or 403 from the CSRF fetch is session expired and sends nothing; other CSRF failures are retryable and send nothing', async () => {
+    for (const [csrfStatus, expected] of [[401, 'session-expired'], [403, 'session-expired'], [500, 'failed'], ['throw', 'failed']] as const) {
+      const calls = u4Http([{status: 200, body: {state: 'claimed'}}], {csrfStatus})
+      expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: expected})
+      expect(u4Posts(calls)).toHaveLength(0)
+    }
+  })
+
+  it('a network failure of the POST is an unknown outcome and is not resubmitted', async () => {
+    const calls = u4Http(['throw'])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: 'unknown'})
+    expect(u4Posts(calls)).toHaveLength(1)
+  })
+
+  it.each([429, 500, 502, 503])('%i is an unknown outcome (it may have been recorded) and is not resubmitted', async status => {
+    const calls = u4Http([{status, body: {}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: 'unknown'})
+    expect(u4Posts(calls)).toHaveLength(1)
+  })
+
+  it('a network failure of the retry POST is an unknown outcome', async () => {
+    u4Http([{status: 400, body: {error: 'bad request'}}, 'throw'])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: 'unknown'})
+  })
+
+  it('a 200 with an unreadable body is an unknown outcome', async () => {
+    u4Http([{status: 200}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: 'unknown'})
+  })
+
+  it('an unsendable ID or decision is a request-level failure and sends nothing', async () => {
+    const calls = u4Http([{status: 200, body: {state: 'claimed'}}])
+    const client = buildQuestionClient()
+    expect(await client.decideRunQuestion('run/1', 'req-1', SKIP)).toEqual({kind: 'failed'})
+    expect(await client.decideRunQuestion('run-1', '../x', SKIP)).toEqual({kind: 'failed'})
+    expect(await client.decideRunQuestion('run-1', 'req-1', {decision: 'nope'} as never)).toEqual({kind: 'failed'})
+    expect(await client.decideRunQuestion('run-1', 'req-1', {decision: 'answer', answers: [{options: [-1]}]})).toEqual({kind: 'failed'})
+    expect(await client.decideRunQuestion('run-1', 'req-1', {decision: 'answer', answers: [{text: 5}]} as never)).toEqual({kind: 'failed'})
+    expect(calls).toHaveLength(0)
+  })
+
+  it('fixture mode appends the fixture session id to the decision and list paths; the base is configurable', async () => {
+    const calls = u4Http([{status: 200, body: {state: 'claimed'}}, {status: 200, body: {requests: []}}])
+    const client = buildQuestionClient({endpointBase: '/dev/operator', fixtureSessionId: 'fx 1'})
+    await client.decideRunQuestion('run-1', 'req-1', SKIP)
+    await client.listRunQuestions('run-1')
+    expect(u4Posts(calls)[0]?.url).toBe('/dev/operator/runs/run-1/questions/req-1/decision?fixtureSessionId=fx%201')
+    expect(calls.at(-1)?.url).toBe('/dev/operator/runs/run-1/questions?fixtureSessionId=fx%201')
+  })
+})
+
+describe('buildQuestionClient — listRunQuestions validation', () => {
+  afterEach(u4Cleanup)
+
+  const entry = (requestID: string, extra: Record<string, unknown> = {}) => ({requestID, questions: [qQuestion()], ...extra})
+
+  it('GETs the run\'s list with redirect:error and credentials, and returns the parsed requests', async () => {
+    const calls = u4Http([{status: 200, body: {requests: [entry('A'), entry('B')]}}])
+    const result = await buildQuestionClient().listRunQuestions('run-1')
+    expect(calls[0]?.url).toBe('/operator/runs/run-1/questions')
+    expect(calls[0]?.init.redirect).toBe('error')
+    expect(calls[0]?.init.credentials).toBe('include')
+    expect(calls[0]?.init.method).toBeUndefined()
+    expect(result).toEqual({
+      success: true,
+      data: {requests: [entry('A'), entry('B')], invalidBody: false, partial: false},
+    })
+  })
+
+  it('an empty list is valid and authoritative', async () => {
+    u4Http([{status: 200, body: {requests: []}}])
+    expect(await buildQuestionClient().listRunQuestions('run-1')).toEqual({
+      success: true,
+      data: {requests: [], invalidBody: false, partial: false},
+    })
+  })
+
+  it('applies the question text rule to listed prompts (same parser as the frames)', async () => {
+    u4Http([{status: 200, body: {requests: [{requestID: 'A', questions: [qQuestion({text: 'a\tb\u202Ec'})]}]}}])
+    const result = await buildQuestionClient().listRunQuestions('run-1')
+    expect(result.success && result.data.requests[0]?.questions[0]?.text).toBe('a bc')
+  })
+
+  it.each([
+    ['null body', null],
+    ['an array', []],
+    ['no requests key', {items: []}],
+    ['requests not an array', {requests: 'nope'}],
+    ['an extra key on the body', {requests: [], extra: 1}],
+    ['more entries than the gateway cap', {requests: Array.from({length: GATEWAY_PENDING_QUESTIONS_CAP + 1}, (_, index) => entry(`R${index}`))}],
+  ])('an invalid body (%s) is flagged invalidBody with nothing listed', async (_name, body) => {
+    u4Http([{status: 200, body}])
+    expect(await buildQuestionClient().listRunQuestions('run-1')).toEqual({
+      success: true,
+      data: {requests: [], invalidBody: true, partial: false},
+    })
+  })
+
+  it('an unreadable 200 body is invalidBody too', async () => {
+    u4Http([{status: 200}])
+    const result = await buildQuestionClient().listRunQuestions('run-1')
+    expect(result.success && result.data.invalidBody).toBe(true)
+  })
+
+  it.each([
+    ['a per-item runId (the entry is closed)', entry('B', {runId: 'run-1'})],
+    ['an extra key', entry('B', {extra: 1})],
+    ['an empty requestID', entry('')],
+    ['a non-string requestID', {requestID: 7, questions: []}],
+    ['a question over its bound', {requestID: 'B', questions: [qQuestion({header: 'h'.repeat(QUESTION_HEADER_MAX_LENGTH + 1)})]}],
+    ['more questions than the cap', {requestID: 'B', questions: Array.from({length: MAX_QUESTIONS_PER_REQUEST + 1}, () => qQuestion())}],
+    ['a non-object', 'nope'],
+    ['a duplicate of an earlier entry', entry('A')],
+  ])('drops an entry with %s, keeps the rest, and marks the list partial', async (_name, bad) => {
+    u4Http([{status: 200, body: {requests: [entry('A'), bad, entry('C')]}}])
+    const result = await buildQuestionClient().listRunQuestions('run-1')
+    expect(result.success && result.data.requests.map(request => request.requestID)).toEqual(['A', 'C'])
+    expect(result.success && result.data.partial).toBe(true)
+    expect(result.success && result.data.invalidBody).toBe(false)
+  })
+
+  it('a request with zero questions is valid', async () => {
+    u4Http([{status: 200, body: {requests: [{requestID: 'A', questions: []}]}}])
+    const result = await buildQuestionClient().listRunQuestions('run-1')
+    expect(result.success && result.data.requests).toEqual([{requestID: 'A', questions: []}])
+  })
+
+  it('an own __proto__ key on an entry drops it', async () => {
+    u4Http([{status: 200, body: JSON.parse('{"requests":[{"requestID":"A","questions":[],"__proto__":{"x":1}}]}')}])
+    const result = await buildQuestionClient().listRunQuestions('run-1')
+    expect(result.success && result.data.requests).toEqual([])
+    expect(result.success && result.data.partial).toBe(true)
+  })
+
+  it.each([404, 429, 500])('non-OK %i is an http failure, not an empty list', async status => {
+    u4Http([{status, body: {requests: []}}])
+    expect(await buildQuestionClient().listRunQuestions('run-1')).toEqual({success: false, error: {kind: 'http', status}})
+  })
+
+  it('a fetch that throws is a network failure', async () => {
+    u4Http(['throw'])
+    expect(await buildQuestionClient().listRunQuestions('run-1')).toEqual({success: false, error: {kind: 'network'}})
+  })
+
+  it('an unsafe run ID is refused before any request', async () => {
+    const calls = u4Http([{status: 200, body: {requests: []}}])
+    expect(await buildQuestionClient().listRunQuestions('../x')).toEqual({success: false, error: {kind: 'invalid-id'}})
+    expect(calls).toHaveLength(0)
+  })
+})
+
+describe('question list through the handle — validation reaches the reducer rules', () => {
+  afterEach(u4Cleanup)
+
+  it('a list with dropped entries is additive only: a local request the list omits survives', async () => {
+    const partial: QuestionListResult = {success: true, data: {requests: [], invalidBody: false, partial: true}}
+    const h = u4Start({initial: [u4Chunks('A')], list: n => (n === 1 ? u4Listed() : partial)})
+    await h.flush()
+    await h.reconnect()
+    expect(h.ids()).toEqual(['A'])
+  })
+
+  it('an authoritative list prunes a local request it omits, without a tombstone', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], list: () => u4Listed()})
+    await h.flush()
+    await h.reconnect()
+    expect(h.ids()).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(false)
+  })
+})
+
+describe('question client — vocabulary parity and privacy', () => {
+  afterEach(u4Cleanup)
+
+  it('the browser vocabularies equal the vendored ones', () => {
+    expect([...QUESTION_DECISION_STATES]).toEqual([...VENDORED_QUESTION_DECISION_STATES])
+    expect([...QUESTION_INVALID_REASONS]).toEqual([...VENDORED_QUESTION_INVALID_REASONS])
+  })
+
+  it('request bodies and response text never reach the console or storage, through the client and the handle', async () => {
+    const SECRET_ANSWER = 'u4-secret-answer-text'
+    const SECRET_RESPONSE = 'u4-secret-response-text'
+    const SECRET_QUESTION = 'u4-secret-question-text'
+    const consoleSpies = (['log', 'info', 'warn', 'error', 'debug', 'trace'] as const).map(method => vi.spyOn(console, method).mockImplementation(() => {}))
+    const setItem = vi.fn()
+    vi.stubGlobal('localStorage', {setItem, getItem: () => null})
+    vi.stubGlobal('sessionStorage', {setItem, getItem: () => null})
+
+    // Client: every outcome class, with secrets in the request and in the response bodies.
+    const decision: QuestionDecision = {decision: 'answer', answers: [{text: SECRET_ANSWER}]}
+    for (const response of [
+      {status: 200, body: {state: 'claimed', detail: SECRET_RESPONSE}},
+      {status: 400, body: {error: SECRET_RESPONSE, reason: 'malformed', detail: SECRET_RESPONSE}},
+      {status: 400, body: {error: SECRET_RESPONSE}},
+      {status: 404, body: {error: SECRET_RESPONSE}},
+      {status: 500, body: {error: SECRET_RESPONSE}},
+      {status: 200, body: {state: SECRET_RESPONSE}},
+    ]) {
+      u4Http([response])
+      await buildQuestionClient().decideRunQuestion('run-1', 'req-1', decision)
+    }
+    u4Http(['throw'])
+    await buildQuestionClient().decideRunQuestion('run-1', 'req-1', decision)
+    u4Http([{status: 200, body: {requests: [{requestID: 'A', questions: [qQuestion({text: SECRET_QUESTION, extra: SECRET_RESPONSE})]}]}}])
+    await buildQuestionClient().listRunQuestions('run-1')
+    vi.unstubAllGlobals()
+    vi.stubGlobal('localStorage', {setItem, getItem: () => null})
+    vi.stubGlobal('sessionStorage', {setItem, getItem: () => null})
+
+    // Handle: open a request with secret text, answer with secret text, fail every way.
+    const outcomes: QuestionDecisionOutcome[] = [
+      {kind: 'unknown'},
+      {kind: 'invalid', reason: 'malformed', questionIndex: 0},
+      {kind: 'session-expired'},
+      u4Decided('already_claimed'),
+    ]
+    const frame = qSse(qOpen('A', [qQuestion({text: SECRET_QUESTION})]))
+    const h = u4Start({
+      initial: [[U4_READY, u4Status('running'), frame]],
+      decide: n => outcomes[n - 1] ?? u4Decided('claimed'),
+      list: () => ({success: false, error: {kind: 'http', status: 500}}),
+    })
+    await h.flush()
+    for (const outcome of outcomes) {
+      expect(outcome.kind).toBeDefined()
+      await h.handle.decideQuestion('A', {decision: 'answer', answers: [{text: SECRET_ANSWER}]})
+    }
+    await h.handle.checkQuestions()
+    await h.flush(60_000)
+    const observable = JSON.stringify([h.handle.getQuestionNotes(), h.handle.getQuestions().map(request => request.status)])
+    expect(observable).not.toContain(SECRET_ANSWER)
+    expect(observable).not.toContain(SECRET_RESPONSE)
+
+    for (const spy of consoleSpies) {
+      for (const args of spy.mock.calls) {
+        const text = JSON.stringify(args)
+        for (const secret of [SECRET_ANSWER, SECRET_RESPONSE, SECRET_QUESTION]) expect(text).not.toContain(secret)
+      }
+      expect(spy).not.toHaveBeenCalled()
+    }
+    expect(setItem).not.toHaveBeenCalled()
+  })
+})
+
+describe('nextStreamState — question-claimed, question-resolved and endClaimedExemptions', () => {
+  beforeEach(() => resetQuestionPageStore())
+  afterEach(() => resetQuestionPageStore())
+
+  const open = (...ids: string[]): StreamState => {
+    let state = qStatus(qLive(), 'running')
+    for (const id of ids) state = qFrameApply(state, qOpen(id))
+    return state
+  }
+
+  it('question-claimed exempts an open request from removal by absence', () => {
+    const claimed = nextStreamState(open('A', 'B'), {type: 'question-claimed', runId: Q_RUN, requestID: 'A'})
+    expect(qEntry(claimed).questionClaimedExempt?.has('A')).toBe(true)
+    expect(qIds(qReconcile(claimed, ['B']))).toEqual(['A', 'B'])
+  })
+
+  it('question-claimed is a no-op for a request that is not open, is tombstoned, or whose run is terminal', () => {
+    const state = open('A')
+    expect(nextStreamState(state, {type: 'question-claimed', runId: Q_RUN, requestID: 'Z'})).toBe(state)
+    expect(nextStreamState(INITIAL_STATE, {type: 'question-claimed', runId: Q_RUN, requestID: 'A'})).toBe(INITIAL_STATE)
+    const terminal = qStatus(state, 'succeeded')
+    expect(nextStreamState(terminal, {type: 'question-claimed', runId: Q_RUN, requestID: 'A'})).toBe(terminal)
+  })
+
+  it('question-resolved tombstones, removes, drops the draft and the exemption, even before the connection is live', () => {
+    const claimed = nextStreamState(open('A'), {type: 'question-claimed', runId: Q_RUN, requestID: 'A'})
+    getQuestionPageStore(Q_RUN).drafts.set('A', {fixture: 'draft'})
+    const reconnecting = {...claimed, connection: 'reconnecting'} as StreamState
+    const resolved = nextStreamState(reconnecting, {type: 'question-resolved', runId: Q_RUN, requestID: 'A'})
+    expect(qIds(resolved)).toEqual([])
+    expect(qEntry(resolved).questionClaimedExempt?.has('A')).toBe(false)
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(true)
+    expect(getQuestionPageStore(Q_RUN).drafts.has('A')).toBe(false)
+    expect(qIds(qFrameApply(resolved, qOpen('A')))).toEqual([])
+  })
+
+  it('question-resolved is ignored once the run is terminal', () => {
+    const terminal = qStatus(open('A'), 'succeeded')
+    expect(nextStreamState(terminal, {type: 'question-resolved', runId: Q_RUN, requestID: 'A'})).toBe(terminal)
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(false)
+  })
+
+  it('a reconcile with endClaimedExemptions removes a claimed request the list omits, and one without keeps it', () => {
+    const claimed = nextStreamState(open('A', 'B'), {type: 'question-claimed', runId: Q_RUN, requestID: 'A'})
+    const base: QuestionReconcileEvent = {
+      type: 'question-reconcile',
+      runId: Q_RUN,
+      snapshotIds: ['A', 'B'],
+      requests: [{requestID: 'B', questions: [qQuestion()] as never}],
+      invalidBody: false,
+      partial: false,
+    }
+    expect(qIds(nextStreamState(claimed, base))).toEqual(['A', 'B'])
+    const ended = nextStreamState(claimed, {...base, endClaimedExemptions: true})
+    expect(qIds(ended)).toEqual(['B'])
+    expect(qEntry(ended).questionClaimedExempt?.size).toBe(0)
+  })
+
+  it('an invalid-body reconcile does not end exemptions even when asked to', () => {
+    const claimed = nextStreamState(open('A'), {type: 'question-claimed', runId: Q_RUN, requestID: 'A'})
+    const result = nextStreamState(claimed, {
+      type: 'question-reconcile',
+      runId: Q_RUN,
+      snapshotIds: ['A'],
+      requests: [],
+      invalidBody: true,
+      partial: false,
+      endClaimedExemptions: true,
+    })
+    expect(result).toBe(claimed)
+  })
+})
+
+describe('approval client — unchanged by the question client', () => {
+  afterEach(u4Cleanup)
+
+  it('still retries once on ANY 400, including one carrying a reason, with the same idempotency key', async () => {
+    const calls = u4Http([
+      {status: 400, body: {error: 'bad request', reason: 'malformed'}},
+      {status: 200, body: {state: 'claimed'}},
+    ])
+    const result = await buildApprovalClient().decideRunApproval('run-1', 'req-1', 'once', 'idem-1')
+    expect(result.success).toBe(true)
+    const posts = u4Posts(calls)
+    expect(posts).toHaveLength(2)
+    expect(posts.map(post => (post.init.headers as Record<string, string>)['idempotency-key'])).toEqual(['idem-1', 'idem-1'])
+  })
+
+  it('still sends the idempotency key, and the approval routes are untouched by the question routes', async () => {
+    const calls = u4Http([{status: 200, body: {state: 'claimed'}}, {status: 200, body: {approvals: []}}])
+    const client = buildApprovalClient()
+    await client.decideRunApproval('run-1', 'req-1', 'once', 'idem-2')
+    await client.listRunApprovals('run-1')
+    const urls = calls.map(call => call.url)
+    expect(urls).toContain('/operator/runs/run-1/approvals/req-1/decision')
+    expect(urls).toContain('/operator/runs/run-1/approvals')
+    expect(urls.some(url => url.includes('/questions'))).toBe(false)
+    expect(calls.find(call => call.url.endsWith('/decision'))?.init.headers).toMatchObject({'idempotency-key': 'idem-2'})
+  })
+
+  it('the approval reconcile still runs on a live transition with no question client wired', async () => {
+    vi.useFakeTimers()
+    const listed: string[] = []
+    vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag)})
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: new ReadableStream({start(c) { c.enqueue(new TextEncoder().encode([U4_READY, u4Status('running')].join(''))) }}),
+    }))
+    const approvalsEl = makeFakeEl('div')
+    const handle = initOperatorStream({
+      runId: Q_RUN,
+      statusEl: makeFakeEl('span') as never,
+      noticeEl: makeFakeEl('div') as never,
+      approvalsEl: approvalsEl as never,
+      approvalClient: {
+        refreshCsrf: async () => ({success: true, data: {csrfToken: 'c'}}),
+        decideRunApproval: async () => ({success: true, data: {state: 'claimed'}}),
+        listRunApprovals: async (runId: string) => {
+          listed.push(runId)
+          return {success: true as const, data: {approvals: []}}
+        },
+      },
+    })
+    u4Handles.push(handle)
+    await vi.advanceTimersByTimeAsync(10)
+    expect(listed).toEqual([Q_RUN])
   })
 })
