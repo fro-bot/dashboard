@@ -115,7 +115,7 @@ const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
  */
 const SUMMARY_STATUSES = new Set(['queued', 'running', 'succeeded', 'failed', 'cancelled'])
 
-/** In-card copy for an expired run snapshot (#583). Dashboard-owned; never wire text. */
+/** In-card copy for an expired run snapshot. Dashboard-owned; never wire text. */
 const OUTPUT_UNAVAILABLE_COPY = 'Output no longer available.'
 
 /** Valid ResetReason values from the gateway SSE surface. */
@@ -911,6 +911,20 @@ export function parseSseFrame(record) {
 
 const questionPageStore = new Map()
 
+// Statuses kept for a request that is no longer open (a note until the card collapses). Every
+// other status leaves with its request.
+const QUESTION_NOTE_KINDS = new Set(['claimed', 'already-settled', 'gone'])
+
+// Statuses while a decision or check is outstanding: the card refuses new decisions.
+const QUESTION_IN_FLIGHT_KINDS = new Set(['in-flight', 'checking', 'claimed-elsewhere'])
+
+// The one wording for each note outcome, shared by the note card and the open card.
+const QUESTION_NOTE_COPY = Object.freeze({
+  claimed: 'This question is no longer open.',
+  'already-settled': 'This question is no longer open.',
+  gone: 'This question is no longer open. Your answer may have been recorded.',
+})
+
 /**
  * The page-level question record for a run: `{tombstones: Set<requestID>, drafts: Map<requestID, draft>}`.
  * Created on first use. The returned object is live — callers mutate it directly.
@@ -1277,7 +1291,7 @@ export function nextStreamState(current, event) {
         }
       }
 
-      // no-snapshot (#583): the gateway has no replay entry for this run (expired after its
+      // no-snapshot: the gateway has no replay entry for this run (expired after its
       // retention window, or lost on restart) and KEEPS THE SUBSCRIPTION OPEN afterwards, so a
       // reconnect would park on a reader that never ends and strand the card on "Connecting".
       // Never reconnect for it:
@@ -1292,6 +1306,8 @@ export function nextStreamState(current, event) {
         const summaryStatus = current.summaryStatus
         const summaryIsTerminal = typeof summaryStatus === 'string' && TERMINAL_STATUSES.has(summaryStatus)
         if (runEntry?.terminal === true || summaryIsTerminal) {
+          // Terminal clears the page store's drafts, as the status-frame terminal path does.
+          questionPageStore.get(resetRunId)?.drafts.clear()
           const knownTerminal = runEntry?.terminal === true
           const terminalEntry = knownTerminal
             ? {...runEntry}
@@ -3219,17 +3235,12 @@ function makeQuestionNoteCard(status) {
   message.className = 'question-region__status'
   message.setAttribute('role', 'status')
   message.setAttribute('aria-live', 'polite')
-  const labels = {
-    claimed: 'This question is no longer open.',
-    'already-settled': 'This question is no longer open.',
-    gone: 'This question is no longer open. Your answer may have been recorded.',
-  }
-  message.textContent = labels[status.kind] ?? ''
+  message.textContent = QUESTION_NOTE_COPY[status.kind] ?? ''
   el.append(message)
   return {
     el,
     update(next) {
-      message.textContent = labels[next.kind] ?? ''
+      message.textContent = QUESTION_NOTE_COPY[next.kind] ?? ''
     },
   }
 }
@@ -3401,7 +3412,7 @@ export function initOperatorStream(opts) {
         if (!prompt.multiple) input.name = radioName
         input.checked = answer.options.includes(optionIndex)
         input.addEventListener('change', () => {
-          if (['claimed', 'already-settled', 'gone'].includes(status.kind)) {
+          if (QUESTION_NOTE_KINDS.has(status.kind)) {
             input.checked = answer.options.includes(optionIndex)
             return
           }
@@ -3437,7 +3448,7 @@ export function initOperatorStream(opts) {
         textarea.rows = 2
         textarea.value = answer.text
         textarea.addEventListener('input', () => {
-          if (['claimed', 'already-settled', 'gone'].includes(status.kind)) {
+          if (QUESTION_NOTE_KINDS.has(status.kind)) {
             textarea.value = answer.text
             return
           }
@@ -3500,7 +3511,7 @@ export function initOperatorStream(opts) {
     }
 
     function refreshValidation() {
-      submitButton.disabled = !canSubmit() || ['in-flight', 'checking', 'claimed-elsewhere'].includes(status.kind)
+      submitButton.disabled = !canSubmit() || QUESTION_IN_FLIGHT_KINDS.has(status.kind)
       for (const [index, question] of questionEls.entries()) {
         question.errorEl.textContent = ''
         question.errorEl.hidden = true
@@ -3533,11 +3544,11 @@ export function initOperatorStream(opts) {
     }
 
     submitButton.addEventListener('click', () => {
-      if (submitButton.disabled || ['claimed', 'already-settled', 'gone'].includes(status.kind)) return
+      if (submitButton.disabled || QUESTION_NOTE_KINDS.has(status.kind)) return
       decideQuestion(request.requestID, answerDecision()).then(() => undefined)
     })
     skipButton.addEventListener('click', () => {
-      if (skipButton.disabled || ['claimed', 'already-settled', 'gone'].includes(status.kind)) return
+      if (skipButton.disabled || QUESTION_NOTE_KINDS.has(status.kind)) return
       store.drafts.delete(request.requestID)
       decideQuestion(request.requestID, {decision: 'skip'}).then(() => undefined)
     })
@@ -3550,13 +3561,11 @@ export function initOperatorStream(opts) {
         'in-flight': 'Sending answers…',
         'claimed-elsewhere': 'This question is being answered elsewhere.',
         checking: 'Checking whether your answer was recorded…',
-        gone: 'This question is no longer open. Your answer may have been recorded.',
-        'already-settled': 'This question is no longer open.',
+        ...QUESTION_NOTE_COPY,
         'failed-to-settle': "Your answer wasn't recorded. Try again.",
         'cant-answer': "You can't answer questions for this run.",
         'session-expired': 'Your session expired. Sign in again in another tab, then try again.',
         'check-failed': "Couldn't check for questions. Try again.",
-        claimed: 'This question is no longer open.',
       }
       const invalidCopy = status.kind === 'invalid'
         ? status.reason === 'multiple-not-allowed'
@@ -3570,7 +3579,7 @@ export function initOperatorStream(opts) {
       statusEl.textContent = invalidCopy || labels[status.kind] || ''
       const blocked = ['in-flight', 'checking', 'claimed-elsewhere', 'cant-answer'].includes(status.kind)
       const removed = status.kind === 'cant-answer'
-      const note = ['claimed', 'already-settled', 'gone'].includes(status.kind)
+      const note = QUESTION_NOTE_KINDS.has(status.kind)
       for (const input of el.querySelectorAll('input, textarea')) {
         input.disabled = blocked || note
         input.tabIndex = note ? -1 : 0
@@ -3774,7 +3783,7 @@ export function initOperatorStream(opts) {
       const runEntry = state.runs[runId]
       const outputText = runEntry?.outputText
       if (runEntry?.outputUnavailable === true) {
-        // Expired snapshot (#583): fixed dashboard copy as a single text node, never wire text.
+        // Expired snapshot: fixed dashboard copy as a single text node, never wire text.
         outputEl.textContent = OUTPUT_UNAVAILABLE_COPY
         outputEl.hidden = false
         outputEl.classList?.add('run-output-unavailable')
@@ -4052,10 +4061,6 @@ export function initOperatorStream(opts) {
   //
   // Never logs, and never stores, request bodies, answer text or response text.
   // -------------------------------------------------------------------------
-
-  // Statuses kept for a request that is no longer open (a note until the card collapses). Every
-  // other status leaves with its request.
-  const QUESTION_NOTE_KINDS = new Set(['claimed', 'already-settled', 'gone'])
 
   const questionRecheckTimers = new Map() // requestID → timer
   let questionsCantAnswer = false // masked 404: the run's questions cannot be answered by this session
@@ -4339,7 +4344,7 @@ export function initOperatorStream(opts) {
     if (typeof requestID !== 'string' || !isQuestionOpen(requestID)) return null
     if (questionsCantAnswer) return getQuestionStatus(requestID)
     const current = questionStatuses.get(requestID)
-    if (current !== undefined && ['in-flight', 'checking', 'claimed-elsewhere'].includes(current.kind)) return current
+    if (current !== undefined && QUESTION_IN_FLIGHT_KINDS.has(current.kind)) return current
     setQuestionStatus(requestID, {kind: 'in-flight'})
     const outcome = await questionClient.decideRunQuestion(runId, requestID, decision)
     if (aborted) return null

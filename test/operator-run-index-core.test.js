@@ -2240,6 +2240,10 @@ describe('CSS selector ↔ status emitter agreement', () => {
       expect(cssContent).toContain(expectedSelector)
     }
 
+    // The stream emitter hyphenates stream-only statuses (`waiting_for_question` → `status-waiting-for-question`).
+    expect(cssContent).toContain('.run-status.status-waiting-for-question')
+    expect(cssContent).toContain('[data-theme="light"] .run-status.status-waiting-for-question')
+
     // Explicitly verify the old wrong ones are GONE
     expect(cssContent).not.toContain('.status-success')
     expect(cssContent).not.toContain('.status-failure')

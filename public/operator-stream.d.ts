@@ -419,7 +419,7 @@ export interface RunEntry {
   /** True once a question reconcile result has been applied for this run. Gates the `running` fallback. */
   readonly questionReconcileDone?: boolean
   /**
-   * True when the run's output is gone because its gateway snapshot expired (#583): set by a
+   * True when the run's output is gone because its gateway snapshot expired: set by a
    * `reset` (`no-snapshot`) for a run known terminal, or by a terminal status frame after such a
    * reset with no output since. Cleared by an output frame. Rendered as fixed in-card copy.
    */
@@ -453,7 +453,7 @@ export interface StreamState {
   /**
    * The run-list summary status for the stream's run, when the caller has one. A terminal value lets
    * a `reset` (`no-snapshot`) close the card with that status and the unavailable state, without
-   * waiting for a status frame the gateway may never send (#583).
+   * waiting for a status frame the gateway may never send.
    */
   readonly summaryStatus?: RunSummaryStatus
   /**

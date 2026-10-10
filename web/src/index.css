@@ -781,7 +781,7 @@
   color: var(--color-text-muted);
 }
 
-/* Expired snapshot (#583): a quiet sentence, not terminal output. */
+/* Expired snapshot: a quiet sentence, not terminal output. */
 .run-output-unavailable {
   font-family: var(--font-body);
   white-space: normal;

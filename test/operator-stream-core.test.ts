@@ -924,7 +924,7 @@ describe('nextStreamState — reset frame', () => {
       type: 'ready',
       data: {contractVersion: PINNED_CONTRACT_VERSION},
     })
-    // no-snapshot no longer reconnects (#583); a transient reason still does.
+    // A no-snapshot reset does not reconnect; a transient reason does.
     const state = nextStreamState(liveState, {
       type: 'reset',
       data: {runId: 'run-abc', reason: 'writer-error'},
@@ -1003,7 +1003,7 @@ describe('nextStreamState — reset frame', () => {
     expect(state.retryCount).toBe(withTerminal.retryCount)
   })
 
-  it('keeps the connection live on no-snapshot reset when the run is still active (#583)', () => {
+  it('keeps the connection live on no-snapshot reset when the run is still active', () => {
     const liveState = nextStreamState(INITIAL_STATE, {
       type: 'ready',
       data: {contractVersion: PINNED_CONTRACT_VERSION},
@@ -1023,7 +1023,7 @@ describe('nextStreamState — reset frame', () => {
     expect(state.retryCount).toBe(withActive.retryCount)
   })
 
-  it('keeps the connection live on no-snapshot reset when the run entry is unknown (#583)', () => {
+  it('keeps the connection live on no-snapshot reset when the run entry is unknown', () => {
     const liveState = nextStreamState(INITIAL_STATE, {
       type: 'ready',
       data: {contractVersion: PINNED_CONTRACT_VERSION},
@@ -8823,6 +8823,32 @@ describe('question region — answer controls and decision bodies', () => {
     handle.close()
   })
 
+  it('keeps Submit disabled until every option-only question has an answer', async () => {
+    const {region, calls, handle} = await renderQuestionFrames([
+      qOpen('req-gate', [
+        qQuestion({options: [{label: 'A', description: ''}, {label: 'B', description: ''}], custom: false}),
+        qQuestion({options: [{label: 'C', description: ''}, {label: 'D', description: ''}], custom: false}),
+      ]),
+    ])
+    const inputs = qFakeFindAll(region, node => node.tagName === 'input')
+    const submit = qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0])
+    expect(submit.disabled).toBe(true)
+
+    qRequired(inputs[0]).checked = true
+    qRequired(inputs[0]).dispatchEvent({type: 'change'})
+    expect(submit.disabled).toBe(true)
+    submit.dispatchEvent({type: 'click'})
+    expect(calls).toHaveLength(0)
+
+    qRequired(inputs[2]).checked = true
+    qRequired(inputs[2]).dispatchEvent({type: 'change'})
+    expect(submit.disabled).toBe(false)
+    submit.dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+    expect(calls[0]?.decision).toEqual({decision: 'answer', answers: [{options: [0]}, {options: [0]}]})
+    handle.close()
+  })
+
   it('blocks a single-choice answer with both values while retaining both values', async () => {
     const {region, handle} = await renderQuestionFrames([qOpen('req-both', [qQuestion()])])
     const radio = qRequired(qFakeFindAll(region, node => node.tagName === 'input')[0])
@@ -8915,6 +8941,15 @@ describe('question region — answer controls and decision bodies', () => {
     qRequired(submits[0]).dispatchEvent({type: 'click'})
     await vi.waitFor(() => expect(calls).toHaveLength(1))
 
+    const cards = region.children.filter(child => child.className.includes('question-region__request'))
+    const controlsOf = (card: FakeElement | undefined) => [
+      ...qFakeFindAll(qRequired(card), node => node.tagName === 'input' || node.tagName === 'textarea'),
+      ...qFakeFindAll(qRequired(card), node => node.className === 'question-region__skip'),
+    ]
+    expect(cards).toHaveLength(2)
+    expect(controlsOf(cards[0]).length).toBeGreaterThan(2)
+    expect(controlsOf(cards[0]).every(control => control.disabled)).toBe(true)
+    expect(controlsOf(cards[1]).every(control => !control.disabled)).toBe(true)
     expect(submits[0]?.disabled).toBe(true)
     expect(submits[1]?.disabled).toBe(false)
     expect(fields[1]?.disabled).toBe(false)
@@ -9579,7 +9614,7 @@ describe('question status — label, wire acceptance and styling', () => {
 })
 
 // ---------------------------------------------------------------------------
-// #583 — expired snapshot handling
+// Expired snapshot handling
 // ---------------------------------------------------------------------------
 
 function nsLive(summaryStatus?: string): StreamState {
@@ -9587,7 +9622,7 @@ function nsLive(summaryStatus?: string): StreamState {
   return nextStreamState(initial, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
 }
 
-describe('nextStreamState — expired snapshot (#583)', () => {
+describe('nextStreamState — expired snapshot', () => {
   const NS_RUN = 'run-abc'
 
   const noSnapshot = (state: StreamState): StreamState =>
@@ -9607,6 +9642,34 @@ describe('nextStreamState — expired snapshot (#583)', () => {
     expect(state.runs[NS_RUN]?.status).toBe('succeeded')
     expect(state.runs[NS_RUN]?.terminal).toBe(true)
     expect(unavailable(state)).toBe(true)
+  })
+
+  it('summary terminal: no-snapshot clears the run drafts and keeps tombstones', () => {
+    resetQuestionPageStore()
+    try {
+      const store = getQuestionPageStore(NS_RUN)
+      store.drafts.set('req-q-1', {fixture: 'draft'})
+      store.tombstones.add('req-q-old')
+      const state = noSnapshot(nsLive('succeeded'))
+      expect(state.connection).toBe('closed')
+      expect(store.drafts.size).toBe(0)
+      expect([...store.tombstones]).toEqual(['req-q-old'])
+    } finally {
+      resetQuestionPageStore()
+    }
+  })
+
+  it('summary running: no-snapshot keeps the run drafts', () => {
+    resetQuestionPageStore()
+    try {
+      const store = getQuestionPageStore(NS_RUN)
+      store.drafts.set('req-q-1', {fixture: 'draft'})
+      const state = noSnapshot(nsLive('running'))
+      expect(state.connection).toBe('live')
+      expect(store.drafts.has('req-q-1')).toBe(true)
+    } finally {
+      resetQuestionPageStore()
+    }
   })
 
   it.each(['failed', 'cancelled'])('summary %s is terminal too', summary => {
@@ -9705,7 +9768,7 @@ describe('nextStreamState — expired snapshot (#583)', () => {
   })
 })
 
-describe('initOperatorStream — expired snapshot DOM (#583)', () => {
+describe('initOperatorStream — expired snapshot DOM', () => {
   afterEach(() => vi.unstubAllGlobals())
 
   const RUN = 'run-abc'
@@ -9785,7 +9848,7 @@ describe('initOperatorStream — expired snapshot DOM (#583)', () => {
   })
 })
 
-describe('initOperatorStream — releases the socket on client-side terminal close (#583)', () => {
+describe('initOperatorStream — releases the socket on client-side terminal close', () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.unstubAllGlobals()
@@ -9863,7 +9926,7 @@ describe('initOperatorStream — releases the socket on client-side terminal clo
   })
 })
 
-describe('expired snapshot — selector/emitter parity (#583)', () => {
+describe('expired snapshot — selector/emitter parity', () => {
   it('styles the class the unavailable state emits', async () => {
     const fs = await import('node:fs/promises')
     const [js, css] = await Promise.all([

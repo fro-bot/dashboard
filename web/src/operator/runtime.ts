@@ -25,6 +25,7 @@
  */
 
 import {validateDynamicId} from './validate-dynamic-id.ts'
+import type {RunSummaryStatus} from '../../../public/operator-stream.js'
 import type {OperatorState} from './state.ts'
 
 /**
@@ -74,7 +75,17 @@ export function discoverCardStreamTargets(runId: string): {
  * The run-list summary statuses the run index parser keeps (public/operator-run-index.js
  * VALID_RUN_SUMMARY_STATUSES). Stream-only statuses (blocked, waiting_for_*) are not summaries.
  */
-const SUMMARY_STATUSES: ReadonlySet<string> = new Set(['queued', 'running', 'succeeded', 'failed', 'cancelled'])
+const SUMMARY_STATUSES: ReadonlySet<RunSummaryStatus> = new Set<RunSummaryStatus>([
+  'queued',
+  'running',
+  'succeeded',
+  'failed',
+  'cancelled',
+])
+
+function isRunSummaryStatus(value: string): value is RunSummaryStatus {
+  return (SUMMARY_STATUSES as ReadonlySet<string>).has(value)
+}
 
 /**
  * The expanded card's run-list summary status, or undefined when the card has none to offer.
@@ -87,7 +98,7 @@ const SUMMARY_STATUSES: ReadonlySet<string> = new Set(['queued', 'running', 'suc
  *
  * Exported so tests exercise the exact production lookup.
  */
-export function discoverCardSummaryStatus(runId: string): string | undefined {
+export function discoverCardSummaryStatus(runId: string): RunSummaryStatus | undefined {
   const card = typeof document !== 'undefined'
     ? document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
     : null
@@ -97,7 +108,7 @@ export function discoverCardSummaryStatus(runId: string): string | undefined {
   for (const token of Array.from(statusEl.classList)) {
     if (!token.startsWith('status-')) continue
     const status = token.slice('status-'.length)
-    if (SUMMARY_STATUSES.has(status)) return status
+    if (isRunSummaryStatus(status)) return status
   }
   return undefined
 }
@@ -300,7 +311,7 @@ async function defaultRuntimeLoader(opts?: {
       cancelEl?: Element | null
       checkoutEl?: Element | null
       questionsEl?: Element | null
-      summaryStatus?: string
+      summaryStatus?: RunSummaryStatus
       endpointBase?: string
       fixtureSessionId?: string
     }) => {close(): void}

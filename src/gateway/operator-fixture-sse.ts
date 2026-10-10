@@ -97,7 +97,7 @@ export const FIXTURE_SCENARIO_NAMES = {
   /** A malformed nested preparation field plus failureKind: absent, but the run still terminalizes with its label. */
   checkout_malformed_preparation: 'checkout_malformed_preparation',
 
-  // -- Agent questions (contract 1.9.0). Each has a recent-runs row; the harness question routes
+  // -- Agent questions. Each has a recent-runs row; the harness question routes
   // -- answer per scenario. Streams that end open (no terminal frame) are held open by the route. --
   /** One single-choice question with options and a custom answer. */
   question_single: 'question_single',
@@ -118,7 +118,7 @@ export const FIXTURE_SCENARIO_NAMES = {
   /** HTML tags, a Markdown link, and bidi/control characters in header, text, labels, descriptions. */
   question_text_sentinels: 'question_text_sentinels',
 
-  // -- Expired snapshot (#583): the gateway answers a subscribe for a run with no replay entry with `reset` (no-snapshot). --
+  // -- Expired snapshot: the gateway answers a subscribe for a run with no replay entry with `reset` (no-snapshot). --
   /** ready → reset no-snapshot → terminal succeeded status, no output. */
   expired_completed_terminal_frame: 'expired_completed_terminal_frame',
   /** ready → reset no-snapshot → nothing; the stream stays open and the run-list row is terminal. */
@@ -157,7 +157,7 @@ export type CheckoutScenarioName =
   | 'workspace_unavailable'
   | 'checkout_malformed_preparation'
 
-/** The scenarios that carry agent questions or exercise the expired-snapshot (#583) paths. */
+/** The scenarios that carry agent questions or exercise the expired-snapshot paths. */
 export type QuestionScenarioName =
   | 'question_single'
   | 'question_multi_shapes'

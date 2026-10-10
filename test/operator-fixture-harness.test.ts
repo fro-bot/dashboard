@@ -2622,7 +2622,7 @@ describe('checkout fixture scenarios — production artifacts carry no scenario 
 })
 
 // ---------------------------------------------------------------------------
-// Question and expired-snapshot scenarios (contract 1.9.0)
+// Question and expired-snapshot scenarios
 // ---------------------------------------------------------------------------
 
 const QUESTION_SCENARIO_KEYS = FIXTURE_QUESTION_SCENARIO_ROWS.map(row => row.scenario)
@@ -2705,7 +2705,7 @@ describe('question fixture scenarios — registry and manifest', () => {
 
 describe('question fixture scenarios — frames parse under both readers', () => {
   for (const key of QUESTION_SCENARIO_KEYS) {
-    it(`${key}: 1.9.0 ready first, then the expected frames, identical under the server reader and parseSseFrame`, () => {
+    it(`${key}: ready first, then the expected frames, identical under the server reader and parseSseFrame`, () => {
       const runId = questionRunId(key)
       const sse = serializeScenarioToSse(key, runId)
       const server = serverFrames(sse)
@@ -2713,9 +2713,8 @@ describe('question fixture scenarios — frames parse under both readers', () =>
 
       expect(server.map(frame => frame.type)).toEqual(EXPECTED_FRAME_TYPES[key])
       expect(browser).toEqual(server)
-      expect(server[0]?.data.contractVersion).toBe('1.9.0')
-      expect(OPERATOR_CONTRACT_VERSION).toBe('1.9.0')
-      expect(PINNED_CONTRACT_VERSION).toBe('1.9.0')
+      expect(server[0]?.data.contractVersion).toBe(OPERATOR_CONTRACT_VERSION)
+      expect(PINNED_CONTRACT_VERSION).toBe(OPERATOR_CONTRACT_VERSION)
 
       // Every run-scoped frame carries the active run ID.
       for (const frame of server.slice(1)) expect(frame.data.runId).toBe(runId)
@@ -2848,7 +2847,7 @@ function reduceQuestionScenario(key: string, summaryStatus: string) {
   return {state, entry: state.runs[runId] as Record<string, unknown> | undefined}
 }
 
-describe('question fixture scenarios — browser reducer reaches the #583 states', () => {
+describe('question fixture scenarios — browser reducer reaches the expired-snapshot states', () => {
   it('expired_completed_terminal_frame (row still running): stays live after reset, then the terminal frame closes it as unavailable', () => {
     const {state, entry} = reduceQuestionScenario('expired_completed_terminal_frame', 'running')
     expect(state.retryCount).toBe(0)
