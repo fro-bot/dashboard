@@ -30,12 +30,50 @@ describe('buildNotification', () => {
   })
 
   it('edge case: copy map is exhaustive over known type values', () => {
-    const knownTypes = ['approval', 'run_failed'] as const
+    const knownTypes = ['approval', 'run_failed', 'question'] as const
     for (const type of knownTypes) {
       const result = buildNotification({type})
       expect(result.title.length).toBeGreaterThan(0)
       expect(result.body.length).toBeGreaterThan(0)
     }
+  })
+
+  it('happy path: question payload renders fixed "Answer needed" copy and route', () => {
+    const result = buildNotification({type: 'question', route: '/'})
+    expect(result.title).toBe('Answer needed')
+    expect(result.body).toBe('A run is waiting for your answer.')
+    expect(result.data).toEqual({type: 'question', route: '/'})
+  })
+
+  it('privacy: question payload extra text fields are never reflected', () => {
+    const sentinel = 'SENTINEL-question-text-9f3a'
+    const result = buildNotification({
+      type: 'question',
+      route: '/elsewhere',
+      text: sentinel,
+      question: sentinel,
+      header: sentinel,
+      failureLabel: sentinel,
+      options: [{label: sentinel}],
+    })
+    expect(result.title).toBe('Answer needed')
+    expect(result.body).toBe('A run is waiting for your answer.')
+    expect(result.data).toEqual({type: 'question', route: '/'})
+    expect(JSON.stringify(result)).not.toContain(sentinel)
+    expect(JSON.stringify(result)).not.toContain('elsewhere')
+  })
+
+  it('regression: approval and run_failed copy is unchanged', () => {
+    expect(buildNotification({type: 'approval'})).toEqual({
+      title: 'Approval needed',
+      body: 'A run is waiting for your approval.',
+      data: {type: 'approval', route: '/'},
+    })
+    expect(buildNotification({type: 'run_failed'})).toEqual({
+      title: 'Run failed',
+      body: 'A run failed.',
+      data: {type: 'run_failed', route: '/'},
+    })
   })
 
   it('edge case: unknown type renders the generic fallback (never no-notification)', () => {
@@ -86,6 +124,10 @@ describe('buildNotification', () => {
     const runFailed = buildNotification({type: 'run_failed'})
     expect(Object.keys(runFailed.data).sort()).toEqual(['route', 'type'])
     expect(runFailed.data.route).toBe('/')
+
+    const question = buildNotification({type: 'question', extraField: 'ignored'})
+    expect(Object.keys(question.data).sort()).toEqual(['route', 'type'])
+    expect(question.data.route).toBe('/')
 
     const fallback = buildNotification(null)
     expect(Object.keys(fallback.data).sort()).toEqual(['route', 'type'])
