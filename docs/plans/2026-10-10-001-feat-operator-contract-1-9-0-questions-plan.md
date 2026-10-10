@@ -1,7 +1,7 @@
 ---
 title: "feat: Adopt operator contract 1.9.0 (agent questions) and fix expired-snapshot hang"
 type: feat
-status: active
+status: completed
 date: 2026-10-10
 origin: docs/brainstorms/2026-10-10-operator-contract-1-9-0-questions-requirements.md
 ---
