@@ -813,9 +813,9 @@ export interface InitOptions {
   /** Injectable cancel client for testing. If absent, buildCancelClient() is used. */
   readonly cancelClient?: CancelControlClient | null
   /**
-   * Question region element (data-role="run-questions"). Its presence wires the question client; the
-   * region UI itself is rendered elsewhere. Without it (and without `questionClient`) the stream never
-   * calls the questions routes.
+   * Question region element (data-role="run-questions"). Its presence wires the browser question client
+   * and renders open requests, state messages, outcomes, and accessible answer controls into this element.
+   * Without it (and without `questionClient`) the stream never calls the questions routes.
    */
   readonly questionsEl?: (HTMLElement & {hidden: boolean}) | null
   /** Injectable question client for testing. If absent and `questionsEl` is present, buildQuestionClient() is used. */

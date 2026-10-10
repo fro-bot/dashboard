@@ -2372,6 +2372,13 @@ interface FakeElement {
   textContent: string
   hidden: boolean
   className: string
+  type: string
+  name: string
+  value: string
+  checked: boolean
+  disabled: boolean
+  tabIndex: number
+  parent?: FakeElement
   children: FakeElement[]
   attributes: Record<string, string>
   style: Record<string, string>
@@ -2391,7 +2398,7 @@ interface FakeElement {
 function makeFakeEl(tagName = 'div'): FakeElement {
   // Setting textContent to '' clears children, mirroring real DOM behavior.
   let textContentValue = ''
-  const el = {
+  const el: FakeElement = {
     tagName,
     get textContent() { return textContentValue },
     set textContent(v: string) {
@@ -2402,11 +2409,17 @@ function makeFakeEl(tagName = 'div'): FakeElement {
     },
     hidden: false,
     className: '',
-    children: [] as FakeElement[],
-    attributes: {} as Record<string, string>,
-    style: {} as Record<string, string>,
-    dataset: {} as Record<string, string>,
-    eventListeners: {} as Record<string, ((...args: unknown[]) => void)[]>,
+    type: '',
+    name: '',
+    value: '',
+    checked: false,
+    disabled: false,
+    tabIndex: 0,
+    children: [],
+    attributes: {},
+    style: {},
+    dataset: {},
+    eventListeners: {},
     querySelector(sel: string): FakeElement | null {
       for (const child of el.children) {
         if (sel.includes('data-role=')) {
@@ -2425,8 +2438,8 @@ function makeFakeEl(tagName = 'div'): FakeElement {
     querySelectorAll(sel: string): FakeElement[] {
       const results: FakeElement[] = []
       for (const child of el.children) {
-        if (sel === 'button') {
-          if (child.tagName === 'button') results.push(child)
+        if (sel.split(',').some(selector => selector.trim() === child.tagName)) {
+          results.push(child)
           results.push(...child.querySelectorAll(sel))
         } else if (sel.includes('data-role=')) {
           const role = sel.match(/data-role="([^"]+)"/)?.[1]
@@ -2440,10 +2453,17 @@ function makeFakeEl(tagName = 'div'): FakeElement {
     },
     append(...nodes: FakeElement[]) {
       for (const node of nodes) {
+        node.remove()
         el.children.push(node)
+        node.parent = el
       }
     },
-    remove() {}, // parent would need to remove from children
+    remove() {
+      if (el.parent !== undefined) {
+        el.parent.children = el.parent.children.filter(child => child !== el)
+        el.parent = undefined
+      }
+    },
     setAttribute(name: string, value: string) {
       el.attributes[name] = value
     },
@@ -2451,9 +2471,9 @@ function makeFakeEl(tagName = 'div'): FakeElement {
       return el.attributes[name] ?? null
     },
     classList: {
-      add(_cls: string) {},
-      remove(_cls: string) {},
-      contains(_cls: string) { return false },
+      add(cls: string) { if (!el.className.split(/\s+/).includes(cls)) el.className = `${el.className} ${cls}`.trim() },
+      remove(cls: string) { el.className = el.className.split(/\s+/).filter(token => token !== cls).join(' ') },
+      contains(cls: string) { return el.className.split(/\s+/).includes(cls) },
     },
     addEventListener(event: string, handler: (...args: unknown[]) => void) {
       if (!el.eventListeners[event]) el.eventListeners[event] = []
@@ -2466,7 +2486,7 @@ function makeFakeEl(tagName = 'div'): FakeElement {
       const handlers = el.eventListeners[event.type] ?? []
       for (const h of handlers) h(eventWithDefaults)
     },
-  } satisfies FakeElement
+  }
   return el
 }
 
@@ -7327,6 +7347,22 @@ describe('CSS selector ↔ checkout-detail emitter agreement', () => {
   })
 })
 
+describe('CSS selector ↔ question-region emitter agreement', () => {
+  it('has a CSS rule for every class token emitted by the question renderer', async () => {
+    const fs = await import('node:fs/promises')
+    const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
+    const source = await fs.readFile(new URL('../public/operator-stream.js', import.meta.url).pathname, 'utf8')
+    const emitted = [...new Set(source.match(/(?<![\w-])question-region(?:__[a-z-]+)?(?![\w-])/g) ?? [])]
+
+    expect(emitted).toEqual(expect.arrayContaining(['question-region', 'question-region__request', 'question-region__question']))
+    for (const token of emitted) {
+      expect(css, `no CSS rule for .${token}`).toMatch(new RegExp(String.raw`\.${token}(?![\w-])`))
+    }
+    expect(css).toContain('[data-role="run-questions"]')
+    expect(css).toContain('[data-role="run-questions"][hidden]')
+  })
+})
+
 // ===========================================================================
 // Checkout provenance / checkout preparation — browser trust boundary
 // ===========================================================================
@@ -8671,6 +8707,320 @@ function qSettle(requestID = 'req-q-1', runId = Q_RUN): Record<string, unknown> 
 function qSse(payload: unknown): string {
   return `event: question\ndata: ${typeof payload === 'string' ? payload : JSON.stringify(payload)}\n\n`
 }
+
+function qFakeText(element: FakeElement): string {
+  return element.textContent + element.children.map(qFakeText).join('')
+}
+
+function qFakeFindAll(element: FakeElement, predicate: (node: FakeElement) => boolean): FakeElement[] {
+  return [
+    ...(predicate(element) ? [element] : []),
+    ...element.children.flatMap(child => qFakeFindAll(child, predicate)),
+  ]
+}
+
+function qRequired<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error('expected a rendered question control')
+  return value
+}
+
+async function renderQuestionFrames(
+  requests: Record<string, unknown>[],
+  decision: (requestId: string, value: QuestionDecision) => Promise<QuestionDecisionOutcome> = async () => ({kind: 'decided', state: 'failed_to_settle'}),
+  list: () => Promise<QuestionListResult> = async () => new Promise<never>(() => {}),
+) {
+  const region = makeFakeEl('section')
+  region.hidden = true
+  const calls: {requestId: string; decision: QuestionDecision}[] = []
+  vi.stubGlobal('document', {
+    createElement: (tagName: string) => makeFakeEl(tagName),
+    createTextNode: (text: string) => {
+      const node = makeFakeEl('#text')
+      node.textContent = text
+      return node
+    },
+  })
+  const body = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n${requests.map(qSse).join('')}`
+  let read = 0
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    status: 200,
+    headers: {get: () => 'text/event-stream'},
+    body: {getReader: () => ({read: async () => read++ === 0
+      ? {done: false, value: new TextEncoder().encode(body)}
+      : new Promise(() => {})})},
+  }))
+  const handle = initOperatorStream({
+    runId: Q_RUN,
+    statusEl: makeFakeEl('span'),
+    noticeEl: makeFakeEl('p'),
+    questionsEl: region as never,
+    questionClient: {
+      listRunQuestions: list,
+      decideRunQuestion: async (_runId, requestId, value) => {
+        calls.push({requestId, decision: value})
+        return decision(requestId, value)
+      },
+    },
+  })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  return {region, calls, handle}
+}
+
+describe('question region — answer controls and decision bodies', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    resetQuestionPageStore()
+  })
+
+  it('renders request cards and question groups in arrival order with radio and checkbox controls', async () => {
+    const {region, handle} = await renderQuestionFrames([
+      qOpen('req-first', [qQuestion({header: 'First question'})]),
+      qOpen('req-second', [qQuestion({header: 'Second question', multiple: true})]),
+    ])
+    const cards = region.children.filter(child => child.className.includes('question-region__request'))
+    const legends = qFakeFindAll(region, node => node.tagName === 'legend').map(node => node.textContent)
+    const inputs = qFakeFindAll(region, node => node.tagName === 'input')
+
+    expect(region.hidden).toBe(false)
+    expect(cards).toHaveLength(2)
+    expect(region.children.at(-1)?.className).toBe('question-region__announcer')
+    expect(legends).toEqual(['First question', 'Second question'])
+    expect(inputs.map(input => input.type)).toEqual(['radio', 'checkbox'])
+    expect(inputs.every(input => !input.checked)).toBe(true)
+    handle.close()
+  })
+
+  it('keeps the question region hidden when no open requests or notes exist', async () => {
+    const {region, handle} = await renderQuestionFrames([])
+    expect(region.hidden).toBe(true)
+    handle.close()
+  })
+
+  it('submits selected option indices and trimmed custom text in question order', async () => {
+    const {region, calls, handle} = await renderQuestionFrames([
+      qOpen('req-answer', [
+        qQuestion({options: [{label: 'A', description: ''}, {label: 'B', description: ''}], custom: false}),
+        qQuestion({multiple: true, options: [{label: 'C', description: ''}, {label: 'D', description: ''}]}),
+      ]),
+    ])
+    const inputs = qFakeFindAll(region, node => node.tagName === 'input')
+    qRequired(inputs[1]).checked = true
+    qRequired(inputs[1]).dispatchEvent({type: 'change'})
+    qRequired(inputs[2]).checked = true
+    qRequired(inputs[2]).dispatchEvent({type: 'change'})
+    qRequired(inputs[3]).checked = true
+    qRequired(inputs[3]).dispatchEvent({type: 'change'})
+    const textarea = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    textarea.value = '  write a note  '
+    textarea.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+
+    expect(calls[0]).toEqual({
+      requestId: 'req-answer',
+      decision: {decision: 'answer', answers: [{options: [1]}, {options: [0, 1], text: 'write a note'}]},
+    })
+    handle.close()
+  })
+
+  it('blocks a single-choice answer with both values while retaining both values', async () => {
+    const {region, handle} = await renderQuestionFrames([qOpen('req-both', [qQuestion()])])
+    const radio = qRequired(qFakeFindAll(region, node => node.tagName === 'input')[0])
+    const textarea = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    radio.checked = true
+    radio.dispatchEvent({type: 'change'})
+    textarea.value = 'custom value'
+    textarea.dispatchEvent({type: 'input'})
+
+    expect(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]?.disabled).toBe(true)
+    expect(qFakeText(region)).toContain('Choose an option or type an answer, not both.')
+    expect(radio.checked).toBe(true)
+    expect(textarea.value).toBe('custom value')
+    handle.close()
+  })
+
+  it('sends an empty answer object for unanswerable questions and an empty answers array for zero questions', async () => {
+    const {region, calls, handle} = await renderQuestionFrames([
+      qOpen('req-unanswerable', [qQuestion({options: [], custom: false})]),
+      qOpen('req-empty', []),
+    ])
+    const submits = qFakeFindAll(region, node => node.className === 'question-region__submit')
+    expect(submits.map(button => button.disabled)).toEqual([false, false])
+    qRequired(submits[0]).dispatchEvent({type: 'click'})
+    qRequired(submits[1]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(calls).toHaveLength(2))
+
+    expect(calls.map(call => call.decision)).toEqual([
+      {decision: 'answer', answers: [{}]},
+      {decision: 'answer', answers: []},
+    ])
+    handle.close()
+  })
+
+  it('treats whitespace as unanswered, enforces the UTF-16 limit, and trims on submit', async () => {
+    const {region, calls, handle} = await renderQuestionFrames([qOpen('req-text-limit', [qQuestion({options: [], custom: true})])])
+    const textarea = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    const submit = qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0])
+    textarea.value = '   \t  '
+    textarea.dispatchEvent({type: 'input'})
+    expect(submit.disabled).toBe(true)
+    textarea.value = 'x'.repeat(4001)
+    textarea.dispatchEvent({type: 'input'})
+    expect(submit.disabled).toBe(true)
+    expect(qFakeText(region)).toContain('Shorten this answer to 4,000 characters or fewer.')
+    textarea.value = 'x'.repeat(4000)
+    textarea.dispatchEvent({type: 'input'})
+    expect(submit.disabled).toBe(false)
+    textarea.value = '  answer text  '
+    textarea.dispatchEvent({type: 'input'})
+    submit.dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+    expect(calls[0]?.decision).toEqual({decision: 'answer', answers: [{text: 'answer text'}]})
+    handle.close()
+  })
+
+  it('skip sends immediately and discards only that request draft', async () => {
+    const {region, calls, handle} = await renderQuestionFrames([
+      qOpen('req-skip', [qQuestion()]),
+      qOpen('req-keep', [qQuestion()]),
+    ])
+    const fields = qFakeFindAll(region, node => node.tagName === 'textarea')
+    qRequired(fields[0]).value = 'discard this'
+    qRequired(fields[0]).dispatchEvent({type: 'input'})
+    qRequired(fields[1]).value = 'keep this'
+    qRequired(fields[1]).dispatchEvent({type: 'input'})
+    const skip = qRequired(qFakeFindAll(region, node => node.className === 'question-region__skip')[0])
+    skip.dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+
+    expect(calls[0]?.decision).toEqual({decision: 'skip'})
+    expect(getQuestionPageStore(Q_RUN).drafts.has('req-skip')).toBe(false)
+    expect(getQuestionPageStore(Q_RUN).drafts.get('req-keep')).toEqual([{options: [], text: 'keep this'}])
+    expect(fields[1]?.value).toBe('keep this')
+    handle.close()
+  })
+
+  it('keeps another request editable while the first request is in flight', async () => {
+    const pending = new Promise<QuestionDecisionOutcome>(() => {})
+    const {region, calls, handle} = await renderQuestionFrames([
+      qOpen('req-flight', [qQuestion()]),
+      qOpen('req-independent', [qQuestion()]),
+    ], async () => pending)
+    const fields = qFakeFindAll(region, node => node.tagName === 'textarea')
+    qRequired(fields[0]).value = 'first'
+    qRequired(fields[0]).dispatchEvent({type: 'input'})
+    qRequired(fields[1]).value = 'second'
+    qRequired(fields[1]).dispatchEvent({type: 'input'})
+    const submits = qFakeFindAll(region, node => node.className === 'question-region__submit')
+    qRequired(submits[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+
+    expect(submits[0]?.disabled).toBe(true)
+    expect(submits[1]?.disabled).toBe(false)
+    expect(fields[1]?.disabled).toBe(false)
+    expect(fields[1]?.value).toBe('second')
+    expect(qFakeText(region)).toContain('Sending answers…')
+    handle.close()
+  })
+
+  it('preserves inputs and shows the retryable failed-to-settle copy', async () => {
+    const {region, handle} = await renderQuestionFrames([qOpen('req-failed', [qQuestion()])])
+    const field = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    field.value = 'draft answer'
+    field.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain("Your answer wasn't recorded. Try again."))
+    expect(field.value).toBe('draft answer')
+    expect(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]?.disabled).toBe(false)
+    handle.close()
+  })
+
+  it('keeps question text and draft visible but removes controls after a masked denial', async () => {
+    const {region, handle} = await renderQuestionFrames([qOpen('req-denied', [qQuestion()])], async () => ({kind: 'cant-answer'}))
+    const field = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    field.value = 'private draft'
+    field.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain("You can't answer questions for this run."))
+
+    expect(field.value).toBe('private draft')
+    expect(qFakeFindAll(region, node => node.tagName === 'fieldset')[0]?.hidden).toBe(false)
+    expect(qFakeFindAll(region, node => node.className === 'question-region__controls')[0]?.hidden).toBe(true)
+    handle.close()
+  })
+
+  it('keeps the draft and shows the session-expired copy', async () => {
+    const {region, handle} = await renderQuestionFrames([qOpen('req-session', [qQuestion()])], async () => ({kind: 'session-expired'}))
+    const field = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    field.value = 'retry after sign-in'
+    field.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain('Your session expired. Sign in again in another tab, then try again.'))
+    expect(field.value).toBe('retry after sign-in')
+    handle.close()
+  })
+
+  it('shows claimed-elsewhere, offers Check again, and announces checking', async () => {
+    const {region, handle} = await renderQuestionFrames([qOpen('req-claimed', [qQuestion()])], async () => ({kind: 'decided', state: 'already_claimed'}))
+    const field = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    field.value = 'kept draft'
+    field.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is being answered elsewhere.'))
+    const check = qRequired(qFakeFindAll(region, node => node.className === 'question-region__check')[0])
+    expect(check.hidden).toBe(false)
+    check.dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain('Checking whether your answer was recorded…'))
+    expect(field.value).toBe('kept draft')
+    handle.close()
+  })
+
+  it('shows the check-failed copy when Check again cannot list questions', async () => {
+    const {region, handle} = await renderQuestionFrames(
+      [qOpen('req-check-failed', [qQuestion()])],
+      async () => ({kind: 'decided', state: 'already_claimed'}),
+      async () => ({success: false, error: {kind: 'network'}}),
+    )
+    const field = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    field.value = 'answer'
+    field.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is being answered elsewhere.'))
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__check')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain("Couldn't check for questions. Try again."))
+    handle.close()
+  })
+
+  it('keeps settled and unknown-outcome notes visible until the request disappears from the card', async () => {
+    const {region, handle} = await renderQuestionFrames(
+      [qOpen('req-note', [qQuestion()])],
+      async () => ({kind: 'decided', state: 'already_settled'}),
+    )
+    const field = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    field.value = 'answer'
+    field.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is no longer open.'))
+    expect(region.hidden).toBe(false)
+    expect(qFakeFindAll(region, node => node.className === 'question-region__controls')[0]?.getAttribute('aria-disabled')).toBe('true')
+    handle.close()
+  })
+
+  it('shows the may-have-been-recorded note after an unknown outcome is absent from the list', async () => {
+    const {region, handle} = await renderQuestionFrames(
+      [qOpen('req-gone', [qQuestion()])],
+      async () => ({kind: 'unknown'}),
+      async () => ({success: true, data: {requests: [], invalidBody: false, partial: false}}),
+    )
+    const field = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    field.value = 'maybe sent'
+    field.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is no longer open. Your answer may have been recorded.'))
+    expect(region.hidden).toBe(false)
+    handle.close()
+  })
+})
 
 function qBrowser(payload: unknown) {
   const result = parseSseFrame(qSse(payload))

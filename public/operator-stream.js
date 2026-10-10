@@ -3210,6 +3210,30 @@ function renderCheckoutDetail(region, runEntry, reasonShownElsewhere) {
   region.hidden = false
 }
 
+function makeQuestionNoteCard(status) {
+  const el = document.createElement('section')
+  el.className = 'question-region__request'
+  el.setAttribute('role', 'group')
+  el.setAttribute('aria-label', 'Agent question request')
+  const message = document.createElement('p')
+  message.className = 'question-region__status'
+  message.setAttribute('role', 'status')
+  message.setAttribute('aria-live', 'polite')
+  const labels = {
+    claimed: 'This question is no longer open.',
+    'already-settled': 'This question is no longer open.',
+    gone: 'This question is no longer open. Your answer may have been recorded.',
+  }
+  message.textContent = labels[status.kind] ?? ''
+  el.append(message)
+  return {
+    el,
+    update(next) {
+      message.textContent = labels[next.kind] ?? ''
+    },
+  }
+}
+
 /**
  * Initialize the operator run stream for a given run ID.
  *
@@ -3251,6 +3275,12 @@ export function initOperatorStream(opts) {
   if (checkoutEl) {
     checkoutEl.textContent = ''
     checkoutEl.hidden = true
+  }
+
+  if (questionsEl !== undefined && questionsEl !== null) {
+    questionsEl.textContent = ''
+    questionsEl.classList?.add('question-region')
+    questionsEl.hidden = true
   }
 
   // Build the approval client lazily (only if approvalsEl is present).
@@ -3301,6 +3331,274 @@ export function initOperatorStream(opts) {
   // Track rendered prompt elements by requestID so we can remove them on settle
   // without re-rendering the entire list. Map: requestID → DOM element.
   const renderedPrompts = new Map()
+
+  // Question cards persist between stream updates so status changes never replace focused input.
+  // Drafts remain in the page-scoped store and are never persisted outside memory.
+  const renderedQuestionCards = new Map()
+  const questionStatuses = new Map() // requestID → status
+  let nextQuestionRadioGroup = 0
+  let questionAnnouncer = null
+
+  function makeQuestionCard(request, initialStatus) {
+    const store = getQuestionPageStore(runId)
+    const saved = store.drafts.get(request.requestID)
+    const answers = request.questions.map((prompt, index) => {
+      const draft = Array.isArray(saved) ? saved[index] : undefined
+      return {
+        options: Array.isArray(draft?.options)
+          ? draft.options.filter(option => Number.isInteger(option) && option >= 0 && option < prompt.options.length)
+          : [],
+        text: typeof draft?.text === 'string' ? draft.text : '',
+      }
+    })
+    let status = initialStatus
+    let lastStatusKind = status.kind
+    const el = document.createElement('section')
+    el.className = 'question-region__request'
+    el.setAttribute('role', 'group')
+    el.setAttribute('aria-label', 'Agent question request')
+
+    const heading = document.createElement('h3')
+    heading.className = 'question-region__heading'
+    heading.textContent = 'Questions'
+    el.append(heading)
+
+    const statusEl = document.createElement('p')
+    statusEl.className = 'question-region__status'
+    statusEl.setAttribute('role', 'status')
+    statusEl.setAttribute('aria-live', 'polite')
+    el.append(statusEl)
+
+    const questionEls = []
+    request.questions.forEach((prompt, questionIndex) => {
+      const fieldset = document.createElement('fieldset')
+      fieldset.className = 'question-region__question'
+      fieldset.tabIndex = -1
+      const legend = document.createElement('legend')
+      legend.textContent = prompt.header
+      fieldset.append(legend)
+
+      const textEl = document.createElement('p')
+      textEl.className = 'question-region__text'
+      textEl.textContent = prompt.text
+      fieldset.append(textEl)
+
+      const errorEl = document.createElement('p')
+      errorEl.className = 'question-region__error'
+      errorEl.hidden = true
+      fieldset.append(errorEl)
+
+      const answer = answers[questionIndex]
+      const radioName = `question-choice-${nextQuestionRadioGroup++}`
+      prompt.options.forEach((option, optionIndex) => {
+        const label = document.createElement('label')
+        label.className = 'question-region__option'
+        const input = document.createElement('input')
+        input.type = prompt.multiple ? 'checkbox' : 'radio'
+        if (!prompt.multiple) input.name = radioName
+        input.checked = answer.options.includes(optionIndex)
+        input.addEventListener('change', () => {
+          if (['claimed', 'already-settled', 'gone'].includes(status.kind)) {
+            input.checked = answer.options.includes(optionIndex)
+            return
+          }
+          if (prompt.multiple) {
+            answer.options = input.checked
+              ? [...new Set([...answer.options, optionIndex])].toSorted((a, b) => a - b)
+              : answer.options.filter(index => index !== optionIndex)
+          } else {
+            answer.options = input.checked ? [optionIndex] : []
+          }
+          saveDraft()
+          refreshValidation()
+        })
+        const copy = document.createElement('span')
+        copy.className = 'question-region__option-copy'
+        copy.textContent = option.label
+        label.append(input, copy)
+        if (option.description !== '') {
+          const description = document.createElement('span')
+          description.className = 'question-region__description'
+          description.textContent = option.description
+          label.append(description)
+        }
+        fieldset.append(label)
+      })
+
+      if (prompt.custom) {
+        const textLabel = document.createElement('label')
+        textLabel.className = 'question-region__custom-label'
+        textLabel.textContent = 'Your answer'
+        const textarea = document.createElement('textarea')
+        textarea.className = 'question-region__input'
+        textarea.rows = 2
+        textarea.value = answer.text
+        textarea.addEventListener('input', () => {
+          if (['claimed', 'already-settled', 'gone'].includes(status.kind)) {
+            textarea.value = answer.text
+            return
+          }
+          answer.text = textarea.value
+          saveDraft()
+          refreshValidation()
+        })
+        textLabel.append(textarea)
+        fieldset.append(textLabel)
+      }
+      questionEls.push({fieldset, errorEl})
+      el.append(fieldset)
+    })
+
+    const controlsEl = document.createElement('div')
+    controlsEl.className = 'question-region__controls'
+    const submitButton = document.createElement('button')
+    submitButton.type = 'button'
+    submitButton.className = 'question-region__submit'
+    submitButton.textContent = 'Submit answers'
+    const skipButton = document.createElement('button')
+    skipButton.type = 'button'
+    skipButton.className = 'question-region__skip'
+    skipButton.textContent = 'Skip'
+    controlsEl.append(submitButton, skipButton)
+    el.append(controlsEl)
+
+    const checkButton = document.createElement('button')
+    checkButton.type = 'button'
+    checkButton.className = 'question-region__check'
+    checkButton.textContent = 'Check again'
+    checkButton.hidden = true
+    checkButton.addEventListener('click', () => {
+      checkQuestions(request.requestID)
+    })
+    el.append(checkButton)
+
+    function saveDraft() {
+      store.drafts.set(request.requestID, answers.map(answer => ({options: [...answer.options], text: answer.text})))
+    }
+
+    function validationMessage() {
+      for (let index = 0; index < request.questions.length; index++) {
+        const prompt = request.questions[index]
+        const answer = answers[index]
+        if (answer.text.length > 4000) return 'Shorten this answer to 4,000 characters or fewer.'
+        if (!prompt.multiple && answer.options.length > 0 && answer.text.trim() !== '') {
+          return 'Choose an option or type an answer, not both.'
+        }
+      }
+      return ''
+    }
+
+    function canSubmit() {
+      if (validationMessage() !== '') return false
+      return request.questions.every((prompt, index) => {
+        if (prompt.options.length === 0 && !prompt.custom) return true
+        return answers[index].options.length > 0 || answers[index].text.trim() !== ''
+      })
+    }
+
+    function refreshValidation() {
+      submitButton.disabled = !canSubmit() || ['in-flight', 'checking', 'claimed-elsewhere'].includes(status.kind)
+      for (const [index, question] of questionEls.entries()) {
+        question.errorEl.textContent = ''
+        question.errorEl.hidden = true
+        const prompt = request.questions[index]
+        const answer = answers[index]
+        let message = ''
+        if (answer.text.length > 4000) {
+          message = 'Shorten this answer to 4,000 characters or fewer.'
+        } else if (!prompt.multiple && answer.options.length > 0 && answer.text.trim() !== '') {
+          message = 'Choose an option or type an answer, not both.'
+        }
+        if (message !== '') {
+          question.errorEl.textContent = message
+          question.errorEl.hidden = false
+        }
+      }
+    }
+
+    function answerDecision() {
+      const payload = request.questions.map((prompt, index) => {
+        if (prompt.options.length === 0 && !prompt.custom) return {}
+        const answer = answers[index]
+        const text = answer.text.trim()
+        return {
+          ...(answer.options.length === 0 ? {} : {options: [...answer.options]}),
+          ...(text === '' ? {} : {text}),
+        }
+      })
+      return {decision: 'answer', answers: payload}
+    }
+
+    submitButton.addEventListener('click', () => {
+      if (submitButton.disabled || ['claimed', 'already-settled', 'gone'].includes(status.kind)) return
+      decideQuestion(request.requestID, answerDecision()).then(() => undefined)
+    })
+    skipButton.addEventListener('click', () => {
+      if (skipButton.disabled || ['claimed', 'already-settled', 'gone'].includes(status.kind)) return
+      store.drafts.delete(request.requestID)
+      decideQuestion(request.requestID, {decision: 'skip'}).then(() => undefined)
+    })
+
+    function update(nextStatus) {
+      const priorKind = lastStatusKind
+      status = nextStatus ?? {kind: 'open'}
+      lastStatusKind = status.kind
+      const labels = {
+        'in-flight': 'Sending answers…',
+        'claimed-elsewhere': 'This question is being answered elsewhere.',
+        checking: 'Checking whether your answer was recorded…',
+        gone: 'This question is no longer open. Your answer may have been recorded.',
+        'already-settled': 'This question is no longer open.',
+        'failed-to-settle': "Your answer wasn't recorded. Try again.",
+        'cant-answer': "You can't answer questions for this run.",
+        'session-expired': 'Your session expired. Sign in again in another tab, then try again.',
+        'check-failed': "Couldn't check for questions. Try again.",
+        claimed: 'This question is no longer open.',
+      }
+      const invalidCopy = status.kind === 'invalid'
+        ? status.reason === 'multiple-not-allowed'
+          ? 'Choose an option or type an answer, not both.'
+          : status.reason === 'empty-value'
+            ? 'This answer is empty.'
+            : status.questionIndex === null
+              ? 'Your answers couldn\'t be sent. Check them and try again.'
+              : 'Check this answer and try again.'
+        : ''
+      statusEl.textContent = invalidCopy || labels[status.kind] || ''
+      const blocked = ['in-flight', 'checking', 'claimed-elsewhere', 'cant-answer'].includes(status.kind)
+      const removed = status.kind === 'cant-answer'
+      const note = ['claimed', 'already-settled', 'gone'].includes(status.kind)
+      for (const input of el.querySelectorAll('input, textarea')) {
+        input.disabled = blocked
+        input.tabIndex = note ? -1 : 0
+      }
+      controlsEl.hidden = removed
+      controlsEl.setAttribute('aria-disabled', String(note))
+      for (const button of [submitButton, skipButton]) {
+        button.tabIndex = note ? -1 : 0
+      }
+      for (const question of questionEls) {
+        question.fieldset.setAttribute('aria-disabled', String(note))
+      }
+      checkButton.hidden = status.kind !== 'claimed-elsewhere' && status.kind !== 'check-failed'
+      skipButton.disabled = blocked
+      submitButton.disabled = blocked || !canSubmit()
+      for (const question of questionEls) {
+        question.errorEl.textContent = ''
+        question.errorEl.hidden = true
+      }
+      if (status.kind === 'invalid' && status.questionIndex !== null && questionEls[status.questionIndex] !== undefined) {
+        questionEls[status.questionIndex].errorEl.textContent = invalidCopy
+        questionEls[status.questionIndex].errorEl.hidden = false
+        if (priorKind !== 'invalid') questionEls[status.questionIndex].fieldset.focus()
+      } else {
+        refreshValidation()
+      }
+    }
+
+    update(initialStatus)
+    return {el, update}
+  }
 
   let state = {
     connection: 'connecting',
@@ -3537,6 +3835,54 @@ export function initOperatorStream(opts) {
       }
     }
 
+    // Question region: render one persistent card per open request and retain final outcomes as notes.
+    if (questionsEl !== undefined && questionsEl !== null && questionClient !== null) {
+      const requests = getQuestions()
+      const notes = getQuestionNotes()
+      const presentIds = new Set()
+      for (const request of requests) {
+        presentIds.add(request.requestID)
+        let card = renderedQuestionCards.get(request.requestID)
+        if (card === undefined) {
+          card = makeQuestionCard(request, request.status)
+          renderedQuestionCards.set(request.requestID, card)
+          if (questionAnnouncer === null) {
+            questionAnnouncer = document.createElement('p')
+            questionAnnouncer.className = 'question-region__announcer'
+            questionAnnouncer.setAttribute('role', 'status')
+            questionAnnouncer.setAttribute('aria-live', 'polite')
+            questionAnnouncer.setAttribute('aria-atomic', 'true')
+          }
+          questionsEl.append(card.el, questionAnnouncer)
+          questionAnnouncer.textContent = 'A new question is available.'
+        } else {
+          card.update(request.status)
+        }
+      }
+      for (const note of notes) {
+        presentIds.add(note.requestID)
+        let card = renderedQuestionCards.get(note.requestID)
+        if (card === undefined) {
+          card = makeQuestionNoteCard(note.status)
+          renderedQuestionCards.set(note.requestID, card)
+          questionsEl.append(card.el)
+        } else {
+          card.update(note.status)
+        }
+      }
+      for (const [requestID, card] of renderedQuestionCards) {
+        if (!presentIds.has(requestID)) {
+          if (questionStatuses.get(requestID)?.kind === 'checking') {
+            presentIds.add(requestID)
+            continue
+          }
+          card.el.remove()
+          renderedQuestionCards.delete(requestID)
+        }
+      }
+      questionsEl.hidden = presentIds.size === 0
+    }
+
     // Cancel control (R1/R2): render on non-terminal runs, hide once terminal.
     // Gated on run status via the reducer's `terminal` flag, not local optimism.
     if (cancelEl !== undefined && cancelEl !== null && cancelClient !== null) {
@@ -3707,7 +4053,6 @@ export function initOperatorStream(opts) {
   // other status leaves with its request.
   const QUESTION_NOTE_KINDS = new Set(['claimed', 'already-settled', 'gone'])
 
-  const questionStatuses = new Map() // requestID → status
   const questionRecheckTimers = new Map() // requestID → timer
   let questionsCantAnswer = false // masked 404: the run's questions cannot be answered by this session
   let questionEpoch = 0 // advanced by every connect(); a flight from an older epoch is discarded
@@ -3932,8 +4277,8 @@ export function initOperatorStream(opts) {
       store.tombstones.add(requestID)
       store.drafts.delete(requestID)
       if (!stillOpen) return
+      questionStatuses.set(requestID, {kind: outcome.state === 'claimed' ? 'claimed' : 'already-settled'})
       dispatch({type: 'question-resolved', runId, requestID})
-      setQuestionStatus(requestID, {kind: outcome.state === 'claimed' ? 'claimed' : 'already-settled'})
       return
     }
 
