@@ -3572,15 +3572,16 @@ export function initOperatorStream(opts) {
       const removed = status.kind === 'cant-answer'
       const note = ['claimed', 'already-settled', 'gone'].includes(status.kind)
       for (const input of el.querySelectorAll('input, textarea')) {
-        input.disabled = blocked
+        input.disabled = blocked || note
         input.tabIndex = note ? -1 : 0
       }
-      controlsEl.hidden = removed
+      controlsEl.hidden = removed || note
       controlsEl.setAttribute('aria-disabled', String(note))
       for (const button of [submitButton, skipButton]) {
         button.tabIndex = note ? -1 : 0
       }
       for (const question of questionEls) {
+        question.fieldset.hidden = note
         question.fieldset.setAttribute('aria-disabled', String(note))
       }
       checkButton.hidden = status.kind !== 'claimed-elsewhere' && status.kind !== 'check-failed'

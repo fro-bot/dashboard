@@ -89,6 +89,25 @@ describe('operator question region accessibility', () => {
     handle.close()
   })
 
+  it('leaves only the settled note after a question is claimed', async () => {
+    const {region, handle} = await mountQuestionRegion(
+      [openFrame('req-claimed-note', [question()])],
+      {kind: 'decided', state: 'claimed'},
+    )
+    const textarea = region.querySelector('textarea') as HTMLTextAreaElement
+    textarea.value = 'Keep moving forward'
+    textarea.dispatchEvent(new Event('input', {bubbles: true}))
+    const submit = region.querySelector('.question-region__submit') as HTMLButtonElement
+
+    submit.click()
+    await vi.waitFor(() => expect(region.textContent).toContain('This question is no longer open.'))
+
+    expect((region.querySelector('.question-region__question') as HTMLFieldSetElement | null)?.hidden).toBe(true)
+    expect((region.querySelector('.question-region__controls') as HTMLDivElement | null)?.hidden).toBe(true)
+    expect(region.querySelector('textarea')?.disabled).toBe(true)
+    handle.close()
+  })
+
   it('announces arrivals politely and exposes named groups with radio and checkbox semantics', async () => {
     const {region, handle} = await mountQuestionRegion([
       openFrame('req-one', [question(), question({header: 'Select any tools', multiple: true, custom: false})]),
