@@ -3357,6 +3357,9 @@ export function initOperatorStream(opts) {
     el.className = 'question-region__request'
     el.setAttribute('role', 'group')
     el.setAttribute('aria-label', 'Agent question request')
+    el.addEventListener('click', event => {
+      event.stopPropagation()
+    })
 
     const heading = document.createElement('h3')
     heading.className = 'question-region__heading'

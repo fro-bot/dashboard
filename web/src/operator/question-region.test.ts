@@ -29,11 +29,20 @@ function makeClient(decisionOutcome: QuestionDecisionOutcome = {kind: 'invalid',
   }
 }
 
-async function mountQuestionRegion(frames: string[], decisionOutcome?: QuestionDecisionOutcome) {
+async function mountQuestionRegion(
+  frames: string[],
+  decisionOutcome?: QuestionDecisionOutcome,
+  parent?: HTMLElement,
+) {
   const region = document.createElement('section')
   region.dataset.role = 'run-questions'
   region.hidden = true
-  document.body.append(region)
+  if (parent === undefined) {
+    document.body.append(region)
+  } else {
+    parent.append(region)
+    document.body.append(parent)
+  }
   const client = makeClient(decisionOutcome)
   const body = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n${frames.join('')}`
   let read = 0
@@ -62,6 +71,24 @@ afterEach(() => {
 })
 
 describe('operator question region accessibility', () => {
+  it('does not collapse an expandable run card when an option is selected', async () => {
+    const runCard = document.createElement('div')
+    let toggleCount = 0
+    runCard.addEventListener('click', () => {
+      toggleCount++
+    })
+    const {region, handle} = await mountQuestionRegion([
+      openFrame('req-expandable', [question()]),
+    ], undefined, runCard)
+
+    const radio = region.querySelector('input[type="radio"]') as HTMLInputElement
+    radio.click()
+
+    expect(toggleCount).toBe(0)
+    expect(region.hidden).toBe(false)
+    handle.close()
+  })
+
   it('announces arrivals politely and exposes named groups with radio and checkbox semantics', async () => {
     const {region, handle} = await mountQuestionRegion([
       openFrame('req-one', [question(), question({header: 'Select any tools', multiple: true, custom: false})]),
