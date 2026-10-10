@@ -766,9 +766,167 @@ describe('defaultRuntimeLoader — production stream wiring', () => {
   })
 })
 
+describe('defaultRuntimeLoader — question region and summary status wiring', () => {
+  type InitOpts = {runId: string; questionsEl?: Element | null; summaryStatus?: string}
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.doUnmock('/static/operator-stream.js?manual=1')
+    vi.doUnmock('/static/operator-run-index.js?manual=1')
+    vi.doUnmock('/static/operator-launch.js?manual=1')
+    vi.restoreAllMocks()
+  })
+
+  /** Mount the real default loader with every public module mocked; returns the captured seams. */
+  async function mountLoader() {
+    const handle = {close: vi.fn()}
+    // Snapshot the region's children at the moment each init runs, before the stream could render into it.
+    const initCalls: {opts: InitOpts; regionChildrenAtInit: number | undefined}[] = []
+    const initOperatorStream = vi.fn((opts: InitOpts) => {
+      initCalls.push({opts, regionChildrenAtInit: opts.questionsEl?.childNodes.length})
+      return handle
+    })
+    let onSelectRun: ((runId: string) => void) | undefined
+    let onRunLaunched: ((runId: string, card: HTMLElement) => void) | undefined
+    vi.doMock('/static/operator-stream.js?manual=1', () => ({
+      initOperatorStream,
+      bootstrapOperatorStreams: vi.fn(),
+      resetBootstrapState: vi.fn(),
+    }))
+    vi.doMock('/static/operator-run-index.js?manual=1', () => ({
+      initOperatorRunIndex: async (opts: {onSelectRun: (runId: string) => void}) => {
+        onSelectRun = opts.onSelectRun
+      },
+      resetRunIndexState: vi.fn(),
+      markRunStreamAttached: vi.fn(),
+      markCardExpandedForLaunch: vi.fn(),
+    }))
+    vi.doMock('/static/operator-launch.js?manual=1', () => ({
+      initOperatorLaunch: vi.fn(async (opts: {onRunLaunched: (runId: string, card: HTMLElement) => void}) => {
+        onRunLaunched = opts.onRunLaunched
+      }),
+      resetLaunchState: vi.fn(),
+    }))
+    const runtime = createOperatorRuntime({container: makeContainer(), onStateChange: vi.fn()})
+    await vi.waitFor(() => {
+      expect(onSelectRun).toBeDefined()
+      expect(onRunLaunched).toBeDefined()
+    })
+    return {
+      runtime,
+      initCalls,
+      select: (runId: string) => onSelectRun?.(runId),
+      launched: (runId: string, card: HTMLElement) => onRunLaunched?.(runId, card),
+    }
+  }
+
+  function cardHtml(runId: string, statusClass: string, extra = ''): string {
+    return `
+      <div data-run-id="${runId}"${extra}>
+        <span data-role="run-status" class="run-status ${statusClass}"></span>
+        <div data-role="run-questions" hidden></div>
+      </div>`
+  }
+
+  it('hands the discovered questionsEl and the card summary status to initOperatorStream', async () => {
+    document.body.innerHTML = `${cardHtml('run-q-a', 'status-succeeded')}${cardHtml('run-q-b', 'status-running')}<div data-role="stream-status"></div>`
+    const regionA = document.querySelector('[data-run-id="run-q-a"] [data-role="run-questions"]')
+    const regionB = document.querySelector('[data-run-id="run-q-b"] [data-role="run-questions"]')
+    const {runtime, initCalls, select} = await mountLoader()
+
+    select('run-q-a')
+    select('run-q-b')
+
+    expect(initCalls).toHaveLength(2)
+    expect(initCalls[0]?.opts.runId).toBe('run-q-a')
+    expect(initCalls[0]?.opts.questionsEl).toBe(regionA)
+    expect(initCalls[0]?.opts.summaryStatus).toBe('succeeded')
+    expect(initCalls[1]?.opts.questionsEl).toBe(regionB)
+    expect(initCalls[1]?.opts.summaryStatus).toBe('running')
+    runtime.cleanup()
+  })
+
+  it('an optimistic card passes no summaryStatus, whatever its status class says', async () => {
+    document.body.innerHTML = `${cardHtml('run-q-opt', 'status-pending', ' data-optimistic="true"')}${cardHtml('run-q-opt-2', 'status-running', ' data-optimistic="true"')}<div data-role="stream-status"></div>`
+    const {runtime, initCalls, launched} = await mountLoader()
+
+    launched('run-q-opt', document.querySelector('[data-run-id="run-q-opt"]') as HTMLElement)
+    launched('run-q-opt-2', document.querySelector('[data-run-id="run-q-opt-2"]') as HTMLElement)
+
+    expect(initCalls).toHaveLength(2)
+    for (const call of initCalls) {
+      expect(call.opts.questionsEl).not.toBeNull()
+      expect('summaryStatus' in call.opts).toBe(false)
+    }
+    runtime.cleanup()
+  })
+
+  it('a status class outside the run-summary allowlist is never passed as summaryStatus', async () => {
+    document.body.innerHTML = `${cardHtml('run-q-wait', 'status-waiting_for_approval')}${cardHtml('run-q-evil', 'status-evil')}${cardHtml('run-q-none', '')}<div data-role="stream-status"></div>`
+    const {runtime, initCalls, select} = await mountLoader()
+
+    select('run-q-wait')
+    select('run-q-evil')
+    select('run-q-none')
+
+    expect(initCalls).toHaveLength(3)
+    for (const call of initCalls) expect('summaryStatus' in call.opts).toBe(false)
+    runtime.cleanup()
+  })
+
+  it('card switch A → B → A clears A’s stale question DOM on re-attach', async () => {
+    document.body.innerHTML = `${cardHtml('run-q-sw-a', 'status-running')}${cardHtml('run-q-sw-b', 'status-running')}<div data-role="stream-status"></div>`
+    const regionA = document.querySelector('[data-run-id="run-q-sw-a"] [data-role="run-questions"]') as HTMLElement
+    const regionB = document.querySelector('[data-run-id="run-q-sw-b"] [data-role="run-questions"]') as HTMLElement
+    const {runtime, initCalls, select} = await mountLoader()
+
+    select('run-q-sw-a')
+    expect(initCalls[0]?.regionChildrenAtInit).toBe(0)
+    // The stream renders a question into A's region, then the operator switches away and back.
+    regionA.append(document.createElement('p'))
+    regionB.append(document.createElement('p'))
+    select('run-q-sw-b')
+    expect(initCalls[1]?.regionChildrenAtInit).toBe(0)
+    // Switching away leaves A's DOM alone; only the re-attach clears it.
+    select('run-q-sw-a')
+
+    expect(initCalls).toHaveLength(3)
+    expect(initCalls[2]?.opts.questionsEl).toBe(regionA)
+    expect(initCalls[2]?.regionChildrenAtInit).toBe(0)
+    expect(regionA.childNodes).toHaveLength(0)
+    runtime.cleanup()
+  })
+
+  it('a card without a question region attaches with questionsEl null and does not throw', async () => {
+    document.body.innerHTML = `<div data-run-id="run-q-legacy"><span data-role="run-status" class="run-status status-running"></span></div><div data-role="stream-status"></div>`
+    const {runtime, initCalls, select} = await mountLoader()
+
+    select('run-q-legacy')
+
+    expect(initCalls).toHaveLength(1)
+    expect(initCalls[0]?.opts.questionsEl).toBeNull()
+    runtime.cleanup()
+  })
+})
+
 describe('discoverCardStreamTargets', () => {
   afterEach(() => {
     document.body.innerHTML = ''
+  })
+
+  it('returns the question region when present, and null when absent', () => {
+    const withRegion = document.createElement('div')
+    withRegion.dataset.runId = 'run-with-questions'
+    const questionsEl = document.createElement('div')
+    questionsEl.dataset.role = 'run-questions'
+    withRegion.append(questionsEl)
+    const without = document.createElement('div')
+    without.dataset.runId = 'run-no-questions'
+    document.body.append(withRegion, without)
+
+    expect(discoverCardStreamTargets('run-with-questions').questionsEl).toBe(questionsEl)
+    expect(discoverCardStreamTargets('run-no-questions').questionsEl).toBeNull()
+    expect(discoverCardStreamTargets('no-such-run').questionsEl).toBeNull()
   })
 
   it('returns all four per-card render targets when the card and substructure exist', () => {

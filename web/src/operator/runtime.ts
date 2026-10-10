@@ -37,7 +37,7 @@ export const MAX_HASH_ID_LENGTH = 512
 
 /**
  * Discover the per-card render targets for a run's stream (output, coalesced
- * output hint, approval prompt, approval badge, reason, cancel, checkout detail). Without these, a stream
+ * output hint, approval prompt, approval badge, reason, cancel, checkout detail, questions). Without these, a stream
  * handle's DOM updates only ever touch statusEl/noticeEl, leaving the card's
  * core content (output + approvals) blank.
  *
@@ -53,6 +53,7 @@ export function discoverCardStreamTargets(runId: string): {
   reasonEl: Element | null
   cancelEl: Element | null
   checkoutEl: Element | null
+  questionsEl: Element | null
 } {
   const card = typeof document !== 'undefined'
     ? document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
@@ -65,7 +66,40 @@ export function discoverCardStreamTargets(runId: string): {
     reasonEl: card?.querySelector('[data-role="run-reason"]') ?? null,
     cancelEl: card?.querySelector('[data-role="run-cancel"]') ?? null,
     checkoutEl: card?.querySelector('[data-role="run-checkout-detail"]') ?? null,
+    questionsEl: card?.querySelector('[data-role="run-questions"]') ?? null,
   }
+}
+
+/**
+ * The run-list summary statuses the run index parser keeps (public/operator-run-index.js
+ * VALID_RUN_SUMMARY_STATUSES). Stream-only statuses (blocked, waiting_for_*) are not summaries.
+ */
+const SUMMARY_STATUSES: ReadonlySet<string> = new Set(['queued', 'running', 'succeeded', 'failed', 'cancelled'])
+
+/**
+ * The expanded card's run-list summary status, or undefined when the card has none to offer.
+ *
+ * Source: the card's run-status element carries a `status-<value>` class that the run index
+ * writes only from its parsed summary (an allowlist-validated value) — no free text is read.
+ * The token is re-checked against the same allowlist here, so anything else (the optimistic
+ * `status-pending`, stream-only statuses, an unknown token) yields undefined. An optimistic
+ * launch card carries no run-list summary yet, so it never offers one.
+ *
+ * Exported so tests exercise the exact production lookup.
+ */
+export function discoverCardSummaryStatus(runId: string): string | undefined {
+  const card = typeof document !== 'undefined'
+    ? document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
+    : null
+  if (card === null || (card as HTMLElement).dataset.optimistic === 'true') return undefined
+  const statusEl = card.querySelector('[data-role="run-status"]')
+  if (statusEl === null) return undefined
+  for (const token of Array.from(statusEl.classList)) {
+    if (!token.startsWith('status-')) continue
+    const status = token.slice('status-'.length)
+    if (SUMMARY_STATUSES.has(status)) return status
+  }
+  return undefined
 }
 
 /**
@@ -265,6 +299,8 @@ async function defaultRuntimeLoader(opts?: {
       reasonEl?: Element | null
       cancelEl?: Element | null
       checkoutEl?: Element | null
+      questionsEl?: Element | null
+      summaryStatus?: string
       endpointBase?: string
       fixtureSessionId?: string
     }) => {close(): void}
@@ -306,7 +342,12 @@ async function defaultRuntimeLoader(opts?: {
 
     // Discover the per-card render targets so live output, coalescing hints,
     // approval prompts, and the approval badge all render — not just status.
-    const {outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, cancelEl, checkoutEl} = discoverCardStreamTargets(runId)
+    const {outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, cancelEl, checkoutEl, questionsEl} = discoverCardStreamTargets(runId)
+    const summaryStatus = discoverCardSummaryStatus(runId)
+
+    // A re-expanded card must never keep question DOM from a previous attach: the stream and
+    // page store rebuild this region from scratch.
+    if (questionsEl !== null) questionsEl.textContent = ''
 
     try {
       const handle = streamMod.initOperatorStream({
@@ -320,6 +361,8 @@ async function defaultRuntimeLoader(opts?: {
         reasonEl,
         cancelEl,
         checkoutEl,
+        questionsEl,
+        ...(summaryStatus === undefined ? {} : {summaryStatus}),
         endpointBase: opts?.endpointBase,
         fixtureSessionId: opts?.fixtureSessionId,
       })

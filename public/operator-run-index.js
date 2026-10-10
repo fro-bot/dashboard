@@ -41,14 +41,22 @@ const STATUS_LABELS = {
 const CHECKOUT_DETAIL_ROLE = 'run-checkout-detail'
 
 /**
+ * data-role of the hidden question region. This module only creates it and shows/hides it with
+ * the rest of the substructure; operator-stream.js owns everything rendered inside it.
+ */
+const QUESTIONS_ROLE = 'run-questions'
+
+/**
  * The card's hidden substructure regions in DOM order. The checkout-detail region leads the
- * list, so anything inserted "before the first hidden region" lands ahead of it too.
+ * list, so anything inserted "before the first hidden region" lands ahead of it too. The
+ * question region sits right after the approvals region on every card shape.
  */
 const SUBSTRUCTURE_ROLES = [
   CHECKOUT_DETAIL_ROLE,
   'run-output',
   'run-output-coalesced',
   'run-approvals',
+  QUESTIONS_ROLE,
   'approval-badge',
   'run-cancel',
 ]
@@ -718,6 +726,13 @@ function renderRunCard(view, onSelectRun) {
   approvalsEl.hidden = true
   card.append(approvalsEl)
 
+  // Question region — directly after run-approvals. Rendered into by the stream; the runtime
+  // seam passes it to initOperatorStream as questionsEl.
+  const questionsEl = document.createElement('div')
+  questionsEl.dataset.role = QUESTIONS_ROLE
+  questionsEl.hidden = true
+  card.append(questionsEl)
+
   const badgeEl = document.createElement('span')
   badgeEl.dataset.role = 'approval-badge'
   badgeEl.hidden = true
@@ -819,6 +834,15 @@ function ensureRunCardAnatomy(card, view, onSelectRun) {
     checkoutEl.dataset.role = CHECKOUT_DETAIL_ROLE
     checkoutEl.hidden = true
     insertBeforeFirstRole(card, checkoutEl, SUBSTRUCTURE_ROLES)
+  }
+
+  // Question region: same slot renderRunCard gives it (after run-approvals, ahead of the badge
+  // and cancel regions). Only created when missing — exactly one per card.
+  if (card.querySelector(`[data-role="${QUESTIONS_ROLE}"]`) === null) {
+    const questionsEl = document.createElement('div')
+    questionsEl.dataset.role = QUESTIONS_ROLE
+    questionsEl.hidden = true
+    insertBeforeFirstRole(card, questionsEl, ['approval-badge', 'run-cancel'])
   }
 
   if (card.querySelector('[data-role="run-cancel"]') === null) {
