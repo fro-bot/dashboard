@@ -915,8 +915,10 @@ const questionPageStore = new Map()
 // other status leaves with its request.
 const QUESTION_NOTE_KINDS = new Set(['claimed', 'already-settled', 'gone'])
 
-// Statuses while a decision or check is outstanding: the card refuses new decisions.
-const QUESTION_IN_FLIGHT_KINDS = new Set(['in-flight', 'checking', 'claimed-elsewhere'])
+// Statuses while a decision or check is outstanding: the card refuses new decisions. A request
+// claimed elsewhere is not here: the operator may answer it, and the gateway's single settlement
+// resolves the race (already_settled and claimed clear it, already_claimed keeps the note).
+const QUESTION_SEND_BLOCKED_KINDS = new Set(['in-flight', 'checking'])
 
 // The one wording for each note outcome, shared by the note card and the open card.
 const QUESTION_NOTE_COPY = Object.freeze({
@@ -3529,7 +3531,7 @@ export function initOperatorStream(opts) {
     }
 
     function refreshValidation() {
-      submitButton.disabled = !canSubmit() || QUESTION_IN_FLIGHT_KINDS.has(status.kind)
+      submitButton.disabled = !canSubmit() || QUESTION_SEND_BLOCKED_KINDS.has(status.kind)
       for (const [index, question] of questionEls.entries()) {
         question.errorEl.textContent = ''
         question.errorEl.hidden = true
@@ -3595,7 +3597,7 @@ export function initOperatorStream(opts) {
               : 'Check this answer and try again.'
         : ''
       statusEl.textContent = invalidCopy || labels[status.kind] || ''
-      const blocked = ['in-flight', 'checking', 'claimed-elsewhere', 'cant-answer'].includes(status.kind)
+      const blocked = QUESTION_SEND_BLOCKED_KINDS.has(status.kind) || status.kind === 'cant-answer'
       const removed = status.kind === 'cant-answer'
       const note = QUESTION_NOTE_KINDS.has(status.kind)
       for (const input of el.querySelectorAll('input, textarea')) {
@@ -4368,8 +4370,9 @@ export function initOperatorStream(opts) {
   /**
    * Submit a decision for one open request: `{decision:'skip'}` or
    * `{decision:'answer', answers:[{options?:number[], text?:string}]}` (one entry per question).
-   * Refused (returns the current status, sends nothing) while the request is in flight, being
-   * checked, or claimed elsewhere, and once the run's questions are known to be unanswerable.
+   * Refused (returns the current status, sends nothing) while the request is in flight or being
+   * checked, and once the run's questions are known to be unanswerable. A request claimed elsewhere
+   * can be answered: a missed settle surfaces as `already_settled`.
    * Resolves to the request's status afterwards, or null when the request is not open.
    */
   async function decideQuestion(requestID, decision) {
@@ -4377,7 +4380,7 @@ export function initOperatorStream(opts) {
     if (typeof requestID !== 'string' || !isQuestionOpen(requestID)) return null
     if (questionsCantAnswer) return getQuestionStatus(requestID)
     const current = questionStatuses.get(requestID)
-    if (current !== undefined && QUESTION_IN_FLIGHT_KINDS.has(current.kind)) return current
+    if (current !== undefined && QUESTION_SEND_BLOCKED_KINDS.has(current.kind)) return current
     setQuestionStatus(requestID, {kind: 'in-flight'})
     const outcome = await questionClient.decideRunQuestion(runId, requestID, decision)
     if (aborted) return null

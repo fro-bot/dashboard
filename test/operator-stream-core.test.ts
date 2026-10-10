@@ -9089,6 +9089,118 @@ describe('question region — answer controls and decision bodies', () => {
     expect(restored.value).toBe('draft that must survive')
     handle.close()
   })
+
+  describe('claimed elsewhere keeps the card answerable', () => {
+    const submitOf = (region: FakeElement) => qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0])
+    const skipOf = (region: FakeElement) => qRequired(qFakeFindAll(region, node => node.className === 'question-region__skip')[0])
+    const checkOf = (region: FakeElement) => qRequired(qFakeFindAll(region, node => node.className === 'question-region__check')[0])
+    const fieldOf = (region: FakeElement) => qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+
+    const type = (region: FakeElement, text: string) => {
+      fieldOf(region).value = text
+      fieldOf(region).dispatchEvent({type: 'input'})
+    }
+
+    it('Submit and Skip stay enabled next to the note and Check again, and the draft is kept', async () => {
+      const {region, calls, handle} = await renderQuestionFrames(
+        [qOpen('req-claimed', [qQuestion()])],
+        async () => ({kind: 'decided', state: 'already_claimed'}),
+      )
+      type(region, 'kept draft')
+      submitOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is being answered elsewhere.'))
+      expect(checkOf(region).hidden).toBe(false)
+      expect(submitOf(region).disabled).toBe(false)
+      expect(skipOf(region).disabled).toBe(false)
+      expect(fieldOf(region).disabled).toBe(false)
+      expect(fieldOf(region).value).toBe('kept draft')
+
+      // Submitting again from claimed-elsewhere sends again; already_claimed keeps the note and the draft.
+      submitOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(calls).toHaveLength(2))
+      await vi.waitFor(() => expect(submitOf(region).disabled).toBe(false))
+      expect(qFakeText(region)).toContain('This question is being answered elsewhere.')
+      expect(checkOf(region).hidden).toBe(false)
+      expect(fieldOf(region).value).toBe('kept draft')
+      handle.close()
+    })
+
+    it('Skip from claimed elsewhere sends {decision:"skip"}', async () => {
+      const {region, calls, handle} = await renderQuestionFrames(
+        [qOpen('req-claimed', [qQuestion()])],
+        async () => ({kind: 'decided', state: 'already_claimed'}),
+      )
+      type(region, 'answer')
+      submitOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is being answered elsewhere.'))
+      skipOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(calls).toHaveLength(2))
+      expect(calls[1]).toEqual({requestId: 'req-claimed', decision: {decision: 'skip'}})
+      handle.close()
+    })
+
+    it('an already_settled answer from claimed elsewhere clears the card to the settled note', async () => {
+      let call = 0
+      const {region, handle} = await renderQuestionFrames(
+        [qOpen('req-claimed', [qQuestion()])],
+        async () => {
+          call += 1
+          return {kind: 'decided', state: call === 1 ? 'already_claimed' : 'already_settled'}
+        },
+      )
+      type(region, 'answer')
+      submitOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is being answered elsewhere.'))
+      submitOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is no longer open.'))
+      expect(qFakeText(region)).not.toContain('being answered elsewhere')
+      expect(qFakeFindAll(region, node => node.tagName === 'fieldset').every(node => node.hidden)).toBe(true)
+      handle.close()
+    })
+
+    it('in flight and checking still block Submit and Skip', async () => {
+      const pending: ((outcome: QuestionDecisionOutcome) => void)[] = []
+      const relist = u4Deferred<QuestionListResult>()
+      let phase: 'claim' | 'resend' = 'claim'
+      const {region, calls, handle} = await renderQuestionFrames(
+        [qOpen('req-claimed', [qQuestion()])],
+        async () => {
+          if (phase === 'claim') {
+            phase = 'resend'
+            return {kind: 'decided', state: 'already_claimed'}
+          }
+          return new Promise<QuestionDecisionOutcome>(resolve => pending.push(resolve))
+        },
+        async () => relist.promise,
+      )
+      type(region, 'answer')
+      submitOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is being answered elsewhere.'))
+
+      // Checking: the list is out.
+      checkOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(qFakeText(region)).toContain('Checking whether your answer was recorded'))
+      expect(submitOf(region).disabled).toBe(true)
+      expect(skipOf(region).disabled).toBe(true)
+      submitOf(region).dispatchEvent({type: 'click'})
+      skipOf(region).dispatchEvent({type: 'click'})
+      expect(calls).toHaveLength(1)
+      relist.resolve({success: true, data: {requests: [], invalidBody: false, partial: false}})
+      await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is being answered elsewhere.'))
+
+      // In flight: a resend is outstanding.
+      submitOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(calls).toHaveLength(2))
+      expect(qFakeText(region)).toContain('Sending answers')
+      expect(submitOf(region).disabled).toBe(true)
+      expect(skipOf(region).disabled).toBe(true)
+      submitOf(region).dispatchEvent({type: 'click'})
+      skipOf(region).dispatchEvent({type: 'click'})
+      expect(calls).toHaveLength(2)
+      pending[0]?.({kind: 'decided', state: 'already_claimed'})
+      handle.close()
+    })
+  })
 })
 
 function qBrowser(payload: unknown) {
@@ -10180,6 +10292,64 @@ describe('question decisions — outcomes by response state', () => {
     expect(h.ids()).toEqual(['A'])
     expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed'})
     expect(h.decideCalls).toHaveLength(2)
+  })
+
+  it('claimed elsewhere, settle frame missed across a reconnect: the next submit settles it (already_settled tombstones and clears)', async () => {
+    const h = u4Start({
+      initial: [u4Chunks('A')],
+      decide: n => u4Decided(n === 1 ? 'already_claimed' : 'already_settled'),
+    })
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.reconnect()
+    // The list still omits it and no settle frame arrived: it stays claimed elsewhere, and answerable.
+    expect(h.ids()).toEqual(['A'])
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'already-settled'})
+    expect(h.decideCalls).toHaveLength(2)
+    expect(h.ids()).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(true)
+    await h.flush(300_000)
+    expect(h.ids()).toEqual([])
+  })
+
+  it('claimed elsewhere: a skip goes out as {decision:"skip"}, and claimed settles the request', async () => {
+    const h = u4Start({
+      initial: [u4Chunks('A')],
+      decide: n => u4Decided(n === 1 ? 'already_claimed' : 'claimed'),
+    })
+    await h.flush()
+    await h.handle.decideQuestion('A', {decision: 'answer', answers: [{text: 'x'}]})
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed'})
+    expect(h.decideCalls[1]?.decision).toEqual({decision: 'skip'})
+    expect(h.ids()).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(true)
+  })
+
+  it('claimed elsewhere then already_claimed again: it stays claimed elsewhere, exempt, with the schedule restarted', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed')})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.flush(1000)
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed-elsewhere'})
+    expect(h.decideCalls).toHaveLength(2)
+    expect(h.ids()).toEqual(['A'])
+    const before = h.listCalls.length
+    await h.flush(2000)
+    expect(h.listCalls.length).toBe(before + 1)
+  })
+
+  it('a decision is refused while a check is out, as it is while the request is in flight', async () => {
+    const d = u4Deferred<QuestionListResult>()
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed'), list: async n => (n === 2 ? d.promise : u4Listed())})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    const check = h.handle.checkQuestions('A')
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'checking'})
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'checking'})
+    expect(h.decideCalls).toHaveLength(1)
+    d.resolve(u4Listed())
+    await check
   })
 
   it('a decision is refused while the request is in flight', async () => {
