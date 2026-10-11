@@ -1,6 +1,7 @@
 ---
 title: CSS selectors must match the classes vanilla JS actually emits
 date: 2026-07-04
+last_updated: 2026-10-10
 category: workflow-issues
 module: dashboard
 problem_type: workflow_issue
@@ -111,6 +112,12 @@ The drift that silently failed:
 .status-failure { /* never matches */ }
 .status-in_progress { /* never matches */ }
 ```
+
+**Status badge, multi-word statuses.** The stream emitter hyphenates the status into its class
+(`status-${status.replaceAll('_', '-')}`, so `waiting_for_approval` renders as
+`status-waiting-for-approval`), while the CSS declared `.status-waiting_for_approval`, which never
+matched. The parity test in `test/operator-run-index-core.test.js` now requires the hyphenated
+selector for every multi-word status in both themes and rejects any underscore status selector.
 
 **2. Approval button class mismatch (buttons rendered unstyled)**
 

@@ -1839,17 +1839,21 @@ export function hasOpenQuestions(runEntry) {
 
 /**
  * The status to render for a run: the wire status adjusted by what the browser knows about
- * open questions. Computed at render and NEVER stored — the next `running` frame would
- * overwrite a stored derived value.
+ * open approval prompts and open questions. Computed at render and NEVER stored — the next
+ * `running` frame would overwrite a stored derived value. Precedence is terminal, then
+ * approval, then question.
  *
  *   1. Terminal wins.
- *   2. Wire `waiting_for_approval` stays (the gateway lets approval win over questions).
- *   3. A `running` run with any open question is `waiting_for_question`.
- *   4. A wire `waiting_for_question` with an open question stays; with none, once a question
+ *   2. Wire `waiting_for_approval` stays.
+ *   3. A `running` or `waiting_for_question` run with any open approval prompt is
+ *      `waiting_for_approval`. The gateway does not re-send status when an approval opens, so
+ *      the wire value alone cannot show it.
+ *   4. A `running` run with any open question is `waiting_for_question`.
+ *   5. A wire `waiting_for_question` with an open question stays; with none, once a question
  *      reconcile has completed in the current connection cycle, it is really `running`. (Before
  *      that, a missed settle frame cannot be told from a question the list has not yet shown, so
  *      the wire value is kept.)
- *   5. Anything else is the wire value (so `queued` and `blocked` stay put).
+ *   6. Anything else is the wire value (so `queued` and `blocked` stay put).
  *
  * @param {object|undefined|null} runEntry - A RunEntry from the stream state's runs map.
  * @returns {string} The status value to label and style; '' when there is no entry.
@@ -1859,6 +1863,9 @@ export function getEffectiveStatus(runEntry) {
   const wire = runEntry.status
   if (runEntry.terminal === true) return wire
   if (wire === 'waiting_for_approval') return wire
+  if ((wire === 'running' || wire === 'waiting_for_question') && hasOpenApprovals(runEntry)) {
+    return 'waiting_for_approval'
+  }
   if (wire === 'running') return hasOpenQuestions(runEntry) ? 'waiting_for_question' : wire
   if (wire === 'waiting_for_question') {
     if (hasOpenQuestions(runEntry)) return wire
@@ -3721,7 +3728,7 @@ export function initOperatorStream(opts) {
     if (statusEl) {
       const runEntry = state.runs[runId]
       if (runEntry && (state.connection === 'live' || runEntry.terminal)) {
-        // The effective status folds open questions into the wire status; it is derived here
+        // The effective status folds open approvals and questions into the wire status; it is derived here
         // on every render and never stored.
         const effectiveStatus = getEffectiveStatus(runEntry)
         // Render label from local map, never the raw wire string into textContent

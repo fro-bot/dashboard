@@ -9510,6 +9510,50 @@ describe('getEffectiveStatus — derived from the wire status and open questions
     expect(getEffectiveStatus(qEntry(withQuestion('waiting_for_approval')))).toBe('waiting_for_approval')
   })
 
+  const withApproval = (state: StreamState): StreamState =>
+    nextStreamState(state, {
+      type: 'approval',
+      data: {runId: Q_RUN, requestID: 'req-a-1', permission: 'shell', settled: false},
+    })
+
+  it('running with an open approval is waiting_for_approval; the wire status stays running', () => {
+    const state = withApproval(qStatus(qLive(), 'running'))
+    expect(getEffectiveStatus(qEntry(state))).toBe('waiting_for_approval')
+    expect(qEntry(state).status).toBe('running')
+  })
+
+  it('running with an open approval and an open question is waiting_for_approval', () => {
+    const state = qFrameApply(withApproval(qStatus(qLive(), 'running')), qOpen('req-q-1'))
+    expect(getEffectiveStatus(qEntry(state))).toBe('waiting_for_approval')
+  })
+
+  it('wire waiting_for_question with an open approval is waiting_for_approval', () => {
+    const state = withApproval(qStatus(qLive(), 'waiting_for_question'))
+    expect(getEffectiveStatus(qEntry(state))).toBe('waiting_for_approval')
+  })
+
+  it('terminal wins over an open approval', () => {
+    const state = qStatus(qLive(), 'succeeded')
+    const stale: RunEntry = {
+      ...qEntry(state),
+      status: 'succeeded',
+      terminal: true,
+      approvalOpenPrompts: {'req-a-1': {runId: Q_RUN, requestID: 'req-a-1', permission: 'shell', settled: false}},
+    }
+    expect(hasOpenApprovals(stale)).toBe(true)
+    expect(getEffectiveStatus(stale)).toBe('succeeded')
+  })
+
+  it('running with no approval and an open question stays waiting_for_question', () => {
+    expect(getEffectiveStatus(qEntry(withQuestion('running')))).toBe('waiting_for_question')
+  })
+
+  it('queued and blocked with an open approval are unchanged', () => {
+    for (const status of ['queued', 'blocked']) {
+      expect(getEffectiveStatus(qEntry(withApproval(qStatus(qLive(), status))))).toBe(status)
+    }
+  })
+
   it('queued with an open question stays queued', () => {
     expect(getEffectiveStatus(qEntry(withQuestion('queued')))).toBe('queued')
   })
@@ -9736,6 +9780,24 @@ describe('question status — label, wire acceptance and styling', () => {
     const settled = await paintedStatus([statusRecord('running'), qSse(qOpen('req-q-1')), qSse(qSettle('req-q-1'))])
     expect(settled.textContent).toBe('Running')
     expect(settled.className).toContain('status-running')
+  })
+
+  const approvalRecord = (requestID = 'req-a-1') =>
+    `event: approval\ndata: ${JSON.stringify({runId: Q_RUN, requestID, permission: 'shell', settled: false})}\n\n`
+
+  it('paints "Waiting for approval" with the hyphenated status class for a running run with an open approval', async () => {
+    resetQuestionPageStore()
+    const status = await paintedStatus([statusRecord('running'), approvalRecord()])
+    expect(status.textContent).toBe('Waiting for approval')
+    expect(status.className).toContain('status-waiting-for-approval')
+    expect(status.className).not.toContain('status-running')
+  })
+
+  it('paints "Waiting for approval" for a running run with an open approval and an open question', async () => {
+    resetQuestionPageStore()
+    const status = await paintedStatus([statusRecord('running'), approvalRecord(), qSse(qOpen('req-q-1'))])
+    expect(status.textContent).toBe('Waiting for approval')
+    expect(status.className).toContain('status-waiting-for-approval')
   })
 
   it('keeps "Waiting for approval" over an open question', async () => {
