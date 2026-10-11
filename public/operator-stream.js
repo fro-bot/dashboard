@@ -3314,6 +3314,18 @@ export function initOperatorStream(opts) {
     questionsEl.hidden = true
   }
 
+  // The approval and cancel regions belong to the card and outlive any one stream attachment, so
+  // each attachment starts them empty: a re-expanded card never stacks a second prompt or Cancel
+  // control on top of the previous attachment's.
+  if (approvalsEl !== undefined && approvalsEl !== null) {
+    approvalsEl.textContent = ''
+    approvalsEl.hidden = true
+  }
+  if (cancelEl !== undefined && cancelEl !== null) {
+    cancelEl.textContent = ''
+    cancelEl.hidden = true
+  }
+
   // Build the approval client lazily (only if approvalsEl is present).
   // Pass endpointBase and fixtureSessionId so fixture mode uses the fixture approval routes
   // and includes the session ID in all approval requests.
@@ -4633,6 +4645,8 @@ export function initOperatorStream(opts) {
       // in-flight cancel attempt can never fire/mutate after close().
       if (cancelControl !== null) {
         cancelControl.dispose()
+        // A disposed control can no longer cancel; remove it rather than leave an inert button.
+        cancelControl.el.remove()
       }
       state = nextStreamState(state, {type: 'stream-closed'})
     },
