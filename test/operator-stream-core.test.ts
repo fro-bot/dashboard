@@ -11,12 +11,24 @@
  * - No console output of frame data.
  */
 
-import type {ApprovalFrameDataOpen, OutputFrameData, RunEntry, StreamState} from '../public/operator-stream.js'
+import type {
+  ApprovalFrameDataOpen,
+  OutputFrameData,
+  QuestionClient,
+  QuestionDecision,
+  QuestionDecisionOutcome,
+  QuestionListResult,
+  QuestionReconcileEvent,
+  RunEntry,
+  StreamHandle,
+  StreamState,
+} from '../public/operator-stream.js'
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {
   bootstrapOperatorStreams,
   buildApprovalClient,
   buildCancelClient,
+  buildQuestionClient,
   CANCEL_RETRY_MAX_ATTEMPTS,
   CHECKOUT_FAILURE_FLAG_LABELS,
   CHECKOUT_LAYOUT_REASON_LABELS,
@@ -30,20 +42,31 @@ import {
   fillLabelTemplate,
   FIRST_FRAME_TIMEOUT_MS,
   GATEWAY_PENDING_APPROVALS_CAP,
+  GATEWAY_PENDING_QUESTIONS_CAP,
+  getEffectiveStatus,
   getOpenApprovals,
+  getOpenQuestions,
+  getQuestionPageStore,
   hasOpenApprovals,
+  hasOpenQuestions,
   initOperatorStream,
   MAX_APPROVAL_TOMBSTONES,
   MAX_OPEN_APPROVALS,
+  MAX_OPEN_QUESTIONS,
   MAX_OUTPUT_TEXT_CHARS,
   MAX_SSE_BUFFER_BYTES,
   nextStreamState,
   parseSseFrame,
   PHASE_TO_WEB_STATUS,
   PINNED_CONTRACT_VERSION,
+  QUESTION_CLAIM_RECHECK_DELAYS_MS,
+  QUESTION_DECISION_STATES,
+  QUESTION_FETCH_TIMEOUT_MS,
+  QUESTION_INVALID_REASONS,
   renderApprovalPrompt,
   renderCancelControl,
   resetBootstrapState,
+  resetQuestionPageStore,
   RETRY_BASE_MS,
   RETRY_FACTOR,
   RETRY_MAX_COUNT,
@@ -54,14 +77,24 @@ import {
   CHECKOUT_OPERATIONS,
   CHECKOUT_REFUSAL_REASONS,
   LAYOUT_REFUSAL_REASONS,
+  MAX_OPTIONS_PER_QUESTION,
+  MAX_QUESTIONS_PER_REQUEST,
   OBSTRUCTION_KINDS,
   OPERATOR_CONTRACT_VERSION,
+  QUESTION_HEADER_MAX_LENGTH,
+  QUESTION_OPTION_DESCRIPTION_MAX_LENGTH,
+  QUESTION_OPTION_LABEL_MAX_LENGTH,
+  QUESTION_TEXT_MAX_LENGTH,
   UPDATE_FAILURE_REASONS,
   PHASE_TO_WEB_STATUS as VENDORED_PHASE_TO_WEB_STATUS,
+  QUESTION_DECISION_STATES as VENDORED_QUESTION_DECISION_STATES,
+  QUESTION_INVALID_REASONS as VENDORED_QUESTION_INVALID_REASONS,
 } from '../src/gateway/operator-contract/index.ts'
 import {OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
 import {FIXTURE_RUN_ID_FOR_TESTS, FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../src/gateway/operator-fixture-sse.ts'
 import {parseSseChunk} from '../src/gateway/operator-sse-reader.ts'
+
+const Q_RUN = 'run-q-001'
 
 const ACTIVE_STATUS = {
   runId: 'run-abc',
@@ -892,9 +925,10 @@ describe('nextStreamState — reset frame', () => {
       type: 'ready',
       data: {contractVersion: PINNED_CONTRACT_VERSION},
     })
+    // A no-snapshot reset does not reconnect; a transient reason does.
     const state = nextStreamState(liveState, {
       type: 'reset',
-      data: {runId: 'run-abc', reason: 'no-snapshot'},
+      data: {runId: 'run-abc', reason: 'writer-error'},
     })
     expect(state.connection).toBe('reconnecting')
     expect(state.shouldReconnect).toBe(true)
@@ -970,7 +1004,7 @@ describe('nextStreamState — reset frame', () => {
     expect(state.retryCount).toBe(withTerminal.retryCount)
   })
 
-  it('reconnects on no-snapshot reset when the run is still active', () => {
+  it('keeps the connection live on no-snapshot reset when the run is still active', () => {
     const liveState = nextStreamState(INITIAL_STATE, {
       type: 'ready',
       data: {contractVersion: PINNED_CONTRACT_VERSION},
@@ -979,31 +1013,31 @@ describe('nextStreamState — reset frame', () => {
       type: 'status',
       data: ACTIVE_STATUS,
     })
-    // no-snapshot on a live run is legitimate: the stream attached before the first
-    // snapshot was taken, so retrying is expected to succeed once one exists.
+    // The gateway keeps the subscription open after no-snapshot, so a reconnect would park on a
+    // reader that never ends. Stay live, spend no retry, and keep accepting frames.
     const state = nextStreamState(withActive, {
       type: 'reset',
       data: {runId: 'run-abc', reason: 'no-snapshot'},
     })
-    expect(state.connection).toBe('reconnecting')
-    expect(state.shouldReconnect).toBe(true)
-    expect(state.retryCount).toBe(withActive.retryCount + 1)
+    expect(state.connection).toBe('live')
+    expect(state.shouldReconnect).toBe(false)
+    expect(state.retryCount).toBe(withActive.retryCount)
   })
 
-  it('reconnects on no-snapshot reset when the run entry is unknown', () => {
+  it('keeps the connection live on no-snapshot reset when the run entry is unknown', () => {
     const liveState = nextStreamState(INITIAL_STATE, {
       type: 'ready',
       data: {contractVersion: PINNED_CONTRACT_VERSION},
     })
-    // No status frame has been applied for run-abc, so the run entry is unknown —
-    // must fall through to the generic retry branch exactly as before the fix.
+    // No status frame and no terminal summary: unknown is not evidence of terminal, so the
+    // connection stays live instead of reconnecting.
     const state = nextStreamState(liveState, {
       type: 'reset',
       data: {runId: 'run-abc', reason: 'no-snapshot'},
     })
-    expect(state.connection).toBe('reconnecting')
-    expect(state.shouldReconnect).toBe(true)
-    expect(state.retryCount).toBe(liveState.retryCount + 1)
+    expect(state.connection).toBe('live')
+    expect(state.shouldReconnect).toBe(false)
+    expect(state.retryCount).toBe(liveState.retryCount)
   })
 
   it('ends the production ready → reset:no-snapshot sequence for a terminal run in a settled, non-reconnecting state', () => {
@@ -1312,7 +1346,7 @@ describe('nextStreamState — reset retryCount capping', () => {
     })
     const state1 = nextStreamState(liveState, {
       type: 'reset',
-      data: {runId: 'run-abc', reason: 'no-snapshot'},
+      data: {runId: 'run-abc', reason: 'shutdown'},
     })
     expect(state1.retryCount).toBe(1)
     expect(state1.shouldReconnect).toBe(true)
@@ -1333,7 +1367,7 @@ describe('nextStreamState — reset retryCount capping', () => {
     }
     const state = nextStreamState(exhausted, {
       type: 'reset',
-      data: {runId: 'run-abc', reason: 'no-snapshot'},
+      data: {runId: 'run-abc', reason: 'shutdown'},
     })
     expect(state.connection).toBe('failed')
     expect(state.shouldReconnect).toBe(false)
@@ -1347,7 +1381,7 @@ describe('nextStreamState — reset retryCount capping', () => {
     for (let i = 0; i < RETRY_MAX_COUNT + 5; i++) {
       state = nextStreamState(state, {
         type: 'reset',
-        data: {runId: 'run-abc', reason: 'no-snapshot'},
+        data: {runId: 'run-abc', reason: 'shutdown'},
       })
     }
     expect(state.connection).toBe('failed')
@@ -2339,6 +2373,13 @@ interface FakeElement {
   textContent: string
   hidden: boolean
   className: string
+  type: string
+  name: string
+  value: string
+  checked: boolean
+  disabled: boolean
+  tabIndex: number
+  parent?: FakeElement
   children: FakeElement[]
   attributes: Record<string, string>
   style: Record<string, string>
@@ -2358,7 +2399,7 @@ interface FakeElement {
 function makeFakeEl(tagName = 'div'): FakeElement {
   // Setting textContent to '' clears children, mirroring real DOM behavior.
   let textContentValue = ''
-  const el = {
+  const el: FakeElement = {
     tagName,
     get textContent() { return textContentValue },
     set textContent(v: string) {
@@ -2369,11 +2410,17 @@ function makeFakeEl(tagName = 'div'): FakeElement {
     },
     hidden: false,
     className: '',
-    children: [] as FakeElement[],
-    attributes: {} as Record<string, string>,
-    style: {} as Record<string, string>,
-    dataset: {} as Record<string, string>,
-    eventListeners: {} as Record<string, ((...args: unknown[]) => void)[]>,
+    type: '',
+    name: '',
+    value: '',
+    checked: false,
+    disabled: false,
+    tabIndex: 0,
+    children: [],
+    attributes: {},
+    style: {},
+    dataset: {},
+    eventListeners: {},
     querySelector(sel: string): FakeElement | null {
       for (const child of el.children) {
         if (sel.includes('data-role=')) {
@@ -2392,8 +2439,8 @@ function makeFakeEl(tagName = 'div'): FakeElement {
     querySelectorAll(sel: string): FakeElement[] {
       const results: FakeElement[] = []
       for (const child of el.children) {
-        if (sel === 'button') {
-          if (child.tagName === 'button') results.push(child)
+        if (sel.split(',').some(selector => selector.trim() === child.tagName)) {
+          results.push(child)
           results.push(...child.querySelectorAll(sel))
         } else if (sel.includes('data-role=')) {
           const role = sel.match(/data-role="([^"]+)"/)?.[1]
@@ -2407,10 +2454,17 @@ function makeFakeEl(tagName = 'div'): FakeElement {
     },
     append(...nodes: FakeElement[]) {
       for (const node of nodes) {
+        node.remove()
         el.children.push(node)
+        node.parent = el
       }
     },
-    remove() {}, // parent would need to remove from children
+    remove() {
+      if (el.parent !== undefined) {
+        el.parent.children = el.parent.children.filter(child => child !== el)
+        el.parent = undefined
+      }
+    },
     setAttribute(name: string, value: string) {
       el.attributes[name] = value
     },
@@ -2418,9 +2472,9 @@ function makeFakeEl(tagName = 'div'): FakeElement {
       return el.attributes[name] ?? null
     },
     classList: {
-      add(_cls: string) {},
-      remove(_cls: string) {},
-      contains(_cls: string) { return false },
+      add(cls: string) { if (!el.className.split(/\s+/).includes(cls)) el.className = `${el.className} ${cls}`.trim() },
+      remove(cls: string) { el.className = el.className.split(/\s+/).filter(token => token !== cls).join(' ') },
+      contains(cls: string) { return el.className.split(/\s+/).includes(cls) },
     },
     addEventListener(event: string, handler: (...args: unknown[]) => void) {
       if (!el.eventListeners[event]) el.eventListeners[event] = []
@@ -2433,7 +2487,7 @@ function makeFakeEl(tagName = 'div'): FakeElement {
       const handlers = el.eventListeners[event.type] ?? []
       for (const h of handlers) h(eventWithDefaults)
     },
-  } satisfies FakeElement
+  }
   return el
 }
 
@@ -3993,7 +4047,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('integration: ghost prompt A absent from complete recovery set is pruned on reconnect', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', command: 'echo A', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     const conn1Chunks = [readyChunk, openAChunk, resetChunk]
     const conn2Chunks = [readyChunk]
@@ -4048,7 +4102,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('error path: listRunApprovals failure → open prompts preserved, no prune', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let listCallCount = 0
     const listCalls: string[] = []
@@ -4185,7 +4239,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('happy: recovery returns [A,B] while only A locally open → B added, A retained, nothing pruned', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let fetchCount = 0
     const client = {
@@ -4249,7 +4303,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('edge (truncation): recovery size >= cap → pruneIds empty, open prompts preserved', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     // Recovery returns exactly GATEWAY_PENDING_APPROVALS_CAP entries (none is req-A)
     const bigRecovery = Array.from({length: GATEWAY_PENDING_APPROVALS_CAP}, (_, i) => ({
@@ -4305,7 +4359,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
     const openBChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-B', permission: 'network', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let fetchCount = 0
     const client = {
@@ -4399,7 +4453,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
     const openBChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-B', permission: 'network', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let fetchCount = 0
     const client = {
@@ -4452,7 +4506,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('stale-reconcile discard: first reconcile resolved after second connect → stale result discarded, no wrong prune', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let resolveFirstList!: (v: {success: true; data: {approvals: []}}) => void
     const firstListPromise = new Promise<{success: true; data: {approvals: []}}>(resolve => {
@@ -4513,7 +4567,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('error path (http 500): listRunApprovals http-500 failure → open prompts preserved', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let listCallCount = 0
     const client = {
@@ -4567,7 +4621,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('error path (protocol): listRunApprovals protocol failure → open prompts preserved', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let listCallCount = 0
     const client = {
@@ -4621,7 +4675,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('truncation boundary (allow-prune): valid size === CAP-1 → prune IS performed', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     const nearCapRecovery = Array.from({length: GATEWAY_PENDING_APPROVALS_CAP - 1}, (_, i) => ({
       requestID: `req-recovered-${i}`,
@@ -4678,7 +4732,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
     const openBChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-B', permission: 'network', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let fetchCount = 0
     const client = {
@@ -4743,7 +4797,7 @@ describe('reconcileApprovals — wired integration (corrective prune)', () => {
   it('stale reconcile with a non-empty pre-GET snapshot bails on epoch mismatch — the prompt is NOT pruned', async () => {
     const readyChunk = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
     const openAChunk = `event: approval\ndata: ${JSON.stringify({runId: 'run-001', requestID: 'req-A', permission: 'shell', settled: false})}\n\n`
-    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'no-snapshot'})}\n\n`
+    const resetChunk = `event: reset\ndata: ${JSON.stringify({runId: 'run-001', reason: 'shutdown'})}\n\n`
 
     let resolveStaleList!: (v: {success: true; data: {approvals: []}}) => void
     const staleListPromise = new Promise<{success: true; data: {approvals: []}}>(resolve => {
@@ -7294,6 +7348,22 @@ describe('CSS selector ↔ checkout-detail emitter agreement', () => {
   })
 })
 
+describe('CSS selector ↔ question-region emitter agreement', () => {
+  it('has a CSS rule for every class token emitted by the question renderer', async () => {
+    const fs = await import('node:fs/promises')
+    const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
+    const source = await fs.readFile(new URL('../public/operator-stream.js', import.meta.url).pathname, 'utf8')
+    const emitted = [...new Set(source.match(/(?<![\w-])question-region(?:__[a-z-]+)?(?![\w-])/g) ?? [])]
+
+    expect(emitted).toEqual(expect.arrayContaining(['question-region', 'question-region__request', 'question-region__question']))
+    for (const token of emitted) {
+      expect(css, `no CSS rule for .${token}`).toMatch(new RegExp(String.raw`\.${token}(?![\w-])`))
+    }
+    expect(css).toContain('[data-role="run-questions"]')
+    expect(css).toContain('[data-role="run-questions"][hidden]')
+  })
+})
+
 // ===========================================================================
 // Checkout provenance / checkout preparation — browser trust boundary
 // ===========================================================================
@@ -8255,6 +8325,114 @@ describe('checkout fields — leak guard', () => {
       expect(JSON.stringify(rest)).not.toContain('fixture-')
     }
   })
+
+  it('a stream carrying question sentinels touches no console, storage, cache, history, location or HTML sink, and writes no sentinel to any element', async () => {
+    const consoleSpies = (['log', 'info', 'warn', 'error', 'debug', 'trace'] as const).map(method => vi.spyOn(console, method).mockImplementation(() => {}))
+    const storageCalls: string[] = []
+    const storage = ckAccessRecorder(storageCalls)
+    vi.stubGlobal('localStorage', storage)
+    vi.stubGlobal('sessionStorage', storage)
+    const idbCalls: string[] = []
+    vi.stubGlobal('indexedDB', ckAccessRecorder(idbCalls))
+    const cacheCalls: string[] = []
+    vi.stubGlobal('caches', ckAccessRecorder(cacheCalls))
+    const historyCalls: string[] = []
+    vi.stubGlobal('history', ckAccessRecorder(historyCalls))
+    const locationWrites: string[] = []
+    vi.stubGlobal('location', ckAccessRecorder(locationWrites))
+
+    const writes: string[] = []
+    vi.stubGlobal('document', {
+      createElement: () => ckRecordingElement(writes),
+      createTextNode: (text: string) => {
+        const node = ckRecordingElement(writes)
+        node.textContent = text
+        return node
+      },
+    })
+
+    const open = qOpen('req-q-sentinel', [
+      qQuestion({
+        header: 'fixture-q-header',
+        text: 'fixture-q-text <img src=x onerror=alert(1)> [link](https://example.invalid)',
+        options: [{label: 'fixture-q-label', description: 'fixture-q-description'}],
+      }),
+    ])
+    // Three rejected frames, each carrying a sentinel: over-bound, extra key, truncated JSON.
+    const overBound = qOpen('req-q-bad', [qQuestion({header: `fixture-q-reject-${'x'.repeat(QUESTION_HEADER_MAX_LENGTH)}`})])
+    const extraKey = {...qOpen('req-q-extra'), 'fixture-q-extra-key': 'fixture-q-extra-value'}
+    const encoder = new TextEncoder()
+    const body = [
+      `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n`,
+      `event: status\ndata: ${JSON.stringify(ckStatusPayload({runId: Q_RUN}))}\n\n`,
+      qSse(open),
+      qSse(overBound),
+      qSse(extraKey),
+      'event: question\ndata: {"fixture-q-truncated\n\n',
+    ].join('')
+    let read = 0
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: {getReader: () => ({read: async () => (read++ === 0 ? {done: false, value: encoder.encode(body)} : new Promise(() => {}))})},
+    }))
+
+    const handle = initOperatorStream({
+      runId: Q_RUN,
+      statusEl: ckRecordingElement(writes) as never,
+      noticeEl: ckRecordingElement(writes) as never,
+      reasonEl: ckRecordingElement(writes) as never,
+      endpointBase: '/operator',
+    })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    handle.close()
+
+    for (const spy of consoleSpies) expect(spy).not.toHaveBeenCalled()
+    expect(storageCalls).toEqual([])
+    expect(idbCalls).toEqual([])
+    expect(cacheCalls).toEqual([])
+    expect(historyCalls).toEqual([])
+    expect(locationWrites).toEqual([])
+    // The valid question reached the reducer: the derived status label is painted.
+    expect(writes.join('\n')).toContain('Waiting for answer')
+    // No question text, accepted or rejected, reaches a text node, attribute, class, dataset or style.
+    expect(writes.join('\n')).not.toContain('fixture-q-')
+    expect(writes.join('\n')).not.toContain('onerror')
+    expect(writes.some(write => /^(?:innerHTML|outerHTML)=/.test(write))).toBe(false)
+    // The page store holds ids and drafts only; the stream never writes question text into it.
+    const store = getQuestionPageStore(Q_RUN)
+    expect(JSON.stringify({tombstones: [...store.tombstones], drafts: [...store.drafts]})).not.toContain('fixture-q-')
+  })
+
+  it('the browser question parser rejects bad frames with a fixed error and no log call carrying a sentinel', () => {
+    const consoleSpies = (['log', 'info', 'warn', 'error', 'debug', 'trace'] as const).map(method => vi.spyOn(console, method).mockImplementation(() => {}))
+    const rejected = [
+      qOpen('req-q-bad', [qQuestion({header: `fixture-q-reject-${'x'.repeat(QUESTION_HEADER_MAX_LENGTH)}`})]),
+      {...qOpen('req-q-extra'), 'fixture-q-extra-key': 'fixture-q-extra-value'},
+      qOpen('req-q-multiple', [qQuestion({text: 'fixture-q-reject', multiple: 'fixture-q-reject'})]),
+      'fixture-q-reject-not-json',
+    ]
+    for (const payload of rejected) {
+      const result = parseSseFrame(qSse(payload))
+      expect(result).not.toBeNull()
+      expect(result?.success).toBe(false)
+      expect(JSON.stringify(result)).not.toContain('fixture-q-')
+    }
+    for (const spy of consoleSpies) expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('question sentinels live only in the open-question entries of in-memory run state', () => {
+    resetQuestionPageStore()
+    const sentinel = qOpen('req-q-sentinel', [qQuestion({header: 'fixture-q-header', text: 'fixture-q-text'})])
+    const state = qFrameApply(qStatus(qLive(), 'running'), sentinel)
+    const entry = qEntry(state) as unknown as Record<string, unknown>
+    const {questionOpen, ...rest} = entry
+    expect(JSON.stringify([...(questionOpen as Map<string, unknown>).values()])).toContain('fixture-q-header')
+    expect(JSON.stringify({...rest, questionClaimedExempt: [...(rest.questionClaimedExempt as Set<string>)]})).not.toContain('fixture-q-')
+    expect(JSON.stringify(toSafeRunView(qEntry(state)))).not.toContain('fixture-q-')
+    expect(Object.keys(toSafeRunView(qEntry(state))).toSorted()).toEqual(['phase', 'runId', 'stale', 'startedAt', 'status'])
+  })
 })
 
 /**
@@ -8500,5 +8678,2739 @@ describe('checkout rendering — labelled safe detail region', () => {
     })
     const {regionText} = await renderCheckoutStatuses([payload])
     expect(regionText).not.toContain('in progress')
+  })
+})
+
+// ===========================================================================
+// Agent questions — browser parser, run-entry state, page store, effective status
+// ===========================================================================
+
+function qQuestion(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    header: 'Pick one',
+    text: 'Which option?',
+    options: [{label: 'alpha', description: 'The first option'}],
+    multiple: false,
+    custom: true,
+    ...overrides,
+  }
+}
+
+function qOpen(requestID = 'req-q-1', questions: unknown[] = [qQuestion()], runId = Q_RUN): Record<string, unknown> {
+  return {runId, requestID, settled: false, questions}
+}
+
+function qSettle(requestID = 'req-q-1', runId = Q_RUN): Record<string, unknown> {
+  return {runId, requestID, settled: true}
+}
+
+/** A `question` SSE record. A string payload is used as the raw data line. */
+function qSse(payload: unknown): string {
+  return `event: question\ndata: ${typeof payload === 'string' ? payload : JSON.stringify(payload)}\n\n`
+}
+
+function qFakeText(element: FakeElement): string {
+  return element.textContent + element.children.map(qFakeText).join('')
+}
+
+function qFakeFindAll(element: FakeElement, predicate: (node: FakeElement) => boolean): FakeElement[] {
+  return [
+    ...(predicate(element) ? [element] : []),
+    ...element.children.flatMap(child => qFakeFindAll(child, predicate)),
+  ]
+}
+
+function qRequired<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error('expected a rendered question control')
+  return value
+}
+
+async function renderQuestionFrames(
+  requests: Record<string, unknown>[],
+  decision: (requestId: string, value: QuestionDecision) => Promise<QuestionDecisionOutcome> = async () => ({kind: 'decided', state: 'failed_to_settle'}),
+  list: () => Promise<QuestionListResult> = async () => new Promise<never>(() => {}),
+) {
+  const region = makeFakeEl('section')
+  region.hidden = true
+  const calls: {requestId: string; decision: QuestionDecision}[] = []
+  vi.stubGlobal('document', {
+    createElement: (tagName: string) => makeFakeEl(tagName),
+    createTextNode: (text: string) => {
+      const node = makeFakeEl('#text')
+      node.textContent = text
+      return node
+    },
+  })
+  const body = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n${requests.map(qSse).join('')}`
+  let read = 0
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    status: 200,
+    headers: {get: () => 'text/event-stream'},
+    body: {getReader: () => ({read: async () => read++ === 0
+      ? {done: false, value: new TextEncoder().encode(body)}
+      : new Promise(() => {})})},
+  }))
+  const handle = initOperatorStream({
+    runId: Q_RUN,
+    statusEl: makeFakeEl('span'),
+    noticeEl: makeFakeEl('p'),
+    questionsEl: region as never,
+    questionClient: {
+      listRunQuestions: list,
+      decideRunQuestion: async (_runId, requestId, value) => {
+        calls.push({requestId, decision: value})
+        return decision(requestId, value)
+      },
+    },
+  })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  return {region, calls, handle}
+}
+
+describe('question region — answer controls and decision bodies', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    resetQuestionPageStore()
+  })
+
+  it('renders request cards and question groups in arrival order with radio and checkbox controls', async () => {
+    const {region, handle} = await renderQuestionFrames([
+      qOpen('req-first', [qQuestion({header: 'First question'})]),
+      qOpen('req-second', [qQuestion({header: 'Second question', multiple: true})]),
+    ])
+    const cards = region.children.filter(child => child.className.includes('question-region__request'))
+    const legends = qFakeFindAll(region, node => node.tagName === 'legend').map(node => node.textContent)
+    const inputs = qFakeFindAll(region, node => node.tagName === 'input')
+
+    expect(region.hidden).toBe(false)
+    expect(cards).toHaveLength(2)
+    expect(region.children.at(-1)?.className).toBe('question-region__announcer')
+    expect(legends).toEqual(['First question', 'Second question'])
+    expect(inputs.map(input => input.type)).toEqual(['radio', 'checkbox'])
+    expect(inputs.every(input => !input.checked)).toBe(true)
+    handle.close()
+  })
+
+  it('keeps the question region hidden when no open requests or notes exist', async () => {
+    const {region, handle} = await renderQuestionFrames([])
+    expect(region.hidden).toBe(true)
+    handle.close()
+  })
+
+  it('submits selected option indices and trimmed custom text in question order', async () => {
+    const {region, calls, handle} = await renderQuestionFrames([
+      qOpen('req-answer', [
+        qQuestion({options: [{label: 'A', description: ''}, {label: 'B', description: ''}], custom: false}),
+        qQuestion({multiple: true, options: [{label: 'C', description: ''}, {label: 'D', description: ''}]}),
+      ]),
+    ])
+    const inputs = qFakeFindAll(region, node => node.tagName === 'input')
+    qRequired(inputs[1]).checked = true
+    qRequired(inputs[1]).dispatchEvent({type: 'change'})
+    qRequired(inputs[2]).checked = true
+    qRequired(inputs[2]).dispatchEvent({type: 'change'})
+    qRequired(inputs[3]).checked = true
+    qRequired(inputs[3]).dispatchEvent({type: 'change'})
+    const textarea = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    textarea.value = '  write a note  '
+    textarea.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+
+    expect(calls[0]).toEqual({
+      requestId: 'req-answer',
+      decision: {decision: 'answer', answers: [{options: [1]}, {options: [0, 1], text: 'write a note'}]},
+    })
+    handle.close()
+  })
+
+  it('keeps Submit disabled until every option-only question has an answer', async () => {
+    const {region, calls, handle} = await renderQuestionFrames([
+      qOpen('req-gate', [
+        qQuestion({options: [{label: 'A', description: ''}, {label: 'B', description: ''}], custom: false}),
+        qQuestion({options: [{label: 'C', description: ''}, {label: 'D', description: ''}], custom: false}),
+      ]),
+    ])
+    const inputs = qFakeFindAll(region, node => node.tagName === 'input')
+    const submit = qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0])
+    expect(submit.disabled).toBe(true)
+
+    qRequired(inputs[0]).checked = true
+    qRequired(inputs[0]).dispatchEvent({type: 'change'})
+    expect(submit.disabled).toBe(true)
+    submit.dispatchEvent({type: 'click'})
+    expect(calls).toHaveLength(0)
+
+    qRequired(inputs[2]).checked = true
+    qRequired(inputs[2]).dispatchEvent({type: 'change'})
+    expect(submit.disabled).toBe(false)
+    submit.dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+    expect(calls[0]?.decision).toEqual({decision: 'answer', answers: [{options: [0]}, {options: [0]}]})
+    handle.close()
+  })
+
+  it('blocks a single-choice answer with both values while retaining both values', async () => {
+    const {region, handle} = await renderQuestionFrames([qOpen('req-both', [qQuestion()])])
+    const radio = qRequired(qFakeFindAll(region, node => node.tagName === 'input')[0])
+    const textarea = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    radio.checked = true
+    radio.dispatchEvent({type: 'change'})
+    textarea.value = 'custom value'
+    textarea.dispatchEvent({type: 'input'})
+
+    expect(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]?.disabled).toBe(true)
+    expect(qFakeText(region)).toContain('Choose an option or type an answer, not both.')
+    expect(radio.checked).toBe(true)
+    expect(textarea.value).toBe('custom value')
+    handle.close()
+  })
+
+  it('sends an empty answer object for unanswerable questions and an empty answers array for zero questions', async () => {
+    const {region, calls, handle} = await renderQuestionFrames([
+      qOpen('req-unanswerable', [qQuestion({options: [], custom: false})]),
+      qOpen('req-empty', []),
+    ])
+    const submits = qFakeFindAll(region, node => node.className === 'question-region__submit')
+    expect(submits.map(button => button.disabled)).toEqual([false, false])
+    qRequired(submits[0]).dispatchEvent({type: 'click'})
+    qRequired(submits[1]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(calls).toHaveLength(2))
+
+    expect(calls.map(call => call.decision)).toEqual([
+      {decision: 'answer', answers: [{}]},
+      {decision: 'answer', answers: []},
+    ])
+    handle.close()
+  })
+
+  it('treats whitespace as unanswered, enforces the UTF-16 limit, and trims on submit', async () => {
+    const {region, calls, handle} = await renderQuestionFrames([qOpen('req-text-limit', [qQuestion({options: [], custom: true})])])
+    const textarea = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    const submit = qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0])
+    textarea.value = '   \t  '
+    textarea.dispatchEvent({type: 'input'})
+    expect(submit.disabled).toBe(true)
+    textarea.value = 'x'.repeat(4001)
+    textarea.dispatchEvent({type: 'input'})
+    expect(submit.disabled).toBe(true)
+    expect(qFakeText(region)).toContain('Shorten this answer to 4,000 characters or fewer.')
+    textarea.value = 'x'.repeat(4000)
+    textarea.dispatchEvent({type: 'input'})
+    expect(submit.disabled).toBe(false)
+    textarea.value = '  answer text  '
+    textarea.dispatchEvent({type: 'input'})
+    submit.dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+    expect(calls[0]?.decision).toEqual({decision: 'answer', answers: [{text: 'answer text'}]})
+    handle.close()
+  })
+
+  it('skip sends immediately and discards only that request draft', async () => {
+    const {region, calls, handle} = await renderQuestionFrames([
+      qOpen('req-skip', [qQuestion()]),
+      qOpen('req-keep', [qQuestion()]),
+    ])
+    const fields = qFakeFindAll(region, node => node.tagName === 'textarea')
+    qRequired(fields[0]).value = 'discard this'
+    qRequired(fields[0]).dispatchEvent({type: 'input'})
+    qRequired(fields[1]).value = 'keep this'
+    qRequired(fields[1]).dispatchEvent({type: 'input'})
+    const skip = qRequired(qFakeFindAll(region, node => node.className === 'question-region__skip')[0])
+    skip.dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+
+    expect(calls[0]?.decision).toEqual({decision: 'skip'})
+    expect(getQuestionPageStore(Q_RUN).drafts.has('req-skip')).toBe(false)
+    expect(getQuestionPageStore(Q_RUN).drafts.get('req-keep')).toEqual([{options: [], text: 'keep this'}])
+    expect(fields[1]?.value).toBe('keep this')
+    handle.close()
+  })
+
+  it('keeps another request editable while the first request is in flight', async () => {
+    const pending = new Promise<QuestionDecisionOutcome>(() => {})
+    const {region, calls, handle} = await renderQuestionFrames([
+      qOpen('req-flight', [qQuestion()]),
+      qOpen('req-independent', [qQuestion()]),
+    ], async () => pending)
+    const fields = qFakeFindAll(region, node => node.tagName === 'textarea')
+    qRequired(fields[0]).value = 'first'
+    qRequired(fields[0]).dispatchEvent({type: 'input'})
+    qRequired(fields[1]).value = 'second'
+    qRequired(fields[1]).dispatchEvent({type: 'input'})
+    const submits = qFakeFindAll(region, node => node.className === 'question-region__submit')
+    qRequired(submits[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+
+    const cards = region.children.filter(child => child.className.includes('question-region__request'))
+    const controlsOf = (card: FakeElement | undefined) => [
+      ...qFakeFindAll(qRequired(card), node => node.tagName === 'input' || node.tagName === 'textarea'),
+      ...qFakeFindAll(qRequired(card), node => node.className === 'question-region__skip'),
+    ]
+    expect(cards).toHaveLength(2)
+    expect(controlsOf(cards[0]).length).toBeGreaterThan(2)
+    expect(controlsOf(cards[0]).every(control => control.disabled)).toBe(true)
+    expect(controlsOf(cards[1]).every(control => !control.disabled)).toBe(true)
+    expect(submits[0]?.disabled).toBe(true)
+    expect(submits[1]?.disabled).toBe(false)
+    expect(fields[1]?.disabled).toBe(false)
+    expect(fields[1]?.value).toBe('second')
+    expect(qFakeText(region)).toContain('Sending answers…')
+    handle.close()
+  })
+
+  it('preserves inputs and shows the retryable failed-to-settle copy', async () => {
+    const {region, handle} = await renderQuestionFrames([qOpen('req-failed', [qQuestion()])])
+    const field = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    field.value = 'draft answer'
+    field.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain("Your answer wasn't recorded. Try again."))
+    expect(field.value).toBe('draft answer')
+    expect(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]?.disabled).toBe(false)
+    handle.close()
+  })
+
+  it('keeps question text and draft visible but removes controls after a masked denial', async () => {
+    const {region, handle} = await renderQuestionFrames([qOpen('req-denied', [qQuestion()])], async () => ({kind: 'cant-answer'}))
+    const field = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    field.value = 'private draft'
+    field.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain("You can't answer questions for this run."))
+
+    expect(field.value).toBe('private draft')
+    expect(qFakeFindAll(region, node => node.tagName === 'fieldset')[0]?.hidden).toBe(false)
+    expect(qFakeFindAll(region, node => node.className === 'question-region__controls')[0]?.hidden).toBe(true)
+    handle.close()
+  })
+
+  it('keeps the draft and shows the session-expired copy', async () => {
+    const {region, handle} = await renderQuestionFrames([qOpen('req-session', [qQuestion()])], async () => ({kind: 'session-expired'}))
+    const field = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    field.value = 'retry after sign-in'
+    field.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain('Your session expired. Sign in again in another tab, then try again.'))
+    expect(field.value).toBe('retry after sign-in')
+    handle.close()
+  })
+
+  it('shows claimed-elsewhere, offers Check again, and announces checking', async () => {
+    const {region, handle} = await renderQuestionFrames([qOpen('req-claimed', [qQuestion()])], async () => ({kind: 'decided', state: 'already_claimed'}))
+    const field = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    field.value = 'kept draft'
+    field.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is being answered elsewhere.'))
+    const check = qRequired(qFakeFindAll(region, node => node.className === 'question-region__check')[0])
+    expect(check.hidden).toBe(false)
+    check.dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain('Checking whether your answer was recorded…'))
+    expect(field.value).toBe('kept draft')
+    handle.close()
+  })
+
+  it('shows the check-failed copy when Check again cannot list questions', async () => {
+    const {region, handle} = await renderQuestionFrames(
+      [qOpen('req-check-failed', [qQuestion()])],
+      async () => ({kind: 'decided', state: 'already_claimed'}),
+      async () => ({success: false, error: {kind: 'network'}}),
+    )
+    const field = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    field.value = 'answer'
+    field.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is being answered elsewhere.'))
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__check')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain("Couldn't check for questions. Try again."))
+    handle.close()
+  })
+
+  it('keeps settled and unknown-outcome notes visible until the request disappears from the card', async () => {
+    const {region, handle} = await renderQuestionFrames(
+      [qOpen('req-note', [qQuestion()])],
+      async () => ({kind: 'decided', state: 'already_settled'}),
+    )
+    const field = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    field.value = 'answer'
+    field.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is no longer open.'))
+    expect(region.hidden).toBe(false)
+    expect(qFakeFindAll(region, node => node.className === 'question-region__controls')[0]?.getAttribute('aria-disabled')).toBe('true')
+    handle.close()
+  })
+
+  it('shows the may-have-been-recorded note after an unknown outcome is absent from the list', async () => {
+    const {region, handle} = await renderQuestionFrames(
+      [qOpen('req-gone', [qQuestion()])],
+      async () => ({kind: 'unknown'}),
+      async () => ({success: true, data: {requests: [], invalidBody: false, partial: false}}),
+    )
+    const field = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    field.value = 'maybe sent'
+    field.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is no longer open. Your answer may have been recorded.'))
+    expect(region.hidden).toBe(false)
+    handle.close()
+  })
+
+  it('a request whose note is "gone" and that a later list shows open gets a real question card with its draft', async () => {
+    let listCalls = 0
+    const listed = (...ids: string[]): QuestionListResult => ({
+      success: true,
+      data: {requests: ids.map(requestID => ({requestID, questions: [qQuestion()] as never})), invalidBody: false, partial: false},
+    })
+    const {region, handle} = await renderQuestionFrames(
+      [qOpen('req-back', [qQuestion()])],
+      async () => ({kind: 'unknown'}),
+      async () => {
+        listCalls += 1
+        return listCalls === 3 ? listed('req-back') : listed()
+      },
+    )
+    const field = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    field.value = 'draft that must survive'
+    field.dispatchEvent({type: 'input'})
+    qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0]).dispatchEvent({type: 'click'})
+    await vi.waitFor(() => expect(qFakeText(region)).toContain('Your answer may have been recorded.'))
+    expect(qFakeFindAll(region, node => node.tagName === 'fieldset')).toHaveLength(0)
+
+    await handle.checkQuestions()
+    expect(listCalls).toBe(3)
+    const cards = region.children.filter(child => child.className.includes('question-region__request'))
+    expect(cards).toHaveLength(1)
+    expect(qFakeFindAll(region, node => node.tagName === 'fieldset').length).toBeGreaterThan(0)
+    expect(qFakeFindAll(region, node => node.className === 'question-region__submit')).toHaveLength(1)
+    expect(qFakeText(region)).not.toContain('Your answer may have been recorded.')
+    const restored = qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+    expect(restored.value).toBe('draft that must survive')
+    handle.close()
+  })
+
+  describe('claimed elsewhere keeps the card answerable', () => {
+    const submitOf = (region: FakeElement) => qRequired(qFakeFindAll(region, node => node.className === 'question-region__submit')[0])
+    const skipOf = (region: FakeElement) => qRequired(qFakeFindAll(region, node => node.className === 'question-region__skip')[0])
+    const checkOf = (region: FakeElement) => qRequired(qFakeFindAll(region, node => node.className === 'question-region__check')[0])
+    const fieldOf = (region: FakeElement) => qRequired(qFakeFindAll(region, node => node.tagName === 'textarea')[0])
+
+    const type = (region: FakeElement, text: string) => {
+      fieldOf(region).value = text
+      fieldOf(region).dispatchEvent({type: 'input'})
+    }
+
+    it('Submit and Skip stay enabled next to the note and Check again, and the draft is kept', async () => {
+      const {region, calls, handle} = await renderQuestionFrames(
+        [qOpen('req-claimed', [qQuestion()])],
+        async () => ({kind: 'decided', state: 'already_claimed'}),
+      )
+      type(region, 'kept draft')
+      submitOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is being answered elsewhere.'))
+      expect(checkOf(region).hidden).toBe(false)
+      expect(submitOf(region).disabled).toBe(false)
+      expect(skipOf(region).disabled).toBe(false)
+      expect(fieldOf(region).disabled).toBe(false)
+      expect(fieldOf(region).value).toBe('kept draft')
+
+      // Submitting again from claimed-elsewhere sends again; already_claimed keeps the note and the draft.
+      submitOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(calls).toHaveLength(2))
+      await vi.waitFor(() => expect(submitOf(region).disabled).toBe(false))
+      expect(qFakeText(region)).toContain('This question is being answered elsewhere.')
+      expect(checkOf(region).hidden).toBe(false)
+      expect(fieldOf(region).value).toBe('kept draft')
+      handle.close()
+    })
+
+    it('Skip from claimed elsewhere sends {decision:"skip"}', async () => {
+      const {region, calls, handle} = await renderQuestionFrames(
+        [qOpen('req-claimed', [qQuestion()])],
+        async () => ({kind: 'decided', state: 'already_claimed'}),
+      )
+      type(region, 'answer')
+      submitOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is being answered elsewhere.'))
+      skipOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(calls).toHaveLength(2))
+      expect(calls[1]).toEqual({requestId: 'req-claimed', decision: {decision: 'skip'}})
+      handle.close()
+    })
+
+    it('an already_settled answer from claimed elsewhere clears the card to the settled note', async () => {
+      let call = 0
+      const {region, handle} = await renderQuestionFrames(
+        [qOpen('req-claimed', [qQuestion()])],
+        async () => {
+          call += 1
+          return {kind: 'decided', state: call === 1 ? 'already_claimed' : 'already_settled'}
+        },
+      )
+      type(region, 'answer')
+      submitOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is being answered elsewhere.'))
+      submitOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is no longer open.'))
+      expect(qFakeText(region)).not.toContain('being answered elsewhere')
+      expect(qFakeFindAll(region, node => node.tagName === 'fieldset').every(node => node.hidden)).toBe(true)
+      handle.close()
+    })
+
+    it('in flight and checking still block Submit and Skip', async () => {
+      const pending: ((outcome: QuestionDecisionOutcome) => void)[] = []
+      const relist = u4Deferred<QuestionListResult>()
+      let phase: 'claim' | 'resend' = 'claim'
+      const {region, calls, handle} = await renderQuestionFrames(
+        [qOpen('req-claimed', [qQuestion()])],
+        async () => {
+          if (phase === 'claim') {
+            phase = 'resend'
+            return {kind: 'decided', state: 'already_claimed'}
+          }
+          return new Promise<QuestionDecisionOutcome>(resolve => pending.push(resolve))
+        },
+        async () => relist.promise,
+      )
+      type(region, 'answer')
+      submitOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is being answered elsewhere.'))
+
+      // Checking: the list is out.
+      checkOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(qFakeText(region)).toContain('Checking whether your answer was recorded'))
+      expect(submitOf(region).disabled).toBe(true)
+      expect(skipOf(region).disabled).toBe(true)
+      submitOf(region).dispatchEvent({type: 'click'})
+      skipOf(region).dispatchEvent({type: 'click'})
+      expect(calls).toHaveLength(1)
+      relist.resolve({success: true, data: {requests: [], invalidBody: false, partial: false}})
+      await vi.waitFor(() => expect(qFakeText(region)).toContain('This question is being answered elsewhere.'))
+
+      // In flight: a resend is outstanding.
+      submitOf(region).dispatchEvent({type: 'click'})
+      await vi.waitFor(() => expect(calls).toHaveLength(2))
+      expect(qFakeText(region)).toContain('Sending answers')
+      expect(submitOf(region).disabled).toBe(true)
+      expect(skipOf(region).disabled).toBe(true)
+      submitOf(region).dispatchEvent({type: 'click'})
+      skipOf(region).dispatchEvent({type: 'click'})
+      expect(calls).toHaveLength(2)
+      pending[0]?.({kind: 'decided', state: 'already_claimed'})
+      handle.close()
+    })
+  })
+})
+
+function qBrowser(payload: unknown) {
+  const result = parseSseFrame(qSse(payload))
+  if (result === null || !result.success || result.frame.type !== 'question') return undefined
+  return result.frame.data
+}
+
+function qServer(payload: unknown) {
+  const result = parseSseChunk(qSse(payload))[0]
+  if (result === undefined || !result.success || result.frame.type !== 'question') return undefined
+  return result.frame.data
+}
+
+function qLive(): StreamState {
+  return ckLive()
+}
+
+function qFrameApply(state: StreamState, payload: unknown): StreamState {
+  const data = qBrowser(payload)
+  if (data === undefined) throw new Error('fixture question frame did not parse')
+  return nextStreamState(state, {type: 'question', data})
+}
+
+function qStatus(state: StreamState, status: string, runId = Q_RUN): StreamState {
+  const terminal = ['succeeded', 'failed', 'cancelled'].includes(status)
+  return ckApply(state, ckStatusPayload({runId, status, phase: terminal ? 'COMPLETED' : 'EXECUTING'}))
+}
+
+function qEntry(state: StreamState, runId = Q_RUN): RunEntry {
+  const entry = state.runs[runId]
+  if (entry === undefined) throw new Error(`expected run ${runId} in state`)
+  return entry
+}
+
+function qIds(state: StreamState, runId = Q_RUN): string[] {
+  return getOpenQuestions(state.runs[runId]).map(request => request.requestID)
+}
+
+function qWithExempt(state: StreamState, ids: string[]): StreamState {
+  return {...state, runs: {...state.runs, [Q_RUN]: {...qEntry(state), questionClaimedExempt: new Set(ids)}}}
+}
+
+function qReconcile(
+  state: StreamState,
+  listed: string[],
+  options: {snapshot?: string[]; invalidBody?: boolean; partial?: boolean} = {},
+): StreamState {
+  const event: QuestionReconcileEvent = {
+    type: 'question-reconcile',
+    runId: Q_RUN,
+    snapshotIds: options.snapshot ?? qIds(state),
+    requests: listed.map(requestID => ({requestID, questions: [qQuestion()] as never})),
+    invalidBody: options.invalidBody ?? false,
+    partial: options.partial ?? false,
+  }
+  return nextStreamState(state, event)
+}
+
+describe('question frames — browser parser agrees with the server parser', () => {
+  const longText = (length: number) => 'x'.repeat(length)
+  const parityCases: [string, unknown, boolean][] = [
+    ['open frame with two questions', qOpen('req-q-1', [qQuestion(), qQuestion({header: 'Second', multiple: true, custom: false})]), true],
+    ['settle frame', qSettle(), true],
+    ['request with zero questions', qOpen('req-q-1', []), true],
+    ['zero options, custom false, multiple true', qOpen('req-q-1', [qQuestion({options: [], custom: false, multiple: true})]), true],
+    ['tab, newline and carriage return in text', qOpen('req-q-1', [qQuestion({text: 'a\tb\nc\rd'})]), true],
+    ['a bidi override in text', qOpen('req-q-1', [qQuestion({text: 'a\u202Eb'})]), true],
+    ['header at its bound', qOpen('req-q-1', [qQuestion({header: longText(QUESTION_HEADER_MAX_LENGTH)})]), true],
+    ['header over its bound', qOpen('req-q-1', [qQuestion({header: longText(QUESTION_HEADER_MAX_LENGTH + 1)})]), false],
+    ['text at its bound', qOpen('req-q-1', [qQuestion({text: longText(QUESTION_TEXT_MAX_LENGTH)})]), true],
+    ['text over its bound', qOpen('req-q-1', [qQuestion({text: longText(QUESTION_TEXT_MAX_LENGTH + 1)})]), false],
+    ['text over its bound only before control removal', qOpen('req-q-1', [qQuestion({text: `${longText(QUESTION_TEXT_MAX_LENGTH)}\u0007\u202E`})]), true],
+    ['text over its bound after tab becomes one space', qOpen('req-q-1', [qQuestion({text: `${longText(QUESTION_TEXT_MAX_LENGTH)}\t`})]), false],
+    ['label at its bound', qOpen('req-q-1', [qQuestion({options: [{label: longText(QUESTION_OPTION_LABEL_MAX_LENGTH), description: ''}]})]), true],
+    ['label over its bound', qOpen('req-q-1', [qQuestion({options: [{label: longText(QUESTION_OPTION_LABEL_MAX_LENGTH + 1), description: ''}]})]), false],
+    ['description at its bound', qOpen('req-q-1', [qQuestion({options: [{label: 'a', description: longText(QUESTION_OPTION_DESCRIPTION_MAX_LENGTH)}]})]), true],
+    ['description over its bound', qOpen('req-q-1', [qQuestion({options: [{label: 'a', description: longText(QUESTION_OPTION_DESCRIPTION_MAX_LENGTH + 1)}]})]), false],
+    ['questions at the cap', qOpen('req-q-1', Array.from({length: MAX_QUESTIONS_PER_REQUEST}, () => qQuestion())), true],
+    ['questions over the cap', qOpen('req-q-1', Array.from({length: MAX_QUESTIONS_PER_REQUEST + 1}, () => qQuestion())), false],
+    ['options at the cap', qOpen('req-q-1', [qQuestion({options: Array.from({length: MAX_OPTIONS_PER_QUESTION}, (_, index) => ({label: `o${index}`, description: ''}))})]), true],
+    ['options over the cap', qOpen('req-q-1', [qQuestion({options: Array.from({length: MAX_OPTIONS_PER_QUESTION + 1}, (_, index) => ({label: `o${index}`, description: ''}))})]), false],
+    ['non-boolean multiple', qOpen('req-q-1', [qQuestion({multiple: 'yes'})]), false],
+    ['non-boolean custom', qOpen('req-q-1', [qQuestion({custom: 1})]), false],
+    ['missing custom', qOpen('req-q-1', [(({custom: _custom, ...rest}) => rest)(qQuestion() as {custom: unknown})]), false],
+    ['extra key on the frame', {...qOpen(), extra: 1}, false],
+    ['extra key on a question', qOpen('req-q-1', [qQuestion({extra: 1})]), false],
+    ['extra key on an option', qOpen('req-q-1', [qQuestion({options: [{label: 'a', description: 'b', extra: 1}]})]), false],
+    ['extra key on a settle frame', {...qSettle(), questions: []}, false],
+    ['open frame without questions', {runId: Q_RUN, requestID: 'req-q-1', settled: false}, false],
+    ['non-array questions', qOpen('req-q-1', 'nope' as never), false],
+    ['non-array options', qOpen('req-q-1', [qQuestion({options: 'nope'})]), false],
+    ['non-string header', qOpen('req-q-1', [qQuestion({header: 7})]), false],
+    ['non-string label', qOpen('req-q-1', [qQuestion({options: [{label: 7, description: ''}]})]), false],
+    ['non-object question', qOpen('req-q-1', ['nope']), false],
+    ['array as a question', qOpen('req-q-1', [[]]), false],
+    ['settled as a string', {...qSettle(), settled: 'true'}, false],
+    ['missing runId', {requestID: 'req-q-1', settled: true}, false],
+    ['empty requestID', qSettle(''), false],
+    ['non-string requestID', {...qSettle(), requestID: 5}, false],
+    ['an own __proto__ key on the frame', '{"runId":"run-q-001","requestID":"req-q-1","settled":true,"__proto__":{"x":1}}', false],
+    ['an own __proto__ key on a question', `{"runId":"run-q-001","requestID":"req-q-1","settled":false,"questions":[{"header":"h","text":"t","options":[],"multiple":false,"custom":true,"__proto__":{"x":1}}]}`, false],
+  ]
+
+  for (const [name, payload, accepted] of parityCases) {
+    it(`${name} → ${accepted ? 'accepted' : 'rejected'} by both, and equal when accepted`, () => {
+      const server = qServer(payload)
+      const browser = qBrowser(payload)
+      expect(server !== undefined).toBe(accepted)
+      expect(browser !== undefined).toBe(accepted)
+      if (accepted) expect(browser).toEqual(server)
+    })
+  }
+
+  it('applies the same text rule to every control, bidi and whitespace code unit', () => {
+    const removed = new Set<number>([
+      ...Array.from({length: 0x20}, (_, code) => code),
+      ...Array.from({length: 0x21}, (_, offset) => 0x7F + offset),
+      0x061C, 0x200E, 0x200F,
+      ...Array.from({length: 5}, (_, offset) => 0x202A + offset),
+      ...Array.from({length: 4}, (_, offset) => 0x2066 + offset),
+    ])
+    for (const code of [...removed, 0x20, 0x41, 0xA0, 0x2028, 0x200B]) {
+      const char = String.fromCharCode(code)
+      const payload = qOpen('req-q-1', [qQuestion({text: `a${char}b`, header: `a${char}b`})])
+      const expected = [9, 10, 13].includes(code) ? 'a b' : removed.has(code) ? 'ab' : `a${char}b`
+      const browser = qBrowser(payload)
+      const server = qServer(payload)
+      expect(browser, `code unit ${code}`).toBeDefined()
+      expect(browser, `code unit ${code}`).toEqual(server)
+      expect(browser !== undefined && !browser.settled ? browser.questions[0]?.text : undefined, `code unit ${code}`).toBe(expected)
+    }
+  })
+
+  it('rebuilds a closed object: the parsed result shares nothing with the input', () => {
+    const input = qOpen('req-q-1', [qQuestion()])
+    const browser = qBrowser(input)
+    expect(browser).toEqual({runId: Q_RUN, requestID: 'req-q-1', settled: false, questions: [qQuestion()]})
+    expect(Object.getPrototypeOf(browser)).toBe(Object.prototype)
+  })
+
+  it('rejects with a fixed error that never echoes the input', () => {
+    const result = parseSseFrame(qSse(qOpen('req-q-1', [qQuestion({header: `fixture-q-echo-${longText(QUESTION_HEADER_MAX_LENGTH)}`})])))
+    expect(result?.success).toBe(false)
+    expect(JSON.stringify(result)).not.toContain('fixture-q-echo')
+    const again = parseSseFrame(qSse(qOpen('req-q-1', [qQuestion({multiple: 'x'})])))
+    expect(again).toEqual(result)
+  })
+})
+
+describe('nextStreamState — question frames', () => {
+  beforeEach(() => resetQuestionPageStore())
+  afterEach(() => resetQuestionPageStore())
+
+  it('open then settle: the question is present, then removed and tombstoned for the page', () => {
+    let state = qFrameApply(qLive(), qOpen('req-q-1'))
+    expect(qIds(state)).toEqual(['req-q-1'])
+    expect(hasOpenQuestions(qEntry(state))).toBe(true)
+    expect(getOpenQuestions(qEntry(state))[0]?.questions).toEqual([qQuestion()])
+    state = qFrameApply(state, qSettle('req-q-1'))
+    expect(qIds(state)).toEqual([])
+    expect(hasOpenQuestions(qEntry(state))).toBe(false)
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('req-q-1')).toBe(true)
+  })
+
+  it('settle before open tombstones the request, so a later open is ignored', () => {
+    let state = qFrameApply(qLive(), qSettle('req-q-1'))
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('req-q-1')).toBe(true)
+    state = qFrameApply(state, qOpen('req-q-1'))
+    expect(qIds(state)).toEqual([])
+  })
+
+  it('a settle frame removes the request draft and the claimed exemption', () => {
+    let state = qWithExempt(qFrameApply(qLive(), qOpen('req-q-1')), ['req-q-1'])
+    getQuestionPageStore(Q_RUN).drafts.set('req-q-1', {fixture: 'draft'})
+    state = qFrameApply(state, qSettle('req-q-1'))
+    expect(getQuestionPageStore(Q_RUN).drafts.has('req-q-1')).toBe(false)
+    expect(qEntry(state).questionClaimedExempt?.has('req-q-1')).toBe(false)
+  })
+
+  it('a duplicate open keeps one entry and the existing draft', () => {
+    let state = qFrameApply(qLive(), qOpen('req-q-1'))
+    const draft = {fixture: 'draft'}
+    getQuestionPageStore(Q_RUN).drafts.set('req-q-1', draft)
+    state = qFrameApply(state, qOpen('req-q-1', [qQuestion({text: 'replayed'})]))
+    expect(qIds(state)).toEqual(['req-q-1'])
+    expect(getQuestionPageStore(Q_RUN).drafts.get('req-q-1')).toBe(draft)
+  })
+
+  it('keeps requests in arrival order, including integer-like request ids', () => {
+    let state = qLive()
+    for (const id of ['10', '2', 'req-b', '1']) state = qFrameApply(state, qOpen(id))
+    expect(qIds(state)).toEqual(['10', '2', 'req-b', '1'])
+  })
+
+  it('rejects the 51st open on a run and keeps the first 50', () => {
+    expect(MAX_OPEN_QUESTIONS).toBe(50)
+    let state = qLive()
+    for (let index = 0; index < MAX_OPEN_QUESTIONS; index++) state = qFrameApply(state, qOpen(`req-q-${index}`))
+    const full = state
+    state = qFrameApply(state, qOpen('req-q-overflow'))
+    expect(state).toBe(full)
+    expect(qIds(state)).toHaveLength(MAX_OPEN_QUESTIONS)
+    expect(qIds(state)).not.toContain('req-q-overflow')
+    expect(qIds(state)[0]).toBe('req-q-0')
+    // A duplicate of an existing request at the cap is still a no-op, and a settle still frees a slot.
+    expect(qFrameApply(state, qOpen('req-q-0'))).toBe(state)
+    state = qFrameApply(qFrameApply(state, qSettle('req-q-0')), qOpen('req-q-overflow'))
+    expect(qIds(state)).toHaveLength(MAX_OPEN_QUESTIONS)
+    expect(qIds(state)).toContain('req-q-overflow')
+  })
+
+  it('ignores question frames before ready', () => {
+    expect(qFrameApply(INITIAL_STATE, qOpen('req-q-1')).runs[Q_RUN]).toBeUndefined()
+    expect(getQuestionPageStore(Q_RUN).tombstones.size).toBe(0)
+    qFrameApply(INITIAL_STATE, qSettle('req-q-1'))
+    expect(getQuestionPageStore(Q_RUN).tombstones.size).toBe(0)
+  })
+
+  it('ignores question frames after a terminal status, including settles', () => {
+    let state = qStatus(qLive(), 'running')
+    state = qStatus(state, 'succeeded')
+    const terminal = state
+    expect(qFrameApply(state, qOpen('req-q-1'))).toBe(terminal)
+    expect(qFrameApply(state, qSettle('req-q-2'))).toBe(terminal)
+    expect(getQuestionPageStore(Q_RUN).tombstones.size).toBe(0)
+  })
+
+  it('a terminal status clears open questions and their drafts without tombstoning them', () => {
+    let state = qStatus(qLive(), 'running')
+    state = qFrameApply(qFrameApply(state, qOpen('req-q-1')), qOpen('req-q-2'))
+    state = qWithExempt(state, ['req-q-2'])
+    const store = getQuestionPageStore(Q_RUN)
+    store.drafts.set('req-q-1', {fixture: 'draft-1'})
+    store.drafts.set('req-q-2', {fixture: 'draft-2'})
+    store.tombstones.add('req-q-old')
+    state = qStatus(state, 'failed')
+    expect(qIds(state)).toEqual([])
+    expect(qEntry(state).questionClaimedExempt?.size).toBe(0)
+    expect(store.drafts.size).toBe(0)
+    expect([...store.tombstones]).toEqual(['req-q-old'])
+    expect(getEffectiveStatus(qEntry(state))).toBe('failed')
+  })
+
+  it('a non-terminal status keeps open questions and drafts', () => {
+    let state = qFrameApply(qStatus(qLive(), 'running'), qOpen('req-q-1'))
+    getQuestionPageStore(Q_RUN).drafts.set('req-q-1', {fixture: 'draft'})
+    state = qStatus(state, 'running')
+    expect(qIds(state)).toEqual(['req-q-1'])
+    expect(getQuestionPageStore(Q_RUN).drafts.has('req-q-1')).toBe(true)
+  })
+
+  it('keeps questions per run', () => {
+    let state = qFrameApply(qLive(), qOpen('req-q-1'))
+    state = qFrameApply(state, qOpen('req-q-2', [qQuestion()], 'run-q-002'))
+    expect(qIds(state, Q_RUN)).toEqual(['req-q-1'])
+    expect(qIds(state, 'run-q-002')).toEqual(['req-q-2'])
+    expect(getQuestionPageStore('run-q-002').tombstones.size).toBe(0)
+  })
+
+  it('a new handle for the same run sees the earlier tombstone and draft', () => {
+    // First handle: a question settles, another is drafted.
+    let first = qFrameApply(qLive(), qOpen('req-q-1'))
+    first = qFrameApply(qFrameApply(first, qOpen('req-q-2')), qSettle('req-q-1'))
+    const draft = {fixture: 'draft'}
+    getQuestionPageStore(Q_RUN).drafts.set('req-q-2', draft)
+    expect(qIds(first)).toEqual(['req-q-2'])
+    // Collapse and re-expand: a fresh state, a fresh run entry, the same page.
+    let second = qLive()
+    expect(qIds(second)).toEqual([])
+    second = qFrameApply(second, qOpen('req-q-1'))
+    expect(qIds(second)).toEqual([])
+    second = qFrameApply(second, qOpen('req-q-2'))
+    expect(qIds(second)).toEqual(['req-q-2'])
+    expect(getQuestionPageStore(Q_RUN).drafts.get('req-q-2')).toBe(draft)
+  })
+
+  it('page store accessors return one record per run and reset clears every run', () => {
+    const store = getQuestionPageStore(Q_RUN)
+    expect(getQuestionPageStore(Q_RUN)).toBe(store)
+    store.tombstones.add('req-q-1')
+    expect(getQuestionPageStore('run-q-002')).not.toBe(store)
+    resetQuestionPageStore()
+    expect(getQuestionPageStore(Q_RUN).tombstones.size).toBe(0)
+  })
+})
+
+describe('getEffectiveStatus — derived from the wire status and open questions', () => {
+  beforeEach(() => resetQuestionPageStore())
+  afterEach(() => resetQuestionPageStore())
+
+  const withQuestion = (status: string) => qFrameApply(qStatus(qLive(), status), qOpen('req-q-1'))
+
+  it('running with an open question is waiting_for_question', () => {
+    expect(getEffectiveStatus(qEntry(withQuestion('running')))).toBe('waiting_for_question')
+  })
+
+  it('never stores the derived value: the wire status stays and the next frame cannot overwrite it', () => {
+    let state = withQuestion('running')
+    expect(qEntry(state).status).toBe('running')
+    state = qStatus(state, 'running')
+    expect(getEffectiveStatus(qEntry(state))).toBe('waiting_for_question')
+    expect(qEntry(state).status).toBe('running')
+  })
+
+  it('wire waiting_for_approval wins over an open question', () => {
+    expect(getEffectiveStatus(qEntry(withQuestion('waiting_for_approval')))).toBe('waiting_for_approval')
+  })
+
+  it('queued with an open question stays queued', () => {
+    expect(getEffectiveStatus(qEntry(withQuestion('queued')))).toBe('queued')
+  })
+
+  it('blocked with an open question stays blocked', () => {
+    expect(getEffectiveStatus(qEntry(withQuestion('blocked')))).toBe('blocked')
+  })
+
+  it('terminal wins over a stale question, and the terminal frame clears the question and its draft', () => {
+    let state = withQuestion('running')
+    getQuestionPageStore(Q_RUN).drafts.set('req-q-1', {fixture: 'draft'})
+    state = qStatus(state, 'succeeded')
+    expect(getEffectiveStatus(qEntry(state))).toBe('succeeded')
+    expect(qIds(state)).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).drafts.size).toBe(0)
+    // Even an entry that still carries a question (hand-built) reports its terminal status.
+    const stale: RunEntry = {
+      ...qEntry(state),
+      status: 'succeeded',
+      terminal: true,
+      questionOpen: new Map([['req-q-1', {requestID: 'req-q-1', questions: []}]]),
+    }
+    expect(getEffectiveStatus(stale)).toBe('succeeded')
+  })
+
+  it('wire waiting_for_question with an open question stays waiting_for_question', () => {
+    expect(getEffectiveStatus(qEntry(withQuestion('waiting_for_question')))).toBe('waiting_for_question')
+  })
+
+  it('wire waiting_for_question with no open question is kept until a reconcile completes, then shows running', () => {
+    let state = qStatus(qLive(), 'waiting_for_question')
+    expect(getEffectiveStatus(qEntry(state))).toBe('waiting_for_question')
+    state = qReconcile(state, [])
+    expect(qEntry(state).questionReconcileDone).toBe(true)
+    expect(getEffectiveStatus(qEntry(state))).toBe('running')
+    expect(qEntry(state).status).toBe('waiting_for_question')
+  })
+
+  it('wire waiting_for_question settled by a frame shows running only after a reconcile', () => {
+    let state = qFrameApply(qStatus(qLive(), 'waiting_for_question'), qOpen('req-q-1'))
+    state = qFrameApply(state, qSettle('req-q-1'))
+    expect(getEffectiveStatus(qEntry(state))).toBe('waiting_for_question')
+    state = qReconcile(state, [])
+    expect(getEffectiveStatus(qEntry(state))).toBe('running')
+  })
+
+  it('running with no question is running; other statuses pass through', () => {
+    for (const status of ['queued', 'blocked', 'running', 'waiting_for_approval', 'succeeded', 'failed', 'cancelled']) {
+      expect(getEffectiveStatus(qEntry(qStatus(qLive(), status)))).toBe(status)
+    }
+  })
+
+  it('is total: an absent entry or one without question fields reports its own status', () => {
+    expect(getEffectiveStatus(undefined)).toBe('')
+    expect(getEffectiveStatus(null)).toBe('')
+    expect(getEffectiveStatus({runId: 'r', status: 'running', phase: 'EXECUTING', startedAt: '', stale: false, terminal: false})).toBe('running')
+  })
+})
+
+describe('nextStreamState — question-reconcile', () => {
+  beforeEach(() => resetQuestionPageStore())
+  afterEach(() => resetQuestionPageStore())
+
+  const withOpen = (...ids: string[]): StreamState => {
+    let state = qStatus(qLive(), 'running')
+    for (const id of ids) state = qFrameApply(state, qOpen(id))
+    return state
+  }
+
+  it('snapshot {A,B}, list {B,C}: A is removed without a tombstone, B stays, C is added', () => {
+    const state = qReconcile(withOpen('A', 'B'), ['B', 'C'])
+    expect(qIds(state)).toEqual(['B', 'C'])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(false)
+    expect(qEntry(state).questionReconcileDone).toBe(true)
+    // Removed by absence, so it can return on a later frame.
+    expect(qIds(qFrameApply(state, qOpen('A')))).toEqual(['B', 'C', 'A'])
+  })
+
+  it('keeps the draft of a request removed by absence, so a return restores it', () => {
+    getQuestionPageStore(Q_RUN).drafts.set('A', {fixture: 'draft'})
+    const state = qReconcile(withOpen('A', 'B'), ['B'])
+    expect(qIds(state)).toEqual(['B'])
+    expect(getQuestionPageStore(Q_RUN).drafts.get('A')).toEqual({fixture: 'draft'})
+  })
+
+  it('a claimed-exempt request survives a list that omits it', () => {
+    const state = qReconcile(qWithExempt(withOpen('A', 'B'), ['A']), ['B', 'C'])
+    expect(qIds(state)).toEqual(['A', 'B', 'C'])
+    expect(qEntry(state).questionClaimedExempt?.has('A')).toBe(true)
+  })
+
+  it('a list that shows a claimed-exempt request open again ends the exemption', () => {
+    const state = qReconcile(qWithExempt(withOpen('A'), ['A']), ['A'])
+    expect(qIds(state)).toEqual(['A'])
+    expect(qEntry(state).questionClaimedExempt?.has('A')).toBe(false)
+  })
+
+  it('a list at the cap of 50 is additive only', () => {
+    expect(GATEWAY_PENDING_QUESTIONS_CAP).toBe(50)
+    const listed = Array.from({length: GATEWAY_PENDING_QUESTIONS_CAP}, (_, index) => `L${index}`)
+    const state = qReconcile(withOpen('A', 'B'), listed)
+    expect(qIds(state)).toContain('A')
+    expect(qIds(state)).toContain('B')
+    expect(qIds(state)).toHaveLength(MAX_OPEN_QUESTIONS)
+    expect(qIds(state).slice(0, 2)).toEqual(['A', 'B'])
+    expect(qIds(state)).toContain('L0')
+    expect(qIds(state)).not.toContain('L48')
+  })
+
+  it('a list just under the cap still prunes', () => {
+    const listed = Array.from({length: GATEWAY_PENDING_QUESTIONS_CAP - 1}, (_, index) => `L${index}`)
+    const state = qReconcile(withOpen('A'), listed)
+    expect(qIds(state)).not.toContain('A')
+    expect(qIds(state)).toHaveLength(GATEWAY_PENDING_QUESTIONS_CAP - 1)
+  })
+
+  it('an invalid body changes nothing, not even the completed flag', () => {
+    const before = withOpen('A', 'B')
+    const after = qReconcile(before, ['C'], {invalidBody: true})
+    expect(after).toBe(before)
+    expect(qEntry(after).questionReconcileDone).toBeUndefined()
+  })
+
+  it('a list with dropped invalid entries is additive only', () => {
+    const state = qReconcile(withOpen('A', 'B'), ['B', 'C'], {partial: true})
+    expect(qIds(state)).toEqual(['A', 'B', 'C'])
+    expect(qEntry(state).questionReconcileDone).toBe(true)
+  })
+
+  it('a tombstoned request in the list stays out', () => {
+    let state = withOpen('B')
+    state = qFrameApply(state, qSettle('T'))
+    state = qReconcile(state, ['B', 'T'])
+    expect(qIds(state)).toEqual(['B'])
+  })
+
+  it('a request that opened after the pre-GET snapshot is never pruned', () => {
+    const snapshot = ['A']
+    let state = withOpen('A')
+    state = qFrameApply(state, qOpen('N'))
+    state = qReconcile(state, [], {snapshot})
+    expect(qIds(state)).toEqual(['N'])
+  })
+
+  it('an authoritative empty list prunes every snapshot request that is not claimed-exempt', () => {
+    const state = qReconcile(qWithExempt(withOpen('A', 'B'), ['B']), [])
+    expect(qIds(state)).toEqual(['B'])
+  })
+
+  it('does not exceed the open-question cap when adding', () => {
+    const listed = Array.from({length: 49}, (_, index) => `L${index}`)
+    let state = withOpen(...Array.from({length: 49}, (_, index) => `K${index}`))
+    state = qReconcile(state, [...listed, 'extra-1', 'extra-2'].slice(0, 49), {partial: true})
+    expect(qIds(state).length).toBeLessThanOrEqual(MAX_OPEN_QUESTIONS)
+  })
+
+  it('is ignored before ready and after a terminal status', () => {
+    const before = qReconcile(INITIAL_STATE, ['A'])
+    expect(before.runs[Q_RUN]).toBeUndefined()
+    const terminal = qStatus(qStatus(qLive(), 'running'), 'succeeded')
+    expect(qReconcile(terminal, ['A'])).toBe(terminal)
+  })
+
+  it('creates a run entry for a run it has not seen a status for, as approvals do', () => {
+    const state = qReconcile(qLive(), ['A'], {snapshot: []})
+    expect(qIds(state)).toEqual(['A'])
+  })
+
+  it('ignores an own __proto__ id without polluting', () => {
+    const state = qReconcile(withOpen('A'), ['__proto__', 'B'])
+    expect(qIds(state)).toContain('B')
+    expect(({} as Record<string, unknown>).requestID).toBeUndefined()
+  })
+})
+
+async function paintedStatus(records: string[]) {
+  const status = makeFakeEl('span')
+  status.classList.add = (cls: string) => {
+    status.className = `${status.className} ${cls}`.trim()
+  }
+  const body = `event: ready\ndata: {"contractVersion":"${PINNED_CONTRACT_VERSION}"}\n\n${records.join('')}`
+  let read = 0
+  vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag), createTextNode: (text: string) => {
+    const node = makeFakeEl('#text')
+    node.textContent = text
+    return node
+  }})
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    ok: true, status: 200, headers: {get: () => 'text/event-stream'},
+    body: {getReader: () => ({read: async () => read++ === 0
+      ? {done: false, value: new TextEncoder().encode(body)}
+      : new Promise(() => {})})},
+  }))
+  const handle = initOperatorStream({runId: Q_RUN, statusEl: status as never, noticeEl: makeFakeEl() as never})
+  await new Promise(resolve => setTimeout(resolve, 30))
+  handle.close()
+  return status
+}
+
+describe('question status — label, wire acceptance and styling', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('accepts waiting_for_question on a status frame', () => {
+    const result = parseSseFrame(`event: status\ndata: ${JSON.stringify(ckStatusPayload({status: 'waiting_for_question'}))}\n\n`)
+    expect(result?.success).toBe(true)
+    expect(result?.success && result.frame.type === 'status' ? result.frame.data.status : '').toBe('waiting_for_question')
+  })
+
+  const statusRecord = (status: string) => `event: status\ndata: ${JSON.stringify(ckStatusPayload({runId: Q_RUN, status}))}\n\n`
+
+  it('paints "Waiting for answer" for a wire waiting_for_question status', async () => {
+    resetQuestionPageStore()
+    const status = await paintedStatus([statusRecord('waiting_for_question')])
+    expect(status.textContent).toBe('Waiting for answer')
+    expect(status.className).toContain('status-waiting-for-question')
+  })
+
+  it('paints "Waiting for answer" for a running run with an open question, and "Running" once it settles', async () => {
+    resetQuestionPageStore()
+    const waiting = await paintedStatus([statusRecord('running'), qSse(qOpen('req-q-1'))])
+    expect(waiting.textContent).toBe('Waiting for answer')
+    expect(waiting.className).toContain('status-waiting-for-question')
+    resetQuestionPageStore()
+    const settled = await paintedStatus([statusRecord('running'), qSse(qOpen('req-q-1')), qSse(qSettle('req-q-1'))])
+    expect(settled.textContent).toBe('Running')
+    expect(settled.className).toContain('status-running')
+  })
+
+  it('keeps "Waiting for approval" over an open question', async () => {
+    resetQuestionPageStore()
+    const status = await paintedStatus([statusRecord('waiting_for_approval'), qSse(qOpen('req-q-1'))])
+    expect(status.textContent).toBe('Waiting for approval')
+  })
+
+  it('keeps "Queued" with an open question and shows the terminal label after a terminal status', async () => {
+    resetQuestionPageStore()
+    expect((await paintedStatus([statusRecord('queued'), qSse(qOpen('req-q-1'))])).textContent).toBe('Queued')
+    resetQuestionPageStore()
+    expect((await paintedStatus([statusRecord('running'), qSse(qOpen('req-q-1')), statusRecord('succeeded')])).textContent).toBe('Succeeded')
+  })
+
+  it('has a CSS rule matching the class the status emitter produces, in both themes', async () => {
+    const fs = await import('node:fs/promises')
+    const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
+    expect(css).toMatch(/\.run-status\.status-waiting-for-question\b/)
+    expect(css).toMatch(/\[data-theme="light"\] \.run-status\.status-waiting-for-question\b/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Expired snapshot handling
+// ---------------------------------------------------------------------------
+
+function nsLive(summaryStatus?: string): StreamState {
+  const initial = {...INITIAL_STATE, ...(summaryStatus === undefined ? {} : {summaryStatus})} as StreamState
+  return nextStreamState(initial, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+}
+
+describe('nextStreamState — expired snapshot', () => {
+  const NS_RUN = 'run-abc'
+
+  const noSnapshot = (state: StreamState): StreamState =>
+    nextStreamState(state, {type: 'reset', data: {runId: NS_RUN, reason: 'no-snapshot'}})
+  const statusFrame = (state: StreamState, data: typeof ACTIVE_STATUS): StreamState =>
+    nextStreamState(state, {type: 'status', data} as never)
+  const outputFrame = (state: StreamState, seq: number, text: string): StreamState =>
+    nextStreamState(state, {type: 'output', data: {runId: NS_RUN, text, final: false, seq}})
+  const unavailable = (state: StreamState): boolean => state.runs[NS_RUN]?.outputUnavailable === true
+
+  it('summary succeeded: no-snapshot with no later frame shows the terminal status, the unavailable state, and closes', () => {
+    const before = nsLive('succeeded')
+    const state = noSnapshot(before)
+    expect(state.connection).toBe('closed')
+    expect(state.shouldReconnect).toBe(false)
+    expect(state.retryCount).toBe(before.retryCount)
+    expect(state.runs[NS_RUN]?.status).toBe('succeeded')
+    expect(state.runs[NS_RUN]?.terminal).toBe(true)
+    expect(unavailable(state)).toBe(true)
+  })
+
+  it('summary terminal: no-snapshot clears the run drafts and keeps tombstones', () => {
+    resetQuestionPageStore()
+    try {
+      const store = getQuestionPageStore(NS_RUN)
+      store.drafts.set('req-q-1', {fixture: 'draft'})
+      store.tombstones.add('req-q-old')
+      const state = noSnapshot(nsLive('succeeded'))
+      expect(state.connection).toBe('closed')
+      expect(store.drafts.size).toBe(0)
+      expect([...store.tombstones]).toEqual(['req-q-old'])
+    } finally {
+      resetQuestionPageStore()
+    }
+  })
+
+  it('summary running: no-snapshot keeps the run drafts', () => {
+    resetQuestionPageStore()
+    try {
+      const store = getQuestionPageStore(NS_RUN)
+      store.drafts.set('req-q-1', {fixture: 'draft'})
+      const state = noSnapshot(nsLive('running'))
+      expect(state.connection).toBe('live')
+      expect(store.drafts.has('req-q-1')).toBe(true)
+    } finally {
+      resetQuestionPageStore()
+    }
+  })
+
+  it.each(['failed', 'cancelled'])('summary %s is terminal too', summary => {
+    const state = noSnapshot(nsLive(summary))
+    expect(state.connection).toBe('closed')
+    expect(state.runs[NS_RUN]?.status).toBe(summary)
+    expect(unavailable(state)).toBe(true)
+  })
+
+  it('no summary: no-snapshot then a terminal status frame shows the status and the unavailable state, never reconnecting', () => {
+    const afterReset = noSnapshot(nsLive())
+    expect(afterReset.connection).toBe('live')
+    expect(afterReset.shouldReconnect).toBe(false)
+    expect(afterReset.retryCount).toBe(0)
+    expect(unavailable(afterReset)).toBe(false)
+    const state = statusFrame(afterReset, TERMINAL_STATUS)
+    expect(state.connection).not.toBe('reconnecting')
+    expect(state.connection).toBe('closed')
+    expect(state.retryCount).toBe(0)
+    expect(state.runs[NS_RUN]?.status).toBe('succeeded')
+    expect(unavailable(state)).toBe(true)
+  })
+
+  it('summary running: no-snapshot, a running status, then output renders output with no unavailable state', () => {
+    let state = noSnapshot(nsLive('running'))
+    expect(state.connection).toBe('live')
+    expect(state.retryCount).toBe(0)
+    state = statusFrame(state, ACTIVE_STATUS)
+    expect(state.runs[NS_RUN]?.status).toBe('running')
+    expect(unavailable(state)).toBe(false)
+    state = outputFrame(state, 0, 'hello')
+    expect(state.connection).toBe('live')
+    expect(state.runs[NS_RUN]?.outputText).toBe('hello')
+    expect(unavailable(state)).toBe(false)
+  })
+
+  it('a non-terminal summary (queued) does not count as terminal', () => {
+    const state = noSnapshot(nsLive('queued'))
+    expect(state.connection).toBe('live')
+    expect(state.shouldReconnect).toBe(false)
+    expect(unavailable(state)).toBe(false)
+  })
+
+  it('a run already terminal in the stream closes on no-snapshot, as before', () => {
+    const terminal = statusFrame(nsLive(), TERMINAL_STATUS)
+    const live: StreamState = {...terminal, connection: 'live'}
+    const state = noSnapshot(live)
+    expect(state.connection).toBe('closed')
+    expect(state.shouldReconnect).toBe(false)
+    expect(state.retryCount).toBe(live.retryCount)
+    expect(state.runs[NS_RUN]?.status).toBe('succeeded')
+  })
+
+  it('a known-terminal run that already has output is not marked unavailable', () => {
+    const withOutput = outputFrame(nsLive(), 0, 'final answer')
+    const terminal = statusFrame(withOutput, TERMINAL_STATUS)
+    const state = noSnapshot({...terminal, connection: 'live'})
+    expect(state.connection).toBe('closed')
+    expect(state.runs[NS_RUN]?.outputText).toBe('final answer')
+    expect(unavailable(state)).toBe(false)
+  })
+
+  it('snapshot-missing, then output, then terminal: no unavailable state', () => {
+    let state = noSnapshot(nsLive())
+    state = outputFrame(state, 0, 'partial')
+    state = statusFrame(state, TERMINAL_STATUS)
+    expect(state.connection).toBe('closed')
+    expect(state.runs[NS_RUN]?.outputText).toBe('partial')
+    expect(unavailable(state)).toBe(false)
+  })
+
+  it('a terminal status with no preceding no-snapshot never shows the unavailable state', () => {
+    const state = statusFrame(nsLive(), TERMINAL_STATUS)
+    expect(unavailable(state)).toBe(false)
+  })
+
+  it('snapshot-missing marks only the run that was reset', () => {
+    const state = statusFrame(noSnapshot(nsLive()), {...TERMINAL_STATUS, runId: 'run-other'})
+    expect(state.runs['run-other']?.outputUnavailable).not.toBe(true)
+  })
+
+  it.each(['shutdown', 'overflow', 'writer-error'])('other reset reason %s still reconnects and spends a retry', reason => {
+    const before = nsLive('succeeded')
+    const state = nextStreamState(before, {type: 'reset', data: {runId: NS_RUN, reason}} as never)
+    expect(state.connection).toBe('reconnecting')
+    expect(state.shouldReconnect).toBe(true)
+    expect(state.retryCount).toBe(before.retryCount + 1)
+    expect(unavailable(state)).toBe(false)
+  })
+
+  it('reason terminal still closes, and a summary status does not turn max-duration into a close', () => {
+    expect(nextStreamState(nsLive('succeeded'), {type: 'reset', data: {runId: NS_RUN, reason: 'terminal'}}).connection).toBe('closed')
+    const active = statusFrame(nsLive('succeeded'), ACTIVE_STATUS)
+    const state = nextStreamState(active, {type: 'reset', data: {runId: NS_RUN, reason: 'max-duration'}})
+    expect(state.connection).toBe('reconnecting')
+  })
+})
+
+describe('initOperatorStream — expired snapshot DOM', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  const RUN = 'run-abc'
+  const record = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+  const readyRecord = record('ready', {contractVersion: PINNED_CONTRACT_VERSION})
+  const resetRecord = record('reset', {runId: RUN, reason: 'no-snapshot'})
+
+  // The gateway keeps the subscription open after `reset`: one chunk, then a reader that never ends.
+  async function paint(records: string[], summaryStatus?: string) {
+    const statusEl = makeFakeEl('span')
+    statusEl.classList.add = (cls: string) => {
+      statusEl.className = `${statusEl.className} ${cls}`.trim()
+    }
+    const outputEl = makeFakeEl('pre')
+    outputEl.hidden = true
+    const noticeEl = makeFakeEl('div')
+    let read = 0
+    vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag)})
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, headers: {get: () => 'text/event-stream'},
+      body: {getReader: () => ({read: async () => read++ === 0
+        ? {done: false, value: new TextEncoder().encode(records.join(''))}
+        : new Promise(() => {})})},
+    }))
+    const handle = initOperatorStream({
+      runId: RUN,
+      statusEl: statusEl as never,
+      noticeEl: noticeEl as never,
+      outputEl: outputEl as never,
+      ...(summaryStatus === undefined ? {} : {summaryStatus: summaryStatus as never}),
+    })
+    await new Promise(resolve => setTimeout(resolve, 30))
+    handle.close()
+    return {statusEl, outputEl, noticeEl}
+  }
+
+  it('summary succeeded + reset no-snapshot: status Succeeded, unavailable text in the output region, empty notice', async () => {
+    const {statusEl, outputEl, noticeEl} = await paint([readyRecord, resetRecord], 'succeeded')
+    expect(statusEl.textContent).toBe('Succeeded')
+    expect(outputEl.textContent).toBe('Output no longer available.')
+    expect(outputEl.hidden).toBe(false)
+    expect(noticeEl.textContent).toBe('')
+    expect(noticeEl.hidden).toBe(true)
+    expect(noticeEl.dataset.connectionState).toBe('closed')
+  })
+
+  it('no summary + reset no-snapshot + terminal status frame: status shown, unavailable text, empty notice', async () => {
+    const {statusEl, outputEl, noticeEl} = await paint([readyRecord, resetRecord, record('status', TERMINAL_STATUS)])
+    expect(statusEl.textContent).toBe('Succeeded')
+    expect(outputEl.textContent).toBe('Output no longer available.')
+    expect(noticeEl.textContent).toBe('')
+    expect(noticeEl.hidden).toBe(true)
+    expect(noticeEl.dataset.connectionState).not.toBe('reconnecting')
+  })
+
+  it('no summary + reset no-snapshot and nothing else: stays live with an empty notice, not "Connecting"', async () => {
+    const {outputEl, noticeEl} = await paint([readyRecord, resetRecord])
+    expect(noticeEl.dataset.connectionState).toBe('live')
+    expect(noticeEl.textContent).toBe('')
+    expect(noticeEl.hidden).toBe(true)
+    expect(outputEl.hidden).toBe(true)
+    expect(outputEl.textContent).toBe('')
+  })
+
+  it('summary running + reset + running status + output: output renders, no unavailable state', async () => {
+    const {statusEl, outputEl, noticeEl} = await paint([
+      readyRecord,
+      resetRecord,
+      record('status', ACTIVE_STATUS),
+      record('output', {runId: RUN, text: 'working on it', final: false, seq: 0}),
+    ], 'running')
+    expect(statusEl.textContent).toBe('Running')
+    expect(outputEl.textContent).toBe('working on it')
+    expect(outputEl.hidden).toBe(false)
+    expect(noticeEl.textContent).toBe('')
+    expect(noticeEl.dataset.connectionState).toBe('live')
+  })
+})
+
+describe('initOperatorStream — releases the socket on client-side terminal close', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  const RUN = 'run-abc'
+  const record = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+  const readyRecord = record('ready', {contractVersion: PINNED_CONTRACT_VERSION})
+  const resetRecord = record('reset', {runId: RUN, reason: 'no-snapshot'})
+
+  // One chunk, then either a reader that never ends or a server-side `done`. A read pending
+  // when the request is aborted rejects, like a real fetch body.
+  async function run(records: string[], opts: {summaryStatus?: string; serverEnds?: boolean} = {}) {
+    vi.useFakeTimers()
+    const statusEl = makeFakeEl('span')
+    const outputEl = makeFakeEl('pre')
+    const noticeEl = makeFakeEl('div')
+    let signal: AbortSignal | undefined
+    let reads = 0
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: {signal: AbortSignal}) => {
+      signal = init.signal
+      return {
+        ok: true, status: 200, headers: {get: () => 'text/event-stream'},
+        body: {getReader: () => ({read: async () => {
+          if (reads++ === 0) return {done: false, value: new TextEncoder().encode(records.join(''))}
+          if (opts.serverEnds === true) return {done: true, value: undefined}
+          return new Promise((_, reject) => {
+            init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+          })
+        }})},
+      }
+    })
+    vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag)})
+    vi.stubGlobal('fetch', fetchMock)
+    const handle = initOperatorStream({
+      runId: RUN,
+      statusEl: statusEl as never,
+      noticeEl: noticeEl as never,
+      outputEl: outputEl as never,
+      ...(opts.summaryStatus === undefined ? {} : {summaryStatus: opts.summaryStatus as never}),
+    })
+    // Past any reconnect backoff, so a scheduled reconnect would have fired.
+    await vi.advanceTimersByTimeAsync(10_000)
+    // Observed BEFORE handle.close(), which aborts on its own.
+    const aborted = signal?.aborted ?? false
+    const connectionState = noticeEl.dataset.connectionState
+    handle.close()
+    return {aborted, connectionState, fetchCalls: fetchMock.mock.calls.length, statusEl, outputEl, noticeEl}
+  }
+
+  it('summary succeeded + ready + reset no-snapshot with a never-ending reader aborts the request and stays closed', async () => {
+    const result = await run([readyRecord, resetRecord], {summaryStatus: 'succeeded'})
+    expect(result.aborted).toBe(true)
+    expect(result.connectionState).toBe('closed')
+    expect(result.fetchCalls).toBe(1)
+    expect(result.statusEl.textContent).toBe('Succeeded')
+    expect(result.outputEl.textContent).toBe('Output no longer available.')
+    expect(result.noticeEl.textContent).toBe('')
+  })
+
+  it('a terminal status frame followed by the server ending the stream stays closed with no abort-induced state change', async () => {
+    const result = await run([readyRecord, record('status', TERMINAL_STATUS)], {serverEnds: true})
+    expect(result.connectionState).toBe('closed')
+    expect(result.fetchCalls).toBe(1)
+    expect(result.statusEl.textContent).toBe('Succeeded')
+    expect(result.noticeEl.textContent).toBe('')
+    expect(result.noticeEl.hidden).toBe(true)
+  })
+
+  it('a contract-version drift close aborts the request and neither reopens nor reconnects', async () => {
+    const result = await run([record('ready', {contractVersion: '9.9.9'})])
+    expect(result.aborted).toBe(true)
+    expect(result.connectionState).toBe('drift')
+    expect(result.fetchCalls).toBe(1)
+  })
+})
+
+describe('expired snapshot — selector/emitter parity', () => {
+  it('styles the class the unavailable state emits', async () => {
+    const fs = await import('node:fs/promises')
+    const [js, css] = await Promise.all([
+      fs.readFile('public/operator-stream.js', 'utf8'),
+      fs.readFile('web/src/index.css', 'utf8'),
+    ])
+    expect(js).toContain("'run-output-unavailable'")
+    expect(css).toMatch(/\.run-output-unavailable(?![\w-])/)
+  })
+})
+
+// ===========================================================================
+// Agent questions — question client, decision outcomes and the re-list triggers (Unit 4)
+// ===========================================================================
+
+type U4State = Extract<QuestionDecisionOutcome, {kind: 'decided'}>['state']
+
+const U4_READY = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
+const U4_RESET_SHUTDOWN = `event: reset\ndata: ${JSON.stringify({runId: Q_RUN, reason: 'shutdown'})}\n\n`
+
+function u4Status(status: string): string {
+  const terminal = ['succeeded', 'failed', 'cancelled'].includes(status)
+  const payload = ckStatusPayload({runId: Q_RUN, status, phase: terminal ? 'COMPLETED' : 'EXECUTING'})
+  return `event: status\ndata: ${JSON.stringify(payload)}\n\n`
+}
+
+/** Chunks for a connection that goes live, runs, and has the given requests open. */
+function u4Chunks(...openIds: string[]): string[] {
+  return [U4_READY, u4Status('running'), ...openIds.map(id => qSse(qOpen(id)))]
+}
+
+function u4Listed(...ids: string[]): QuestionListResult {
+  return {
+    success: true,
+    data: {requests: ids.map(requestID => ({requestID, questions: [qQuestion()] as never})), invalidBody: false, partial: false},
+  }
+}
+
+const u4Decided = (state: U4State): QuestionDecisionOutcome => ({kind: 'decided', state})
+const SKIP: QuestionDecision = {decision: 'skip'}
+
+/** A one-chunk SSE body that stays open. */
+function u4SseBody(text: string): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(text))
+    },
+  })
+}
+
+function u4Deferred<T>(): {promise: Promise<T>; resolve: (value: T) => void} {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(r => {
+    resolve = r
+  })
+  return {promise, resolve}
+}
+
+interface U4Options {
+  /** Chunks per connection; a connection past the end serves just `ready` + a running status. */
+  initial?: string[][]
+  list?: (call: number) => QuestionListResult | Promise<QuestionListResult>
+  decide?: (call: number, requestId: string, decision: QuestionDecision) => QuestionDecisionOutcome | Promise<QuestionDecisionOutcome>
+}
+
+const u4Handles: StreamHandle[] = []
+
+/** Start a stream with fake timers and an injected question client. Connections stay open until `end`. */
+function u4Start(opts: U4Options = {}) {
+  vi.useFakeTimers()
+  const controllers: ReadableStreamDefaultController<Uint8Array>[] = []
+  const encoder = new TextEncoder()
+  const listCalls: string[] = []
+  const decideCalls: {requestId: string; decision: QuestionDecision}[] = []
+
+  const client: QuestionClient = {
+    listRunQuestions: async runId => {
+      listCalls.push(runId)
+      return opts.list === undefined ? u4Listed() : opts.list(listCalls.length)
+    },
+    decideRunQuestion: async (_runId, requestId, decision) => {
+      decideCalls.push({requestId, decision})
+      return opts.decide === undefined ? u4Decided('claimed') : opts.decide(decideCalls.length, requestId, decision)
+    },
+  }
+
+  vi.stubGlobal('document', {
+    createElement: (tag: string) => makeFakeEl(tag),
+    createTextNode: (text: string) => {
+      const node = makeFakeEl('#text')
+      node.textContent = text
+      return node
+    },
+  })
+  vi.stubGlobal('addEventListener', () => {})
+  vi.stubGlobal('fetch', async () => {
+    const chunks = opts.initial?.[controllers.length] ?? [U4_READY, u4Status('running')]
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controllers.push(controller)
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
+      },
+    })
+    return {ok: true, status: 200, headers: {get: () => 'text/event-stream'}, body}
+  })
+
+  const statusEl = makeFakeEl('span')
+  const handle = initOperatorStream({
+    runId: Q_RUN,
+    statusEl: statusEl as never,
+    noticeEl: makeFakeEl('div') as never,
+    questionClient: client,
+  })
+  u4Handles.push(handle)
+
+  return {
+    handle,
+    statusEl,
+    listCalls,
+    decideCalls,
+    flush: async (ms = 0) => vi.advanceTimersByTimeAsync(ms),
+    push: (connection: number, chunk: string) => controllers[connection]?.enqueue(encoder.encode(chunk)),
+    end: (connection: number) => controllers[connection]?.close(),
+    ids: () => handle.getQuestions().map(request => request.requestID),
+    /** Drop connection 0 and let the stream reconnect and go live again. */
+    reconnect: async () => {
+      controllers[0]?.enqueue(encoder.encode(U4_RESET_SHUTDOWN))
+      controllers[0]?.close()
+      await vi.advanceTimersByTimeAsync(5000)
+    },
+  }
+}
+
+function u4Cleanup() {
+  for (const handle of u4Handles.splice(0)) handle.close()
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+  resetQuestionPageStore()
+}
+
+describe('question decisions — outcomes by response state', () => {
+  afterEach(u4Cleanup)
+
+  it('live transition: lists once on going live and adds a listed request', async () => {
+    const h = u4Start({initial: [[U4_READY, u4Status('running')]], list: () => u4Listed('L1')})
+    await h.flush()
+    expect(h.listCalls).toEqual([Q_RUN])
+    expect(h.ids()).toEqual(['L1'])
+    expect(h.handle.getQuestionStatus('L1')).toEqual({kind: 'open'})
+  })
+
+  it('claimed: the request is tombstoned and removed, and a later list cannot bring it back', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], list: n => (n === 1 ? u4Listed() : u4Listed('A'))})
+    await h.flush()
+    expect(h.ids()).toEqual(['A'])
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed'})
+    expect(h.ids()).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(true)
+    expect(h.handle.getQuestionNotes()).toEqual([{requestID: 'A', status: {kind: 'claimed'}}])
+    await h.handle.checkQuestions()
+    expect(h.listCalls).toHaveLength(2)
+    expect(h.ids()).toEqual([])
+  })
+
+  it('already_settled: tombstoned and removed, as its own note distinct from gone', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_settled')})
+    await h.flush()
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'already-settled'})
+    expect(h.ids()).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(true)
+  })
+
+  it('claimed resolves even while the stream is reconnecting (the reducer event is not gated on live)', async () => {
+    const d = u4Deferred<QuestionDecisionOutcome>()
+    const h = u4Start({initial: [u4Chunks('A')], decide: async () => d.promise})
+    await h.flush()
+    const pending = h.handle.decideQuestion('A', SKIP)
+    h.push(0, U4_RESET_SHUTDOWN)
+    h.end(0)
+    await h.flush(0)
+    d.resolve(u4Decided('claimed'))
+    await pending
+    expect(h.ids()).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(true)
+  })
+
+  it('already_claimed: kept, claimed-exempt, and re-listed on the 2/5/10/20 second schedule, then it stops', async () => {
+    expect([...QUESTION_CLAIM_RECHECK_DELAYS_MS]).toEqual([2000, 5000, 10_000, 20_000])
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed')})
+    await h.flush()
+    expect(h.listCalls).toHaveLength(1)
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed-elsewhere'})
+    expect(h.ids()).toEqual(['A'])
+
+    let lists = 1
+    for (const delay of QUESTION_CLAIM_RECHECK_DELAYS_MS) {
+      await h.flush(delay - 1)
+      expect(h.listCalls).toHaveLength(lists)
+      await h.flush(1)
+      await h.flush(0)
+      lists += 1
+      expect(h.listCalls).toHaveLength(lists)
+      // The gateway omits claimed requests from the list, yet the request stays.
+      expect(h.ids()).toEqual(['A'])
+      expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+    }
+    await h.flush(300_000)
+    expect(h.listCalls).toHaveLength(5)
+    expect(h.ids()).toEqual(['A'])
+  })
+
+  it('failed_to_settle: retryable with the request kept, and a resubmit is allowed', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: n => (n === 1 ? u4Decided('failed_to_settle') : u4Decided('claimed'))})
+    await h.flush()
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'failed-to-settle'})
+    expect(h.ids()).toEqual(['A'])
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed'})
+    expect(h.decideCalls).toHaveLength(2)
+  })
+
+  it('claimed elsewhere, settle frame missed across a reconnect: the next submit settles it (already_settled tombstones and clears)', async () => {
+    const h = u4Start({
+      initial: [u4Chunks('A')],
+      decide: n => u4Decided(n === 1 ? 'already_claimed' : 'already_settled'),
+    })
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.reconnect()
+    // The list still omits it and no settle frame arrived: it stays claimed elsewhere, and answerable.
+    expect(h.ids()).toEqual(['A'])
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'already-settled'})
+    expect(h.decideCalls).toHaveLength(2)
+    expect(h.ids()).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(true)
+    await h.flush(300_000)
+    expect(h.ids()).toEqual([])
+  })
+
+  it('claimed elsewhere: a skip goes out as {decision:"skip"}, and claimed settles the request', async () => {
+    const h = u4Start({
+      initial: [u4Chunks('A')],
+      decide: n => u4Decided(n === 1 ? 'already_claimed' : 'claimed'),
+    })
+    await h.flush()
+    await h.handle.decideQuestion('A', {decision: 'answer', answers: [{text: 'x'}]})
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed'})
+    expect(h.decideCalls[1]?.decision).toEqual({decision: 'skip'})
+    expect(h.ids()).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(true)
+  })
+
+  it('claimed elsewhere then already_claimed again: it stays claimed elsewhere, exempt, with the schedule restarted', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed')})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.flush(1000)
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed-elsewhere'})
+    expect(h.decideCalls).toHaveLength(2)
+    expect(h.ids()).toEqual(['A'])
+    const before = h.listCalls.length
+    await h.flush(2000)
+    expect(h.listCalls.length).toBe(before + 1)
+  })
+
+  it('a decision is refused while a check is out, as it is while the request is in flight', async () => {
+    const d = u4Deferred<QuestionListResult>()
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed'), list: async n => (n === 2 ? d.promise : u4Listed())})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    const check = h.handle.checkQuestions('A')
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'checking'})
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'checking'})
+    expect(h.decideCalls).toHaveLength(1)
+    d.resolve(u4Listed())
+    await check
+  })
+
+  it('a decision is refused while the request is in flight', async () => {
+    const d = u4Deferred<QuestionDecisionOutcome>()
+    const h = u4Start({initial: [u4Chunks('A')], decide: async () => d.promise})
+    await h.flush()
+    const first = h.handle.decideQuestion('A', SKIP)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'in-flight'})
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'in-flight'})
+    expect(h.decideCalls).toHaveLength(1)
+    d.resolve(u4Decided('claimed'))
+    await first
+  })
+
+  it('a request that is not open is not submitted', async () => {
+    const h = u4Start({initial: [u4Chunks('A')]})
+    await h.flush()
+    expect(await h.handle.decideQuestion('nope', SKIP)).toBeNull()
+    expect(h.decideCalls).toHaveLength(0)
+  })
+
+  it('invalid answer on question 2 (zero-based index 1): marked, input kept, resubmit allowed, nothing retried', async () => {
+    const invalid: QuestionDecisionOutcome = {kind: 'invalid', reason: 'arity-mismatch', questionIndex: 1}
+    const h = u4Start({initial: [u4Chunks('A')], decide: n => (n === 1 ? invalid : u4Decided('claimed'))})
+    await h.flush()
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'invalid', reason: 'arity-mismatch', questionIndex: 1})
+    expect(h.ids()).toEqual(['A'])
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed'})
+  })
+
+  it('request-level invalid and request-level failure surface without a question index', async () => {
+    const h = u4Start({
+      initial: [u4Chunks('A')],
+      decide: n => (n === 1 ? {kind: 'invalid', reason: null, questionIndex: null} : {kind: 'failed'}),
+    })
+    await h.flush()
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'invalid', reason: null, questionIndex: null})
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'failed-to-settle'})
+  })
+
+  it('masked 404: can\'t answer, for this request and every request the run opens later; nothing more is sent', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => ({kind: 'cant-answer'})})
+    await h.flush()
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'cant-answer'})
+    expect(h.ids()).toEqual(['A'])
+    h.push(0, qSse(qOpen('B')))
+    await h.flush()
+    expect(h.handle.getQuestionStatus('B')).toEqual({kind: 'cant-answer'})
+    expect(await h.handle.decideQuestion('B', SKIP)).toEqual({kind: 'cant-answer'})
+    expect(h.decideCalls).toHaveLength(1)
+  })
+
+  it('401/403: session expired, and the operator can try again', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: n => (n === 1 ? {kind: 'session-expired'} : u4Decided('claimed'))})
+    await h.flush()
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'session-expired'})
+    expect(h.ids()).toEqual(['A'])
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed'})
+  })
+})
+
+describe('question re-list triggers — unknown outcome, claim lifecycle, failures, races', () => {
+  afterEach(u4Cleanup)
+
+  it('network failure: no resubmit, a fresh list is issued, and a request the list omits is "gone" (may have been recorded)', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => ({kind: 'unknown'}), list: () => u4Listed()})
+    await h.flush()
+    expect(h.listCalls).toHaveLength(1)
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'gone'})
+    expect(h.decideCalls).toHaveLength(1)
+    expect(h.listCalls).toHaveLength(2)
+    expect(h.ids()).toEqual([])
+    expect(h.handle.getQuestionNotes()).toEqual([{requestID: 'A', status: {kind: 'gone'}}])
+    // Removed by absence, not settled: it is not tombstoned, and "gone" differs from "already settled".
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(false)
+    expect(h.handle.getQuestionStatus('A')).not.toEqual({kind: 'already-settled'})
+  })
+
+  it('network failure: shows "checking" while the list is out, and a request the list still shows goes back to open', async () => {
+    const d = u4Deferred<QuestionListResult>()
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => ({kind: 'unknown'}), list: async n => (n === 1 ? u4Listed() : d.promise)})
+    await h.flush()
+    const pending = h.handle.decideQuestion('A', SKIP)
+    await h.flush()
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'checking'})
+    d.resolve(u4Listed('A'))
+    expect(await pending).toEqual({kind: 'open'})
+    expect(h.ids()).toEqual(['A'])
+  })
+
+  it('network failure: the check itself failing surfaces "check failed", and still never resubmits', async () => {
+    const h = u4Start({
+      initial: [u4Chunks('A')],
+      decide: () => ({kind: 'unknown'}),
+      list: n => (n === 1 ? u4Listed() : {success: false, error: {kind: 'network'}}),
+    })
+    await h.flush()
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'check-failed'})
+    expect(h.ids()).toEqual(['A'])
+    expect(h.decideCalls).toHaveLength(1)
+  })
+
+  it('settle frame before the POST resolves: the late response is ignored', async () => {
+    for (const late of [u4Decided('failed_to_settle'), u4Decided('already_claimed'), u4Decided('claimed'), {kind: 'invalid', reason: 'malformed', questionIndex: null} as const]) {
+      const d = u4Deferred<QuestionDecisionOutcome>()
+      const h = u4Start({initial: [u4Chunks('A')], decide: async () => d.promise})
+      await h.flush()
+      const pending = h.handle.decideQuestion('A', SKIP)
+      h.push(0, qSse(qSettle('A')))
+      await h.flush()
+      expect(h.ids()).toEqual([])
+      d.resolve(late)
+      expect(await pending).toBeNull()
+      expect(h.handle.getQuestionStatus('A')).toBeNull()
+      expect(h.handle.getQuestionNotes()).toEqual([])
+      expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(true)
+      u4Cleanup()
+    }
+  })
+
+  it('list removal before the POST resolves: a late claimed still tombstones, so a later list cannot resurrect the request', async () => {
+    const d = u4Deferred<QuestionDecisionOutcome>()
+    const h = u4Start({initial: [u4Chunks('A')], decide: async () => d.promise, list: n => (n === 3 ? u4Listed('A') : u4Listed())})
+    await h.flush()
+    const pending = h.handle.decideQuestion('A', SKIP)
+    await h.handle.checkQuestions() // list #2 omits A: removed by absence, not tombstoned
+    expect(h.ids()).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(false)
+    d.resolve(u4Decided('claimed'))
+    expect(await pending).toBeNull()
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(true)
+    await h.handle.checkQuestions() // list #3 shows A again, but it is settled for the page
+    expect(h.listCalls).toHaveLength(3)
+    expect(h.ids()).toEqual([])
+  })
+
+  it('terminal status before the POST resolves: the late response is ignored and nothing is tombstoned', async () => {
+    const d = u4Deferred<QuestionDecisionOutcome>()
+    const h = u4Start({initial: [u4Chunks('A')], decide: async () => d.promise})
+    await h.flush()
+    const pending = h.handle.decideQuestion('A', SKIP)
+    h.push(0, u4Status('succeeded'))
+    await h.flush()
+    expect(h.ids()).toEqual([])
+    d.resolve(u4Decided('claimed'))
+    expect(await pending).toBeNull()
+    expect(h.handle.getQuestionNotes()).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(false)
+  })
+
+  it('claim reopen: omitted by a list it stays, shown open by a later list it is back to open and the schedule stops', async () => {
+    const h = u4Start({
+      initial: [u4Chunks('A')],
+      decide: () => u4Decided('already_claimed'),
+      list: n => (n === 3 ? u4Listed('A') : u4Listed()),
+    })
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.flush(2000)
+    expect(h.listCalls).toHaveLength(2)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+    await h.flush(5000)
+    expect(h.listCalls).toHaveLength(3)
+    expect(h.ids()).toEqual(['A'])
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'open'})
+    await h.flush(300_000)
+    expect(h.listCalls).toHaveLength(3)
+    // Open again, so it can be answered again.
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed-elsewhere'})
+  })
+
+  it('a settle frame ends a claim: the request is removed and the schedule stops', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed')})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    h.push(0, qSse(qSettle('A')))
+    await h.flush()
+    expect(h.ids()).toEqual([])
+    expect(h.handle.getQuestionStatus('A')).toBeNull()
+    await h.flush(300_000)
+    expect(h.listCalls).toHaveLength(1)
+  })
+
+  it('a terminal status ends a claim: statuses clear and the schedule stops', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed')})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    h.push(0, u4Status('succeeded'))
+    await h.flush(300_000)
+    expect(h.ids()).toEqual([])
+    expect(h.handle.getQuestionStatus('A')).toBeNull()
+    expect(h.listCalls).toHaveLength(1)
+  })
+
+  it('a live transition keeps a claimed-elsewhere request on its card when the list still omits it', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed')})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    expect(h.ids()).toEqual(['A'])
+    await h.reconnect()
+    expect(h.listCalls.length).toBeGreaterThanOrEqual(2)
+    expect(h.ids()).toEqual(['A'])
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(false)
+  })
+
+  it('a live transition restarts the claimed re-list schedule, so a request the claimant then released is found', async () => {
+    const h = u4Start({
+      initial: [u4Chunks('A')],
+      decide: () => u4Decided('already_claimed'),
+      list: n => (n === 5 ? u4Listed('A') : u4Listed()),
+    })
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.reconnect()
+    // The old schedule ended at the reconnect; the restarted one still re-lists on its own.
+    const afterReconnect = h.listCalls.length
+    await h.flush(300_000)
+    expect(h.listCalls.length).toBeGreaterThan(afterReconnect)
+    expect(h.listCalls).toHaveLength(5)
+    expect(h.ids()).toEqual(['A'])
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'open'})
+    // Open again, so it can be answered again.
+    expect(await h.handle.decideQuestion('A', SKIP)).toEqual({kind: 'claimed-elsewhere'})
+  })
+
+  it('a live transition does not end a claimed exemption: only a settle frame, a terminal status, or an open listing does', async () => {
+    const settled = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed')})
+    await settled.flush()
+    await settled.handle.decideQuestion('A', SKIP)
+    await settled.reconnect()
+    expect(settled.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+    settled.push(1, qSse(qSettle('A')))
+    await settled.flush()
+    expect(settled.ids()).toEqual([])
+    expect(settled.handle.getQuestionStatus('A')).toBeNull()
+    u4Cleanup()
+
+    const terminal = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed')})
+    await terminal.flush()
+    await terminal.handle.decideQuestion('A', SKIP)
+    await terminal.reconnect()
+    terminal.push(1, u4Status('succeeded'))
+    await terminal.flush(300_000)
+    expect(terminal.ids()).toEqual([])
+    expect(terminal.handle.getQuestionStatus('A')).toBeNull()
+  })
+
+  it('questionReconcileDone is reset on reconnect: a wire waiting_for_question is not painted as running until the new reconcile completes', async () => {
+    const relist = u4Deferred<QuestionListResult>()
+    const waiting = [U4_READY, u4Status('waiting_for_question')]
+    const h = u4Start({initial: [waiting, waiting], list: async n => (n === 2 ? relist.promise : u4Listed())})
+    await h.flush()
+    // The first reconcile completed with no open question: the stale wire status reads as running.
+    expect(h.statusEl.textContent).toBe('Running')
+    await h.reconnect()
+    expect(h.listCalls).toHaveLength(2)
+    expect(h.statusEl.textContent).toBe('Waiting for answer')
+    relist.resolve(u4Listed())
+    await h.flush()
+    expect(h.statusEl.textContent).toBe('Running')
+  })
+
+  it('claim exemption survives the next live transition when the list shows the request open (it is simply open)', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed'), list: n => (n === 1 ? u4Listed() : u4Listed('A'))})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.reconnect()
+    expect(h.ids()).toEqual(['A'])
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'open'})
+  })
+
+  it.each([
+    ['429', {success: false, error: {kind: 'http', status: 429}}],
+    ['500', {success: false, error: {kind: 'http', status: 500}}],
+    ['network', {success: false, error: {kind: 'network'}}],
+    ['invalid body', {success: true, data: {requests: [], invalidBody: true, partial: false}}],
+  ] as [string, QuestionListResult][])('list %s on a live transition: nothing is pruned, nothing surfaces, and it is never retried', async (_name, failure) => {
+    const h = u4Start({initial: [u4Chunks('A')], list: n => (n === 1 ? u4Listed() : failure)})
+    await h.flush()
+    expect(h.ids()).toEqual(['A'])
+    await h.reconnect()
+    expect(h.listCalls).toHaveLength(2)
+    expect(h.ids()).toEqual(['A'])
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'open'})
+    await h.flush(600_000)
+    expect(h.listCalls).toHaveLength(2)
+  })
+
+  it('a failed re-list during the claim schedule leaves the claim as is and stops the schedule', async () => {
+    const h = u4Start({
+      initial: [u4Chunks('A')],
+      decide: () => u4Decided('already_claimed'),
+      list: n => (n === 1 ? u4Listed() : {success: false, error: {kind: 'http', status: 429}}),
+    })
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.flush(2000)
+    expect(h.listCalls).toHaveLength(2)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+    await h.flush(300_000)
+    expect(h.listCalls).toHaveLength(2)
+  })
+
+  it('"Check again" that fails surfaces "check failed"; one that works restores the claim, and a later one shows it open', async () => {
+    const h = u4Start({
+      initial: [u4Chunks('A')],
+      decide: () => u4Decided('already_claimed'),
+      list: n => (n === 2 ? {success: false, error: {kind: 'http', status: 500}} : n === 4 ? u4Listed('A') : u4Listed()),
+    })
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.handle.checkQuestions('A')
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'check-failed'})
+    // The schedule does not retry a failed check on its own.
+    await h.flush(300_000)
+    expect(h.listCalls).toHaveLength(2)
+    await h.handle.checkQuestions('A')
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+    await h.handle.checkQuestions('A')
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'open'})
+    expect(h.listCalls).toHaveLength(4)
+  })
+
+  it('"Check again" shows "checking" while the list is out; without a request ID it targets every claimed request', async () => {
+    const d = u4Deferred<QuestionListResult>()
+    const h = u4Start({initial: [u4Chunks('A', 'B')], decide: () => u4Decided('already_claimed'), list: async n => (n === 2 ? d.promise : u4Listed())})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.handle.decideQuestion('B', SKIP)
+    const pending = h.handle.checkQuestions()
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'checking'})
+    expect(h.handle.getQuestionStatus('B')).toEqual({kind: 'checking'})
+    d.resolve(u4Listed())
+    await pending
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+    expect(h.handle.getQuestionStatus('B')).toEqual({kind: 'claimed-elsewhere'})
+  })
+
+  it('a manual check waits out a list already in flight and then issues its own fresh one', async () => {
+    const d = u4Deferred<QuestionListResult>()
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed'), list: async n => (n === 2 ? d.promise : u4Listed())})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    await h.flush(2000) // the schedule's list (#2) is now out
+    expect(h.listCalls).toHaveLength(2)
+    const pending = h.handle.checkQuestions('A')
+    await h.flush()
+    expect(h.listCalls).toHaveLength(2)
+    d.resolve(u4Listed())
+    await pending
+    expect(h.listCalls).toHaveLength(3)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+  })
+
+  it('epoch guard: a list that resolves after a reconnect is ignored', async () => {
+    const stale = u4Deferred<QuestionListResult>()
+    const h = u4Start({list: async n => (n === 1 ? stale.promise : u4Listed('B'))})
+    await h.flush()
+    expect(h.listCalls).toHaveLength(1)
+    await h.reconnect()
+    expect(h.listCalls).toHaveLength(2)
+    expect(h.ids()).toEqual(['B'])
+    stale.resolve(u4Listed('A'))
+    await h.flush()
+    expect(h.ids()).toEqual(['B'])
+  })
+
+  it('close() ends the claim schedule and refuses further decisions', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], decide: () => u4Decided('already_claimed')})
+    await h.flush()
+    await h.handle.decideQuestion('A', SKIP)
+    h.handle.close()
+    await h.flush(300_000)
+    expect(h.listCalls).toHaveLength(1)
+    expect(await h.handle.decideQuestion('A', SKIP)).toBeNull()
+  })
+
+  it('a handle without a question client or region never calls the questions routes', async () => {
+    vi.useFakeTimers()
+    const urls: string[] = []
+    vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag)})
+    vi.stubGlobal('fetch', async (url: string) => {
+      urls.push(url)
+      return {ok: true, status: 200, headers: {get: () => 'text/event-stream'}, body: u4SseBody(u4Chunks('A').join(''))}
+    })
+    const handle = initOperatorStream({runId: Q_RUN, statusEl: makeFakeEl('span') as never, noticeEl: makeFakeEl('div') as never})
+    u4Handles.push(handle)
+    await vi.advanceTimersByTimeAsync(10)
+    expect(urls.every(url => url.endsWith('/stream'))).toBe(true)
+    expect(handle.getQuestions().map(request => request.requestID)).toEqual(['A'])
+    expect(await handle.decideQuestion('A', SKIP)).toBeNull()
+    await handle.checkQuestions()
+    expect(urls).toHaveLength(1)
+  })
+
+  it('a question region wires the real client: the live transition GETs the run\'s pending list', async () => {
+    vi.useFakeTimers()
+    const urls: string[] = []
+    vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag)})
+    vi.stubGlobal('fetch', async (url: string) => {
+      urls.push(url)
+      if (url.includes('/questions')) {
+        return {ok: true, status: 200, json: async () => ({requests: [{requestID: 'W', questions: [qQuestion()]}]})}
+      }
+      return {ok: true, status: 200, headers: {get: () => 'text/event-stream'}, body: u4SseBody([U4_READY, u4Status('running')].join(''))}
+    })
+    const handle = initOperatorStream({
+      runId: Q_RUN,
+      statusEl: makeFakeEl('span') as never,
+      noticeEl: makeFakeEl('div') as never,
+      questionsEl: makeFakeEl('div') as never,
+    })
+    u4Handles.push(handle)
+    await vi.advanceTimersByTimeAsync(10)
+    expect(urls).toContain(`/operator/runs/${Q_RUN}/questions`)
+    expect(handle.getQuestions().map(request => request.requestID)).toEqual(['W'])
+  })
+})
+
+interface U4TimeoutRoutes {
+  /** Decision POST: a response, or 'hang' for one that only ends when its signal aborts. */
+  decide?: {status: number; body: unknown} | 'hang'
+  /** Per list GET (1-based): the requests it returns, or 'hang'. */
+  list?: (call: number) => string[] | 'hang'
+}
+
+/**
+ * Stub fetch and AbortSignal.timeout for the REAL question client behind a live stream, so a hung
+ * request ends on fake time. A hung request settles only when its signal aborts, as a hung socket
+ * would; AbortSignal.timeout is driven by the (fake) setTimeout.
+ */
+function u4StartTimeoutHandle(routes: U4TimeoutRoutes) {
+  vi.useFakeTimers()
+  const timeouts: number[] = []
+  vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
+    timeouts.push(ms)
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(new DOMException('timed out', 'TimeoutError')), ms)
+    return controller.signal
+  })
+  const counts = {stream: 0, list: 0, decide: 0}
+  const hang = async (init: RequestInit | undefined): Promise<never> => new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+  })
+  vi.stubGlobal('document', {
+    createElement: (tag: string) => makeFakeEl(tag),
+    createTextNode: (text: string) => {
+      const node = makeFakeEl('#text')
+      node.textContent = text
+      return node
+    },
+  })
+  vi.stubGlobal('addEventListener', () => {})
+  vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/stream')) {
+      counts.stream += 1
+      return {ok: true, status: 200, headers: {get: () => 'text/event-stream'}, body: u4SseBody(u4Chunks('A').join(''))}
+    }
+    if (url.includes('/session/csrf')) return {ok: true, status: 200, json: async () => ({csrfToken: 'csrf'})}
+    if (url.includes('/decision')) {
+      counts.decide += 1
+      const decide = routes.decide ?? {status: 200, body: {state: 'claimed'}}
+      if (decide === 'hang') return hang(init)
+      return {ok: decide.status === 200, status: decide.status, json: async () => decide.body}
+    }
+    counts.list += 1
+    const listed = routes.list?.(counts.list) ?? []
+    if (listed === 'hang') return hang(init)
+    return {ok: true, status: 200, json: async () => ({requests: listed.map(requestID => ({requestID, questions: [qQuestion()]}))})}
+  })
+  const handle = initOperatorStream({
+    runId: Q_RUN,
+    statusEl: makeFakeEl('span') as never,
+    noticeEl: makeFakeEl('div') as never,
+    questionsEl: makeFakeEl('div') as never,
+  })
+  u4Handles.push(handle)
+  return {handle, counts, timeouts}
+}
+
+describe('question client — bounded fetches', () => {
+  afterEach(u4Cleanup)
+
+  it('a decision POST that never resolves ends as an unknown outcome: a fresh re-list, never a resubmit', async () => {
+    const h = u4StartTimeoutHandle({decide: 'hang', list: call => (call === 1 ? ['A'] : [])})
+    await vi.advanceTimersByTimeAsync(10)
+    expect(h.handle.getQuestions().map(request => request.requestID)).toEqual(['A'])
+    expect(h.counts.list).toBe(1)
+
+    const pending = h.handle.decideQuestion('A', SKIP)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'in-flight'})
+    await vi.advanceTimersByTimeAsync(QUESTION_FETCH_TIMEOUT_MS - 1)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'in-flight'})
+    expect(h.counts.list).toBe(1)
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(await pending).toEqual({kind: 'gone'})
+    expect(h.counts.decide).toBe(1)
+    expect(h.counts.list).toBe(2)
+    expect(h.timeouts).toContain(QUESTION_FETCH_TIMEOUT_MS)
+    // The request's own timeout is not the stream's abort: the stream was not torn down or reconnected.
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(h.counts.stream).toBe(1)
+  })
+
+  it('a list GET that never resolves fails its checks without pruning, and a later check is not wedged behind it', async () => {
+    const h = u4StartTimeoutHandle({
+      decide: {status: 200, body: {state: 'already_claimed'}},
+      list: call => (call === 2 ? 'hang' : ['A']),
+    })
+    await vi.advanceTimersByTimeAsync(10)
+    await h.handle.decideQuestion('A', SKIP)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'claimed-elsewhere'})
+
+    const check = h.handle.checkQuestions('A')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'checking'})
+    expect(h.counts.list).toBe(2)
+    await vi.advanceTimersByTimeAsync(QUESTION_FETCH_TIMEOUT_MS)
+    await check
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'check-failed'})
+    expect(h.handle.getQuestions().map(request => request.requestID)).toEqual(['A'])
+    expect(h.counts.stream).toBe(1)
+
+    await h.handle.checkQuestions('A')
+    expect(h.counts.list).toBe(3)
+    expect(h.handle.getQuestionStatus('A')).toEqual({kind: 'open'})
+  })
+
+  it('every question client fetch carries a timeout signal', async () => {
+    const calls = u4Http([{status: 200, body: {state: 'claimed'}}, {status: 200, body: {requests: []}}])
+    const client = buildQuestionClient()
+    await client.decideRunQuestion('run-1', 'req-1', SKIP)
+    await client.listRunQuestions('run-1')
+    expect(calls.length).toBeGreaterThanOrEqual(3)
+    for (const call of calls) expect(call.init.signal).toBeInstanceOf(AbortSignal)
+  })
+})
+
+interface U4Response {
+  status: number
+  body?: unknown
+}
+
+/** Stub fetch: CSRF requests succeed (or fail as told); every other request takes the next scripted response. */
+function u4Http(responses: (U4Response | 'throw')[], opts: {csrfStatus?: number | 'throw'} = {}) {
+  const calls: {url: string; init: RequestInit}[] = []
+  let next = 0
+  vi.stubGlobal('fetch', async (url: string, init: RequestInit = {}) => {
+    calls.push({url, init})
+    if (url.includes('/session/csrf')) {
+      if (opts.csrfStatus === 'throw') throw new Error('csrf network')
+      const status = opts.csrfStatus ?? 200
+      return {ok: status === 200, status, json: async () => ({csrfToken: `csrf-${calls.length}`})}
+    }
+    const scripted = responses[Math.min(next++, responses.length - 1)]
+    if (scripted === undefined || scripted === 'throw') throw new Error('network')
+    return {
+      ok: scripted.status >= 200 && scripted.status < 300,
+      status: scripted.status,
+      json: async () => {
+        if (scripted.body === undefined) throw new Error('no body')
+        return scripted.body
+      },
+    }
+  })
+  return calls
+}
+
+const u4Posts = <T extends {url: string}>(calls: T[]): T[] => calls.filter(call => call.url.includes('/decision'))
+const U4_ANSWER: QuestionDecision = {decision: 'answer', answers: [{options: [0]}, {text: 'hello'}]}
+
+describe('buildQuestionClient — decideRunQuestion', () => {
+  afterEach(u4Cleanup)
+
+  it('POSTs the answer body with x-csrf-token, redirect:error, credentials, and no idempotency key', async () => {
+    const calls = u4Http([{status: 200, body: {state: 'claimed'}}])
+    const result = await buildQuestionClient().decideRunQuestion('run-1', 'req-1', U4_ANSWER)
+    expect(result).toEqual({kind: 'decided', state: 'claimed'})
+    const [post] = u4Posts(calls)
+    expect(post?.url).toBe('/operator/runs/run-1/questions/req-1/decision')
+    expect(post?.init.method).toBe('POST')
+    expect(post?.init.redirect).toBe('error')
+    expect(post?.init.credentials).toBe('include')
+    const headers = post?.init.headers as Record<string, string>
+    expect(headers['x-csrf-token']).toMatch(/^csrf-/)
+    expect(Object.keys(headers).map(key => key.toLowerCase())).not.toContain('idempotency-key')
+    expect(JSON.parse(String(post?.init.body))).toEqual({decision: 'answer', answers: [{options: [0]}, {text: 'hello'}]})
+  })
+
+  it('sends skip as {decision:"skip"} and rebuilds a closed answer body (stray fields are not sent)', async () => {
+    const calls = u4Http([{status: 200, body: {state: 'claimed'}}])
+    const client = buildQuestionClient()
+    await client.decideRunQuestion('run-1', 'req-1', SKIP)
+    await client.decideRunQuestion('run-1', 'req-1', {decision: 'answer', answers: [{options: [1], text: 'x', extra: 'no'}]} as never)
+    const [skip, answer] = u4Posts(calls)
+    expect(JSON.parse(String(skip?.init.body))).toEqual({decision: 'skip'})
+    expect(JSON.parse(String(answer?.init.body))).toEqual({decision: 'answer', answers: [{options: [1], text: 'x'}]})
+  })
+
+  it('an empty answer list is sent as-is (a request with zero questions)', async () => {
+    const calls = u4Http([{status: 200, body: {state: 'claimed'}}])
+    await buildQuestionClient().decideRunQuestion('run-1', 'req-1', {decision: 'answer', answers: []})
+    expect(JSON.parse(String(u4Posts(calls)[0]?.init.body))).toEqual({decision: 'answer', answers: []})
+  })
+
+  it.each(QUESTION_DECISION_STATES)('200 %s is a decided outcome', async state => {
+    u4Http([{status: 200, body: {state}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: 'decided', state})
+  })
+
+  it('200 with an unknown state is a request-level retryable failure', async () => {
+    u4Http([{status: 200, body: {state: 'mystery'}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: 'failed'})
+  })
+
+  it('400 without a reason refreshes CSRF and retries once with the new token', async () => {
+    const calls = u4Http([{status: 400, body: {error: 'bad request'}}, {status: 200, body: {state: 'claimed'}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', U4_ANSWER)).toEqual({kind: 'decided', state: 'claimed'})
+    const posts = u4Posts(calls)
+    expect(posts).toHaveLength(2)
+    expect(calls.filter(call => call.url.includes('/session/csrf'))).toHaveLength(2)
+    const tokens = posts.map(post => (post.init.headers as Record<string, string>)['x-csrf-token'])
+    expect(tokens[0]).not.toBe(tokens[1])
+  })
+
+  it('400 without a reason and with an unreadable body is also a CSRF-style 400', async () => {
+    const calls = u4Http([{status: 400}, {status: 200, body: {state: 'claimed'}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: 'decided', state: 'claimed'})
+    expect(u4Posts(calls)).toHaveLength(2)
+  })
+
+  it('a second 400 without a reason is a request-level invalid outcome, not a third attempt', async () => {
+    const calls = u4Http([{status: 400, body: {error: 'bad request'}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: 'invalid', reason: null, questionIndex: null})
+    expect(u4Posts(calls)).toHaveLength(2)
+  })
+
+  it('400 arity-mismatch with questionIndex 1 is invalid on question 2, and is never retried', async () => {
+    const calls = u4Http([{status: 400, body: {error: 'bad request', reason: 'arity-mismatch', questionIndex: 1}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', U4_ANSWER)).toEqual({
+      kind: 'invalid',
+      reason: 'arity-mismatch',
+      questionIndex: 1,
+    })
+    expect(u4Posts(calls)).toHaveLength(1)
+  })
+
+  it.each(QUESTION_INVALID_REASONS)('400 %s with a null index is a request-level answer problem with the reason kept', async reason => {
+    const calls = u4Http([{status: 400, body: {error: 'bad request', reason, questionIndex: null}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', U4_ANSWER)).toEqual({kind: 'invalid', reason, questionIndex: null})
+    expect(u4Posts(calls)).toHaveLength(1)
+  })
+
+  it('400 with an unknown reason is request-level invalid, never retried', async () => {
+    const calls = u4Http([{status: 400, body: {error: 'bad request', reason: 'brand-new-reason', questionIndex: 0}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', U4_ANSWER)).toEqual({kind: 'invalid', reason: null, questionIndex: null})
+    expect(u4Posts(calls)).toHaveLength(1)
+  })
+
+  it.each([2, -1, 1.5, '1', undefined])('400 with an out-of-range or unusable index (%s) is request-level, never retried', async questionIndex => {
+    const calls = u4Http([{status: 400, body: {error: 'bad request', reason: 'unknown-option', questionIndex}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', U4_ANSWER)).toEqual({
+      kind: 'invalid',
+      reason: 'unknown-option',
+      questionIndex: null,
+    })
+    expect(u4Posts(calls)).toHaveLength(1)
+  })
+
+  it('404 is can\'t-answer, 401 and 403 are session expired, and none is retried', async () => {
+    for (const [status, expected] of [[404, 'cant-answer'], [401, 'session-expired'], [403, 'session-expired']] as const) {
+      const calls = u4Http([{status, body: {}}])
+      expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: expected})
+      expect(u4Posts(calls)).toHaveLength(1)
+    }
+  })
+
+  it('a 401 or 403 from the CSRF fetch is session expired and sends nothing; other CSRF failures are retryable and send nothing', async () => {
+    for (const [csrfStatus, expected] of [[401, 'session-expired'], [403, 'session-expired'], [500, 'failed'], ['throw', 'failed']] as const) {
+      const calls = u4Http([{status: 200, body: {state: 'claimed'}}], {csrfStatus})
+      expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: expected})
+      expect(u4Posts(calls)).toHaveLength(0)
+    }
+  })
+
+  it('a network failure of the POST is an unknown outcome and is not resubmitted', async () => {
+    const calls = u4Http(['throw'])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: 'unknown'})
+    expect(u4Posts(calls)).toHaveLength(1)
+  })
+
+  it.each([429, 500, 502, 503])('%i is an unknown outcome (it may have been recorded) and is not resubmitted', async status => {
+    const calls = u4Http([{status, body: {}}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: 'unknown'})
+    expect(u4Posts(calls)).toHaveLength(1)
+  })
+
+  it('a network failure of the retry POST is an unknown outcome', async () => {
+    u4Http([{status: 400, body: {error: 'bad request'}}, 'throw'])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: 'unknown'})
+  })
+
+  it('a 200 with an unreadable body is an unknown outcome', async () => {
+    u4Http([{status: 200}])
+    expect(await buildQuestionClient().decideRunQuestion('run-1', 'req-1', SKIP)).toEqual({kind: 'unknown'})
+  })
+
+  it('an unsendable ID or decision is a request-level failure and sends nothing', async () => {
+    const calls = u4Http([{status: 200, body: {state: 'claimed'}}])
+    const client = buildQuestionClient()
+    expect(await client.decideRunQuestion('run/1', 'req-1', SKIP)).toEqual({kind: 'failed'})
+    expect(await client.decideRunQuestion('run-1', '../x', SKIP)).toEqual({kind: 'failed'})
+    expect(await client.decideRunQuestion('run-1', 'req-1', {decision: 'nope'} as never)).toEqual({kind: 'failed'})
+    expect(await client.decideRunQuestion('run-1', 'req-1', {decision: 'answer', answers: [{options: [-1]}]})).toEqual({kind: 'failed'})
+    expect(await client.decideRunQuestion('run-1', 'req-1', {decision: 'answer', answers: [{text: 5}]} as never)).toEqual({kind: 'failed'})
+    expect(calls).toHaveLength(0)
+  })
+
+  it('fixture mode appends the fixture session id to the decision and list paths; the base is configurable', async () => {
+    const calls = u4Http([{status: 200, body: {state: 'claimed'}}, {status: 200, body: {requests: []}}])
+    const client = buildQuestionClient({endpointBase: '/dev/operator', fixtureSessionId: 'fx 1'})
+    await client.decideRunQuestion('run-1', 'req-1', SKIP)
+    await client.listRunQuestions('run-1')
+    expect(u4Posts(calls)[0]?.url).toBe('/dev/operator/runs/run-1/questions/req-1/decision?fixtureSessionId=fx%201')
+    expect(calls.at(-1)?.url).toBe('/dev/operator/runs/run-1/questions?fixtureSessionId=fx%201')
+  })
+})
+
+describe('buildQuestionClient — listRunQuestions validation', () => {
+  afterEach(u4Cleanup)
+
+  const entry = (requestID: string, extra: Record<string, unknown> = {}) => ({requestID, questions: [qQuestion()], ...extra})
+
+  it('GETs the run\'s list with redirect:error and credentials, and returns the parsed requests', async () => {
+    const calls = u4Http([{status: 200, body: {requests: [entry('A'), entry('B')]}}])
+    const result = await buildQuestionClient().listRunQuestions('run-1')
+    expect(calls[0]?.url).toBe('/operator/runs/run-1/questions')
+    expect(calls[0]?.init.redirect).toBe('error')
+    expect(calls[0]?.init.credentials).toBe('include')
+    expect(calls[0]?.init.method).toBeUndefined()
+    expect(result).toEqual({
+      success: true,
+      data: {requests: [entry('A'), entry('B')], invalidBody: false, partial: false},
+    })
+  })
+
+  it('an empty list is valid and authoritative', async () => {
+    u4Http([{status: 200, body: {requests: []}}])
+    expect(await buildQuestionClient().listRunQuestions('run-1')).toEqual({
+      success: true,
+      data: {requests: [], invalidBody: false, partial: false},
+    })
+  })
+
+  it('applies the question text rule to listed prompts (same parser as the frames)', async () => {
+    u4Http([{status: 200, body: {requests: [{requestID: 'A', questions: [qQuestion({text: 'a\tb\u202Ec'})]}]}}])
+    const result = await buildQuestionClient().listRunQuestions('run-1')
+    expect(result.success && result.data.requests[0]?.questions[0]?.text).toBe('a bc')
+  })
+
+  it.each([
+    ['null body', null],
+    ['an array', []],
+    ['no requests key', {items: []}],
+    ['requests not an array', {requests: 'nope'}],
+    ['an extra key on the body', {requests: [], extra: 1}],
+    ['more entries than the gateway cap', {requests: Array.from({length: GATEWAY_PENDING_QUESTIONS_CAP + 1}, (_, index) => entry(`R${index}`))}],
+  ])('an invalid body (%s) is flagged invalidBody with nothing listed', async (_name, body) => {
+    u4Http([{status: 200, body}])
+    expect(await buildQuestionClient().listRunQuestions('run-1')).toEqual({
+      success: true,
+      data: {requests: [], invalidBody: true, partial: false},
+    })
+  })
+
+  it('an unreadable 200 body is invalidBody too', async () => {
+    u4Http([{status: 200}])
+    const result = await buildQuestionClient().listRunQuestions('run-1')
+    expect(result.success && result.data.invalidBody).toBe(true)
+  })
+
+  it.each([
+    ['a per-item runId (the entry is closed)', entry('B', {runId: 'run-1'})],
+    ['an extra key', entry('B', {extra: 1})],
+    ['an empty requestID', entry('')],
+    ['a non-string requestID', {requestID: 7, questions: []}],
+    ['a question over its bound', {requestID: 'B', questions: [qQuestion({header: 'h'.repeat(QUESTION_HEADER_MAX_LENGTH + 1)})]}],
+    ['more questions than the cap', {requestID: 'B', questions: Array.from({length: MAX_QUESTIONS_PER_REQUEST + 1}, () => qQuestion())}],
+    ['a non-object', 'nope'],
+    ['a duplicate of an earlier entry', entry('A')],
+  ])('drops an entry with %s, keeps the rest, and marks the list partial', async (_name, bad) => {
+    u4Http([{status: 200, body: {requests: [entry('A'), bad, entry('C')]}}])
+    const result = await buildQuestionClient().listRunQuestions('run-1')
+    expect(result.success && result.data.requests.map(request => request.requestID)).toEqual(['A', 'C'])
+    expect(result.success && result.data.partial).toBe(true)
+    expect(result.success && result.data.invalidBody).toBe(false)
+  })
+
+  it('a request with zero questions is valid', async () => {
+    u4Http([{status: 200, body: {requests: [{requestID: 'A', questions: []}]}}])
+    const result = await buildQuestionClient().listRunQuestions('run-1')
+    expect(result.success && result.data.requests).toEqual([{requestID: 'A', questions: []}])
+  })
+
+  it('an own __proto__ key on an entry drops it', async () => {
+    u4Http([{status: 200, body: JSON.parse('{"requests":[{"requestID":"A","questions":[],"__proto__":{"x":1}}]}')}])
+    const result = await buildQuestionClient().listRunQuestions('run-1')
+    expect(result.success && result.data.requests).toEqual([])
+    expect(result.success && result.data.partial).toBe(true)
+  })
+
+  it.each([404, 429, 500])('non-OK %i is an http failure, not an empty list', async status => {
+    u4Http([{status, body: {requests: []}}])
+    expect(await buildQuestionClient().listRunQuestions('run-1')).toEqual({success: false, error: {kind: 'http', status}})
+  })
+
+  it('a fetch that throws is a network failure', async () => {
+    u4Http(['throw'])
+    expect(await buildQuestionClient().listRunQuestions('run-1')).toEqual({success: false, error: {kind: 'network'}})
+  })
+
+  it('an unsafe run ID is refused before any request', async () => {
+    const calls = u4Http([{status: 200, body: {requests: []}}])
+    expect(await buildQuestionClient().listRunQuestions('../x')).toEqual({success: false, error: {kind: 'invalid-id'}})
+    expect(calls).toHaveLength(0)
+  })
+})
+
+describe('question list through the handle — validation reaches the reducer rules', () => {
+  afterEach(u4Cleanup)
+
+  it('a list with dropped entries is additive only: a local request the list omits survives', async () => {
+    const partial: QuestionListResult = {success: true, data: {requests: [], invalidBody: false, partial: true}}
+    const h = u4Start({initial: [u4Chunks('A')], list: n => (n === 1 ? u4Listed() : partial)})
+    await h.flush()
+    await h.reconnect()
+    expect(h.ids()).toEqual(['A'])
+  })
+
+  it('an authoritative list prunes a local request it omits, without a tombstone', async () => {
+    const h = u4Start({initial: [u4Chunks('A')], list: () => u4Listed()})
+    await h.flush()
+    await h.reconnect()
+    expect(h.ids()).toEqual([])
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(false)
+  })
+})
+
+describe('question client — vocabulary parity and privacy', () => {
+  afterEach(u4Cleanup)
+
+  it('the browser vocabularies equal the vendored ones', () => {
+    expect([...QUESTION_DECISION_STATES]).toEqual([...VENDORED_QUESTION_DECISION_STATES])
+    expect([...QUESTION_INVALID_REASONS]).toEqual([...VENDORED_QUESTION_INVALID_REASONS])
+  })
+
+  it('request bodies and response text never reach the console or storage, through the client and the handle', async () => {
+    const SECRET_ANSWER = 'u4-secret-answer-text'
+    const SECRET_RESPONSE = 'u4-secret-response-text'
+    const SECRET_QUESTION = 'u4-secret-question-text'
+    const consoleSpies = (['log', 'info', 'warn', 'error', 'debug', 'trace'] as const).map(method => vi.spyOn(console, method).mockImplementation(() => {}))
+    const setItem = vi.fn()
+    vi.stubGlobal('localStorage', {setItem, getItem: () => null})
+    vi.stubGlobal('sessionStorage', {setItem, getItem: () => null})
+
+    // Client: every outcome class, with secrets in the request and in the response bodies.
+    const decision: QuestionDecision = {decision: 'answer', answers: [{text: SECRET_ANSWER}]}
+    for (const response of [
+      {status: 200, body: {state: 'claimed', detail: SECRET_RESPONSE}},
+      {status: 400, body: {error: SECRET_RESPONSE, reason: 'malformed', detail: SECRET_RESPONSE}},
+      {status: 400, body: {error: SECRET_RESPONSE}},
+      {status: 404, body: {error: SECRET_RESPONSE}},
+      {status: 500, body: {error: SECRET_RESPONSE}},
+      {status: 200, body: {state: SECRET_RESPONSE}},
+    ]) {
+      u4Http([response])
+      await buildQuestionClient().decideRunQuestion('run-1', 'req-1', decision)
+    }
+    u4Http(['throw'])
+    await buildQuestionClient().decideRunQuestion('run-1', 'req-1', decision)
+    u4Http([{status: 200, body: {requests: [{requestID: 'A', questions: [qQuestion({text: SECRET_QUESTION, extra: SECRET_RESPONSE})]}]}}])
+    await buildQuestionClient().listRunQuestions('run-1')
+    vi.unstubAllGlobals()
+    vi.stubGlobal('localStorage', {setItem, getItem: () => null})
+    vi.stubGlobal('sessionStorage', {setItem, getItem: () => null})
+
+    // Handle: open a request with secret text, answer with secret text, fail every way.
+    const outcomes: QuestionDecisionOutcome[] = [
+      {kind: 'unknown'},
+      {kind: 'invalid', reason: 'malformed', questionIndex: 0},
+      {kind: 'session-expired'},
+      u4Decided('already_claimed'),
+    ]
+    const frame = qSse(qOpen('A', [qQuestion({text: SECRET_QUESTION})]))
+    const h = u4Start({
+      initial: [[U4_READY, u4Status('running'), frame]],
+      decide: n => outcomes[n - 1] ?? u4Decided('claimed'),
+      list: () => ({success: false, error: {kind: 'http', status: 500}}),
+    })
+    await h.flush()
+    for (const outcome of outcomes) {
+      expect(outcome.kind).toBeDefined()
+      await h.handle.decideQuestion('A', {decision: 'answer', answers: [{text: SECRET_ANSWER}]})
+    }
+    await h.handle.checkQuestions()
+    await h.flush(60_000)
+    const observable = JSON.stringify([h.handle.getQuestionNotes(), h.handle.getQuestions().map(request => request.status)])
+    expect(observable).not.toContain(SECRET_ANSWER)
+    expect(observable).not.toContain(SECRET_RESPONSE)
+
+    for (const spy of consoleSpies) {
+      for (const args of spy.mock.calls) {
+        const text = JSON.stringify(args)
+        for (const secret of [SECRET_ANSWER, SECRET_RESPONSE, SECRET_QUESTION]) expect(text).not.toContain(secret)
+      }
+      expect(spy).not.toHaveBeenCalled()
+    }
+    expect(setItem).not.toHaveBeenCalled()
+  })
+})
+
+describe('nextStreamState — question-claimed, question-resolved and question-reconcile-reset', () => {
+  beforeEach(() => resetQuestionPageStore())
+  afterEach(() => resetQuestionPageStore())
+
+  const open = (...ids: string[]): StreamState => {
+    let state = qStatus(qLive(), 'running')
+    for (const id of ids) state = qFrameApply(state, qOpen(id))
+    return state
+  }
+
+  it('question-claimed exempts an open request from removal by absence', () => {
+    const claimed = nextStreamState(open('A', 'B'), {type: 'question-claimed', runId: Q_RUN, requestID: 'A'})
+    expect(qEntry(claimed).questionClaimedExempt?.has('A')).toBe(true)
+    expect(qIds(qReconcile(claimed, ['B']))).toEqual(['A', 'B'])
+  })
+
+  it('question-claimed is a no-op for a request that is not open, is tombstoned, or whose run is terminal', () => {
+    const state = open('A')
+    expect(nextStreamState(state, {type: 'question-claimed', runId: Q_RUN, requestID: 'Z'})).toBe(state)
+    expect(nextStreamState(INITIAL_STATE, {type: 'question-claimed', runId: Q_RUN, requestID: 'A'})).toBe(INITIAL_STATE)
+    const terminal = qStatus(state, 'succeeded')
+    expect(nextStreamState(terminal, {type: 'question-claimed', runId: Q_RUN, requestID: 'A'})).toBe(terminal)
+  })
+
+  it('question-resolved tombstones, removes, drops the draft and the exemption, even before the connection is live', () => {
+    const claimed = nextStreamState(open('A'), {type: 'question-claimed', runId: Q_RUN, requestID: 'A'})
+    getQuestionPageStore(Q_RUN).drafts.set('A', {fixture: 'draft'})
+    const reconnecting = {...claimed, connection: 'reconnecting'} as StreamState
+    const resolved = nextStreamState(reconnecting, {type: 'question-resolved', runId: Q_RUN, requestID: 'A'})
+    expect(qIds(resolved)).toEqual([])
+    expect(qEntry(resolved).questionClaimedExempt?.has('A')).toBe(false)
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(true)
+    expect(getQuestionPageStore(Q_RUN).drafts.has('A')).toBe(false)
+    expect(qIds(qFrameApply(resolved, qOpen('A')))).toEqual([])
+  })
+
+  it('question-resolved is ignored once the run is terminal', () => {
+    const terminal = qStatus(open('A'), 'succeeded')
+    expect(nextStreamState(terminal, {type: 'question-resolved', runId: Q_RUN, requestID: 'A'})).toBe(terminal)
+    expect(getQuestionPageStore(Q_RUN).tombstones.has('A')).toBe(false)
+  })
+
+  it('a reconcile keeps a claimed request the list omits, and ends the exemption only when the list shows it open', () => {
+    const claimed = nextStreamState(open('A', 'B'), {type: 'question-claimed', runId: Q_RUN, requestID: 'A'})
+    const omitting: QuestionReconcileEvent = {
+      type: 'question-reconcile',
+      runId: Q_RUN,
+      snapshotIds: ['A', 'B'],
+      requests: [{requestID: 'B', questions: [qQuestion()] as never}],
+      invalidBody: false,
+      partial: false,
+    }
+    const kept = nextStreamState(claimed, omitting)
+    expect(qIds(kept)).toEqual(['A', 'B'])
+    expect(qEntry(kept).questionClaimedExempt?.has('A')).toBe(true)
+    const reopened = nextStreamState(kept, {
+      ...omitting,
+      requests: [
+        {requestID: 'A', questions: [qQuestion()] as never},
+        {requestID: 'B', questions: [qQuestion()] as never},
+      ],
+    })
+    expect(qIds(reopened)).toEqual(['A', 'B'])
+    expect(qEntry(reopened).questionClaimedExempt?.has('A')).toBe(false)
+  })
+
+  it('question-reconcile-reset clears the completed flag, so a wire waiting_for_question reads as waiting again', () => {
+    let state = qStatus(qLive(), 'waiting_for_question')
+    state = qReconcile(state, [])
+    expect(getEffectiveStatus(qEntry(state))).toBe('running')
+    const reset = nextStreamState(state, {type: 'question-reconcile-reset', runId: Q_RUN})
+    expect(qEntry(reset).questionReconcileDone).toBe(false)
+    expect(getEffectiveStatus(qEntry(reset))).toBe('waiting_for_question')
+    expect(qEntry(reset).status).toBe('waiting_for_question')
+  })
+
+  it('question-reconcile-reset leaves a state without the run, and a terminal run, unchanged', () => {
+    expect(nextStreamState(INITIAL_STATE, {type: 'question-reconcile-reset', runId: Q_RUN})).toBe(INITIAL_STATE)
+    const terminal = qStatus(open('A'), 'succeeded')
+    expect(nextStreamState(terminal, {type: 'question-reconcile-reset', runId: Q_RUN})).toBe(terminal)
+  })
+})
+
+describe('approval client — unchanged by the question client', () => {
+  afterEach(u4Cleanup)
+
+  it('still retries once on ANY 400, including one carrying a reason, with the same idempotency key', async () => {
+    const calls = u4Http([
+      {status: 400, body: {error: 'bad request', reason: 'malformed'}},
+      {status: 200, body: {state: 'claimed'}},
+    ])
+    const result = await buildApprovalClient().decideRunApproval('run-1', 'req-1', 'once', 'idem-1')
+    expect(result.success).toBe(true)
+    const posts = u4Posts(calls)
+    expect(posts).toHaveLength(2)
+    expect(posts.map(post => (post.init.headers as Record<string, string>)['idempotency-key'])).toEqual(['idem-1', 'idem-1'])
+  })
+
+  it('still sends the idempotency key, and the approval routes are untouched by the question routes', async () => {
+    const calls = u4Http([{status: 200, body: {state: 'claimed'}}, {status: 200, body: {approvals: []}}])
+    const client = buildApprovalClient()
+    await client.decideRunApproval('run-1', 'req-1', 'once', 'idem-2')
+    await client.listRunApprovals('run-1')
+    const urls = calls.map(call => call.url)
+    expect(urls).toContain('/operator/runs/run-1/approvals/req-1/decision')
+    expect(urls).toContain('/operator/runs/run-1/approvals')
+    expect(urls.some(url => url.includes('/questions'))).toBe(false)
+    expect(calls.find(call => call.url.endsWith('/decision'))?.init.headers).toMatchObject({'idempotency-key': 'idem-2'})
+  })
+
+  it('the approval reconcile still runs on a live transition with no question client wired', async () => {
+    vi.useFakeTimers()
+    const listed: string[] = []
+    vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag)})
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      headers: {get: () => 'text/event-stream'},
+      body: new ReadableStream({start(c) { c.enqueue(new TextEncoder().encode([U4_READY, u4Status('running')].join(''))) }}),
+    }))
+    const approvalsEl = makeFakeEl('div')
+    const handle = initOperatorStream({
+      runId: Q_RUN,
+      statusEl: makeFakeEl('span') as never,
+      noticeEl: makeFakeEl('div') as never,
+      approvalsEl: approvalsEl as never,
+      approvalClient: {
+        refreshCsrf: async () => ({success: true, data: {csrfToken: 'c'}}),
+        decideRunApproval: async () => ({success: true, data: {state: 'claimed'}}),
+        listRunApprovals: async (runId: string) => {
+          listed.push(runId)
+          return {success: true as const, data: {approvals: []}}
+        },
+      },
+    })
+    u4Handles.push(handle)
+    await vi.advanceTimersByTimeAsync(10)
+    expect(listed).toEqual([Q_RUN])
   })
 })

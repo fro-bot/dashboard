@@ -12,7 +12,12 @@ import {resolve} from 'node:path'
 import process from 'node:process'
 import {describe, expect, it} from 'vitest'
 import {OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
-import {FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../src/gateway/operator-fixture-sse.ts'
+import {
+  FIXTURE_QUESTION_SCENARIO_ROWS,
+  FIXTURE_SCENARIO_NAMES,
+  fixtureQuestionScript,
+  serializeScenarioToSse,
+} from '../src/gateway/operator-fixture-sse.ts'
 import {FIXTURE_KNOWN_FAILURE_REASON, FIXTURE_UNKNOWN_FAILURE_REASON} from '../src/gateway/operator-fixtures.ts'
 
 const FIXTURE_FILES = [
@@ -365,6 +370,73 @@ describe('fixture no-leak guard — checkout scenarios', () => {
   it('no fixture source contains a literal 40-hex SHA', () => {
     for (const filePath of FIXTURE_FILES) {
       expect(stripComments(readFixtureFile(filePath))).not.toMatch(/\b[\da-f]{40}\b/i)
+    }
+  })
+})
+
+describe('fixture no-leak guard — question scenarios', () => {
+  // eslint-disable-next-line no-control-regex
+  const STRIPPED = /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g
+  const QUESTION_KEYS = FIXTURE_QUESTION_SCENARIO_ROWS.map(row => row.scenario)
+
+  interface QuestionRecord {
+    readonly runId: string
+    readonly requestID: string
+    readonly settled: boolean
+    readonly questions?: {header: string; text: string; options: {label: string; description: string}[]}[]
+  }
+
+  function questionRecords(sse: string): QuestionRecord[] {
+    return sse
+      .split('\n\n')
+      .filter(record => record.includes('event: question'))
+      .map(record => JSON.parse(record.split('data: ')[1] ?? '{}') as QuestionRecord)
+  }
+
+  function freeText(record: QuestionRecord): string[] {
+    return (record.questions ?? []).flatMap(question => [
+      question.header,
+      question.text,
+      ...question.options.flatMap(option => [option.label, option.description]),
+    ])
+  }
+
+  it('every question request ID is req-fixture- prefixed, and every frame carries the bound run ID', () => {
+    expect(QUESTION_KEYS.length).toBe(12)
+    for (const key of QUESTION_KEYS) {
+      const runId = `run-fixture-index-${key.replaceAll('_', '-')}`
+      for (const record of questionRecords(serializeScenarioToSse(key, runId))) {
+        expect(isFixtureRequestId(record.requestID), `${key} ${record.requestID}`).toBe(true)
+        expect(record.runId).toBe(runId)
+      }
+    }
+  })
+
+  it('every scripted request ID is req-fixture- prefixed', () => {
+    for (const key of QUESTION_KEYS) {
+      const script = fixtureQuestionScript(key)
+      const requests = [script?.openRequests ?? [], ...(script?.listsAfterDecision ?? [])].flat()
+      for (const request of requests) expect(isFixtureRequestId(request.requestID), `${key} ${request.requestID}`).toBe(true)
+    }
+  })
+
+  it('every free-form question string starts with "fixture" (ignoring bidi/control characters)', () => {
+    for (const key of QUESTION_KEYS) {
+      for (const record of questionRecords(serializeScenarioToSse(key, 'run-fixture-leak-001'))) {
+        for (const value of freeText(record)) {
+          const visible = value.replaceAll(STRIPPED, '')
+          expect(visible.startsWith('fixture'), `${key}: ${JSON.stringify(visible.slice(0, 40))}`).toBe(true)
+        }
+      }
+    }
+  })
+
+  it('the bidi/control characters sit only in the text-sentinel scenario', () => {
+    for (const key of QUESTION_KEYS) {
+      const hasUnsafe = questionRecords(serializeScenarioToSse(key, 'run-fixture-leak-001'))
+        .flatMap(record => freeText(record))
+        .some(value => value !== value.replaceAll(STRIPPED, ''))
+      expect(hasUnsafe, key).toBe(key === 'question_text_sentinels')
     }
   })
 })

@@ -2240,6 +2240,10 @@ describe('CSS selector ↔ status emitter agreement', () => {
       expect(cssContent).toContain(expectedSelector)
     }
 
+    // The stream emitter hyphenates stream-only statuses (`waiting_for_question` → `status-waiting-for-question`).
+    expect(cssContent).toContain('.run-status.status-waiting-for-question')
+    expect(cssContent).toContain('[data-theme="light"] .run-status.status-waiting-for-question')
+
     // Explicitly verify the old wrong ones are GONE
     expect(cssContent).not.toContain('.status-success')
     expect(cssContent).not.toContain('.status-failure')
@@ -3165,5 +3169,144 @@ describe('checkout-detail region — adopted optimistic cards (ensureRunCardAnat
     const hiddenRoles = card => childRoles(card).filter(role => role !== undefined && !['run-status-group', 'run-repo', 'run-updated-at'].includes(role))
     expect(hiddenRoles(optimistic)).toEqual(hiddenRoles(fetched))
     expect(hiddenRoles(fetched)[0]).toBe(CHECKOUT_ROLE)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Question region — one hidden region per card, on every card shape
+// ---------------------------------------------------------------------------
+
+const QUESTIONS_ROLE = 'run-questions'
+
+describe('question region — fetched cards (renderRunCard)', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('every fetched card has exactly one hidden, empty run-questions div after run-approvals', async () => {
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([
+      makeValidSummary({runId: 'run-q-fetched-1', updatedAt: '2026-06-26T13:00:00.000Z'}),
+      makeValidSummary({runId: 'run-q-fetched-2'}),
+    ])
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(2)
+    for (const card of cards) {
+      expect(countRole(card, QUESTIONS_ROLE)).toBe(1)
+      const region = card.querySelector(`[data-role="${QUESTIONS_ROLE}"]`)
+      expect(region.hidden).toBe(true)
+      expect(region.textContent).toBe('')
+      expect(region._children).toHaveLength(0)
+      expect(Object.keys(region.dataset)).toEqual(['role'])
+      expect(Object.keys(region.attributes)).toEqual([])
+      const roles = childRoles(card)
+      expect(roles.indexOf(QUESTIONS_ROLE)).toBe(roles.indexOf('run-approvals') + 1)
+    }
+  })
+
+  it('is part of the auto-hidden substructure: expand reveals it, collapse hides it, switching hides the first card’s', async () => {
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([makeValidSummary({runId: 'run-q-accordion-a'}), makeValidSummary({runId: 'run-q-accordion-b'})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    const [cardA, cardB] = cards
+    const region = card => card.querySelector(`[data-role="${QUESTIONS_ROLE}"]`)
+
+    cardA.dispatchEvent({type: 'click'})
+    expect(region(cardA).hidden).toBe(false)
+    expect(region(cardB).hidden).toBe(true)
+
+    cardB.dispatchEvent({type: 'click'})
+    expect(region(cardA).hidden).toBe(true)
+    expect(region(cardB).hidden).toBe(false)
+
+    cardB.dispatchEvent({type: 'click'})
+    expect(region(cardB).hidden).toBe(true)
+  })
+
+  it('source: SUBSTRUCTURE_ROLES lists the question role', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).toMatch(/const QUESTIONS_ROLE = 'run-questions'/)
+    const list = src.match(/const SUBSTRUCTURE_ROLES = \[([\s\S]*?)\]/)?.[1] ?? ''
+    expect(list).toContain('QUESTIONS_ROLE')
+  })
+
+  it('regression: the run-summary parser still rejects waiting statuses', () => {
+    for (const status of ['waiting_for_question', 'waiting_for_approval', 'blocked']) {
+      const parsed = parseRunSummaryItem(makeValidSummary({runId: 'run-q-reject-001', status}))
+      expect(parsed.success).toBe(false)
+    }
+    expect(VALID_RUN_SUMMARY_STATUSES.has('waiting_for_question')).toBe(false)
+  })
+})
+
+describe('question region — adopted optimistic cards (ensureRunCardAnatomy)', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  const UPDATED_AT = '2026-06-26T13:00:00.000Z'
+
+  it('a status-only card gains exactly one hidden region between run-approvals and approval-badge, across repeated diffs', async () => {
+    const runId = 'run-q-adopt-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+    expect(optimistic.querySelector(`[data-role="${QUESTIONS_ROLE}"]`)).toBeNull()
+
+    for (let i = 0; i < 3; i++) {
+      stubFetchRuns([makeValidSummary({runId, status: 'running', updatedAt: UPDATED_AT})])
+      await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    }
+
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toBe(optimistic)
+    expect(countRole(optimistic, QUESTIONS_ROLE)).toBe(1)
+    expect(optimistic.querySelector(`[data-role="${QUESTIONS_ROLE}"]`).hidden).toBe(true)
+    const roles = childRoles(optimistic)
+    expect(roles.indexOf(QUESTIONS_ROLE)).toBe(roles.indexOf('run-approvals') + 1)
+    expect(roles.indexOf(QUESTIONS_ROLE)).toBeLessThan(roles.indexOf('approval-badge'))
+    expect(roles.indexOf(QUESTIONS_ROLE)).toBeLessThan(roles.indexOf('run-cancel'))
+  })
+
+  it('a launch-built card that already carries the region is not given a second one', async () => {
+    const runId = 'run-q-adopt-existing-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+    const region = document.createElement('div')
+    region.dataset.role = QUESTIONS_ROLE
+    region.hidden = true
+    optimistic._children.splice(optimistic._children.findIndex(child => child.dataset?.role === 'approval-badge'), 0, region)
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running', updatedAt: UPDATED_AT})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    expect(countRole(optimistic, QUESTIONS_ROLE)).toBe(1)
+    expect(optimistic.querySelector(`[data-role="${QUESTIONS_ROLE}"]`)).toBe(region)
+  })
+
+  it('an adopted card exposes the same ordered hidden regions as a fetched card', async () => {
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([makeValidSummary({runId: 'run-q-parity-fetched', updatedAt: UPDATED_AT})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    const optimistic = makeStatusOnlyOptimisticCard(cards, 'run-q-parity-adopted')
+    stubFetchRuns([
+      makeValidSummary({runId: 'run-q-parity-fetched', updatedAt: UPDATED_AT}),
+      makeValidSummary({runId: 'run-q-parity-adopted', status: 'running', updatedAt: UPDATED_AT}),
+    ])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    const fetched = cards.find(card => card.dataset.runId === 'run-q-parity-fetched')
+    const hiddenRoles = card => childRoles(card).filter(role => role !== undefined && !['run-status-group', 'run-repo', 'run-updated-at'].includes(role))
+    expect(hiddenRoles(optimistic)).toEqual(hiddenRoles(fetched))
+    expect(hiddenRoles(fetched)).toContain(QUESTIONS_ROLE)
   })
 })

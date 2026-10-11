@@ -25,7 +25,7 @@ function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {status, headers: {'content-type': 'application/json'}})
 }
 
-describe('optimistic launch card — checkout-detail region', () => {
+describe('optimistic launch card', () => {
   let launchModule: LaunchModule | undefined
 
   afterEach(() => {
@@ -35,7 +35,8 @@ describe('optimistic launch card — checkout-detail region', () => {
     vi.unstubAllGlobals()
   })
 
-  it('a successful launch inserts a card with exactly one hidden, empty checkout-detail region right after the header row', async () => {
+  /** Run the real submit path and return the optimistic card it inserts. */
+  async function launchOptimisticCard(): Promise<HTMLElement> {
     launchModule = await importLaunchModuleWithStreamMock()
     vi.stubGlobal('fetch', vi.fn(async (input: string) => {
       if (input.endsWith('/session/csrf')) return jsonResponse(200, {csrfToken: 'tok-card'})
@@ -59,7 +60,11 @@ describe('optimistic launch card — checkout-detail region', () => {
         form?.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}))
       })
     })
-    const card = await launched
+    return launched
+  }
+
+  it('a successful launch inserts a card with exactly one hidden, empty checkout-detail region right after the header row', async () => {
+    const card = await launchOptimisticCard()
 
     expect(card.dataset.runId).toBe('run-card-001')
     expect(document.querySelector('[data-role="run-index-list"]')?.firstElementChild).toBe(card)
@@ -75,5 +80,21 @@ describe('optimistic launch card — checkout-detail region', () => {
     const at = roles.indexOf('run-checkout-detail')
     expect(roles[at - 1]).toBe('run-repo')
     expect(roles[at + 1]).toBe('run-output')
+  })
+
+  it('the optimistic card contains exactly one hidden, empty run-questions region directly after run-approvals', async () => {
+    const card = await launchOptimisticCard()
+
+    const regions = card.querySelectorAll<HTMLElement>('[data-role="run-questions"]')
+    expect(regions).toHaveLength(1)
+    const region = regions[0]
+    expect(region?.hidden).toBe(true)
+    expect(region?.textContent).toBe('')
+    expect(region?.parentElement).toBe(card)
+
+    const roles = Array.from(card.children).map(child => (child as HTMLElement).dataset.role)
+    const at = roles.indexOf('run-questions')
+    expect(roles[at - 1]).toBe('run-approvals')
+    expect(roles[at + 1]).toBe('approval-badge')
   })
 })

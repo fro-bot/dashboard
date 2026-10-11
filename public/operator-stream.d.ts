@@ -24,6 +24,28 @@ export declare const FIRST_FRAME_TIMEOUT_MS: number
  * Used by reconcileApprovals to guard against truncated recovery responses.
  */
 export declare const GATEWAY_PENDING_APPROVALS_CAP: number
+/** Cap on open questions per run (the gateway's list cap). Excess opens are rejected, never evicting. */
+export declare const MAX_OPEN_QUESTIONS: number
+/**
+ * Mirrors the gateway's pending-question list cap (50). A list at or above it may be
+ * truncated, so the question reconcile is additive only for it.
+ */
+export declare const GATEWAY_PENDING_QUESTIONS_CAP: number
+/** Decision states a 200 can carry. Mirrors the vendored `QUESTION_DECISION_STATES`. */
+export declare const QUESTION_DECISION_STATES: readonly ['claimed', 'already_claimed', 'already_settled', 'failed_to_settle']
+/** Reasons a 400 can carry. Mirrors the vendored `QUESTION_INVALID_REASONS`. */
+export declare const QUESTION_INVALID_REASONS: readonly [
+  'malformed',
+  'arity-mismatch',
+  'unknown-option',
+  'multiple-not-allowed',
+  'empty-value',
+  'text-too-long',
+]
+/** Delays between successive re-lists after an `already_claimed`: about 2, 5, 10 and 20 seconds, then stop. */
+export declare const QUESTION_CLAIM_RECHECK_DELAYS_MS: readonly number[]
+/** Bound, in milliseconds, on each fetch of the question client (list, CSRF and decision POST). */
+export declare const QUESTION_FETCH_TIMEOUT_MS: number
 
 /** Operator-safe failure-reason code. */
 export type FailureKind =
@@ -271,12 +293,47 @@ export interface ApprovalFrameDataSettle {
 
 export type ApprovalFrameData = ApprovalFrameDataOpen | ApprovalFrameDataSettle
 
+/** One selectable option. Both strings are sanitized, bounded, untrusted plain text. */
+export interface QuestionOption {
+  readonly label: string
+  readonly description: string
+}
+
+/** One question of a request. All strings are sanitized, bounded, untrusted plain text. */
+export interface QuestionPrompt {
+  readonly header: string
+  readonly text: string
+  readonly options: readonly QuestionOption[]
+  readonly multiple: boolean
+  readonly custom: boolean
+}
+
+/** A pending question request: the request ID and its parsed prompts, in question order. */
+export interface QuestionRequest {
+  readonly requestID: string
+  readonly questions: readonly QuestionPrompt[]
+}
+
+export interface QuestionFrameDataOpen extends QuestionRequest {
+  readonly runId: string
+  readonly settled: false
+}
+
+export interface QuestionFrameDataSettle {
+  readonly runId: string
+  readonly requestID: string
+  readonly settled: true
+}
+
+export type QuestionFrameData = QuestionFrameDataOpen | QuestionFrameDataSettle
+
 export type StreamFrame =
   | {readonly type: 'ready'; readonly data: ReadyFrameData}
   | {readonly type: 'status'; readonly data: StatusFrameData}
   | {readonly type: 'reset'; readonly data: ResetFrameData}
   | {readonly type: 'output'; readonly data: OutputFrameData}
   | {readonly type: 'approval'; readonly data: ApprovalFrameData}
+  | {readonly type: 'question'; readonly data: QuestionFrameData}
 
 // ---------------------------------------------------------------------------
 // Parse result
@@ -349,6 +406,27 @@ export interface RunEntry {
    */
   readonly approvalTombstones?: Readonly<Record<string, true>>
   /**
+   * Open question requests keyed by requestID, in arrival order (capped at MAX_OPEN_QUESTIONS).
+   * Absent until the first question frame or reconcile for this run. Use
+   * `getOpenQuestions(runEntry)` to read. Tombstones and drafts are NOT here: they live in the
+   * page store so they outlast this run entry.
+   */
+  readonly questionOpen?: ReadonlyMap<string, QuestionRequest>
+  /**
+   * Request IDs this page got `already_claimed` for. The gateway omits claimed requests from the
+   * pending list, so the question reconcile never removes these for being absent. Empty until the
+   * question client populates it.
+   */
+  readonly questionClaimedExempt?: ReadonlySet<string>
+  /** True once a question reconcile result has been applied for this run. Gates the `running` fallback. */
+  readonly questionReconcileDone?: boolean
+  /**
+   * True when the run's output is gone because its gateway snapshot expired: set by a
+   * `reset` (`no-snapshot`) for a run known terminal, or by a terminal status frame after such a
+   * reset with no output since. Cleared by an output frame. Rendered as fixed in-card copy.
+   */
+  readonly outputUnavailable?: boolean
+  /**
    * True while a browser-dispatched cancel POST is outstanding for this run.
    * Internal-only — set by the `cancel` action, cleared by a terminal status
    * frame from any source (terminal-wins). Never exposed via toSafeRunView.
@@ -366,11 +444,25 @@ export interface CancelActionEvent {
   readonly data: {readonly runId: string}
 }
 
+/** Statuses a run-list summary can carry. */
+export type RunSummaryStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+
 export interface StreamState {
   readonly connection: ConnectionStatus
   readonly runs: Readonly<Record<string, RunEntry>>
   readonly retryCount: number
   readonly shouldReconnect: boolean
+  /**
+   * The run-list summary status for the stream's run, when the caller has one. A terminal value lets
+   * a `reset` (`no-snapshot`) close the card with that status and the unavailable state, without
+   * waiting for a status frame the gateway may never send.
+   */
+  readonly summaryStatus?: RunSummaryStatus
+  /**
+   * Null-prototype map of runId → true after a `reset` (`no-snapshot`) left the run live. A terminal
+   * status frame with no output since shows the unavailable state; an output frame clears the mark.
+   */
+  readonly snapshotMissing?: Readonly<Record<string, true>>
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +493,55 @@ export interface ApprovalReconcileEvent {
   }[]
 }
 
+/**
+ * Result of a pending-question list check, applied as a diff against a pre-GET snapshot.
+ *
+ * - snapshotIds: request IDs open locally BEFORE the GET. Only these may be removed, so a request
+ *   that opened over SSE during the await is never pruned.
+ * - requests: the valid listed requests. Listed and not tombstoned → added. A request in
+ *   `snapshotIds` and absent from here is removed WITHOUT a tombstone, unless it is claimed-exempt.
+ * - invalidBody: the response body failed validation → no change at all.
+ * - partial: the caller dropped invalid entries → additive only.
+ *
+ * A list of GATEWAY_PENDING_QUESTIONS_CAP or more requests is also additive only. Sets
+ * `questionReconcileDone`. A claimed-exempt request ends its exemption only when the list shows it
+ * open. Failures (network, 429, 5xx) are never dispatched.
+ */
+export interface QuestionReconcileEvent {
+  readonly type: 'question-reconcile'
+  readonly runId: string
+  readonly snapshotIds: readonly string[]
+  readonly requests: readonly QuestionRequest[]
+  readonly invalidBody: boolean
+  readonly partial: boolean
+}
+
+/**
+ * A new connection cycle starts: clear `questionReconcileDone` so a wire `waiting_for_question` is not
+ * read as `running` before the new cycle's question list has been applied.
+ */
+export interface QuestionReconcileResetEvent {
+  readonly type: 'question-reconcile-reset'
+  readonly runId: string
+}
+
+/**
+ * This page's own decision got `claimed` or `already_settled`: tombstone the request for the page and
+ * remove it, with its draft and exemption, exactly as a settle frame would. Not gated on the connection.
+ */
+export interface QuestionResolvedEvent {
+  readonly type: 'question-resolved'
+  readonly runId: string
+  readonly requestID: string
+}
+
+/** This page got `already_claimed` for an open request: exempt it from removal by list absence. */
+export interface QuestionClaimedEvent {
+  readonly type: 'question-claimed'
+  readonly runId: string
+  readonly requestID: string
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle events
 // ---------------------------------------------------------------------------
@@ -414,6 +555,10 @@ export type StreamEvent =
   | {readonly type: 'buffer-overflow'}
   | {readonly type: 'first-frame-timeout'}
   | ApprovalReconcileEvent
+  | QuestionReconcileEvent
+  | QuestionReconcileResetEvent
+  | QuestionResolvedEvent
+  | QuestionClaimedEvent
   | CancelActionEvent
 
 // ---------------------------------------------------------------------------
@@ -475,12 +620,160 @@ export declare function hasOpenApprovals(runEntry: RunEntry | undefined | null):
  */
 export declare function getOpenApprovals(runEntry: RunEntry | undefined | null): readonly ApprovalFrameDataOpen[]
 
+/** The run's open question requests in arrival order; empty when there are none. */
+export declare function getOpenQuestions(runEntry: RunEntry | undefined | null): readonly QuestionRequest[]
+
+/** True iff the run has at least one open question request. */
+export declare function hasOpenQuestions(runEntry: RunEntry | undefined | null): boolean
+
+/**
+ * The status to render: terminal wins; else wire `waiting_for_approval`; else a `running` run with
+ * an open question → `waiting_for_question`; else a wire `waiting_for_question` with no open question
+ * after a completed reconcile → `running`; else the wire value. Derived at render, never stored.
+ * Returns '' for an absent entry.
+ */
+export declare function getEffectiveStatus(runEntry: RunEntry | undefined | null): string
+
+/**
+ * Page-level question record for a run. Tombstones (settled requests, never evicted) and drafts
+ * outlive stream handles so a collapsed and re-expanded card sees them. In memory only; the record
+ * is live and callers mutate it directly. Created on first use.
+ */
+export interface QuestionPageRecord {
+  readonly tombstones: Set<string>
+  readonly drafts: Map<string, unknown>
+}
+
+export declare function getQuestionPageStore(runId: string): QuestionPageRecord
+
+/** Drop every run's tombstones and drafts (tests; page teardown). */
+export declare function resetQuestionPageStore(): void
+
 // ---------------------------------------------------------------------------
 // DOM shell (browser-only — never called at module top-level)
 // ---------------------------------------------------------------------------
 
+/** A decision for one question request: skip it, or answer with one entry per question, in order. */
+export type QuestionDecision =
+  | {readonly decision: 'skip'}
+  | {
+    readonly decision: 'answer'
+    readonly answers: readonly {readonly options?: readonly number[]; readonly text?: string}[]
+  }
+
+export type QuestionDecisionState = (typeof QUESTION_DECISION_STATES)[number]
+export type QuestionInvalidReason = (typeof QUESTION_INVALID_REASONS)[number]
+
+/**
+ * Outcome of `decideRunQuestion`, classified by response.
+ * - `decided`: 200 with a known state.
+ * - `invalid`: 400 with a `reason`. `reason` and `questionIndex` are both null when the invalid answer
+ *   is request-level (unknown reason, or no usable index); `questionIndex` is zero-based and in range.
+ *   Also what a second 400 without a `reason` becomes.
+ * - `cant-answer`: 404, the masked denial.
+ * - `session-expired`: 401/403, from the CSRF fetch or the POST.
+ * - `unknown`: the POST was sent and its outcome is unknown (network failure, 429, 5xx, unreadable 200).
+ *   Never resubmit; re-list instead.
+ * - `failed`: request-level and retryable (never sent, or a 200 with an unknown state).
+ */
+export type QuestionDecisionOutcome =
+  | {readonly kind: 'decided'; readonly state: QuestionDecisionState}
+  | {readonly kind: 'invalid'; readonly reason: QuestionInvalidReason | null; readonly questionIndex: number | null}
+  | {readonly kind: 'cant-answer'}
+  | {readonly kind: 'session-expired'}
+  | {readonly kind: 'unknown'}
+  | {readonly kind: 'failed'}
+
+export type QuestionListResult =
+  | {
+    readonly success: true
+    readonly data: {
+      readonly requests: readonly QuestionRequest[]
+      /** The body failed validation (requests is then empty): change nothing. */
+      readonly invalidBody: boolean
+      /** Entries were dropped (invalid or duplicate): the list is not a complete picture. */
+      readonly partial: boolean
+    }
+  }
+  | {readonly success: false; readonly error: {readonly kind: 'http'; readonly status: number}}
+  | {readonly success: false; readonly error: {readonly kind: 'network'}}
+  | {readonly success: false; readonly error: {readonly kind: 'invalid-id'}}
+
+/** Browser-direct question client (also the injection shape for tests). */
+export interface QuestionClient {
+  readonly listRunQuestions: (runId: string) => Promise<QuestionListResult>
+  readonly decideRunQuestion: (
+    runId: string,
+    requestId: string,
+    decision: QuestionDecision,
+  ) => Promise<QuestionDecisionOutcome>
+}
+
+/**
+ * The UI-facing status of one question request. Stream state, never page-store state. A request with
+ * no recorded status is `open`.
+ *
+ * - `open`: answerable.
+ * - `in-flight`: a decision POST is outstanding (disable controls, "Sending answers…").
+ * - `claimed-elsewhere`: `already_claimed`; kept, exempt from removal by absence, re-listing on a
+ *   bounded backoff and then on "Check again" (`checkQuestions`).
+ * - `checking`: a list check is pending (after an unknown outcome, or a manual check).
+ * - `gone`: unknown outcome, then the list omitted the request. "This question is no longer open. Your
+ *   answer may have been recorded." A note, shown for a request that is no longer in `getQuestions()`.
+ * - `invalid`: 400 with a reason; `questionIndex` is the zero-based question, null for the whole request.
+ * - `failed-to-settle`: `failed_to_settle`, or any other retryable request-level error. Input kept.
+ * - `cant-answer`: masked 404; applies to every open request of the run for this stream.
+ * - `session-expired`: 401/403.
+ * - `check-failed`: a check the operator is waiting on failed (manual, or after an unknown outcome).
+ * - `claimed`: this page's answer was accepted. A note for a request that already left.
+ * - `already-settled`: `already_settled`. A note, distinct from `gone` so the copy can differ.
+ */
+export type QuestionRequestStatus =
+  | {readonly kind: 'open'}
+  | {readonly kind: 'in-flight'}
+  | {readonly kind: 'claimed-elsewhere'}
+  | {readonly kind: 'checking'}
+  | {readonly kind: 'gone'}
+  | {readonly kind: 'invalid'; readonly reason: QuestionInvalidReason | null; readonly questionIndex: number | null}
+  | {readonly kind: 'failed-to-settle'}
+  | {readonly kind: 'cant-answer'}
+  | {readonly kind: 'session-expired'}
+  | {readonly kind: 'check-failed'}
+  | {readonly kind: 'claimed'}
+  | {readonly kind: 'already-settled'}
+
+/** An open request with its parsed prompts and UI-facing status. */
+export interface QuestionRequestView extends QuestionRequest {
+  readonly status: QuestionRequestStatus
+}
+
+/** A request that is no longer open but whose outcome stays on the card: `claimed`, `already-settled` or `gone`. */
+export interface QuestionNote {
+  readonly requestID: string
+  readonly status: QuestionRequestStatus
+}
+
 export interface StreamHandle {
   close: () => void
+  /**
+   * Submit a decision for one open request. Sends nothing (returns the current status) while the request
+   * is in flight, being checked or claimed elsewhere, or once the run's questions are known unanswerable.
+   * Resolves to the request's status afterwards (after the follow-up check, for an unknown outcome), or
+   * null when the request is not open or no question client is wired. Never resubmits on its own.
+   */
+  decideQuestion: (requestID: string, decision: QuestionDecision) => Promise<QuestionRequestStatus | null>
+  /**
+   * "Check again": re-list on demand. With a request ID, targets that request; without, every request
+   * that is claimed elsewhere or whose last check failed. Those go `checking`; a failed check leaves
+   * `check-failed`. Resolves when the check has finished.
+   */
+  checkQuestions: (requestID?: string) => Promise<void>
+  /** Open requests in arrival order with their statuses. */
+  getQuestions: () => readonly QuestionRequestView[]
+  /** Notes for requests that are no longer open. */
+  getQuestionNotes: () => readonly QuestionNote[]
+  /** The status of one request, or null when the stream knows nothing about it. */
+  getQuestionStatus: (requestID: string) => QuestionRequestStatus | null
 }
 
 /** Browser-direct approval client interface (for testing injection). */
@@ -527,6 +820,20 @@ export interface InitOptions {
   readonly checkoutEl?: (HTMLElement & {hidden: boolean}) | null
   /** Injectable cancel client for testing. If absent, buildCancelClient() is used. */
   readonly cancelClient?: CancelControlClient | null
+  /**
+   * Question region element (data-role="run-questions"). Its presence wires the browser question client
+   * and renders open requests, state messages, outcomes, and accessible answer controls into this element.
+   * Without it (and without `questionClient`) the stream never calls the questions routes.
+   */
+  readonly questionsEl?: (HTMLElement & {hidden: boolean}) | null
+  /** Injectable question client for testing. If absent and `questionsEl` is present, buildQuestionClient() is used. */
+  readonly questionClient?: QuestionClient | null
+  /**
+   * The run-list summary status for this run, when the caller has one. A terminal value lets an
+   * expired run (`reset` with `no-snapshot`) show its status plus "Output no longer available."
+   * without a status frame. Unknown values are ignored.
+   */
+  readonly summaryStatus?: RunSummaryStatus
 }
 
 export declare function initOperatorStream(opts: InitOptions): StreamHandle
@@ -547,6 +854,16 @@ export declare function resetBootstrapState(): void
 /** Browser-direct approval client factory. Returns refreshCsrf/decideRunApproval/listRunApprovals. */
 export declare function buildApprovalClient(opts?: {readonly endpointBase?: string; readonly fixtureSessionId?: string}): ApprovalClient
 
+/**
+ * Browser-direct question client factory. Shares the approval client's CSRF fetch, but classifies a 400
+ * by its `reason`: without one it refreshes CSRF and retries once, with one it is an invalid answer and
+ * is never retried. No idempotency key. Never logs or stores bodies, answer text or response text.
+ */
+export declare function buildQuestionClient(opts?: {
+  readonly endpointBase?: string
+  readonly fixtureSessionId?: string
+}): QuestionClient
+
 // ---------------------------------------------------------------------------
 // Browser-direct cancel client
 // ---------------------------------------------------------------------------
@@ -560,7 +877,7 @@ export type CancelTerminalPhase = 'COMPLETED' | 'FAILED' | 'CANCELLED'
 export type RunPhase = 'PENDING' | 'ACKNOWLEDGED' | 'EXECUTING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
 
 /**
- * The 7-value operator-facing web status set. Mirrors
+ * The operator-facing web status set. Mirrors
  * src/gateway/operator-contract/run-status.ts OperatorWebStatus.
  */
 export type OperatorWebStatus =
@@ -568,6 +885,7 @@ export type OperatorWebStatus =
   | 'blocked'
   | 'running'
   | 'waiting_for_approval'
+  | 'waiting_for_question'
   | 'succeeded'
   | 'failed'
   | 'cancelled'

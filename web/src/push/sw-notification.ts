@@ -13,7 +13,7 @@
  * generic "Run failed" copy — the raw label is NEVER rendered.
  */
 
-export type PushNotificationType = 'approval' | 'run_failed'
+export type PushNotificationType = 'approval' | 'run_failed' | 'question'
 
 /**
  * Allowlisted `failureLabel` values. An unrecognized label (including any
@@ -51,10 +51,15 @@ const COPY_MAP: Record<PushNotificationType, (failureLabel: string | undefined) 
         : RUN_FAILED_GENERIC_BODY,
     data: {type: 'run_failed', route: '/'},
   }),
+  question: () => ({
+    title: 'Answer needed',
+    body: 'A run is waiting for your answer.',
+    data: {type: 'question', route: '/'},
+  }),
 }
 
 function isKnownType(value: unknown): value is PushNotificationType {
-  return value === 'approval' || value === 'run_failed'
+  return value === 'approval' || value === 'run_failed' || value === 'question'
 }
 
 /**
@@ -86,6 +91,8 @@ export function buildNotification(rawPayload: unknown): SafeNotification {
       return COPY_MAP.approval(failureLabel)
     case 'run_failed':
       return COPY_MAP.run_failed(failureLabel)
+    case 'question':
+      return COPY_MAP.question(failureLabel)
     default: {
       const exhaustiveType: never = type
       return exhaustiveType

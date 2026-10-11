@@ -27,6 +27,7 @@ describe('runStatusLabel', () => {
     'queued',
     'running',
     'waiting_for_approval',
+    'waiting_for_question',
     'blocked',
     'failed',
     'cancelled',
@@ -63,6 +64,10 @@ describe('runStatusLabel', () => {
     const label = runStatusLabel('waiting_for_approval')
     expect(label).not.toBe('waiting_for_approval')
     expect(label).toMatch(/approval|waiting|pending/i)
+  })
+
+  it('waiting_for_question → "Waiting for answer"', () => {
+    expect(runStatusLabel('waiting_for_question')).toBe('Waiting for answer')
   })
 
   it('blocked → human-readable label', () => {
@@ -193,6 +198,10 @@ describe('streamEventLabel', () => {
 
   it("'reset' returns its safe fixed label", () => {
     expect(streamEventLabel('reset')).toBe('Stream reconnected')
+  })
+
+  it("'question' returns its safe fixed label", () => {
+    expect(streamEventLabel('question')).toBe('Question asked')
   })
 })
 

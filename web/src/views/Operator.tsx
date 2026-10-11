@@ -28,6 +28,25 @@ import type {OperatorRuntimeHandle} from '../operator/runtime.ts'
 import {isActionDisabled} from '../operator/state.ts'
 import type {OperatorState} from '../operator/state.ts'
 
+// Question and expired-snapshot fixture scenarios. Gated on DEV (replaced at build time) so their
+// names never reach the production bundle; the fixture build and tests keep them.
+const QUESTION_FIXTURE_SCENARIOS: readonly {readonly value: string; readonly label: string}[] = import.meta.env.DEV
+  ? [
+      {value: 'question_single', label: 'Question: single'},
+      {value: 'question_multi_shapes', label: 'Question: every shape'},
+      {value: 'question_settled_elsewhere', label: 'Question: settled elsewhere'},
+      {value: 'question_terminal_pending', label: 'Question: run ends while open'},
+      {value: 'question_already_claimed_reopens', label: 'Question: already claimed, reopens'},
+      {value: 'question_failed_to_settle', label: 'Question: failed to settle'},
+      {value: 'question_invalid_answer', label: 'Question: invalid answer'},
+      {value: 'question_masked_404', label: 'Question: masked 404'},
+      {value: 'question_text_sentinels', label: 'Question: text sentinels'},
+      {value: 'expired_completed_terminal_frame', label: 'Expired run: terminal frame after reset'},
+      {value: 'expired_completed_silent', label: 'Expired run: silent after reset'},
+      {value: 'running_after_no_snapshot', label: 'Running run after reset'},
+    ]
+  : []
+
 interface OperatorProps {
   /** Current operator state from the canonical classifier. Defaults to `loading`. */
   readonly state?: OperatorState
@@ -390,6 +409,9 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
                       <option value="no_output">No output</option>
                       <option value="stream_reset">Stream reset</option>
                       <option value="approval_flow">Approval flow</option>
+                      {QUESTION_FIXTURE_SCENARIOS.map(option => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
                     </select>
                   </div>
                 )}

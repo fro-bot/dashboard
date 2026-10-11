@@ -13,6 +13,9 @@ import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
 import {Buffer} from 'node:buffer'
 import process from 'node:process'
 import {afterEach, describe, expect, it} from 'vitest'
+import {PINNED_CONTRACT_VERSION} from '../public/operator-stream.js'
+import {OPERATOR_CONTRACT_VERSION} from '../src/gateway/operator-contract/version.ts'
+import {FIXTURE_QUESTION_SCENARIO_ROWS} from '../src/gateway/operator-fixture-sse.ts'
 import {buildDashboardApp} from '../src/server.ts'
 import {SessionManager} from '../src/session.ts'
 
@@ -604,6 +607,30 @@ describe('production build artifacts — no fixture strings in web/dist JS', () 
       expect(src, `index.html must not contain ${literal}`).not.toContain(literal)
     }
   })
+
+  it('no question or expired-snapshot fixture scenario name, row run ID, or request ID reaches web/dist or the shipped browser modules', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    expect(FIXTURE_QUESTION_SCENARIO_ROWS.length).toBeGreaterThan(0)
+    const files = [
+      'web/dist/sw.js',
+      'web/dist/index.html',
+      'public/operator-stream.js',
+      'public/operator-launch.js',
+      'public/operator-run-index.js',
+    ]
+    for (const file of await fs.readdir('web/dist/assets')) {
+      if (file.endsWith('.js') || file.endsWith('.css')) files.push(path.join('web/dist/assets', file))
+    }
+    for (const file of files) {
+      const src = await fs.readFile(file, 'utf8')
+      for (const {scenario} of FIXTURE_QUESTION_SCENARIO_ROWS) {
+        expect(src, `${file} must not contain scenario ${scenario}`).not.toContain(scenario)
+        expect(src, `${file} must not contain the run ID for ${scenario}`).not.toContain(`run-fixture-index-${scenario.replaceAll('_', '-')}`)
+      }
+      expect(src, `${file} must not contain a question fixture request ID`).not.toContain('req-fixture-question-')
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -868,6 +895,10 @@ describe('security — operator-stream.js contract pin and checkout-field bounda
     expect(code).toMatch(/export const PINNED_CONTRACT_VERSION = ['"]\d+\.\d+\.\d+['"]/)
     expect(code).not.toMatch(/from\s+['"][^'"]*(?:src\/|\.ts['"])/)
     expect(code).not.toMatch(/\bimport\s*\(/)
+  })
+
+  it('the browser pin equals the vendored contract version (every pin moves together)', () => {
+    expect(PINNED_CONTRACT_VERSION).toBe(OPERATOR_CONTRACT_VERSION)
   })
 
   it('renders checkout provenance and preparation through no HTML sink and puts no raw field in a class or CSS variable', async () => {

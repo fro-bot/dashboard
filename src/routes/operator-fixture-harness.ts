@@ -1,3 +1,4 @@
+import type {OperatorFailureKind} from '../gateway/operator-contract/run-status.ts'
 /**
  * Dev-only fixture harness router.
  *
@@ -13,10 +14,18 @@
  *   require a matching session (query param or x-fixture-session-id header).
  */
 import type {RunSummary} from '../gateway/operator-contract/run-summary.ts'
+import type {FixtureQuestionDecisionOutcome} from '../gateway/operator-fixture-sse.ts'
 import {createHash} from 'node:crypto'
 import {Hono} from 'hono'
 import {FIXTURE_OPERATOR_PREFIX} from '../gateway/operator-fixture-routes.ts'
-import {FIXTURE_CHECKOUT_SCENARIO_ROWS, FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../gateway/operator-fixture-sse.ts'
+import {
+  FIXTURE_CHECKOUT_SCENARIO_ROWS,
+  FIXTURE_QUESTION_SCENARIO_ROWS,
+  FIXTURE_SCENARIO_NAMES,
+  fixtureQuestionScript,
+  isHeldOpenScenario,
+  serializeScenarioToSse,
+} from '../gateway/operator-fixture-sse.ts'
 import {
   FIXTURE_CSRF,
   FIXTURE_KNOWN_FAILURE_REASON,
@@ -108,10 +117,22 @@ const FIXTURE_BASE_RUN_SUMMARIES: readonly RunSummary[] = [
   },
 ]
 
-// One recent-runs row per checkout scenario (provenance, preparation, new failure kinds), so each
-// is selectable in the assembled UI by expanding its row. Older than every base row, so the base
-// list keeps its order at the top. Run IDs are derived from the scenario name.
-const FIXTURE_CHECKOUT_RUN_SUMMARIES: readonly RunSummary[] = FIXTURE_CHECKOUT_SCENARIO_ROWS.map((row, index) => {
+// One recent-runs row per checkout scenario (provenance, preparation, new failure kinds) and per
+// question / expired-snapshot scenario, so each is selectable in the assembled UI by expanding its row.
+// Older than every base row, so the base list keeps its order at the top. Run IDs are derived from the
+// scenario name: `run-fixture-index-<name with hyphens>`.
+interface FixtureScenarioRow {
+  readonly scenario: string
+  readonly summaryStatus: RunSummary['status']
+  readonly failureKind?: OperatorFailureKind
+}
+
+const FIXTURE_SCENARIO_ROWS: readonly FixtureScenarioRow[] = [
+  ...FIXTURE_CHECKOUT_SCENARIO_ROWS,
+  ...FIXTURE_QUESTION_SCENARIO_ROWS,
+]
+
+const FIXTURE_SCENARIO_RUN_SUMMARIES: readonly RunSummary[] = FIXTURE_SCENARIO_ROWS.map((row, index) => {
   const createdAt = new Date(Date.UTC(2026, 5, 28, 9, 59, 59 - index * 30)).toISOString().replace('.000Z', 'Z')
   const updatedAt = new Date(Date.UTC(2026, 5, 28, 9, 59, 59 - index * 30 + 15)).toISOString().replace('.000Z', 'Z')
   return {
@@ -124,14 +145,14 @@ const FIXTURE_CHECKOUT_RUN_SUMMARIES: readonly RunSummary[] = FIXTURE_CHECKOUT_S
   }
 })
 
-const FIXTURE_RUN_SUMMARIES: readonly RunSummary[] = [...FIXTURE_BASE_RUN_SUMMARIES, ...FIXTURE_CHECKOUT_RUN_SUMMARIES]
+const FIXTURE_RUN_SUMMARIES: readonly RunSummary[] = [...FIXTURE_BASE_RUN_SUMMARIES, ...FIXTURE_SCENARIO_RUN_SUMMARIES]
 
 // Run IDs bound to a specific stream scenario, distinct from the generic terminal_failure /
 // success default chosen by summary status. Extends the failed→scenario binding below.
 const RUN_ID_TO_SCENARIO: ReadonlyMap<string, string> = new Map([
   ['run-fixture-index-failed-reason-006', FIXTURE_SCENARIO_NAMES.terminal_failure_known_reason],
   ['run-fixture-index-failed-unknown-reason-007', FIXTURE_SCENARIO_NAMES.terminal_failure_unknown_reason],
-  ...FIXTURE_CHECKOUT_SCENARIO_ROWS.map((row, index): [string, string] => [FIXTURE_CHECKOUT_RUN_SUMMARIES[index]?.runId ?? '', row.scenario]),
+  ...FIXTURE_SCENARIO_ROWS.map((row, index): [string, string] => [FIXTURE_SCENARIO_RUN_SUMMARIES[index]?.runId ?? '', row.scenario]),
 ])
 
 // In-memory state — scoped by (fixtureSessionId, idempotencyKey). Resets on restart.
@@ -139,6 +160,52 @@ const idempotencyMap = new Map<string, string>() // `${sessionId}:${idemKey}` �
 const runScenarioMap = new Map<string, string>() // runId → scenarioName
 const runSessionMap = new Map<string, string>() // runId → owning fixtureSessionId (launched runs only)
 const validFixtureSessionIds = new Set<string>() // all session IDs minted by GET /session
+
+// Position in a scenario's question script, per run. Cleared when the run's stream is opened, so
+// reloading or re-expanding a card replays the scenario from the start.
+interface QuestionRunState {
+  decided: boolean
+  decisionCount: number
+  listsAfterDecisionCount: number
+}
+const questionRunState = new Map<string, QuestionRunState>()
+
+// A held-open stream ends after this long if the browser never closes it (the gateway's own cap is 30 minutes).
+const FIXTURE_HELD_OPEN_MS = 30 * 60 * 1000
+
+// The bytes, then silence: a run that is not finished keeps its subscription open and sends nothing more.
+// Ends on client abort, on cancel, or at the cap.
+function heldOpenStream(bytes: string, signal: AbortSignal): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let closed = false
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      const close = (): void => {
+        if (closed) return
+        closed = true
+        clearTimeout(timer)
+        controller.close()
+      }
+      controller.enqueue(encoder.encode(bytes))
+      if (signal.aborted) {
+        close()
+        return
+      }
+      signal.addEventListener('abort', close, {once: true})
+      timer = setTimeout(close, FIXTURE_HELD_OPEN_MS)
+      timer.unref()
+    },
+    cancel() {
+      closed = true
+      clearTimeout(timer)
+    },
+  })
+}
+
+function nthOrLast<T>(sequence: readonly T[], index: number): T | undefined {
+  return sequence[Math.min(index, sequence.length - 1)]
+}
 
 // Cancel idempotency — scoped by `${sessionId}:${idemKey}` → the cached response body.
 const cancelIdempotencyMap = new Map<string, {ok: true; runId: string; phase: 'COMPLETED' | 'FAILED' | 'CANCELLED'}>()
@@ -414,8 +481,10 @@ export function buildFixtureHarnessRouter(): Hono {
       return res
     }
 
+    questionRunState.delete(runId)
+
     logger.debug('fixture-harness: GET /runs/:runId/stream', {status: 200})
-    return new Response(sseBytes, {
+    return new Response(isHeldOpenScenario(scenario) ? heldOpenStream(sseBytes, c.req.raw.signal) : sseBytes, {
       status: 200,
       headers: {
         'content-type': 'text/event-stream; charset=utf-8',
@@ -469,6 +538,84 @@ export function buildFixtureHarnessRouter(): Hono {
 
     logger.debug('fixture-harness: POST /runs/:runId/approvals/:reqId/decision', {status: 200})
     const res = c.json({state: 'claimed'})
+    setNoStore(res.headers)
+    return res
+  })
+
+  // GET /runs/:runId/questions — the run's open question requests, scripted per scenario.
+  // Requires matching fixtureSessionId. Wire shape: {requests:[{requestID, questions}]}.
+  router.get('/runs/:runId/questions', c => {
+    const runId = c.req.param('runId')
+    const scenario = runScenarioMap.get(runId)
+    if (scenario === undefined) {
+      logger.debug('fixture-harness: GET /runs/:runId/questions', {status: 404, errorClass: 'unknown-run'})
+      const res = c.json({error: 'not-found'}, 404)
+      setNoStore(res.headers)
+      return res
+    }
+
+    const requestSessionId = extractRequestSessionId(c)
+    if (!verifyRunOwnership(runId, requestSessionId)) {
+      logger.debug('fixture-harness: GET /runs/:runId/questions', {status: 400, errorClass: 'session-mismatch'})
+      const res = c.json({error: 'invalid-fixture-session'}, 400)
+      setNoStore(res.headers)
+      return res
+    }
+
+    const script = fixtureQuestionScript(scenario)
+    const state = questionRunState.get(runId)
+    let requests = script?.openRequests ?? []
+    if (script?.listsAfterDecision !== undefined && state?.decided === true) {
+      requests = nthOrLast(script.listsAfterDecision, state.listsAfterDecisionCount) ?? requests
+      state.listsAfterDecisionCount++
+    }
+
+    logger.debug('fixture-harness: GET /runs/:runId/questions', {status: 200})
+    const res = c.json({requests})
+    setNoStore(res.headers)
+    return res
+  })
+
+  // POST /runs/:runId/questions/:requestId/decision — scripted outcome. Requires matching fixtureSessionId.
+  // The body is not read. A scenario without a script answers {state:'claimed'}; a request the scenario does
+  // not list answers already_settled, as the gateway does for an unknown request.
+  router.post('/runs/:runId/questions/:requestId/decision', c => {
+    const runId = c.req.param('runId')
+    const scenario = runScenarioMap.get(runId)
+    if (scenario === undefined) {
+      logger.debug('fixture-harness: POST /runs/:runId/questions/:requestId/decision', {status: 404, errorClass: 'unknown-run'})
+      const res = c.json({error: 'not-found'}, 404)
+      setNoStore(res.headers)
+      return res
+    }
+
+    const requestSessionId = extractRequestSessionId(c)
+    if (!verifyRunOwnership(runId, requestSessionId)) {
+      logger.debug('fixture-harness: POST /runs/:runId/questions/:requestId/decision', {status: 400, errorClass: 'session-mismatch'})
+      const res = c.json({error: 'invalid-fixture-session'}, 400)
+      setNoStore(res.headers)
+      return res
+    }
+
+    const script = fixtureQuestionScript(scenario)
+    const requestId = c.req.param('requestId')
+    const known = script === undefined || [script.openRequests, ...(script.listsAfterDecision ?? [])].some(list =>
+      list.some(request => request.requestID === requestId),
+    )
+
+    let outcome: FixtureQuestionDecisionOutcome = {status: 200, body: {state: 'claimed'}}
+    if (known) {
+      const state = questionRunState.get(runId) ?? {decided: false, decisionCount: 0, listsAfterDecisionCount: 0}
+      outcome = nthOrLast(script?.decisions ?? [], state.decisionCount) ?? outcome
+      state.decided = true
+      state.decisionCount++
+      questionRunState.set(runId, state)
+    } else {
+      outcome = {status: 200, body: {state: 'already_settled'}}
+    }
+
+    logger.debug('fixture-harness: POST /runs/:runId/questions/:requestId/decision', {status: outcome.status})
+    const res = outcome.status === 404 ? c.json({error: 'not-found'}, 404) : c.json(outcome.body, outcome.status)
     setNoStore(res.headers)
     return res
   })
@@ -738,6 +885,7 @@ export function resetFixtureHarnessForTesting(): void {
   pushIdempotencyMap.clear()
   pushSessionRecordMap.clear()
   cancelIdempotencyMap.clear()
+  questionRunState.clear()
   sessionIdCounter = 0
   runIdCounter = 0
 }

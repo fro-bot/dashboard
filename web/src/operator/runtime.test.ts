@@ -766,9 +766,167 @@ describe('defaultRuntimeLoader — production stream wiring', () => {
   })
 })
 
+describe('defaultRuntimeLoader — question region and summary status wiring', () => {
+  type InitOpts = {runId: string; questionsEl?: Element | null; summaryStatus?: string}
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.doUnmock('/static/operator-stream.js?manual=1')
+    vi.doUnmock('/static/operator-run-index.js?manual=1')
+    vi.doUnmock('/static/operator-launch.js?manual=1')
+    vi.restoreAllMocks()
+  })
+
+  /** Mount the real default loader with every public module mocked; returns the captured seams. */
+  async function mountLoader() {
+    const handle = {close: vi.fn()}
+    // Snapshot the region's children at the moment each init runs, before the stream could render into it.
+    const initCalls: {opts: InitOpts; regionChildrenAtInit: number | undefined}[] = []
+    const initOperatorStream = vi.fn((opts: InitOpts) => {
+      initCalls.push({opts, regionChildrenAtInit: opts.questionsEl?.childNodes.length})
+      return handle
+    })
+    let onSelectRun: ((runId: string) => void) | undefined
+    let onRunLaunched: ((runId: string, card: HTMLElement) => void) | undefined
+    vi.doMock('/static/operator-stream.js?manual=1', () => ({
+      initOperatorStream,
+      bootstrapOperatorStreams: vi.fn(),
+      resetBootstrapState: vi.fn(),
+    }))
+    vi.doMock('/static/operator-run-index.js?manual=1', () => ({
+      initOperatorRunIndex: async (opts: {onSelectRun: (runId: string) => void}) => {
+        onSelectRun = opts.onSelectRun
+      },
+      resetRunIndexState: vi.fn(),
+      markRunStreamAttached: vi.fn(),
+      markCardExpandedForLaunch: vi.fn(),
+    }))
+    vi.doMock('/static/operator-launch.js?manual=1', () => ({
+      initOperatorLaunch: vi.fn(async (opts: {onRunLaunched: (runId: string, card: HTMLElement) => void}) => {
+        onRunLaunched = opts.onRunLaunched
+      }),
+      resetLaunchState: vi.fn(),
+    }))
+    const runtime = createOperatorRuntime({container: makeContainer(), onStateChange: vi.fn()})
+    await vi.waitFor(() => {
+      expect(onSelectRun).toBeDefined()
+      expect(onRunLaunched).toBeDefined()
+    })
+    return {
+      runtime,
+      initCalls,
+      select: (runId: string) => onSelectRun?.(runId),
+      launched: (runId: string, card: HTMLElement) => onRunLaunched?.(runId, card),
+    }
+  }
+
+  function cardHtml(runId: string, statusClass: string, extra = ''): string {
+    return `
+      <div data-run-id="${runId}"${extra}>
+        <span data-role="run-status" class="run-status ${statusClass}"></span>
+        <div data-role="run-questions" hidden></div>
+      </div>`
+  }
+
+  it('hands the discovered questionsEl and the card summary status to initOperatorStream', async () => {
+    document.body.innerHTML = `${cardHtml('run-q-a', 'status-succeeded')}${cardHtml('run-q-b', 'status-running')}<div data-role="stream-status"></div>`
+    const regionA = document.querySelector('[data-run-id="run-q-a"] [data-role="run-questions"]')
+    const regionB = document.querySelector('[data-run-id="run-q-b"] [data-role="run-questions"]')
+    const {runtime, initCalls, select} = await mountLoader()
+
+    select('run-q-a')
+    select('run-q-b')
+
+    expect(initCalls).toHaveLength(2)
+    expect(initCalls[0]?.opts.runId).toBe('run-q-a')
+    expect(initCalls[0]?.opts.questionsEl).toBe(regionA)
+    expect(initCalls[0]?.opts.summaryStatus).toBe('succeeded')
+    expect(initCalls[1]?.opts.questionsEl).toBe(regionB)
+    expect(initCalls[1]?.opts.summaryStatus).toBe('running')
+    runtime.cleanup()
+  })
+
+  it('an optimistic card passes no summaryStatus, whatever its status class says', async () => {
+    document.body.innerHTML = `${cardHtml('run-q-opt', 'status-pending', ' data-optimistic="true"')}${cardHtml('run-q-opt-2', 'status-running', ' data-optimistic="true"')}<div data-role="stream-status"></div>`
+    const {runtime, initCalls, launched} = await mountLoader()
+
+    launched('run-q-opt', document.querySelector('[data-run-id="run-q-opt"]') as HTMLElement)
+    launched('run-q-opt-2', document.querySelector('[data-run-id="run-q-opt-2"]') as HTMLElement)
+
+    expect(initCalls).toHaveLength(2)
+    for (const call of initCalls) {
+      expect(call.opts.questionsEl).not.toBeNull()
+      expect('summaryStatus' in call.opts).toBe(false)
+    }
+    runtime.cleanup()
+  })
+
+  it('a status class outside the run-summary allowlist is never passed as summaryStatus', async () => {
+    document.body.innerHTML = `${cardHtml('run-q-wait', 'status-waiting_for_approval')}${cardHtml('run-q-evil', 'status-evil')}${cardHtml('run-q-none', '')}<div data-role="stream-status"></div>`
+    const {runtime, initCalls, select} = await mountLoader()
+
+    select('run-q-wait')
+    select('run-q-evil')
+    select('run-q-none')
+
+    expect(initCalls).toHaveLength(3)
+    for (const call of initCalls) expect('summaryStatus' in call.opts).toBe(false)
+    runtime.cleanup()
+  })
+
+  it('card switch A → B → A clears A’s stale question DOM on re-attach', async () => {
+    document.body.innerHTML = `${cardHtml('run-q-sw-a', 'status-running')}${cardHtml('run-q-sw-b', 'status-running')}<div data-role="stream-status"></div>`
+    const regionA = document.querySelector('[data-run-id="run-q-sw-a"] [data-role="run-questions"]') as HTMLElement
+    const regionB = document.querySelector('[data-run-id="run-q-sw-b"] [data-role="run-questions"]') as HTMLElement
+    const {runtime, initCalls, select} = await mountLoader()
+
+    select('run-q-sw-a')
+    expect(initCalls[0]?.regionChildrenAtInit).toBe(0)
+    // The stream renders a question into A's region, then the operator switches away and back.
+    regionA.append(document.createElement('p'))
+    regionB.append(document.createElement('p'))
+    select('run-q-sw-b')
+    expect(initCalls[1]?.regionChildrenAtInit).toBe(0)
+    // Switching away leaves A's DOM alone; only the re-attach clears it.
+    select('run-q-sw-a')
+
+    expect(initCalls).toHaveLength(3)
+    expect(initCalls[2]?.opts.questionsEl).toBe(regionA)
+    expect(initCalls[2]?.regionChildrenAtInit).toBe(0)
+    expect(regionA.childNodes).toHaveLength(0)
+    runtime.cleanup()
+  })
+
+  it('a card without a question region attaches with questionsEl null and does not throw', async () => {
+    document.body.innerHTML = `<div data-run-id="run-q-legacy"><span data-role="run-status" class="run-status status-running"></span></div><div data-role="stream-status"></div>`
+    const {runtime, initCalls, select} = await mountLoader()
+
+    select('run-q-legacy')
+
+    expect(initCalls).toHaveLength(1)
+    expect(initCalls[0]?.opts.questionsEl).toBeNull()
+    runtime.cleanup()
+  })
+})
+
 describe('discoverCardStreamTargets', () => {
   afterEach(() => {
     document.body.innerHTML = ''
+  })
+
+  it('returns the question region when present, and null when absent', () => {
+    const withRegion = document.createElement('div')
+    withRegion.dataset.runId = 'run-with-questions'
+    const questionsEl = document.createElement('div')
+    questionsEl.dataset.role = 'run-questions'
+    withRegion.append(questionsEl)
+    const without = document.createElement('div')
+    without.dataset.runId = 'run-no-questions'
+    document.body.append(withRegion, without)
+
+    expect(discoverCardStreamTargets('run-with-questions').questionsEl).toBe(questionsEl)
+    expect(discoverCardStreamTargets('run-no-questions').questionsEl).toBeNull()
+    expect(discoverCardStreamTargets('no-such-run').questionsEl).toBeNull()
   })
 
   it('returns all four per-card render targets when the card and substructure exist', () => {
@@ -859,39 +1017,64 @@ describe('discoverCardStreamTargets', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Teardown-ordering invariant: initOperatorStream's close() statement order
+// Teardown behavior: initOperatorStream's close() aborts, clears timers, and goes quiet
 // ---------------------------------------------------------------------------
 
-describe('initOperatorStream — close() teardown-ordering invariant (pin, do not regress)', () => {
+describe('initOperatorStream — close() teardown behavior', () => {
   afterEach(() => {
+    vi.useRealTimers()
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
 
-  it("close() sets aborted before touching timers/controller/state (source order pin)", async () => {
-    const fs = await import('node:fs/promises')
-    const path = await import('node:path')
-    const url = await import('node:url')
-    const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
-    const src = await fs.readFile(path.join(__dirname, '../../../public/operator-stream.js'), 'utf8')
+  it('close() aborts the connection, clears the first-frame timer, and a late abort rejection neither reconnects nor writes', async () => {
+    vi.useFakeTimers()
+    const streamMod = await import('../../../public/operator-stream.js')
+    const signals: (AbortSignal | undefined)[] = []
+    let rejectFetch: ((err: unknown) => void) | undefined
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      signals.push(init?.signal ?? undefined)
+      return new Promise((_resolve, reject) => {
+        rejectFetch = reject
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
 
-    // Isolate the close() method body inside the returned handle object.
-    const closeMatch = src.match(/close\(\)\s*\{([\s\S]*?)\n\s*\},\n\s*\}\n\}/)
-    expect(closeMatch).not.toBeNull()
-    const body = closeMatch?.[1] ?? ''
+    const noticeEl = document.createElement('div')
+    const handle = streamMod.initOperatorStream({runId: 'run-close', statusEl: null, noticeEl})
+    expect(signals[0]?.aborted).toBe(false)
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
 
-    const abortedIdx = body.indexOf('aborted = true')
-    const reconnectTimerIdx = body.indexOf('clearTimeout(reconnectTimer)')
-    const firstFrameTimerCallIdx = body.indexOf('clearFirstFrameTimer()')
-    const controllerAbortIdx = body.indexOf('abortController.abort()')
-    const stateTransitionIdx = body.indexOf("nextStreamState(state, {type: 'stream-closed'})")
+    handle.close()
+    expect(signals[0]?.aborted).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
 
-    expect(abortedIdx).toBeGreaterThanOrEqual(0)
-    expect(reconnectTimerIdx).toBeGreaterThan(abortedIdx)
-    expect(firstFrameTimerCallIdx).toBeGreaterThan(abortedIdx)
-    expect(controllerAbortIdx).toBeGreaterThan(reconnectTimerIdx)
-    expect(controllerAbortIdx).toBeGreaterThan(firstFrameTimerCallIdx)
-    expect(stateTransitionIdx).toBeGreaterThan(controllerAbortIdx)
+    rejectFetch?.(new DOMException('The operation was aborted.', 'AbortError'))
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(noticeEl.dataset.connectionState).toBeUndefined()
+  })
+
+  it('close() clears a pending reconnect timer, so no further connection is opened', async () => {
+    vi.useFakeTimers()
+    const streamMod = await import('../../../public/operator-stream.js')
+    const fetchMock = vi.fn().mockResolvedValue({status: 500})
+    vi.stubGlobal('fetch', fetchMock)
+
+    const noticeEl = document.createElement('div')
+    const handle = streamMod.initOperatorStream({runId: 'run-close-retry', statusEl: null, noticeEl})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(noticeEl.dataset.connectionState).toBe('reconnecting')
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+
+    handle.close()
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // The closed handle never repaints: the notice keeps its state from before close().
+    expect(noticeEl.dataset.connectionState).toBe('reconnecting')
   })
 
   it('integration: closing A then immediately opening B absorbs A\'s late abort microtask (no closed->reconnecting regression, no late notice write)', async () => {

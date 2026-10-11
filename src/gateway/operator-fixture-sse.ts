@@ -17,6 +17,11 @@ import type {
   OperatorCheckoutProvenance,
   OperatorRemoteFreshness,
 } from './operator-contract/provenance.ts'
+import type {
+  PendingQuestionDTO,
+  QuestionDecisionErrorResponse,
+  QuestionDecisionResponse,
+} from './operator-contract/question-frame.ts'
 import type {OperatorFailureKind} from './operator-contract/run-status.ts'
 import {OPERATOR_CONTRACT_VERSION} from './operator-contract/version.ts'
 import {FIXTURE_KNOWN_FAILURE_REASON, FIXTURE_UNKNOWN_FAILURE_REASON} from './operator-fixtures.ts'
@@ -91,6 +96,35 @@ export const FIXTURE_SCENARIO_NAMES = {
   workspace_unavailable: 'workspace_unavailable',
   /** A malformed nested preparation field plus failureKind: absent, but the run still terminalizes with its label. */
   checkout_malformed_preparation: 'checkout_malformed_preparation',
+
+  // -- Agent questions. Each has a recent-runs row; the harness question routes
+  // -- answer per scenario. Streams that end open (no terminal frame) are held open by the route. --
+  /** One single-choice question with options and a custom answer. */
+  question_single: 'question_single',
+  /** One request, four questions: single-choice, multiple, custom-only, unanswerable. */
+  question_multi_shapes: 'question_multi_shapes',
+  /** A question opens, then a settle frame arrives later in the stream (answered elsewhere). */
+  question_settled_elsewhere: 'question_settled_elsewhere',
+  /** A question opens, then the run ends failed with no settle frame. */
+  question_terminal_pending: 'question_terminal_pending',
+  /** Decision → already_claimed; the list omits the request first, then lists it again. */
+  question_already_claimed_reopens: 'question_already_claimed_reopens',
+  /** Decision → failed_to_settle, then already_settled on the retry. */
+  question_failed_to_settle: 'question_failed_to_settle',
+  /** Two questions; the decision is refused 400 unknown-option on question 2 (index 1). */
+  question_invalid_answer: 'question_invalid_answer',
+  /** The decision is the masked 404. */
+  question_masked_404: 'question_masked_404',
+  /** HTML tags, a Markdown link, and bidi/control characters in header, text, labels, descriptions. */
+  question_text_sentinels: 'question_text_sentinels',
+
+  // -- Expired snapshot: the gateway answers a subscribe for a run with no replay entry with `reset` (no-snapshot). --
+  /** ready → reset no-snapshot → terminal succeeded status, no output. */
+  expired_completed_terminal_frame: 'expired_completed_terminal_frame',
+  /** ready → reset no-snapshot → nothing; the stream stays open and the run-list row is terminal. */
+  expired_completed_silent: 'expired_completed_silent',
+  /** ready → reset no-snapshot → running status → output; the stream stays open. */
+  running_after_no_snapshot: 'running_after_no_snapshot',
 } as const
 
 /** Union of all canonical scenario name values. */
@@ -122,6 +156,21 @@ export type CheckoutScenarioName =
   | 'checkout_update_failed_transient'
   | 'workspace_unavailable'
   | 'checkout_malformed_preparation'
+
+/** The scenarios that carry agent questions or exercise the expired-snapshot paths. */
+export type QuestionScenarioName =
+  | 'question_single'
+  | 'question_multi_shapes'
+  | 'question_settled_elsewhere'
+  | 'question_terminal_pending'
+  | 'question_already_claimed_reopens'
+  | 'question_failed_to_settle'
+  | 'question_invalid_answer'
+  | 'question_masked_404'
+  | 'question_text_sentinels'
+  | 'expired_completed_terminal_frame'
+  | 'expired_completed_silent'
+  | 'running_after_no_snapshot'
 
 const FIXTURE_RUN_ID_MALFORMED = 'run-fixture-malformed-001'
 
@@ -315,6 +364,14 @@ function buildStreamResetScenario(activeRunId: string): string {
     statusFrame(activeRunId, 'running', 'EXECUTING', startedAt) +
     resetFrame(activeRunId, 'terminal')
   )
+}
+
+function questionOpenFrame(runId: string, request: PendingQuestionDTO): string {
+  return sseRecord('question', {runId, requestID: request.requestID, settled: false, questions: request.questions})
+}
+
+function questionSettleFrame(runId: string, request: PendingQuestionDTO): string {
+  return sseRecord('question', {runId, requestID: request.requestID, settled: true})
 }
 
 function buildApprovalFlowScenario(activeRunId: string): string {
@@ -604,8 +661,361 @@ const CHECKOUT_SCENARIO_BUILDERS = Object.fromEntries(
   ]),
 ) as Readonly<Record<CheckoutScenarioName, (activeRunId: string) => string>>
 
+// ---------------------------------------------------------------------------
+// Question and expired-snapshot scenarios
+//
+// Wire shapes follow fro-bot/agent v0.119.1: open frames `{runId, requestID, settled:false, questions}`,
+// settle frames `{runId, requestID, settled:true}`, no settle frame at terminal. Status frames stay
+// `running` while a question is pending: `waiting_for_question` is overlaid only at lifecycle
+// transitions and the fixtures do not model one. Every request ID is `req-fixture-` prefixed and every
+// free-form string starts with `fixture`, ignoring the deliberate bidi/control characters in the
+// sentinel scenario.
+// ---------------------------------------------------------------------------
+
+const QUESTION_STARTED_AT = '2026-10-10T10:00:00Z'
+
+const QUESTION_SINGLE: PendingQuestionDTO = {
+  requestID: 'req-fixture-question-single-001',
+  questions: [
+    {
+      header: 'fixture choice',
+      text: 'fixture question: which synthetic option should the agent use?',
+      options: [
+        {label: 'fixture-alpha', description: 'fixture first synthetic option'},
+        {label: 'fixture-beta', description: 'fixture second synthetic option'},
+        {label: 'fixture-gamma', description: 'fixture third synthetic option'},
+      ],
+      multiple: false,
+      custom: true,
+    },
+  ],
+}
+
+// Every shape flag combination the card renders, in one request.
+const QUESTION_MULTI: PendingQuestionDTO = {
+  requestID: 'req-fixture-question-multi-001',
+  questions: [
+    {
+      header: 'fixture single choice',
+      text: 'fixture question 1: pick one option, or type your own.',
+      options: [
+        {label: 'fixture-red', description: 'fixture first synthetic option'},
+        {label: 'fixture-green', description: 'fixture second synthetic option'},
+      ],
+      multiple: false,
+      custom: true,
+    },
+    {
+      header: 'fixture multiple',
+      text: 'fixture question 2: pick any number of options.',
+      options: [
+        {label: 'fixture-one', description: 'fixture first synthetic option'},
+        {label: 'fixture-two', description: 'fixture second synthetic option'},
+        {label: 'fixture-three', description: 'fixture third synthetic option'},
+      ],
+      multiple: true,
+      custom: true,
+    },
+    {
+      header: 'fixture custom only',
+      text: 'fixture question 3: no options, type an answer.',
+      options: [],
+      multiple: false,
+      custom: true,
+    },
+    {
+      header: 'fixture unanswerable',
+      text: 'fixture question 4: no options and no custom answer, so it can only be skipped.',
+      options: [],
+      multiple: false,
+      custom: false,
+    },
+  ],
+}
+
+const QUESTION_SETTLED_ELSEWHERE: PendingQuestionDTO = {
+  requestID: 'req-fixture-question-settled-001',
+  questions: [
+    {
+      header: 'fixture settled elsewhere',
+      text: 'fixture question: this request is answered somewhere else.',
+      options: [{label: 'fixture-yes', description: 'fixture synthetic option'}, {label: 'fixture-no', description: 'fixture synthetic option'}],
+      multiple: false,
+      custom: false,
+    },
+  ],
+}
+
+const QUESTION_TERMINAL_PENDING: PendingQuestionDTO = {
+  requestID: 'req-fixture-question-terminal-001',
+  questions: [
+    {
+      header: 'fixture pending at terminal',
+      text: 'fixture question: the run ends while this is still open.',
+      options: [{label: 'fixture-continue', description: 'fixture synthetic option'}],
+      multiple: false,
+      custom: true,
+    },
+  ],
+}
+
+const QUESTION_CLAIMED: PendingQuestionDTO = {
+  requestID: 'req-fixture-question-claimed-001',
+  questions: [
+    {
+      header: 'fixture claimed elsewhere',
+      text: 'fixture question: another decision is in flight, then reopens.',
+      options: [{label: 'fixture-approve', description: 'fixture synthetic option'}, {label: 'fixture-decline', description: 'fixture synthetic option'}],
+      multiple: false,
+      custom: true,
+    },
+  ],
+}
+
+const QUESTION_FAILED_TO_SETTLE: PendingQuestionDTO = {
+  requestID: 'req-fixture-question-failsettle-001',
+  questions: [
+    {
+      header: 'fixture failed to settle',
+      text: 'fixture question: the reply to the agent fails.',
+      options: [{label: 'fixture-send', description: 'fixture synthetic option'}, {label: 'fixture-hold', description: 'fixture synthetic option'}],
+      multiple: false,
+      custom: true,
+    },
+  ],
+}
+
+const QUESTION_INVALID: PendingQuestionDTO = {
+  requestID: 'req-fixture-question-invalid-001',
+  questions: [
+    {
+      header: 'fixture first question',
+      text: 'fixture question 1: this answer is accepted.',
+      options: [{label: 'fixture-a', description: 'fixture synthetic option'}, {label: 'fixture-b', description: 'fixture synthetic option'}],
+      multiple: false,
+      custom: true,
+    },
+    {
+      header: 'fixture second question',
+      text: 'fixture question 2: the gateway refuses this answer as an unknown option.',
+      options: [{label: 'fixture-c', description: 'fixture synthetic option'}, {label: 'fixture-d', description: 'fixture synthetic option'}],
+      multiple: false,
+      custom: true,
+    },
+  ],
+}
+
+const QUESTION_MASKED: PendingQuestionDTO = {
+  requestID: 'req-fixture-question-masked-001',
+  questions: [
+    {
+      header: 'fixture masked denial',
+      text: 'fixture question: the decision is denied with a masked 404.',
+      options: [{label: 'fixture-go', description: 'fixture synthetic option'}],
+      multiple: false,
+      custom: true,
+    },
+  ],
+}
+
+// Untrusted text: HTML, a Markdown link and bidi/control characters (override, isolate, bell, newline).
+// The parsers strip the controls and the browser renders the rest as plain text.
+const QUESTION_SENTINELS: PendingQuestionDTO = {
+  requestID: 'req-fixture-question-sentinels-001',
+  questions: [
+    {
+      header: 'fixture <b>bold</b> header\u202E reversed',
+      text:
+        'fixture <img src=x onerror=alert(1)> and [a link](https://fixture.invalid/phish)\u202E reversed\u2066 isolate\u2069\nsecond line\u0007 bell',
+      options: [
+        {label: 'fixture <i>italic</i> \u202Elabel', description: 'fixture [markdown](https://fixture.invalid/x) **not bold**'},
+        {label: 'fixture `code` \u2067isolate\u2069 label', description: 'fixture <script>fixture()</script>\u001F end'},
+      ],
+      multiple: false,
+      custom: true,
+    },
+  ],
+}
+
+/** The outcome of one question decision POST. */
+export type FixtureQuestionDecisionOutcome =
+  | {readonly status: 200; readonly body: QuestionDecisionResponse}
+  | {readonly status: 400; readonly body: QuestionDecisionErrorResponse}
+  | {readonly status: 404}
+
+/**
+ * What the harness question routes answer for one scenario. Every sequence advances one step per call
+ * and repeats its last entry.
+ */
+export interface FixtureQuestionScript {
+  /** `GET .../questions` before any decision; also the whole list when `listsAfterDecision` is absent. */
+  readonly openRequests: readonly PendingQuestionDTO[]
+  /** Lists returned by successive GETs once a decision has been made. */
+  readonly listsAfterDecision?: readonly (readonly PendingQuestionDTO[])[]
+  /** Outcomes of successive decision POSTs. Absent: `{state:'claimed'}`. */
+  readonly decisions?: readonly FixtureQuestionDecisionOutcome[]
+}
+
+interface QuestionScenarioSpec {
+  /** Status the recent-runs row shows before the stream is opened (the card's summary status). */
+  readonly summaryStatus: 'running' | 'succeeded'
+  /** The stream ends open, as the gateway's does for a run that is not finished. */
+  readonly holdOpen: boolean
+  readonly script: FixtureQuestionScript
+  readonly build: (activeRunId: string) => string
+}
+
+const claimed: FixtureQuestionDecisionOutcome = {status: 200, body: {state: 'claimed'}}
+
+function runningWithProgress(runId: string): string {
+  return (
+    readyFrame(OPERATOR_CONTRACT_VERSION) +
+    statusFrame(runId, 'running', 'EXECUTING', QUESTION_STARTED_AT) +
+    outputFrame(runId, '[Fixture output — synthetic progress before the question]', false, 0)
+  )
+}
+
+const QUESTION_SCENARIO_SPECS: Readonly<Record<QuestionScenarioName, QuestionScenarioSpec>> = {
+  question_single: {
+    summaryStatus: 'running',
+    holdOpen: true,
+    script: {openRequests: [QUESTION_SINGLE]},
+    build: runId => runningWithProgress(runId) + questionOpenFrame(runId, QUESTION_SINGLE),
+  },
+  question_multi_shapes: {
+    summaryStatus: 'running',
+    holdOpen: true,
+    script: {openRequests: [QUESTION_MULTI]},
+    build: runId => runningWithProgress(runId) + questionOpenFrame(runId, QUESTION_MULTI),
+  },
+  question_settled_elsewhere: {
+    summaryStatus: 'running',
+    holdOpen: true,
+    // Settled by the end of the stream, so a list no longer shows it.
+    script: {openRequests: []},
+    build: runId =>
+      runningWithProgress(runId) +
+      questionOpenFrame(runId, QUESTION_SETTLED_ELSEWHERE) +
+      outputFrame(runId, '[Fixture output — synthetic progress after the request settled]', false, 1) +
+      questionSettleFrame(runId, QUESTION_SETTLED_ELSEWHERE),
+  },
+  question_terminal_pending: {
+    summaryStatus: 'running',
+    holdOpen: false,
+    // Terminal clears the run's questions with no settle frame, so a list is empty.
+    script: {openRequests: []},
+    build: runId =>
+      runningWithProgress(runId) +
+      questionOpenFrame(runId, QUESTION_TERMINAL_PENDING) +
+      outputFrame(runId, '', true, 1) +
+      statusFrame(runId, 'failed', 'FAILED', QUESTION_STARTED_AT),
+  },
+  question_already_claimed_reopens: {
+    summaryStatus: 'running',
+    holdOpen: true,
+    script: {
+      openRequests: [QUESTION_CLAIMED],
+      // Claimed requests are excluded from the list; when the claimant fails the request reopens with no frame.
+      listsAfterDecision: [[], [QUESTION_CLAIMED]],
+      decisions: [{status: 200, body: {state: 'already_claimed'}}, claimed],
+    },
+    build: runId => runningWithProgress(runId) + questionOpenFrame(runId, QUESTION_CLAIMED),
+  },
+  question_failed_to_settle: {
+    summaryStatus: 'running',
+    holdOpen: true,
+    script: {
+      openRequests: [QUESTION_FAILED_TO_SETTLE],
+      decisions: [{status: 200, body: {state: 'failed_to_settle'}}, {status: 200, body: {state: 'already_settled'}}],
+    },
+    build: runId => runningWithProgress(runId) + questionOpenFrame(runId, QUESTION_FAILED_TO_SETTLE),
+  },
+  question_invalid_answer: {
+    summaryStatus: 'running',
+    holdOpen: true,
+    script: {
+      openRequests: [QUESTION_INVALID],
+      decisions: [{status: 400, body: {error: 'bad request', reason: 'unknown-option', questionIndex: 1}}],
+    },
+    build: runId => runningWithProgress(runId) + questionOpenFrame(runId, QUESTION_INVALID),
+  },
+  question_masked_404: {
+    summaryStatus: 'running',
+    holdOpen: true,
+    script: {openRequests: [QUESTION_MASKED], decisions: [{status: 404}]},
+    build: runId => runningWithProgress(runId) + questionOpenFrame(runId, QUESTION_MASKED),
+  },
+  question_text_sentinels: {
+    summaryStatus: 'running',
+    holdOpen: true,
+    script: {openRequests: [QUESTION_SENTINELS]},
+    build: runId => runningWithProgress(runId) + questionOpenFrame(runId, QUESTION_SENTINELS),
+  },
+
+  expired_completed_terminal_frame: {
+    // A stale row: the list was read before the run finished, so the summary is not yet terminal and the
+    // terminal status frame after `reset` is what tells the card the run is over.
+    summaryStatus: 'running',
+    holdOpen: false,
+    script: {openRequests: []},
+    build: runId =>
+      readyFrame(OPERATOR_CONTRACT_VERSION) +
+      resetFrame(runId, 'no-snapshot') +
+      statusFrame(runId, 'succeeded', 'COMPLETED', QUESTION_STARTED_AT),
+  },
+  expired_completed_silent: {
+    // The gateway could not read the stored run state, so it sends nothing after `reset`. Only the
+    // run-list summary knows the run is over.
+    summaryStatus: 'succeeded',
+    holdOpen: true,
+    script: {openRequests: []},
+    build: runId => readyFrame(OPERATOR_CONTRACT_VERSION) + resetFrame(runId, 'no-snapshot'),
+  },
+  running_after_no_snapshot: {
+    summaryStatus: 'running',
+    holdOpen: true,
+    script: {openRequests: []},
+    build: runId =>
+      readyFrame(OPERATOR_CONTRACT_VERSION) +
+      resetFrame(runId, 'no-snapshot') +
+      statusFrame(runId, 'running', 'EXECUTING', QUESTION_STARTED_AT) +
+      outputFrame(runId, '[Fixture output — synthetic run result after the snapshot reset]', false, 0),
+  },
+}
+
+/** Rows for the recent-runs list: one per question or expired-snapshot scenario. Order follows FIXTURE_SCENARIO_NAMES. */
+export const FIXTURE_QUESTION_SCENARIO_ROWS: readonly {
+  readonly scenario: QuestionScenarioName
+  readonly summaryStatus: 'running' | 'succeeded'
+}[] = (Object.keys(QUESTION_SCENARIO_SPECS) as QuestionScenarioName[]).map(scenario => ({
+  scenario,
+  summaryStatus: QUESTION_SCENARIO_SPECS[scenario].summaryStatus,
+}))
+
+function isQuestionScenarioName(name: string): name is QuestionScenarioName {
+  return Object.hasOwn(QUESTION_SCENARIO_SPECS, name)
+}
+
+/** The scripted question routes for a scenario, or undefined for a scenario with no questions. */
+export function fixtureQuestionScript(scenarioName: string): FixtureQuestionScript | undefined {
+  return isQuestionScenarioName(scenarioName) ? QUESTION_SCENARIO_SPECS[scenarioName].script : undefined
+}
+
+/** True when the scenario's stream ends open, with no terminal frame, as the gateway's does for a live run. */
+export function isHeldOpenScenario(scenarioName: string): boolean {
+  return isQuestionScenarioName(scenarioName) && QUESTION_SCENARIO_SPECS[scenarioName].holdOpen
+}
+
+const QUESTION_SCENARIO_BUILDERS = Object.fromEntries(
+  (Object.keys(QUESTION_SCENARIO_SPECS) as QuestionScenarioName[]).map(scenario => [
+    scenario,
+    QUESTION_SCENARIO_SPECS[scenario].build,
+  ]),
+) as Readonly<Record<QuestionScenarioName, (activeRunId: string) => string>>
+
 const SCENARIO_BUILDERS: Readonly<Record<FixtureScenarioName, (activeRunId: string) => string>> = {
   ...CHECKOUT_SCENARIO_BUILDERS,
+  ...QUESTION_SCENARIO_BUILDERS,
   [FIXTURE_SCENARIO_NAMES.success]: buildSuccessScenario,
   [FIXTURE_SCENARIO_NAMES.terminal_failure]: buildTerminalFailureScenario,
   [FIXTURE_SCENARIO_NAMES.terminal_failure_known_reason]: buildTerminalFailureKnownReasonScenario,

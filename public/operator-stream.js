@@ -30,7 +30,7 @@
 // ---------------------------------------------------------------------------
 
 /** Contract version this client expects on the ready frame. */
-export const PINNED_CONTRACT_VERSION = '1.8.0'
+export const PINNED_CONTRACT_VERSION = '1.9.0'
 
 /** Base delay in milliseconds for exponential backoff. */
 export const RETRY_BASE_MS = 1000
@@ -82,6 +82,23 @@ export const MAX_OPEN_APPROVALS = 100
 export const GATEWAY_PENDING_APPROVALS_CAP = 50
 
 /**
+ * Hard cap on the per-run open-questions map. It equals the gateway's pending-question
+ * list cap (50). Excess opens for unseen requestIDs are rejected, never evicting a real
+ * pending question: losing one the operator can still answer is worse than dropping overflow.
+ */
+export const MAX_OPEN_QUESTIONS = 50
+
+/**
+ * Mirrors the gateway's pending-question list cap (50) from fro-bot/agent
+ * `GET /operator/runs/:runId/questions`. A list at or above this size may be truncated, so
+ * the question reconcile treats it as additive only and never prunes from it.
+ *
+ * NOTE: External contract value with no in-repo source of truth. A stale mirror tightens
+ * the guard (ghosts persist) but never wipes real questions — the safe direction.
+ */
+export const GATEWAY_PENDING_QUESTIONS_CAP = 50
+
+/**
  * Bounded timeout in milliseconds for receiving the first SSE frame after opening
  * a stream. If no frame arrives within this window, the connection transitions to
  * 'submitted-unobservable' — the run was accepted but is not yet streaming (e.g.
@@ -91,6 +108,15 @@ export const FIRST_FRAME_TIMEOUT_MS = 15_000
 
 /** Terminal OperatorWebStatus values — a run in one of these states will not progress. */
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
+
+/**
+ * Statuses a run-list summary can carry (the run index parser keeps only these). The optional
+ * `summaryStatus` init option is accepted only from this set; anything else is dropped.
+ */
+const SUMMARY_STATUSES = new Set(['queued', 'running', 'succeeded', 'failed', 'cancelled'])
+
+/** In-card copy for an expired run snapshot. Dashboard-owned; never wire text. */
+const OUTPUT_UNAVAILABLE_COPY = 'Output no longer available.'
 
 /** Valid ResetReason values from the gateway SSE surface. */
 const VALID_RESET_REASONS = new Set([
@@ -108,6 +134,7 @@ const VALID_STATUSES = new Set([
   'blocked',
   'running',
   'waiting_for_approval',
+  'waiting_for_question',
   'succeeded',
   'failed',
   'cancelled',
@@ -136,6 +163,7 @@ const STATUS_LABELS = {
   blocked: 'Blocked',
   running: 'Running',
   waiting_for_approval: 'Waiting for approval',
+  waiting_for_question: 'Waiting for answer',
   succeeded: 'Succeeded',
   failed: 'Failed',
   cancelled: 'Cancelled',
@@ -556,6 +584,101 @@ function normalizeCrlf(text) {
 }
 
 // ---------------------------------------------------------------------------
+// Question frame parser
+//
+// Behaves identically to the server reader's parseQuestionFrame
+// (src/gateway/operator-contract/question-frame.ts); a parity test feeds the same
+// inputs to both. Question and answer text is untrusted: the text rule converts tab,
+// newline and carriage return to spaces and removes every other control and bidi
+// character. Bounds are enforced after that rule. A frame that is malformed, closed-
+// object-violating (any extra key, including an own __proto__) or over-bound is
+// rejected whole — never truncated. Zero questions is valid.
+// ---------------------------------------------------------------------------
+
+const QUESTION_HEADER_MAX_LENGTH = 128
+const QUESTION_TEXT_MAX_LENGTH = 4096
+const QUESTION_OPTION_LABEL_MAX_LENGTH = 256
+const QUESTION_OPTION_DESCRIPTION_MAX_LENGTH = 1024
+const MAX_QUESTIONS_PER_REQUEST = 8
+const MAX_OPTIONS_PER_QUESTION = 64
+
+// Removed outright: C0 controls except tab/LF/CR, DEL, C1 controls, and every Unicode bidi control
+// (marks U+200E/U+200F/U+061C, embeddings and overrides U+202A-U+202E, isolates U+2066-U+2069).
+// eslint-disable-next-line no-control-regex
+const QUESTION_REMOVED_CHARS = /[\u0000-\u0008\v\f\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g
+const QUESTION_WHITESPACE_CHARS = /[\t\n\r]/g
+
+function sanitizeQuestionText(value) {
+  return value.replaceAll(QUESTION_WHITESPACE_CHARS, ' ').replaceAll(QUESTION_REMOVED_CHARS, '')
+}
+
+function isQuestionRecord(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** True when the value's own enumerable keys are exactly `keys`. An own `__proto__` counts as a key, so it fails. */
+function hasExactKeys(value, keys) {
+  const own = Object.keys(value)
+  return own.length === keys.length && keys.every(key => Object.hasOwn(value, key))
+}
+
+/** Sanitize a bounded string, or null when it is not a string or is over its bound after sanitizing. */
+function boundedQuestionText(value, maxLength) {
+  if (typeof value !== 'string') return null
+  const clean = sanitizeQuestionText(value)
+  return clean.length <= maxLength ? clean : null
+}
+
+function parseQuestionOption(value) {
+  if (!isQuestionRecord(value) || !hasExactKeys(value, ['label', 'description'])) return null
+  const label = boundedQuestionText(value.label, QUESTION_OPTION_LABEL_MAX_LENGTH)
+  const description = boundedQuestionText(value.description, QUESTION_OPTION_DESCRIPTION_MAX_LENGTH)
+  if (label === null || description === null) return null
+  return {label, description}
+}
+
+function parseQuestionPrompt(value) {
+  if (!isQuestionRecord(value) || !hasExactKeys(value, ['header', 'text', 'options', 'multiple', 'custom'])) return null
+  const header = boundedQuestionText(value.header, QUESTION_HEADER_MAX_LENGTH)
+  const text = boundedQuestionText(value.text, QUESTION_TEXT_MAX_LENGTH)
+  if (header === null || text === null) return null
+  if (typeof value.multiple !== 'boolean' || typeof value.custom !== 'boolean') return null
+  if (!Array.isArray(value.options) || value.options.length > MAX_OPTIONS_PER_QUESTION) return null
+  const options = []
+  for (const entry of value.options) {
+    const option = parseQuestionOption(entry)
+    if (option === null) return null
+    options.push(option)
+  }
+  return {header, text, options, multiple: value.multiple, custom: value.custom}
+}
+
+/**
+ * Validate one `question` frame payload (already JSON-parsed) into a closed frame object, or
+ * null when it is malformed or out of bounds. Never throws; the result is rebuilt field by
+ * field so no input object or nested part reaches a caller.
+ */
+function parseQuestionFramePayload(value) {
+  if (!isQuestionRecord(value) || typeof value.settled !== 'boolean') return null
+  if (!isNonEmptyString(value.runId) || !isNonEmptyString(value.requestID)) return null
+
+  if (value.settled) {
+    if (!hasExactKeys(value, ['runId', 'requestID', 'settled'])) return null
+    return {runId: value.runId, requestID: value.requestID, settled: true}
+  }
+
+  if (!hasExactKeys(value, ['runId', 'requestID', 'settled', 'questions'])) return null
+  if (!Array.isArray(value.questions) || value.questions.length > MAX_QUESTIONS_PER_REQUEST) return null
+  const questions = []
+  for (const entry of value.questions) {
+    const question = parseQuestionPrompt(entry)
+    if (question === null) return null
+    questions.push(question)
+  }
+  return {runId: value.runId, requestID: value.requestID, settled: false, questions}
+}
+
+// ---------------------------------------------------------------------------
 // Pure SSE frame parser
 // ---------------------------------------------------------------------------
 
@@ -757,8 +880,87 @@ export function parseSseFrame(record) {
     }
   }
 
+  if (eventName === 'question') {
+    // The reject path returns a fixed string: question text and IDs are never echoed or logged.
+    const data = parseQuestionFramePayload(parsed)
+    if (data === null) {
+      return {success: false, error: 'question frame failed validation'}
+    }
+    return {success: true, frame: {type: 'question', data}}
+  }
+
   // Unknown event name — fixed error string, never echoes the name
   return {success: false, error: 'sse record has unrecognized event name'}
+}
+
+// ---------------------------------------------------------------------------
+// Question page store
+//
+// Tombstones and drafts outlive stream handles: stream state is created fresh on each
+// attach, so keeping them there would let a late pending list resurrect a settled
+// request after a card collapses and re-expands. The store is a module-level map keyed
+// by run ID, in memory only (never persisted), and dies with the page — logout navigates.
+//
+// Tombstones are NOT evicted: they grow only with questions actually settled, which keeps
+// "a settled request never reappears" true for the page. Drafts are keyed by requestID.
+//
+// The reducer reads and writes this store directly. That makes nextStreamState impure for
+// question frames by design: the store must be visible to a new handle for the same run,
+// which a value held in the reducer's own state can never be.
+// ---------------------------------------------------------------------------
+
+const questionPageStore = new Map()
+
+// Statuses kept for a request that is no longer open (a note until the card collapses). Every
+// other status leaves with its request.
+const QUESTION_NOTE_KINDS = new Set(['claimed', 'already-settled', 'gone'])
+
+// Statuses while a decision or check is outstanding: the card refuses new decisions. A request
+// claimed elsewhere is not here: the operator may answer it, and the gateway's single settlement
+// resolves the race (already_settled and claimed clear it, already_claimed keeps the note).
+const QUESTION_SEND_BLOCKED_KINDS = new Set(['in-flight', 'checking'])
+
+// The one wording for each note outcome, shared by the note card and the open card.
+const QUESTION_NOTE_COPY = Object.freeze({
+  claimed: 'This question is no longer open.',
+  'already-settled': 'This question is no longer open.',
+  gone: 'This question is no longer open. Your answer may have been recorded.',
+})
+
+/**
+ * The page-level question record for a run: `{tombstones: Set<requestID>, drafts: Map<requestID, draft>}`.
+ * Created on first use. The returned object is live — callers mutate it directly.
+ */
+export function getQuestionPageStore(runId) {
+  let record = questionPageStore.get(runId)
+  if (record === undefined) {
+    record = {tombstones: new Set(), drafts: new Map()}
+    questionPageStore.set(runId, record)
+  }
+  return record
+}
+
+/** Drop every run's tombstones and drafts. For tests and logout-equivalent teardown. */
+export function resetQuestionPageStore() {
+  questionPageStore.clear()
+}
+
+/**
+ * Tombstone a question request for the page and drop it from the run entry: its open request, its
+ * draft, and any claimed exemption. Shared by the settle frame and by this page's own
+ * `claimed` / `already_settled` decision response, which settle a request the same way. A request
+ * never seen open still tombstones (settle-before-open). `base` is the run entry (or its stub).
+ */
+function settleQuestionInState(current, base, runId, requestID) {
+  const store = getQuestionPageStore(runId)
+  store.tombstones.add(requestID)
+  store.drafts.delete(requestID)
+  const nextOpen = new Map(base.questionOpen ?? new Map())
+  nextOpen.delete(requestID)
+  const nextExempt = new Set(base.questionClaimedExempt ?? new Set())
+  nextExempt.delete(requestID)
+  const updatedEntry = {...base, questionOpen: nextOpen, questionClaimedExempt: nextExempt}
+  return {...current, runs: Object.assign(Object.create(null), current.runs, {[runId]: updatedEntry})}
 }
 
 // ---------------------------------------------------------------------------
@@ -774,6 +976,10 @@ export function parseSseFrame(record) {
  *   runs: Object.create(null) — null-prototype map keyed by runId
  *   retryCount: number
  *   shouldReconnect: boolean
+ *   summaryStatus?: the run-list summary status for the stream's run (optional; set at init).
+ *                   A terminal value lets `reset` (no-snapshot) close the card without a status frame.
+ *   snapshotMissing?: null-prototype map of runId → true after a no-snapshot reset that left the
+ *                     run live. Cleared by an output frame; read by a terminal status frame.
  *
  * Events (discriminated by type):
  *   { type: 'ready', data: { contractVersion } }
@@ -868,6 +1074,21 @@ export function nextStreamState(current, event) {
       if (checkoutPreparation !== undefined) {
         nextEntry.checkoutPreparation = checkoutPreparation
         delete nextEntry.checkoutProvenance
+      }
+      // Terminal clears the run's open questions, the claimed exemption, and every draft in the
+      // page store — with NO tombstone (the gateway sends no settle frame at terminal; terminal
+      // is absorbing, so nothing can reopen). Tombstones stay: they are the page's memory.
+      if (isTerminal) {
+        questionPageStore.get(runId)?.drafts.clear()
+        if (prevStatusEntry?.questionOpen !== undefined) {
+          nextEntry.questionOpen = new Map()
+          nextEntry.questionClaimedExempt = new Set()
+        }
+        // A terminal status after a no-snapshot reset with no output since: the snapshot (and the
+        // output it carried) expired, so say so in the card. An output frame clears the mark.
+        if (current.snapshotMissing?.[runId] === true && typeof prevStatusEntry?.outputSeq !== 'number') {
+          nextEntry.outputUnavailable = true
+        }
       }
       const updatedRuns = Object.assign(Object.create(null), current.runs, {[runId]: nextEntry})
       // If all observed runs are terminal, close the stream
@@ -1027,18 +1248,24 @@ export function nextStreamState(current, event) {
       }
 
       const base = prev ?? {runId, status: '', phase: '', startedAt: '', stale: false, terminal: false}
-      const updatedRuns = Object.assign(Object.create(null), current.runs, {
-        [runId]: {
-          ...base,
-          runId,
-          outputText: nextText,
-          outputSeq: nextSeq,
-          outputFinal: final ? true : (prev?.outputFinal ?? false),
-          outputCoalesced: coalesced,
-          outputTruncated: truncated,
-        },
-      })
-      return {...current, runs: updatedRuns}
+      const nextOutputEntry = {
+        ...base,
+        runId,
+        outputText: nextText,
+        outputSeq: nextSeq,
+        outputFinal: final ? true : (prev?.outputFinal ?? false),
+        outputCoalesced: coalesced,
+        outputTruncated: truncated,
+      }
+      // An output frame proves the snapshot is not missing: clear the mark and any unavailable state.
+      delete nextOutputEntry.outputUnavailable
+      const updatedRuns = Object.assign(Object.create(null), current.runs, {[runId]: nextOutputEntry})
+      if (current.snapshotMissing?.[runId] !== true) {
+        return {...current, runs: updatedRuns}
+      }
+      const remainingMissing = Object.assign(Object.create(null), current.snapshotMissing)
+      delete remainingMissing[runId]
+      return {...current, runs: updatedRuns, snapshotMissing: remainingMissing}
     }
 
     case 'reset': {
@@ -1066,22 +1293,53 @@ export function nextStreamState(current, event) {
         }
       }
 
-      // no-snapshot: the gateway has no terminal replay entry for this run. For a
-      // known-terminal run this is a stable fact, not a transient hiccup — every
-      // retry gets the same byte-identical reset, so reconnecting can never help.
-      // Unlike max-duration, an unknown run entry must still fall through and
-      // retry: no-snapshot on a live run is a legitimate transient condition (the
-      // stream attached before the first snapshot), and "unknown" is not evidence
-      // the run is terminal.
+      // no-snapshot: the gateway has no replay entry for this run (expired after its
+      // retention window, or lost on restart) and KEEPS THE SUBSCRIPTION OPEN afterwards, so a
+      // reconnect would park on a reader that never ends and strand the card on "Connecting".
+      // Never reconnect for it:
+      //   - the run is known terminal (from the stream, or from its run-list summary): show that
+      //     terminal status plus the unavailable state, and close;
+      //   - otherwise the run's state is unknown, which is not evidence of terminal: stay live,
+      //     spend no retry, and mark the snapshot missing so a later terminal status with no
+      //     output since can show the unavailable state.
       if (reason === 'no-snapshot') {
-        const runEntry = current.runs[event.data.runId]
-        const runIsKnownTerminal = runEntry !== undefined && runEntry.terminal
-        if (runIsKnownTerminal) {
+        const resetRunId = event.data.runId
+        const runEntry = current.runs[resetRunId]
+        const summaryStatus = current.summaryStatus
+        const summaryIsTerminal = typeof summaryStatus === 'string' && TERMINAL_STATUSES.has(summaryStatus)
+        if (runEntry?.terminal === true || summaryIsTerminal) {
+          // Terminal clears the page store's drafts, as the status-frame terminal path does.
+          questionPageStore.get(resetRunId)?.drafts.clear()
+          const knownTerminal = runEntry?.terminal === true
+          const terminalEntry = knownTerminal
+            ? {...runEntry}
+            : {
+                phase: '',
+                startedAt: '',
+                stale: false,
+                ...runEntry,
+                runId: resetRunId,
+                status: summaryStatus,
+                terminal: true,
+                cancelInFlight: false,
+                approvalOpenPrompts: Object.create(null),
+                ...(runEntry?.questionOpen === undefined
+                  ? {}
+                  : {questionOpen: new Map(), questionClaimedExempt: new Set()}),
+              }
+          if (typeof terminalEntry.outputSeq !== 'number') {
+            terminalEntry.outputUnavailable = true
+          }
           return {
             ...current,
+            runs: Object.assign(Object.create(null), current.runs, {[resetRunId]: terminalEntry}),
             connection: 'closed',
             shouldReconnect: false,
           }
+        }
+        return {
+          ...current,
+          snapshotMissing: Object.assign(Object.create(null), current.snapshotMissing, {[resetRunId]: true}),
         }
       }
 
@@ -1267,6 +1525,188 @@ export function nextStreamState(current, event) {
       return {...current, runs: updatedRuns}
     }
 
+    case 'question': {
+      // Question frames before ready (connection !== 'live') are ignored — mirrors approval gating.
+      if (current.connection !== 'live') {
+        return current
+      }
+      const {runId, requestID, settled} = event.data
+      const prevEntry = current.runs[runId]
+
+      // Terminal is absorbing: once the run is terminal, all question frames are ignored.
+      if (prevEntry !== undefined && prevEntry.terminal) {
+        return current
+      }
+
+      const base = prevEntry ?? {
+        runId,
+        status: '',
+        phase: '',
+        startedAt: '',
+        stale: false,
+        terminal: false,
+      }
+      const store = getQuestionPageStore(runId)
+      const prevOpen = base.questionOpen ?? new Map()
+      const prevExempt = base.questionClaimedExempt ?? new Set()
+
+      if (settled) {
+        // Settle frame: tombstone for the page, remove the request, its draft, and any claimed
+        // exemption. A settle for a request never seen open still tombstones (settle-before-open).
+        return settleQuestionInState(current, base, runId, requestID)
+      }
+
+      // Open frame: a tombstoned request is ignored (open-after-settle / id-reuse guard).
+      if (store.tombstones.has(requestID)) {
+        return current
+      }
+      // A repeated open keeps the existing entry and its draft — replayed opens add nothing.
+      if (prevOpen.has(requestID)) {
+        return current
+      }
+      // Cap: reject the overflow open; never evict a real pending question.
+      if (prevOpen.size >= MAX_OPEN_QUESTIONS) {
+        return current
+      }
+      const nextOpen = new Map(prevOpen)
+      nextOpen.set(requestID, {requestID, questions: event.data.questions})
+      const updatedEntry = {
+        ...base,
+        questionOpen: nextOpen,
+        questionClaimedExempt: prevExempt,
+      }
+      return {...current, runs: Object.assign(Object.create(null), current.runs, {[runId]: updatedEntry})}
+    }
+
+    case 'question-reconcile': {
+      // Result of a pending-question list check. Like approval-reconcile, the caller computes the
+      // inputs from a pre-GET snapshot (`snapshotIds`) — the ids open locally BEFORE the request —
+      // so anything that opened over SSE during the await is never eligible for removal.
+      //
+      //   invalidBody  the response body failed validation: change nothing (not even the flag)
+      //   partial      the caller dropped invalid entries: the list is not a complete picture
+      //   requests     the valid listed requests, `{requestID, questions}`
+      //
+      // Failures (network, 429, 5xx) never reach here — the caller dispatches nothing for them.
+      //
+      // Before ready (connection !== 'live') → ignore (mirrors question/approval gating).
+      if (current.connection !== 'live') {
+        return current
+      }
+      const {runId, snapshotIds, requests, invalidBody, partial} = event
+      if (invalidBody === true) {
+        return current
+      }
+      const prevEntry = current.runs[runId]
+
+      // Terminal is absorbing.
+      if (prevEntry !== undefined && prevEntry.terminal) {
+        return current
+      }
+
+      const base = prevEntry ?? {
+        runId,
+        status: '',
+        phase: '',
+        startedAt: '',
+        stale: false,
+        terminal: false,
+      }
+      const store = getQuestionPageStore(runId)
+      const nextOpen = new Map(base.questionOpen ?? new Map())
+      const nextExempt = new Set(base.questionClaimedExempt ?? new Set())
+      const listedIds = new Set(requests.map(request => request.requestID))
+
+      // --- Removal path ---
+      // A full list may be truncated at the gateway cap, and a partial one is missing entries the
+      // caller could not validate: either way absence proves nothing, so the diff is additive only.
+      // Removal never tombstones — the request may return on a later frame or list — and a
+      // claimed-exempt request is skipped: the gateway excludes claimed requests from the list,
+      // so its absence says nothing about them. An exemption ends only on a settle frame, a terminal
+      // status, or a list that shows the request open again (the add path below).
+      const additiveOnly = partial === true || requests.length >= GATEWAY_PENDING_QUESTIONS_CAP
+      if (!additiveOnly) {
+        for (const requestID of snapshotIds) {
+          if (!listedIds.has(requestID) && !nextExempt.has(requestID)) {
+            nextOpen.delete(requestID)
+          }
+        }
+      }
+
+      // --- Add path ---
+      // Listed and not tombstoned → add (unless already open or at the cap). A list that shows a
+      // claimed-exempt request ends its exemption: the claimant failed and it is open again.
+      for (const request of requests) {
+        const {requestID} = request
+        if (nextExempt.has(requestID)) nextExempt.delete(requestID)
+        if (store.tombstones.has(requestID)) continue
+        if (nextOpen.has(requestID)) continue
+        if (nextOpen.size >= MAX_OPEN_QUESTIONS) continue
+        nextOpen.set(requestID, {requestID, questions: request.questions})
+      }
+
+      const updatedEntry = {
+        ...base,
+        questionOpen: nextOpen,
+        questionClaimedExempt: nextExempt,
+        questionReconcileDone: true,
+      }
+      return {...current, runs: Object.assign(Object.create(null), current.runs, {[runId]: updatedEntry})}
+    }
+
+    case 'question-reconcile-reset': {
+      // A new connection cycle starts: the question list applied in the previous cycle says nothing
+      // about this one, so the completed flag clears until the new cycle's list is applied. Only an
+      // existing, non-terminal run entry carries the flag.
+      const prevEntry = current.runs[event.runId]
+      if (prevEntry === undefined || prevEntry.terminal || prevEntry.questionReconcileDone !== true) {
+        return current
+      }
+      const updatedEntry = {...prevEntry, questionReconcileDone: false}
+      return {...current, runs: Object.assign(Object.create(null), current.runs, {[event.runId]: updatedEntry})}
+    }
+
+    case 'question-resolved': {
+      // This page's own decision got `claimed` or `already_settled`: the request is settled, so it is
+      // tombstoned and removed exactly as a settle frame would. Unlike the frame it is not gated on
+      // the connection — the POST can resolve while the stream is reconnecting. Terminal is absorbing.
+      const {runId, requestID} = event
+      const prevEntry = current.runs[runId]
+      if (prevEntry !== undefined && prevEntry.terminal) {
+        return current
+      }
+      const base = prevEntry ?? {
+        runId,
+        status: '',
+        phase: '',
+        startedAt: '',
+        stale: false,
+        terminal: false,
+      }
+      return settleQuestionInState(current, base, runId, requestID)
+    }
+
+    case 'question-claimed': {
+      // This page got `already_claimed` for an open request: the gateway omits claimed requests from
+      // the pending list, so exempt it from removal by absence. A request that is not open (or is
+      // tombstoned) has nothing to protect.
+      const {runId, requestID} = event
+      const prevEntry = current.runs[runId]
+      if (prevEntry === undefined || prevEntry.terminal) {
+        return current
+      }
+      if (prevEntry.questionOpen?.has(requestID) !== true) {
+        return current
+      }
+      if (getQuestionPageStore(runId).tombstones.has(requestID)) {
+        return current
+      }
+      const nextExempt = new Set(prevEntry.questionClaimedExempt ?? new Set())
+      nextExempt.add(requestID)
+      const updatedEntry = {...prevEntry, questionClaimedExempt: nextExempt}
+      return {...current, runs: Object.assign(Object.create(null), current.runs, {[runId]: updatedEntry})}
+    }
+
     case 'buffer-overflow': {
       // A stream that exceeds the buffer cap is hostile or broken — fail closed
       // terminally with no reconnect, regardless of retry budget.
@@ -1367,6 +1807,67 @@ export function getOpenApprovals(runEntry) {
 }
 
 // ---------------------------------------------------------------------------
+// Question derivation helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the open questions for a run entry in arrival order. Each element is
+ * `{requestID, questions}` where `questions` are the parsed, sanitized prompts.
+ * Returns an empty array when there are none.
+ *
+ * @param {object} runEntry - A RunEntry from the stream state's runs map.
+ * @returns {Array} The open question requests, or an empty array.
+ */
+export function getOpenQuestions(runEntry) {
+  if (runEntry === undefined || runEntry === null) return []
+  const open = runEntry.questionOpen
+  if (open === undefined || open === null) return []
+  return [...open.values()]
+}
+
+/**
+ * Returns true iff the run entry has at least one open question request.
+ *
+ * @param {object} runEntry - A RunEntry from the stream state's runs map.
+ * @returns {boolean} True iff the run has at least one open question request.
+ */
+export function hasOpenQuestions(runEntry) {
+  if (runEntry === undefined || runEntry === null) return false
+  const open = runEntry.questionOpen
+  return open !== undefined && open !== null && open.size > 0
+}
+
+/**
+ * The status to render for a run: the wire status adjusted by what the browser knows about
+ * open questions. Computed at render and NEVER stored — the next `running` frame would
+ * overwrite a stored derived value.
+ *
+ *   1. Terminal wins.
+ *   2. Wire `waiting_for_approval` stays (the gateway lets approval win over questions).
+ *   3. A `running` run with any open question is `waiting_for_question`.
+ *   4. A wire `waiting_for_question` with an open question stays; with none, once a question
+ *      reconcile has completed in the current connection cycle, it is really `running`. (Before
+ *      that, a missed settle frame cannot be told from a question the list has not yet shown, so
+ *      the wire value is kept.)
+ *   5. Anything else is the wire value (so `queued` and `blocked` stay put).
+ *
+ * @param {object|undefined|null} runEntry - A RunEntry from the stream state's runs map.
+ * @returns {string} The status value to label and style; '' when there is no entry.
+ */
+export function getEffectiveStatus(runEntry) {
+  if (runEntry === undefined || runEntry === null) return ''
+  const wire = runEntry.status
+  if (runEntry.terminal === true) return wire
+  if (wire === 'waiting_for_approval') return wire
+  if (wire === 'running') return hasOpenQuestions(runEntry) ? 'waiting_for_question' : wire
+  if (wire === 'waiting_for_question') {
+    if (hasOpenQuestions(runEntry)) return wire
+    return runEntry.questionReconcileDone === true ? 'running' : wire
+  }
+  return wire
+}
+
+// ---------------------------------------------------------------------------
 // Backoff delay calculator
 // ---------------------------------------------------------------------------
 
@@ -1382,6 +1883,59 @@ function backoffDelay(attempt) {
 // ---------------------------------------------------------------------------
 // DOM shell — only runs in a browser (document must exist)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Transport helpers shared by the approval, question and cancel clients
+// ---------------------------------------------------------------------------
+
+/**
+ * Append the fixture session id as a query param. Only appended when a fixtureSessionId is
+ * provided (fixture mode) — never in production.
+ */
+function withFixtureParam(fixtureSessionId, url) {
+  return fixtureSessionId === undefined
+    ? url
+    : `${url}${url.includes('?') ? '&' : '?'}fixtureSessionId=${encodeURIComponent(fixtureSessionId)}`
+}
+
+/**
+ * Same-origin fetch with the cookie riding and redirects refused. A `timeoutMs` bounds the request
+ * with its own timeout signal (where AbortSignal.timeout exists), so a hung socket rejects instead
+ * of waiting forever; that signal is the request's own, never the stream's.
+ */
+function browserFetch(input, init, timeoutMs) {
+  const signal = timeoutMs !== undefined && typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(timeoutMs)
+    : undefined
+  return globalThis.fetch(input, {
+    ...init,
+    credentials: 'include',
+    redirect: 'error',
+    ...(signal === undefined ? {} : {signal}),
+  })
+}
+
+/**
+ * Fetch a fresh CSRF token. Resolves to `{success:true, data:{csrfToken}}`, or
+ * `{success:false, error:{kind:'http', status}}` | `{kind:'protocol'}` | `{kind:'network'}`.
+ */
+async function refreshCsrf(endpointBase, fixtureSessionId, timeoutMs) {
+  try {
+    const res = await browserFetch(
+      withFixtureParam(fixtureSessionId, `${endpointBase}/session/csrf`),
+      {headers: {'content-type': 'application/json'}},
+      timeoutMs,
+    )
+    if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
+    const data = await res.json()
+    if (data === null || typeof data !== 'object' || typeof data.csrfToken !== 'string') {
+      return {success: false, error: {kind: 'protocol'}}
+    }
+    return {success: true, data: {csrfToken: data.csrfToken}}
+  } catch {
+    return {success: false, error: {kind: 'network'}}
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Browser-direct approval client (same-origin relative /operator/* paths)
@@ -1416,36 +1970,8 @@ function backoffDelay(attempt) {
 export function buildApprovalClient(opts) {
   const endpointBase = opts?.endpointBase ?? '/operator'
   const fixtureSessionId = opts?.fixtureSessionId
-
-  // Append fixtureSessionId as a query param when in fixture mode.
-  // Only appended when fixtureSessionId is provided — never in production.
-  const withFixtureParam = url =>
-    fixtureSessionId === undefined
-      ? url
-      : `${url}${url.includes('?') ? '&' : '?'}fixtureSessionId=${encodeURIComponent(fixtureSessionId)}`
-
-  const browserFetch = (input, init) =>
-    globalThis.fetch(input, {
-      ...init,
-      credentials: 'include',
-      redirect: 'error',
-    })
-
-  async function refreshCsrf() {
-    try {
-      const res = await browserFetch(withFixtureParam(`${endpointBase}/session/csrf`), {
-        headers: {'content-type': 'application/json'},
-      })
-      if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
-      const data = await res.json()
-      if (data === null || typeof data !== 'object' || typeof data.csrfToken !== 'string') {
-        return {success: false, error: {kind: 'protocol'}}
-      }
-      return {success: true, data: {csrfToken: data.csrfToken}}
-    } catch {
-      return {success: false, error: {kind: 'network'}}
-    }
-  }
+  const withFixture = url => withFixtureParam(fixtureSessionId, url)
+  const getCsrf = async () => refreshCsrf(endpointBase, fixtureSessionId)
 
   /**
    * POST a decision for a pending approval.
@@ -1462,7 +1988,7 @@ export function buildApprovalClient(opts) {
     // Get initial CSRF token. Propagate an HTTP failure (e.g. an expired session
     // returning 401/403) so the caller can show the reload state instead of an
     // endless retry; only a true transport failure collapses to 'network'.
-    const csrfResult = await refreshCsrf()
+    const csrfResult = await getCsrf()
     if (!csrfResult.success) {
       return csrfResult.error.kind === 'http'
         ? {success: false, error: {kind: 'http', status: csrfResult.error.status}}
@@ -1470,7 +1996,7 @@ export function buildApprovalClient(opts) {
     }
     const csrfToken = csrfResult.data.csrfToken
 
-    const path = withFixtureParam(`${endpointBase}/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(requestId)}/decision`)
+    const path = withFixture(`${endpointBase}/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(requestId)}/decision`)
     const body = JSON.stringify({decision})
     const makeInit = csrf => ({
       method: 'POST',
@@ -1492,7 +2018,7 @@ export function buildApprovalClient(opts) {
 
     // CSRF-400 retry: refresh CSRF once and retry with the same idempotency key
     if (res.status === 400) {
-      const retrycsrfResult = await refreshCsrf()
+      const retrycsrfResult = await getCsrf()
       if (!retrycsrfResult.success) {
         return retrycsrfResult.error.kind === 'http'
           ? {success: false, error: {kind: 'http', status: retrycsrfResult.error.status}}
@@ -1534,7 +2060,7 @@ export function buildApprovalClient(opts) {
   async function listRunApprovals(runId) {
     try {
       const res = await browserFetch(
-        withFixtureParam(`${endpointBase}/runs/${encodeURIComponent(runId)}/approvals`),
+        withFixture(`${endpointBase}/runs/${encodeURIComponent(runId)}/approvals`),
         {headers: {'content-type': 'application/json'}},
       )
       if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
@@ -1546,7 +2072,259 @@ export function buildApprovalClient(opts) {
     }
   }
 
-  return {refreshCsrf, decideRunApproval, listRunApprovals}
+  return {refreshCsrf: getCsrf, decideRunApproval, listRunApprovals}
+}
+
+// ---------------------------------------------------------------------------
+// Browser-direct question client (same-origin relative /operator/* paths)
+// ---------------------------------------------------------------------------
+
+/** Decision states a 200 can carry. Mirrors the vendored QUESTION_DECISION_STATES (a test pins parity). */
+export const QUESTION_DECISION_STATES = Object.freeze(['claimed', 'already_claimed', 'already_settled', 'failed_to_settle'])
+
+/** Reasons a 400 can carry. Mirrors the vendored QUESTION_INVALID_REASONS (a test pins parity). */
+export const QUESTION_INVALID_REASONS = Object.freeze([
+  'malformed',
+  'arity-mismatch',
+  'unknown-option',
+  'multiple-not-allowed',
+  'empty-value',
+  'text-too-long',
+])
+
+const QUESTION_DECISION_STATE_SET = new Set(QUESTION_DECISION_STATES)
+const QUESTION_INVALID_REASON_SET = new Set(QUESTION_INVALID_REASONS)
+
+/** Delays between successive re-lists after an `already_claimed`: about 2, 5, 10 and 20 seconds, then stop. */
+export const QUESTION_CLAIM_RECHECK_DELAYS_MS = Object.freeze([2000, 5000, 10_000, 20_000])
+
+/**
+ * Bound on each fetch of the question client (list, CSRF, decision POST): a hung request must end
+ * as its designed failure (a decision POST as an unknown outcome, a list as a network failure)
+ * instead of holding a question in flight or a list check open forever. It is a separate constant
+ * from the cancel client's bound because the recovery differs, though the value is the same.
+ */
+export const QUESTION_FETCH_TIMEOUT_MS = 10_000
+
+/** One pending-list entry `{requestID, questions}` (no per-item runId), or null when invalid. */
+function parsePendingQuestionEntry(value) {
+  if (!isQuestionRecord(value) || !hasExactKeys(value, ['requestID', 'questions'])) return null
+  if (!isNonEmptyString(value.requestID)) return null
+  if (!Array.isArray(value.questions) || value.questions.length > MAX_QUESTIONS_PER_REQUEST) return null
+  const questions = []
+  for (const entry of value.questions) {
+    const question = parseQuestionPrompt(entry)
+    if (question === null) return null
+    questions.push(question)
+  }
+  return {requestID: value.requestID, questions}
+}
+
+/**
+ * Validate a pending-list body `{requests:[...]}`. Null when the whole body is invalid (not exactly
+ * that shape, or more entries than the gateway's cap). Otherwise the valid entries plus `partial`:
+ * true when any entry was dropped (invalid or duplicate), because the list is then not a complete
+ * picture. Never throws; the result shares nothing with the input.
+ */
+function parsePendingQuestionsBody(body) {
+  if (!isQuestionRecord(body) || !hasExactKeys(body, ['requests'])) return null
+  if (!Array.isArray(body.requests) || body.requests.length > GATEWAY_PENDING_QUESTIONS_CAP) return null
+  const requests = []
+  const seen = new Set()
+  let partial = false
+  for (const entry of body.requests) {
+    const parsed = parsePendingQuestionEntry(entry)
+    if (parsed === null || seen.has(parsed.requestID)) {
+      partial = true
+      continue
+    }
+    seen.add(parsed.requestID)
+    requests.push(parsed)
+  }
+  return {requests, partial}
+}
+
+/** Rebuild a decision as a closed request body, or null when it is not an answer/skip shape. */
+function buildQuestionDecisionBody(decision) {
+  if (!isQuestionRecord(decision)) return null
+  if (decision.decision === 'skip') return {decision: 'skip'}
+  if (decision.decision !== 'answer' || !Array.isArray(decision.answers)) return null
+  const answers = []
+  for (const answer of decision.answers) {
+    if (!isQuestionRecord(answer)) return null
+    const out = {}
+    if (answer.options !== undefined) {
+      if (!Array.isArray(answer.options)) return null
+      if (!answer.options.every(index => Number.isSafeInteger(index) && index >= 0)) return null
+      out.options = [...answer.options]
+    }
+    if (answer.text !== undefined) {
+      if (typeof answer.text !== 'string') return null
+      out.text = answer.text
+    }
+    answers.push(out)
+  }
+  return {decision: 'answer', answers}
+}
+
+const QUESTION_REQUEST_LEVEL_INVALID = Object.freeze({kind: 'invalid', reason: null, questionIndex: null})
+
+/**
+ * Read a 400. Null when it carries no `reason` — the browser guard's refusal (CSRF, Origin, Fetch
+ * Metadata), which fires before the handler and is the only 400 worth a CSRF retry. Otherwise the
+ * invalid-answer outcome: a known reason with an in-range question index, or a request-level one
+ * (unknown reason; missing, non-integer or out-of-range index). The body is never kept or logged.
+ */
+async function readQuestionBadRequest(res, answerCount) {
+  let data = null
+  try {
+    data = await res.json()
+  } catch {
+    data = null
+  }
+  if (!isQuestionRecord(data) || !Object.hasOwn(data, 'reason')) return null
+  if (typeof data.reason !== 'string' || !QUESTION_INVALID_REASON_SET.has(data.reason)) {
+    return QUESTION_REQUEST_LEVEL_INVALID
+  }
+  const {questionIndex} = data
+  const inRange = Number.isInteger(questionIndex) && questionIndex >= 0 && questionIndex < answerCount
+  return {kind: 'invalid', reason: data.reason, questionIndex: inRange ? questionIndex : null}
+}
+
+/**
+ * Classify every response of a question decision except a 400, which the caller handles.
+ *   200, known state → {kind:'decided', state}
+ *   200, unknown state → {kind:'failed'} (request-level, retryable)
+ *   200, unreadable body, 429, 5xx, anything else → {kind:'unknown'} (outcome unknown: re-list, never resubmit)
+ *   401/403 → {kind:'session-expired'}; 404 (the masked denial) → {kind:'cant-answer'}
+ */
+async function classifyQuestionDecisionResponse(res) {
+  if (res.ok) {
+    let data
+    try {
+      data = await res.json()
+    } catch {
+      return {kind: 'unknown'}
+    }
+    const state = isQuestionRecord(data) ? data.state : undefined
+    return typeof state === 'string' && QUESTION_DECISION_STATE_SET.has(state)
+      ? {kind: 'decided', state}
+      : {kind: 'failed'}
+  }
+  if (res.status === 401 || res.status === 403) return {kind: 'session-expired'}
+  if (res.status === 404) return {kind: 'cant-answer'}
+  return {kind: 'unknown'}
+}
+
+/**
+ * Build the browser-direct question client: list the pending questions of a run and submit one
+ * decision. Same transport posture as the approval client (same-origin paths, `credentials`
+ * include, `redirect: 'error'`, CSRF fetched first, fixture session id only in fixture mode) and
+ * it shares that client's transport helpers. It does NOT share the approval client's retry-on-any-400.
+ * Every fetch (list, CSRF, decision POST) is bounded by QUESTION_FETCH_TIMEOUT_MS: a timed-out
+ * decision POST is an unknown outcome (it may have been recorded), a timed-out list is a network
+ * failure.
+ *
+ * Security: never logs or stores a run id, request id, answer text, response text or CSRF token.
+ * Path IDs are validated before they are embedded. There is no idempotency key: the gateway's
+ * question route does not read one; single settlement comes from its claim states.
+ *
+ * `listRunQuestions(runId)` →
+ *   {success:true, data:{requests, invalidBody, partial}}  — 2xx; `invalidBody` when the body fails
+ *       validation (requests is then empty), `partial` when entries were dropped
+ *   {success:false, error:{kind:'http', status}} | {kind:'network'} | {kind:'invalid-id'}
+ *
+ * `decideRunQuestion(runId, requestId, decision)` → one of
+ *   {kind:'decided', state}                 — 200 with a known state
+ *   {kind:'invalid', reason, questionIndex} — 400 with a `reason` (both null when request-level)
+ *   {kind:'cant-answer'}                    — 404, the masked denial
+ *   {kind:'session-expired'}                — 401/403, from the CSRF fetch or the POST
+ *   {kind:'unknown'}                        — network failure or an unclassifiable response after the
+ *                                             POST was sent: it may have been recorded
+ *   {kind:'failed'}                         — request-level and retryable: not sent, or an unknown state
+ *
+ * A 400 without a `reason` refreshes CSRF and retries once; a second one is request-level invalid.
+ * A 400 with a `reason` is never retried.
+ *
+ * @param {object} [opts] - Optional configuration.
+ * @param {string} [opts.endpointBase] - The endpoint base path. Defaults to '/operator'.
+ * @param {string} [opts.fixtureSessionId] - Fixture session ID (fixture mode only).
+ */
+export function buildQuestionClient(opts) {
+  const endpointBase = opts?.endpointBase ?? '/operator'
+  const fixtureSessionId = opts?.fixtureSessionId
+  const withFixture = url => withFixtureParam(fixtureSessionId, url)
+  const timedFetch = async (input, init) => browserFetch(input, init, QUESTION_FETCH_TIMEOUT_MS)
+  const getCsrf = async () => refreshCsrf(endpointBase, fixtureSessionId, QUESTION_FETCH_TIMEOUT_MS)
+
+  async function listRunQuestions(runId) {
+    if (!validateDynamicId(runId)) return {success: false, error: {kind: 'invalid-id'}}
+    try {
+      const res = await timedFetch(
+        withFixture(`${endpointBase}/runs/${encodeURIComponent(runId)}/questions`),
+        {headers: {'content-type': 'application/json'}},
+      )
+      if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
+      let body
+      try {
+        body = await res.json()
+      } catch {
+        body = null
+      }
+      const parsed = parsePendingQuestionsBody(body)
+      if (parsed === null) return {success: true, data: {requests: [], invalidBody: true, partial: false}}
+      return {success: true, data: {requests: parsed.requests, invalidBody: false, partial: parsed.partial}}
+    } catch {
+      return {success: false, error: {kind: 'network'}}
+    }
+  }
+
+  async function decideRunQuestion(runId, requestId, decision) {
+    if (!validateDynamicId(runId) || !validateDynamicId(requestId)) return {kind: 'failed'}
+    const body = buildQuestionDecisionBody(decision)
+    if (body === null) return {kind: 'failed'}
+    const answerCount = body.decision === 'answer' ? body.answers.length : 0
+    const payload = JSON.stringify(body)
+    const path = withFixture(
+      `${endpointBase}/runs/${encodeURIComponent(runId)}/questions/${encodeURIComponent(requestId)}/decision`,
+    )
+
+    // Two attempts at most, and only a 400 without a `reason` gets the second.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const csrfResult = await getCsrf()
+      if (!csrfResult.success) {
+        const {error} = csrfResult
+        return error.kind === 'http' && (error.status === 401 || error.status === 403)
+          ? {kind: 'session-expired'}
+          : {kind: 'failed'}
+      }
+
+      let res
+      try {
+        res = await timedFetch(path, {
+          method: 'POST',
+          redirect: 'error',
+          headers: {
+            'content-type': 'application/json',
+            'x-csrf-token': csrfResult.data.csrfToken,
+          },
+          body: payload,
+        })
+      } catch {
+        return {kind: 'unknown'}
+      }
+
+      if (res.status === 400) {
+        const invalid = await readQuestionBadRequest(res, answerCount)
+        if (invalid === null) continue
+        return invalid
+      }
+      return classifyQuestionDecisionResponse(res)
+    }
+    return QUESTION_REQUEST_LEVEL_INVALID
+  }
+
+  return {listRunQuestions, decideRunQuestion}
 }
 
 // ---------------------------------------------------------------------------
@@ -1658,46 +2436,27 @@ export function buildCancelClient(opts) {
   const fixtureSessionId = opts?.fixtureSessionId
   const logger = opts?.logger
 
-  const withFixtureParam = url =>
-    fixtureSessionId === undefined
-      ? url
-      : `${url}${url.includes('?') ? '&' : '?'}fixtureSessionId=${encodeURIComponent(fixtureSessionId)}`
-
-  const browserFetch = (input, init) =>
-    globalThis.fetch(input, {
-      ...init,
-      credentials: 'include',
-      redirect: 'error',
-      signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(CANCEL_FETCH_TIMEOUT_MS) : undefined,
-    })
+  const withFixture = url => withFixtureParam(fixtureSessionId, url)
+  const timedFetch = async (input, init) => browserFetch(input, init, CANCEL_FETCH_TIMEOUT_MS)
 
   const ROUTE_TEMPLATE = '/operator/runs/:runId/cancel'
   const CSRF_ROUTE_TEMPLATE = '/operator/session/csrf'
 
   /**
-   * Fetch a fresh CSRF token for the cancel POST. Mirrors buildApprovalClient's
-   * refreshCsrf — separate instance because this module cannot share module-level
-   * state with buildApprovalClient's closure.
+   * Fetch a fresh CSRF token for the cancel POST: the shared fetch, bounded by
+   * CANCEL_FETCH_TIMEOUT_MS, with each failure logged by static route template only.
    */
-  async function refreshCsrf() {
-    try {
-      const res = await browserFetch(withFixtureParam(`${endpointBase}/session/csrf`), {
-        headers: {'content-type': 'application/json'},
-      })
-      if (!res.ok) {
-        logger?.error('operator-cancel-client: csrf http error', {route: CSRF_ROUTE_TEMPLATE, status: res.status})
-        return {success: false, error: {kind: 'http', status: res.status}}
+  async function getCsrf() {
+    const result = await refreshCsrf(endpointBase, fixtureSessionId, CANCEL_FETCH_TIMEOUT_MS)
+    if (!result.success) {
+      const {error} = result
+      if (error.kind === 'http') {
+        logger?.error('operator-cancel-client: csrf http error', {route: CSRF_ROUTE_TEMPLATE, status: error.status})
+      } else {
+        logger?.error(`operator-cancel-client: csrf ${error.kind} error`, {route: CSRF_ROUTE_TEMPLATE})
       }
-      const data = await res.json()
-      if (data === null || typeof data !== 'object' || typeof data.csrfToken !== 'string') {
-        logger?.error('operator-cancel-client: csrf protocol error', {route: CSRF_ROUTE_TEMPLATE})
-        return {success: false, error: {kind: 'protocol'}}
-      }
-      return {success: true, data: {csrfToken: data.csrfToken}}
-    } catch {
-      logger?.error('operator-cancel-client: csrf network error', {route: CSRF_ROUTE_TEMPLATE})
-      return {success: false, error: {kind: 'network'}}
     }
+    return result
   }
 
   /**
@@ -1724,7 +2483,7 @@ export function buildCancelClient(opts) {
       return {success: false, error: {kind: 'validation', code: 'missing_idempotency_key'}}
     }
 
-    const path = withFixtureParam(`${endpointBase}/runs/${encodeURIComponent(runId)}/cancel`)
+    const path = withFixture(`${endpointBase}/runs/${encodeURIComponent(runId)}/cancel`)
     const init = {
       method: 'POST',
       redirect: 'error',
@@ -1737,7 +2496,7 @@ export function buildCancelClient(opts) {
 
     let res
     try {
-      res = await browserFetch(path, init)
+      res = await timedFetch(path, init)
     } catch {
       logger?.error('operator-cancel-client: network error', {route: ROUTE_TEMPLATE})
       return {success: false, error: {kind: 'network'}}
@@ -1746,7 +2505,7 @@ export function buildCancelClient(opts) {
     // One retry only on HTTP 400, reusing the SAME idempotency key and init.
     if (res.status === 400) {
       try {
-        res = await browserFetch(path, init)
+        res = await timedFetch(path, init)
       } catch {
         logger?.error('operator-cancel-client: network error', {route: ROUTE_TEMPLATE})
         return {success: false, error: {kind: 'network'}}
@@ -1773,7 +2532,7 @@ export function buildCancelClient(opts) {
     return {success: false, error: {kind: 'http', status: res.status}}
   }
 
-  return {cancelRun, refreshCsrf}
+  return {cancelRun, refreshCsrf: getCsrf}
 }
 
 // ---------------------------------------------------------------------------
@@ -2486,6 +3245,26 @@ function renderCheckoutDetail(region, runEntry, reasonShownElsewhere) {
   region.hidden = false
 }
 
+function makeQuestionNoteCard(status) {
+  const el = document.createElement('section')
+  el.className = 'question-region__request'
+  el.setAttribute('role', 'group')
+  el.setAttribute('aria-label', 'Agent question request')
+  const message = document.createElement('p')
+  message.className = 'question-region__status'
+  message.setAttribute('role', 'status')
+  message.setAttribute('aria-live', 'polite')
+  message.textContent = QUESTION_NOTE_COPY[status.kind] ?? ''
+  el.append(message)
+  return {
+    el,
+    isNote: true,
+    update(next) {
+      message.textContent = QUESTION_NOTE_COPY[next.kind] ?? ''
+    },
+  }
+}
+
 /**
  * Initialize the operator run stream for a given run ID.
  *
@@ -2500,6 +3279,9 @@ function renderCheckoutDetail(region, runEntry, reasonShownElsewhere) {
  *   badgeEl     — element with [data-role="approval-badge"] for the approval count badge
  *   checkoutEl  — element with [data-role="run-checkout-detail"], the target for checkout
  *                 provenance / preparation, rendered only from the sanitized closed DTOs.
+ *   summaryStatus — optional run-list summary status for this run (queued | running | succeeded |
+ *                 failed | cancelled). A terminal value lets an expired run (reset no-snapshot)
+ *                 show its status plus "Output no longer available." without a status frame.
  *   approvalClient — optional pre-built approval client (for testing); if absent,
  *                    buildApprovalClient() is called when the flag is on
  *
@@ -2513,11 +3295,23 @@ function renderCheckoutDetail(region, runEntry, reasonShownElsewhere) {
  * - Read-only: GET only for stream; approval decisions are operator-forwarded writes.
  */
 export function initOperatorStream(opts) {
-  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, checkoutEl, cancelEl, approvalClient: injectedApprovalClient, cancelClient: injectedCancelClient, endpointBase, fixtureSessionId} = opts
+  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, checkoutEl, cancelEl, questionsEl, approvalClient: injectedApprovalClient, cancelClient: injectedCancelClient, questionClient: injectedQuestionClient, endpointBase, fixtureSessionId} = opts
+
+  // The run-list summary status for this run, when the caller has one. Only a known summary status
+  // is kept; it lets a no-snapshot reset close an expired terminal run without a status frame.
+  const summaryStatus = typeof opts.summaryStatus === 'string' && SUMMARY_STATUSES.has(opts.summaryStatus)
+    ? opts.summaryStatus
+    : undefined
 
   if (checkoutEl) {
     checkoutEl.textContent = ''
     checkoutEl.hidden = true
+  }
+
+  if (questionsEl !== undefined && questionsEl !== null) {
+    questionsEl.textContent = ''
+    questionsEl.classList?.add('question-region')
+    questionsEl.hidden = true
   }
 
   // Build the approval client lazily (only if approvalsEl is present).
@@ -2533,6 +3327,21 @@ export function initOperatorStream(opts) {
             },
       ))
     : null
+
+  // Build the question client only when the caller wires questions: an injected client, or the
+  // question region element. A stream with neither never touches the questions routes.
+  const questionClient = injectedQuestionClient ?? (
+    questionsEl !== undefined && questionsEl !== null
+      ? buildQuestionClient(
+          endpointBase === undefined && fixtureSessionId === undefined
+            ? undefined
+            : {
+                ...(endpointBase === undefined ? {} : {endpointBase}),
+                ...(fixtureSessionId === undefined ? {} : {fixtureSessionId}),
+              },
+        )
+      : null
+  )
 
   // Build the cancel client lazily (only if cancelEl is present).
   const cancelClient = cancelEl !== undefined && cancelEl !== null
@@ -2554,11 +3363,282 @@ export function initOperatorStream(opts) {
   // without re-rendering the entire list. Map: requestID → DOM element.
   const renderedPrompts = new Map()
 
+  // Question cards persist between stream updates so status changes never replace focused input.
+  // Drafts remain in the page-scoped store and are never persisted outside memory.
+  const renderedQuestionCards = new Map()
+  const questionStatuses = new Map() // requestID → status
+  let nextQuestionRadioGroup = 0
+  let questionAnnouncer = null
+
+  function makeQuestionCard(request, initialStatus) {
+    const store = getQuestionPageStore(runId)
+    const saved = store.drafts.get(request.requestID)
+    const answers = request.questions.map((prompt, index) => {
+      const draft = Array.isArray(saved) ? saved[index] : undefined
+      return {
+        options: Array.isArray(draft?.options)
+          ? draft.options.filter(option => Number.isInteger(option) && option >= 0 && option < prompt.options.length)
+          : [],
+        text: typeof draft?.text === 'string' ? draft.text : '',
+      }
+    })
+    let status = initialStatus
+    let lastStatusKind = status.kind
+    const el = document.createElement('section')
+    el.className = 'question-region__request'
+    el.setAttribute('role', 'group')
+    el.setAttribute('aria-label', 'Agent question request')
+    el.addEventListener('click', event => {
+      event.stopPropagation()
+    })
+
+    const heading = document.createElement('h3')
+    heading.className = 'question-region__heading'
+    heading.textContent = 'Questions'
+    el.append(heading)
+
+    const statusEl = document.createElement('p')
+    statusEl.className = 'question-region__status'
+    statusEl.setAttribute('role', 'status')
+    statusEl.setAttribute('aria-live', 'polite')
+    el.append(statusEl)
+
+    const questionEls = []
+    request.questions.forEach((prompt, questionIndex) => {
+      const fieldset = document.createElement('fieldset')
+      fieldset.className = 'question-region__question'
+      fieldset.tabIndex = -1
+      const legend = document.createElement('legend')
+      legend.textContent = prompt.header
+      fieldset.append(legend)
+
+      const textEl = document.createElement('p')
+      textEl.className = 'question-region__text'
+      textEl.textContent = prompt.text
+      fieldset.append(textEl)
+
+      const errorEl = document.createElement('p')
+      errorEl.className = 'question-region__error'
+      errorEl.hidden = true
+      fieldset.append(errorEl)
+
+      const answer = answers[questionIndex]
+      const radioName = `question-choice-${nextQuestionRadioGroup++}`
+      prompt.options.forEach((option, optionIndex) => {
+        const label = document.createElement('label')
+        label.className = 'question-region__option'
+        const input = document.createElement('input')
+        input.type = prompt.multiple ? 'checkbox' : 'radio'
+        if (!prompt.multiple) input.name = radioName
+        input.checked = answer.options.includes(optionIndex)
+        input.addEventListener('change', () => {
+          if (QUESTION_NOTE_KINDS.has(status.kind)) {
+            input.checked = answer.options.includes(optionIndex)
+            return
+          }
+          if (prompt.multiple) {
+            answer.options = input.checked
+              ? [...new Set([...answer.options, optionIndex])].toSorted((a, b) => a - b)
+              : answer.options.filter(index => index !== optionIndex)
+          } else {
+            answer.options = input.checked ? [optionIndex] : []
+          }
+          saveDraft()
+          refreshValidation()
+        })
+        const copy = document.createElement('span')
+        copy.className = 'question-region__option-copy'
+        copy.textContent = option.label
+        label.append(input, copy)
+        if (option.description !== '') {
+          const description = document.createElement('span')
+          description.className = 'question-region__description'
+          description.textContent = option.description
+          label.append(description)
+        }
+        fieldset.append(label)
+      })
+
+      if (prompt.custom) {
+        const textLabel = document.createElement('label')
+        textLabel.className = 'question-region__custom-label'
+        textLabel.textContent = 'Your answer'
+        const textarea = document.createElement('textarea')
+        textarea.className = 'question-region__input'
+        textarea.rows = 2
+        textarea.value = answer.text
+        textarea.addEventListener('input', () => {
+          if (QUESTION_NOTE_KINDS.has(status.kind)) {
+            textarea.value = answer.text
+            return
+          }
+          answer.text = textarea.value
+          saveDraft()
+          refreshValidation()
+        })
+        textLabel.append(textarea)
+        fieldset.append(textLabel)
+      }
+      questionEls.push({fieldset, errorEl})
+      el.append(fieldset)
+    })
+
+    const controlsEl = document.createElement('div')
+    controlsEl.className = 'question-region__controls'
+    const submitButton = document.createElement('button')
+    submitButton.type = 'button'
+    submitButton.className = 'question-region__submit'
+    submitButton.textContent = 'Submit answers'
+    const skipButton = document.createElement('button')
+    skipButton.type = 'button'
+    skipButton.className = 'question-region__skip'
+    skipButton.textContent = 'Skip'
+    controlsEl.append(submitButton, skipButton)
+    el.append(controlsEl)
+
+    const checkButton = document.createElement('button')
+    checkButton.type = 'button'
+    checkButton.className = 'question-region__check'
+    checkButton.textContent = 'Check again'
+    checkButton.hidden = true
+    checkButton.addEventListener('click', () => {
+      checkQuestions(request.requestID)
+    })
+    el.append(checkButton)
+
+    function saveDraft() {
+      store.drafts.set(request.requestID, answers.map(answer => ({options: [...answer.options], text: answer.text})))
+    }
+
+    function validationMessage() {
+      for (let index = 0; index < request.questions.length; index++) {
+        const prompt = request.questions[index]
+        const answer = answers[index]
+        if (answer.text.length > 4000) return 'Shorten this answer to 4,000 characters or fewer.'
+        if (!prompt.multiple && answer.options.length > 0 && answer.text.trim() !== '') {
+          return 'Choose an option or type an answer, not both.'
+        }
+      }
+      return ''
+    }
+
+    function canSubmit() {
+      if (validationMessage() !== '') return false
+      return request.questions.every((prompt, index) => {
+        if (prompt.options.length === 0 && !prompt.custom) return true
+        return answers[index].options.length > 0 || answers[index].text.trim() !== ''
+      })
+    }
+
+    function refreshValidation() {
+      submitButton.disabled = !canSubmit() || QUESTION_SEND_BLOCKED_KINDS.has(status.kind)
+      for (const [index, question] of questionEls.entries()) {
+        question.errorEl.textContent = ''
+        question.errorEl.hidden = true
+        const prompt = request.questions[index]
+        const answer = answers[index]
+        let message = ''
+        if (answer.text.length > 4000) {
+          message = 'Shorten this answer to 4,000 characters or fewer.'
+        } else if (!prompt.multiple && answer.options.length > 0 && answer.text.trim() !== '') {
+          message = 'Choose an option or type an answer, not both.'
+        }
+        if (message !== '') {
+          question.errorEl.textContent = message
+          question.errorEl.hidden = false
+        }
+      }
+    }
+
+    function answerDecision() {
+      const payload = request.questions.map((prompt, index) => {
+        if (prompt.options.length === 0 && !prompt.custom) return {}
+        const answer = answers[index]
+        const text = answer.text.trim()
+        return {
+          ...(answer.options.length === 0 ? {} : {options: [...answer.options]}),
+          ...(text === '' ? {} : {text}),
+        }
+      })
+      return {decision: 'answer', answers: payload}
+    }
+
+    submitButton.addEventListener('click', () => {
+      if (submitButton.disabled || QUESTION_NOTE_KINDS.has(status.kind)) return
+      decideQuestion(request.requestID, answerDecision()).then(() => undefined)
+    })
+    skipButton.addEventListener('click', () => {
+      if (skipButton.disabled || QUESTION_NOTE_KINDS.has(status.kind)) return
+      store.drafts.delete(request.requestID)
+      decideQuestion(request.requestID, {decision: 'skip'}).then(() => undefined)
+    })
+
+    function update(nextStatus) {
+      const priorKind = lastStatusKind
+      status = nextStatus ?? {kind: 'open'}
+      lastStatusKind = status.kind
+      const labels = {
+        'in-flight': 'Sending answers…',
+        'claimed-elsewhere': 'This question is being answered elsewhere.',
+        checking: 'Checking whether your answer was recorded…',
+        ...QUESTION_NOTE_COPY,
+        'failed-to-settle': "Your answer wasn't recorded. Try again.",
+        'cant-answer': "You can't answer questions for this run.",
+        'session-expired': 'Your session expired. Sign in again in another tab, then try again.',
+        'check-failed': "Couldn't check for questions. Try again.",
+      }
+      const invalidCopy = status.kind === 'invalid'
+        ? status.reason === 'multiple-not-allowed'
+          ? 'Choose an option or type an answer, not both.'
+          : status.reason === 'empty-value'
+            ? 'This answer is empty.'
+            : status.questionIndex === null
+              ? 'Your answers couldn\'t be sent. Check them and try again.'
+              : 'Check this answer and try again.'
+        : ''
+      statusEl.textContent = invalidCopy || labels[status.kind] || ''
+      const blocked = QUESTION_SEND_BLOCKED_KINDS.has(status.kind) || status.kind === 'cant-answer'
+      const removed = status.kind === 'cant-answer'
+      const note = QUESTION_NOTE_KINDS.has(status.kind)
+      for (const input of el.querySelectorAll('input, textarea')) {
+        input.disabled = blocked || note
+        input.tabIndex = note ? -1 : 0
+      }
+      controlsEl.hidden = removed || note
+      controlsEl.setAttribute('aria-disabled', String(note))
+      for (const button of [submitButton, skipButton]) {
+        button.tabIndex = note ? -1 : 0
+      }
+      for (const question of questionEls) {
+        question.fieldset.hidden = note
+        question.fieldset.setAttribute('aria-disabled', String(note))
+      }
+      checkButton.hidden = status.kind !== 'claimed-elsewhere' && status.kind !== 'check-failed'
+      skipButton.disabled = blocked
+      submitButton.disabled = blocked || !canSubmit()
+      for (const question of questionEls) {
+        question.errorEl.textContent = ''
+        question.errorEl.hidden = true
+      }
+      if (status.kind === 'invalid' && status.questionIndex !== null && questionEls[status.questionIndex] !== undefined) {
+        questionEls[status.questionIndex].errorEl.textContent = invalidCopy
+        questionEls[status.questionIndex].errorEl.hidden = false
+        if (priorKind !== 'invalid') questionEls[status.questionIndex].fieldset.focus()
+      } else {
+        refreshValidation()
+      }
+    }
+
+    update(initialStatus)
+    return {el, update}
+  }
+
   let state = {
     connection: 'connecting',
     runs: Object.create(null), // null-prototype to guard against __proto__ key pollution
     retryCount: 0,
     shouldReconnect: false,
+    ...(summaryStatus === undefined ? {} : {summaryStatus}),
   }
 
   let abortController = null
@@ -2641,13 +3721,15 @@ export function initOperatorStream(opts) {
     if (statusEl) {
       const runEntry = state.runs[runId]
       if (runEntry && (state.connection === 'live' || runEntry.terminal)) {
-        const view = toSafeRunView(runEntry)
+        // The effective status folds open questions into the wire status; it is derived here
+        // on every render and never stored.
+        const effectiveStatus = getEffectiveStatus(runEntry)
         // Render label from local map, never the raw wire string into textContent
-        const label = STATUS_LABELS[view.status] ?? ''
+        const label = STATUS_LABELS[effectiveStatus] ?? ''
         statusEl.textContent = label
         // Update status class for styling — use allowlisted status value (no whitespace)
         statusEl.className = statusEl.className.replaceAll(/\bstatus-\S+/g, '')
-        statusEl.classList.add(`status-${view.status.replaceAll('_', '-')}`)
+        statusEl.classList.add(`status-${effectiveStatus.replaceAll('_', '-')}`)
       } else if (!aborted) {
         const conn = state.connection
         const runIsTerminal = runEntry !== undefined && runEntry.terminal === true
@@ -2720,10 +3802,17 @@ export function initOperatorStream(opts) {
     if (outputEl) {
       const runEntry = state.runs[runId]
       const outputText = runEntry?.outputText
-      if (typeof outputText === 'string' && outputText !== '') {
+      if (runEntry?.outputUnavailable === true) {
+        // Expired snapshot: fixed dashboard copy as a single text node, never wire text.
+        outputEl.textContent = OUTPUT_UNAVAILABLE_COPY
+        outputEl.hidden = false
+        outputEl.classList?.add('run-output-unavailable')
+      } else if (typeof outputText === 'string' && outputText !== '') {
         outputEl.textContent = outputText
         outputEl.hidden = false
+        outputEl.classList?.remove('run-output-unavailable')
       } else {
+        outputEl.classList?.remove('run-output-unavailable')
         // No output (or an authoritative empty final): clear any stale text and re-hide.
         outputEl.textContent = ''
         outputEl.hidden = true
@@ -2779,6 +3868,60 @@ export function initOperatorStream(opts) {
       }
     }
 
+    // Question region: render one persistent card per open request and retain final outcomes as notes.
+    if (questionsEl !== undefined && questionsEl !== null && questionClient !== null) {
+      const requests = getQuestions()
+      const notes = getQuestionNotes()
+      const presentIds = new Set()
+      for (const request of requests) {
+        presentIds.add(request.requestID)
+        let card = renderedQuestionCards.get(request.requestID)
+        // A request that was a note (gone) and is open again needs a real card, not its note.
+        if (card?.isNote === true) {
+          card.el.remove()
+          renderedQuestionCards.delete(request.requestID)
+          card = undefined
+        }
+        if (card === undefined) {
+          card = makeQuestionCard(request, request.status)
+          renderedQuestionCards.set(request.requestID, card)
+          if (questionAnnouncer === null) {
+            questionAnnouncer = document.createElement('p')
+            questionAnnouncer.className = 'question-region__announcer'
+            questionAnnouncer.setAttribute('role', 'status')
+            questionAnnouncer.setAttribute('aria-live', 'polite')
+            questionAnnouncer.setAttribute('aria-atomic', 'true')
+          }
+          questionsEl.append(card.el, questionAnnouncer)
+          questionAnnouncer.textContent = 'A new question is available.'
+        } else {
+          card.update(request.status)
+        }
+      }
+      for (const note of notes) {
+        presentIds.add(note.requestID)
+        let card = renderedQuestionCards.get(note.requestID)
+        if (card === undefined) {
+          card = makeQuestionNoteCard(note.status)
+          renderedQuestionCards.set(note.requestID, card)
+          questionsEl.append(card.el)
+        } else {
+          card.update(note.status)
+        }
+      }
+      for (const [requestID, card] of renderedQuestionCards) {
+        if (!presentIds.has(requestID)) {
+          if (questionStatuses.get(requestID)?.kind === 'checking') {
+            presentIds.add(requestID)
+            continue
+          }
+          card.el.remove()
+          renderedQuestionCards.delete(requestID)
+        }
+      }
+      questionsEl.hidden = presentIds.size === 0
+    }
+
     // Cancel control (R1/R2): render on non-terminal runs, hide once terminal.
     // Gated on run status via the reducer's `terminal` flag, not local optimism.
     if (cancelEl !== undefined && cancelEl !== null && cancelClient !== null) {
@@ -2823,11 +3966,17 @@ export function initOperatorStream(opts) {
   function dispatch(event) {
     const prevConnection = state.connection
     state = nextStreamState(state, event)
+    syncQuestionStatuses()
     updateDOM()
     // Trigger reconcile when the stream first goes live (or re-goes live after reconnect).
     // This is the one-shot GET on (re)connect.
     if (prevConnection !== 'live' && state.connection === 'live') {
       reconcileApprovals()
+      // The question check is its own trigger with its own flag and epoch, not the approval latch.
+      // A request claimed elsewhere keeps its exemption across the transition, and its re-list
+      // schedule restarts so a request the claimant released is found.
+      reconcileQuestions()
+      restartClaimedRechecks()
     }
   }
 
@@ -2919,6 +4068,348 @@ export function initOperatorStream(opts) {
     dispatch({type: 'approval-reconcile', runId, pruneIds, addPrompts})
   }
 
+  // -------------------------------------------------------------------------
+  // Questions: per-request status, decisions, and the three re-list triggers
+  //
+  // The reducer stays pure; everything with a clock or a network lives here. Per-request status
+  // is stream state, NOT page-store state: the page store holds only tombstones and drafts.
+  // A request with no entry in `questionStatuses` is simply `open`.
+  //
+  //   {kind:'open'}
+  //   {kind:'in-flight'}                         a decision POST is outstanding
+  //   {kind:'claimed-elsewhere'}                 already_claimed; re-listing on a backoff (restarted at
+  //                                              each live transition), then manual
+  //   {kind:'checking'}                          a list check is pending (unknown outcome, or manual)
+  //   {kind:'gone'}                              unknown outcome, then absent: may have been recorded
+  //   {kind:'invalid', reason, questionIndex}    400 with a reason; questionIndex null = whole request
+  //   {kind:'failed-to-settle'}                  failed_to_settle, or any retryable request-level error
+  //   {kind:'cant-answer'}                       masked 404 (applies to every open request of the run)
+  //   {kind:'session-expired'}                   401/403
+  //   {kind:'check-failed'}                      a check that surfaced to the operator failed
+  //   {kind:'claimed'} | {kind:'already-settled'}  settled; note for a request that is no longer open
+  //
+  // Never logs, and never stores, request bodies, answer text or response text.
+  // -------------------------------------------------------------------------
+
+  const questionRecheckTimers = new Map() // requestID → timer
+  let questionsCantAnswer = false // masked 404: the run's questions cannot be answered by this session
+  let questionEpoch = 0 // advanced by every connect(); a flight from an older epoch is discarded
+  let questionFlight = null // the in-flight list check, if any: {id, epoch, promise}
+  let questionFlightSeq = 0
+
+  function isQuestionOpen(requestID) {
+    return state.runs[runId]?.questionOpen?.has(requestID) === true
+  }
+
+  function setQuestionStatus(requestID, status) {
+    questionStatuses.set(requestID, status)
+    updateDOM()
+  }
+
+  function clearQuestionRecheck(requestID) {
+    const timer = questionRecheckTimers.get(requestID)
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      questionRecheckTimers.delete(requestID)
+    }
+  }
+
+  function clearQuestionRechecks() {
+    for (const timer of questionRecheckTimers.values()) clearTimeout(timer)
+    questionRecheckTimers.clear()
+  }
+
+  /**
+   * Drop statuses the state no longer supports. Runs after every reducer event: a request that
+   * left (settle frame, list removal, terminal) loses its status unless it is a settled/gone note;
+   * a note whose request returned open is dropped; a claimed request whose exemption ended (a
+   * settle frame, a list that shows it open again) is simply open.
+   */
+  function syncQuestionStatuses() {
+    if (questionStatuses.size === 0) return
+    const entry = state.runs[runId]
+    if (entry?.terminal === true) {
+      questionStatuses.clear()
+      clearQuestionRechecks()
+      return
+    }
+    const open = entry?.questionOpen
+    const exempt = entry?.questionClaimedExempt
+    for (const [requestID, status] of [...questionStatuses]) {
+      if (open?.has(requestID) !== true) {
+        if (!QUESTION_NOTE_KINDS.has(status.kind)) {
+          questionStatuses.delete(requestID)
+          clearQuestionRecheck(requestID)
+        }
+      } else if (QUESTION_NOTE_KINDS.has(status.kind)) {
+        questionStatuses.delete(requestID)
+      } else if (status.kind === 'claimed-elsewhere' && exempt?.has(requestID) !== true) {
+        questionStatuses.delete(requestID)
+        clearQuestionRecheck(requestID)
+      }
+    }
+  }
+
+  /** The UI-facing status of one request, or null for a request this stream knows nothing about. */
+  function getQuestionStatus(requestID) {
+    if (!isQuestionOpen(requestID)) return questionStatuses.get(requestID) ?? null
+    if (questionsCantAnswer) return {kind: 'cant-answer'}
+    return questionStatuses.get(requestID) ?? {kind: 'open'}
+  }
+
+  /** Open requests in arrival order, each with its parsed prompts and UI-facing status. */
+  function getQuestions() {
+    return getOpenQuestions(state.runs[runId]).map(request => ({
+      requestID: request.requestID,
+      questions: request.questions,
+      status: getQuestionStatus(request.requestID),
+    }))
+  }
+
+  /** Notes for requests that are no longer open (settled, or gone after an unknown outcome). */
+  function getQuestionNotes() {
+    const notes = []
+    for (const [requestID, status] of questionStatuses) {
+      if (QUESTION_NOTE_KINDS.has(status.kind) && !isQuestionOpen(requestID)) notes.push({requestID, status})
+    }
+    return notes
+  }
+
+  /** Surface a failed check on every request whose check was pending (it was `checking`). */
+  function failQuestionChecks(targets) {
+    for (const requestID of targets) {
+      if (isQuestionOpen(requestID)) questionStatuses.set(requestID, {kind: 'check-failed'})
+    }
+    updateDOM()
+  }
+
+  /**
+   * Settle the pending checks after a good list was applied. A request still open goes back to
+   * claimed-elsewhere if it is still exempt, else to open. A request that is gone from the open set
+   * — and was not tombstoned by a settle, nor cleared by a terminal status — is `gone`: the list
+   * omitted it after an unknown outcome, so the answer may have been recorded.
+   */
+  function resolveQuestionChecks(targets) {
+    const entry = state.runs[runId]
+    const tombstones = getQuestionPageStore(runId).tombstones
+    for (const requestID of targets) {
+      if (isQuestionOpen(requestID)) {
+        const status = questionStatuses.get(requestID)
+        if (status?.kind !== 'checking' && status?.kind !== 'check-failed') continue
+        if (entry?.questionClaimedExempt?.has(requestID) === true) {
+          questionStatuses.set(requestID, {kind: 'claimed-elsewhere'})
+        } else {
+          questionStatuses.delete(requestID)
+        }
+      } else if (!tombstones.has(requestID) && entry?.terminal !== true) {
+        questionStatuses.set(requestID, {kind: 'gone'})
+      }
+    }
+    updateDOM()
+  }
+
+  /**
+   * One list check: snapshot the open ids BEFORE the GET, list, dispatch the diff, then settle
+   * whatever checks were pending. Resolves true only for a valid list applied in the current epoch.
+   * A failure (network, 429, 5xx, non-OK, invalid body) never prunes; it surfaces `check-failed`
+   * only on requests whose check was pending, and is never retried automatically.
+   */
+  async function runQuestionFlight(flight) {
+    try {
+      const targets = new Set()
+      for (const [requestID, status] of questionStatuses) {
+        if (status.kind === 'checking' || status.kind === 'check-failed') targets.add(requestID)
+      }
+      if (state.connection !== 'live') {
+        failQuestionChecks(targets)
+        return false
+      }
+      const snapshotIds = getOpenQuestions(state.runs[runId]).map(request => request.requestID)
+
+      const result = await questionClient.listRunQuestions(runId)
+
+      // Stale: close() ran, or connect() started a new cycle during the await.
+      if (aborted || flight.epoch !== questionEpoch) return false
+
+      if (!result.success) {
+        failQuestionChecks(targets)
+        return false
+      }
+      const {requests, invalidBody, partial} = result.data
+      if (invalidBody === true || state.connection !== 'live') {
+        // An invalid body changes nothing; a connection that dropped mid-GET ignores the result too.
+        if (invalidBody === true) {
+          dispatch({type: 'question-reconcile', runId, snapshotIds, requests: [], invalidBody: true, partial: false})
+        }
+        failQuestionChecks(targets)
+        return false
+      }
+      dispatch({
+        type: 'question-reconcile',
+        runId,
+        snapshotIds,
+        requests,
+        invalidBody: false,
+        partial,
+      })
+      resolveQuestionChecks(targets)
+      return true
+    } finally {
+      if (questionFlight === flight) questionFlight = null
+    }
+  }
+
+  /**
+   * Re-list the run's pending questions. Has its own in-flight flag and epoch; it is not the
+   * approval `reconcileDone` latch. Calls coalesce into the flight already running, except
+   * `fresh` ones (an unknown outcome, a manual check), which need a list issued after they were
+   * asked for: they wait out an older flight and then run, or join one started after them.
+   * Resolves to whether a valid list was applied.
+   */
+  async function reconcileQuestions({fresh = false} = {}) {
+    if (questionClient === null || aborted) return false
+    const askedAfter = questionFlightSeq
+    for (;;) {
+      const running = questionFlight
+      if (running === null || running.epoch !== questionEpoch) break
+      if (!fresh || running.id > askedAfter) return running.promise
+      await running.promise
+      if (aborted) return false
+    }
+    const flight = {id: ++questionFlightSeq, epoch: questionEpoch, promise: null}
+    questionFlight = flight
+    flight.promise = runQuestionFlight(flight)
+    return flight.promise
+  }
+
+  /**
+   * Re-list after `already_claimed`: about 2, 5, 10 and 20 seconds apart, then stop and leave
+   * "Check again" to the operator. The schedule ends early if the request stops being claimed
+   * elsewhere, if the connection is not live, or if a check fails (never retried automatically).
+   */
+  function scheduleQuestionRecheck(requestID, attempt) {
+    clearQuestionRecheck(requestID)
+    if (aborted || attempt >= QUESTION_CLAIM_RECHECK_DELAYS_MS.length) return
+    const timer = setTimeout(async () => {
+      questionRecheckTimers.delete(requestID)
+      if (aborted) return
+      if (questionStatuses.get(requestID)?.kind !== 'claimed-elsewhere' || state.connection !== 'live') return
+      const ok = await reconcileQuestions()
+      if (!ok || aborted) return
+      if (questionStatuses.get(requestID)?.kind === 'claimed-elsewhere') scheduleQuestionRecheck(requestID, attempt + 1)
+    }, QUESTION_CLAIM_RECHECK_DELAYS_MS[attempt])
+    questionRecheckTimers.set(requestID, timer)
+  }
+
+  /** Start the re-list schedule over for every request that is claimed elsewhere. */
+  function restartClaimedRechecks() {
+    for (const [requestID, status] of questionStatuses) {
+      if (status.kind === 'claimed-elsewhere' && isQuestionOpen(requestID)) scheduleQuestionRecheck(requestID, 0)
+    }
+  }
+
+  /** Apply a decision outcome. Resolves after the follow-up list check, when there is one. */
+  async function applyQuestionOutcome(requestID, outcome) {
+    const stillOpen = isQuestionOpen(requestID)
+
+    // This page's own claimed / already_settled settles the request for the page, like a settle
+    // frame: tombstone, remove, drop the draft. A request that is gone already is still tombstoned
+    // so a later list cannot resurrect it; a request cleared by a terminal status is ignored.
+    if (outcome.kind === 'decided' && (outcome.state === 'claimed' || outcome.state === 'already_settled')) {
+      if (state.runs[runId]?.terminal === true) return
+      const store = getQuestionPageStore(runId)
+      store.tombstones.add(requestID)
+      store.drafts.delete(requestID)
+      if (!stillOpen) return
+      questionStatuses.set(requestID, {kind: outcome.state === 'claimed' ? 'claimed' : 'already-settled'})
+      dispatch({type: 'question-resolved', runId, requestID})
+      return
+    }
+
+    // Any other outcome for a request that settled or was cleared meanwhile is ignored.
+    if (!stillOpen) return
+
+    switch (outcome.kind) {
+      case 'decided': {
+        if (outcome.state === 'already_claimed') {
+          // Kept, exempt from removal by absence (the gateway omits claimed requests from the list).
+          setQuestionStatus(requestID, {kind: 'claimed-elsewhere'})
+          dispatch({type: 'question-claimed', runId, requestID})
+          if (questionStatuses.get(requestID)?.kind === 'claimed-elsewhere') scheduleQuestionRecheck(requestID, 0)
+          return
+        }
+        setQuestionStatus(requestID, {kind: 'failed-to-settle'})
+        return
+      }
+      case 'invalid': {
+        setQuestionStatus(requestID, {kind: 'invalid', reason: outcome.reason, questionIndex: outcome.questionIndex})
+        return
+      }
+      case 'cant-answer': {
+        questionsCantAnswer = true
+        questionStatuses.delete(requestID)
+        updateDOM()
+        return
+      }
+      case 'session-expired': {
+        setQuestionStatus(requestID, {kind: 'session-expired'})
+        return
+      }
+      case 'unknown': {
+        // Never resubmit. Re-list with a fresh GET; absent afterwards means it may have been recorded.
+        setQuestionStatus(requestID, {kind: 'checking'})
+        await reconcileQuestions({fresh: true})
+        return
+      }
+      default: {
+        setQuestionStatus(requestID, {kind: 'failed-to-settle'})
+      }
+    }
+  }
+
+  /**
+   * Submit a decision for one open request: `{decision:'skip'}` or
+   * `{decision:'answer', answers:[{options?:number[], text?:string}]}` (one entry per question).
+   * Refused (returns the current status, sends nothing) while the request is in flight or being
+   * checked, and once the run's questions are known to be unanswerable. A request claimed elsewhere
+   * can be answered: a missed settle surfaces as `already_settled`.
+   * Resolves to the request's status afterwards, or null when the request is not open.
+   */
+  async function decideQuestion(requestID, decision) {
+    if (questionClient === null || aborted) return null
+    if (typeof requestID !== 'string' || !isQuestionOpen(requestID)) return null
+    if (questionsCantAnswer) return getQuestionStatus(requestID)
+    const current = questionStatuses.get(requestID)
+    if (current !== undefined && QUESTION_SEND_BLOCKED_KINDS.has(current.kind)) return current
+    setQuestionStatus(requestID, {kind: 'in-flight'})
+    const outcome = await questionClient.decideRunQuestion(runId, requestID, decision)
+    if (aborted) return null
+    await applyQuestionOutcome(requestID, outcome)
+    return getQuestionStatus(requestID)
+  }
+
+  /**
+   * "Check again": re-list on demand. With a request ID it targets that request, otherwise every
+   * request that is claimed elsewhere or whose last check failed. Those go `checking`, and a failed
+   * check leaves `check-failed`. A request already being checked or in flight is left alone.
+   */
+  async function checkQuestions(requestID) {
+    if (questionClient === null || aborted || questionsCantAnswer) return
+    const checkable = status => status !== undefined && (status.kind === 'claimed-elsewhere' || status.kind === 'check-failed')
+    if (requestID === undefined) {
+      for (const [id, status] of [...questionStatuses]) {
+        if (checkable(status) && isQuestionOpen(id)) questionStatuses.set(id, {kind: 'checking'})
+      }
+      updateDOM()
+    } else {
+      if (!isQuestionOpen(requestID)) return
+      const status = questionStatuses.get(requestID)
+      if (status?.kind === 'checking' || status?.kind === 'in-flight') return
+      if (checkable(status)) setQuestionStatus(requestID, {kind: 'checking'})
+    }
+    await reconcileQuestions({fresh: true})
+  }
+
   function connect() {
     // Don't fetch if close() was called
     if (aborted) return
@@ -2928,16 +4419,29 @@ export function initOperatorStream(opts) {
     reconcileDone = false
 
     // Advance the epoch so any in-flight reconcile from the previous connection
-    // cycle sees a stale epoch and discards its result.
+    // cycle sees a stale epoch and discards its result. The question check keeps its own
+    // epoch and its own completed flag, both reset here; the claimed re-list timers end here and
+    // restart at the live transition.
     connectEpoch++
+    questionEpoch++
+    clearQuestionRechecks()
+    if (state.runs[runId]?.questionReconcileDone === true) {
+      dispatch({type: 'question-reconcile-reset', runId})
+    }
 
     // Clear any previously-pending first-frame timer before arming a new one.
     // Without this, a reconnect would leak the old timer, which could fire later
     // and wrongly dispatch first-frame-timeout on a recovering stream.
     clearFirstFrameTimer()
 
-    abortController = new AbortController()
-    const signal = abortController.signal
+    const connectionController = new AbortController()
+    abortController = connectionController
+    const signal = connectionController.signal
+
+    // Set when this connection aborts its own request because the reducer reached a
+    // non-reading terminal state. The resulting abort rejection is intentional: it must
+    // not dispatch unexpected-close or schedule a reconnect.
+    let abortedByUs = false
 
     // Arm the first-frame timeout. If no ready/status/reset frame arrives within
     // FIRST_FRAME_TIMEOUT_MS, the run is considered submitted but not yet observable.
@@ -3053,7 +4557,10 @@ export function initOperatorStream(opts) {
                 boundary = buffer.indexOf('\n\n')
               }
 
-              // Continue reading if still connected
+              // Continue reading if still connected; otherwise release the socket. The
+              // gateway keeps a subscriber open (no frames) after a client-side close such as
+              // reset:no-snapshot for a terminal run, so merely ceasing to read would leak the
+              // stream and its subscriber slot until the gateway's max duration.
               if (
                 state.connection !== 'closed' &&
                 state.connection !== 'failed' &&
@@ -3062,9 +4569,14 @@ export function initOperatorStream(opts) {
                 state.connection !== 'submitted-unobservable' // stop reading after first-frame timeout
               ) {
                 readChunk()
+              } else {
+                abortedByUs = true
+                clearFirstFrameTimer()
+                connectionController.abort()
               }
             })
             .catch(() => {
+              if (abortedByUs) return
               // Stream read error — fail closed, no logging of error details
               clearFirstFrameTimer()
               dispatch({type: 'unexpected-close'})
@@ -3077,6 +4589,7 @@ export function initOperatorStream(opts) {
         readChunk()
       })
       .catch(() => {
+        if (abortedByUs) return
         // Network error — fail closed, no logging of error details
         clearFirstFrameTimer()
         dispatch({type: 'network-error'})
@@ -3099,6 +4612,11 @@ export function initOperatorStream(opts) {
 
   // Return a handle to allow external abort (e.g. page unload)
   return {
+    decideQuestion,
+    checkQuestions,
+    getQuestions,
+    getQuestionNotes,
+    getQuestionStatus,
     close() {
       aborted = true // prevent late timer from fetching
       // Clear any pending timers
@@ -3107,6 +4625,7 @@ export function initOperatorStream(opts) {
         reconnectTimer = null
       }
       clearFirstFrameTimer()
+      clearQuestionRechecks()
       if (abortController) {
         abortController.abort()
       }

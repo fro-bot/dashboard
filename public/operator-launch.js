@@ -701,6 +701,13 @@ export async function initOperatorLaunch(opts) {
           approvalsEl.hidden = true
           card.append(approvalsEl)
 
+          // Question region — same slot as a fetched card: directly after run-approvals.
+          // Rendered into by the stream.
+          const questionsEl = document.createElement('div')
+          questionsEl.dataset.role = 'run-questions'
+          questionsEl.hidden = true
+          card.append(questionsEl)
+
           const badgeEl = document.createElement('span')
           badgeEl.dataset.role = 'approval-badge'
           badgeEl.hidden = true
