@@ -200,7 +200,7 @@ question or drops a draft. A terminal status clears that run's drafts.
 
 `getEffectiveStatus` computes `waiting_for_question` from the wire status and the open
 questions. It is never stored: the next `running` frame would overwrite a stored value. A
-terminal status wins, and wire `waiting_for_approval` wins over questions.
+terminal status wins, then any open approval prompt (wire `waiting_for_approval` or an open prompt on a running run), then questions.
 
 ### Parse closed, render inert
 

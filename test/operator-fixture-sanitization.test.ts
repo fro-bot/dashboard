@@ -402,7 +402,7 @@ describe('fixture no-leak guard — question scenarios', () => {
   }
 
   it('every question request ID is req-fixture- prefixed, and every frame carries the bound run ID', () => {
-    expect(QUESTION_KEYS.length).toBe(12)
+    expect(QUESTION_KEYS.length).toBe(13)
     for (const key of QUESTION_KEYS) {
       const runId = `run-fixture-index-${key.replaceAll('_', '-')}`
       for (const record of questionRecords(serializeScenarioToSse(key, runId))) {

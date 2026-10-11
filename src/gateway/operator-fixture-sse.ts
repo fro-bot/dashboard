@@ -117,6 +117,8 @@ export const FIXTURE_SCENARIO_NAMES = {
   question_masked_404: 'question_masked_404',
   /** HTML tags, a Markdown link, and bidi/control characters in header, text, labels, descriptions. */
   question_text_sentinels: 'question_text_sentinels',
+  /** One question and no approval prompt, so the run's only open prompt is the question. */
+  question_no_approval: 'question_no_approval',
 
   // -- Expired snapshot: the gateway answers a subscribe for a run with no replay entry with `reset` (no-snapshot). --
   /** ready → reset no-snapshot → terminal succeeded status, no output. */
@@ -168,6 +170,7 @@ export type QuestionScenarioName =
   | 'question_invalid_answer'
   | 'question_masked_404'
   | 'question_text_sentinels'
+  | 'question_no_approval'
   | 'expired_completed_terminal_frame'
   | 'expired_completed_silent'
   | 'running_after_no_snapshot'
@@ -837,6 +840,19 @@ const QUESTION_SENTINELS: PendingQuestionDTO = {
   ],
 }
 
+const QUESTION_NO_APPROVAL: PendingQuestionDTO = {
+  requestID: 'req-fixture-question-noapproval-001',
+  questions: [
+    {
+      header: 'fixture question only',
+      text: 'fixture question: this run has no approval prompt, only this question.',
+      options: [{label: 'fixture-proceed', description: 'fixture synthetic option'}, {label: 'fixture-stop', description: 'fixture synthetic option'}],
+      multiple: false,
+      custom: true,
+    },
+  ],
+}
+
 /** The outcome of one question decision POST. */
 export type FixtureQuestionDecisionOutcome =
   | {readonly status: 200; readonly body: QuestionDecisionResponse}
@@ -861,6 +877,8 @@ interface QuestionScenarioSpec {
   readonly summaryStatus: 'running' | 'succeeded'
   /** The stream ends open, as the gateway's does for a run that is not finished. */
   readonly holdOpen: boolean
+  /** The harness approval list for the run is empty, so the question is the run's only open prompt. */
+  readonly noApproval?: true
   readonly script: FixtureQuestionScript
   readonly build: (activeRunId: string) => string
 }
@@ -951,6 +969,13 @@ const QUESTION_SCENARIO_SPECS: Readonly<Record<QuestionScenarioName, QuestionSce
     script: {openRequests: [QUESTION_SENTINELS]},
     build: runId => runningWithProgress(runId) + questionOpenFrame(runId, QUESTION_SENTINELS),
   },
+  question_no_approval: {
+    summaryStatus: 'running',
+    holdOpen: true,
+    noApproval: true,
+    script: {openRequests: [QUESTION_NO_APPROVAL]},
+    build: runId => runningWithProgress(runId) + questionOpenFrame(runId, QUESTION_NO_APPROVAL),
+  },
 
   expired_completed_terminal_frame: {
     // A stale row: the list was read before the run finished, so the summary is not yet terminal and the
@@ -1004,6 +1029,11 @@ export function fixtureQuestionScript(scenarioName: string): FixtureQuestionScri
 /** True when the scenario's stream ends open, with no terminal frame, as the gateway's does for a live run. */
 export function isHeldOpenScenario(scenarioName: string): boolean {
   return isQuestionScenarioName(scenarioName) && QUESTION_SCENARIO_SPECS[scenarioName].holdOpen
+}
+
+/** True when the scenario's run has no open approval prompt, so the harness approval list is empty. */
+export function isNoApprovalScenario(scenarioName: string): boolean {
+  return isQuestionScenarioName(scenarioName) && QUESTION_SCENARIO_SPECS[scenarioName].noApproval === true
 }
 
 const QUESTION_SCENARIO_BUILDERS = Object.fromEntries(

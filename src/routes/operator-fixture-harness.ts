@@ -24,6 +24,7 @@ import {
   FIXTURE_SCENARIO_NAMES,
   fixtureQuestionScript,
   isHeldOpenScenario,
+  isNoApprovalScenario,
   serializeScenarioToSse,
 } from '../gateway/operator-fixture-sse.ts'
 import {
@@ -495,9 +496,11 @@ export function buildFixtureHarnessRouter(): Hono {
   })
 
   // GET /runs/:runId/approvals — synthetic approval list. Requires matching fixtureSessionId.
+  // Every run lists the one harness approval except a scenario that has no approval prompt.
   router.get('/runs/:runId/approvals', c => {
     const runId = c.req.param('runId')
-    if (!runScenarioMap.has(runId)) {
+    const scenario = runScenarioMap.get(runId)
+    if (scenario === undefined) {
       logger.debug('fixture-harness: GET /runs/:runId/approvals', {status: 404, errorClass: 'unknown-run'})
       const res = c.json({error: 'not-found'}, 404)
       setNoStore(res.headers)
@@ -513,7 +516,7 @@ export function buildFixtureHarnessRouter(): Hono {
     }
 
     logger.debug('fixture-harness: GET /runs/:runId/approvals', {status: 200})
-    const res = c.json({approvals: [FIXTURE_APPROVAL]})
+    const res = c.json({approvals: isNoApprovalScenario(scenario) ? [] : [FIXTURE_APPROVAL]})
     setNoStore(res.headers)
     return res
   })

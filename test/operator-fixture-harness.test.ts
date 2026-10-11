@@ -2683,6 +2683,7 @@ const EXPECTED_FRAME_TYPES: Readonly<Record<string, readonly string[]>> = {
   question_invalid_answer: SINGLE_OPEN_SHAPE,
   question_masked_404: SINGLE_OPEN_SHAPE,
   question_text_sentinels: SINGLE_OPEN_SHAPE,
+  question_no_approval: SINGLE_OPEN_SHAPE,
   expired_completed_terminal_frame: ['ready', 'reset', 'status'],
   expired_completed_silent: ['ready', 'reset'],
   running_after_no_snapshot: ['ready', 'reset', 'status', 'output'],
@@ -2692,7 +2693,7 @@ const EXPECTED_FRAME_TYPES: Readonly<Record<string, readonly string[]>> = {
 const QUESTION_UNSAFE_CHARS = /[\u0000-\u0008\v\f\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/
 
 describe('question fixture scenarios — registry and manifest', () => {
-  it('lists the twelve scenarios in the manifest, each with a row', async () => {
+  it('lists the thirteen scenarios in the manifest, each with a row', async () => {
     expect(QUESTION_SCENARIO_KEYS).toEqual(Object.keys(EXPECTED_FRAME_TYPES))
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
     const body = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}`)).json() as {scenarios: string[]}
@@ -2707,6 +2708,7 @@ describe('question fixture scenarios — registry and manifest', () => {
       'run-fixture-index-question-invalid-answer',
       'run-fixture-index-question-masked-404',
       'run-fixture-index-question-text-sentinels',
+      'run-fixture-index-question-no-approval',
       'run-fixture-index-expired-completed-terminal-frame',
       'run-fixture-index-expired-completed-silent',
       'run-fixture-index-running-after-no-snapshot',
@@ -3004,7 +3006,7 @@ describe('question fixture routes — scripted list and decision', () => {
       }
     }
     // What the stream opens is what the list shows (before any settle or terminal).
-    for (const key of ['question_single', 'question_multi_shapes', 'question_already_claimed_reopens', 'question_text_sentinels']) {
+    for (const key of ['question_single', 'question_multi_shapes', 'question_already_claimed_reopens', 'question_text_sentinels', 'question_no_approval']) {
       expect(await list(key)).toEqual(rawOpenRequests(serializeScenarioToSse(key, questionRunId(key))))
     }
     // Settled elsewhere, ended at terminal, and the expired runs list nothing.
@@ -3101,6 +3103,54 @@ describe('question fixture routes — scripted list and decision', () => {
       {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({decision: 'skip'})},
     )
     expect(await decisionRes.json()).toEqual({state: 'claimed'})
+  })
+})
+
+describe('question_no_approval — a question with no approval prompt', () => {
+  const key = 'question_no_approval'
+
+  it('streams its own question and no approval frame', () => {
+    const sse = serializeScenarioToSse(key, questionRunId(key))
+    const types = serverFrames(sse).map(frame => frame.type)
+    expect(types).toContain('question')
+    expect(types).not.toContain('approval')
+    expect(sse).not.toContain('event: approval')
+    expect(String(serverFrames(sse).find(frame => frame.type === 'question')?.data.requestID)).toBe('req-fixture-question-noapproval-001')
+  })
+
+  it('lists no approvals, while every other question scenario keeps its open approval', async () => {
+    const {app, fixtureSessionId} = await questionHarness()
+    const approvals = async (scenario: string) => {
+      const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${questionRunId(scenario)}/approvals?fixtureSessionId=${fixtureSessionId}`)
+      expect(res.status).toBe(200)
+      return (await res.json() as {approvals: unknown[]}).approvals
+    }
+    expect(await approvals(key)).toEqual([])
+    for (const other of QUESTION_SCENARIO_KEYS.filter(candidate => candidate !== key)) {
+      expect(await approvals(other), `${other} keeps the harness approval`).toHaveLength(1)
+    }
+  })
+
+  it('lists its question and the decision claims it', async () => {
+    const {list, decide} = await questionHarness()
+    const requests = await list(key)
+    expect(requests.map(request => request.requestID)).toEqual(['req-fixture-question-noapproval-001'])
+    const res = await decide(key, requests[0]?.requestID ?? '', {decision: 'answer', answers: [{options: [0]}]})
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({state: 'claimed'})
+  })
+
+  it('a launched run with the scenario also lists no approvals', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const {fixtureSessionId} = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)).json() as {fixtureSessionId: string}
+    const launch = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({scenario: key, idempotencyKey: 'fixture-idem-key-question-noapproval-001', fixtureSessionId, csrfToken: 'fixture-csrf-placeholder', repo: 'fixture-org/fixture-repo', prompt: '[Fixture prompt]'}),
+    })
+    const {runId} = await launch.json() as {runId: string}
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/approvals?fixtureSessionId=${fixtureSessionId}`)
+    expect(await res.json()).toEqual({approvals: []})
   })
 })
 
