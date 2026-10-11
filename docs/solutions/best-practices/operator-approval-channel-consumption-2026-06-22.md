@@ -1,6 +1,7 @@
 ---
 title: Consuming the gateway operator approval channel safely in a read-only dashboard
 date: 2026-06-22
+last_updated: 2026-10-10
 category: best-practices
 module: dashboard
 component: authentication
@@ -58,9 +59,13 @@ consumer must not caption the dismissal; it dismisses silently and **tombstones 
 
 ### 2. Bound the maps — a stream is untrusted input
 
-A long-lived or hostile stream can emit unbounded distinct ids. Both the open-prompt map
-and the tombstone map need caps with deterministic eviction (FIFO for tombstones; reject
-new opens past the cap rather than evicting a real pending prompt). This is the same
+A long-lived or hostile stream can emit unbounded distinct ids. Both approval maps
+(open prompts and tombstones) need caps with deterministic eviction (FIFO for tombstones,
+`MAX_APPROVAL_TOMBSTONES`; reject new opens past the cap rather than evicting a real pending
+prompt). Question tombstones are the deliberate exception: they are unbounded for the page
+lifetime, because evicting one would let a pending list re-add a settled question. The
+open-question map is capped (`MAX_OPEN_QUESTIONS`, 50) and rejects excess opens; a list at the
+gateway's pending cap (`GATEWAY_PENDING_QUESTIONS_CAP`) is additive only. This is the same
 discipline the output channel applies to accumulated text — treat every per-id structure
 fed from the wire as attacker-influenceable.
 
@@ -131,8 +136,87 @@ was the only signal). The result is a cosmetic ghost prompt that clears inline o
 Making reconcile corrective needs the gateway recovery response to be a complete authoritative
 open-set.
 
+## Question channel
+
+Contract 1.9.0 adds agent questions to the run stream: `event: question` frames (open or
+settle, discriminated like approvals) plus a pending-list GET and a per-request decision POST.
+The approval rules above apply unchanged (inert text, browser-direct, version-locked pins).
+These are the places the question channel differs. Code lives in `public/operator-stream.js`
+and `src/gateway/operator-contract/question-frame.ts`.
+
+### Key the outcome on the body, never the status
+
+`classifyQuestionDecisionResponse` reads the 200 body's `state` (`claimed`, `already_claimed`,
+`already_settled`, `failed_to_settle`). Everything else maps by class:
+
+| Response | Outcome |
+| --- | --- |
+| 200, known `state` | decided (by `state`) |
+| 200, unrecognized `state` | failed (request-level, retryable) |
+| 401 / 403 | session expired |
+| 404 (masked denial) | cannot answer |
+| 429, 5xx, unreadable 200, timeout | unknown: re-list, never resubmit |
+
+`readQuestionBadRequest` splits the 400. A body with a `reason` is an invalid answer and is
+never retried. A body without one is the browser guard's refusal (CSRF, Origin, Fetch
+Metadata): refresh CSRF and retry once. There is no idempotency key; the gateway's question
+route does not read one, and single settlement comes from its claim states.
+
+### Tombstone only on evidence of settlement
+
+A tombstone comes from a settle frame or from this tab's own `claimed` / `already_settled`
+response (`settleQuestionInState`, `applyQuestionOutcome`), never from a request's absence
+in the pending list. The list omits requests mid-claim, and a claim that fails reopens the
+request with no frame, so absence proves nothing.
+
+### Claimed elsewhere
+
+An `already_claimed` response marks the request exempt from removal by absence
+(`questionClaimedExempt`). The exemption survives reconnects and ends only on a settle frame,
+a terminal status, or a list that shows the request open. While it holds, the client re-lists
+on a bounded schedule (`QUESTION_CLAIM_RECHECK_DELAYS_MS`: 2, 5, 10, 20 s, restarted on each
+live transition), then leaves a manual "Check again".
+
+Submit and Skip stay enabled from claimed-elsewhere. `QUESTION_SEND_BLOCKED_KINDS` holds only
+`in-flight` and `checking`, so a settle frame the client missed resolves as `already_settled`.
+The gateway's single settlement makes a second decision safe.
+
+> Pitfall: keeping the exemption across reconnects while still blocking sends left the card
+> with no way out. Allow sends.
+
+### Bound every fetch
+
+The list GET, CSRF fetch and decision POST each carry `AbortSignal.timeout`
+(`QUESTION_FETCH_TIMEOUT_MS`, 10 s), like the cancel client. A timed-out decision is an
+unknown outcome: re-list, never resubmit. A timed-out list is a failed check and prunes nothing.
+
+### Keep tombstones and drafts for the page, not the stream
+
+`getQuestionPageStore` holds tombstones and drafts per run outside the per-attach stream state,
+so collapsing and re-expanding a card, or switching cards, never resurrects a settled
+question or drops a draft. A terminal status clears that run's drafts.
+
+### Derive the waiting status at render
+
+`getEffectiveStatus` computes `waiting_for_question` from the wire status and the open
+questions. It is never stored: the next `running` frame would overwrite a stored value. A
+terminal status wins, and wire `waiting_for_approval` wins over questions.
+
+### Parse closed, render inert
+
+The parsers (`question-frame.ts` and the browser mirror) reject over-bound text rather than
+truncating it, rebuild closed objects, and reject extra keys, including an own `__proto__`.
+Question text, option labels and descriptions render through text nodes only.
+
+### A request that reopens gets a real card
+
+A request shown as a "gone" note card can reopen when a later list shows it open. The note
+must give way to the question card (`syncQuestionStatuses` drops a note whose request is open
+again).
+
 ## Related
 
+- [consume-gateway-operator-contract-1-8-0](./consume-gateway-operator-contract-1-8-0-2026-10-07.md) — the per-bump checklist ("Every contract bump").
 - [authenticated-sse-consumption-fetch-stream-no-leak](./authenticated-sse-consumption-fetch-stream-no-leak-2026-06-20.md) — the underlying authenticated SSE fetch-stream consumer this builds on.
 - [operator-sse-output-consumption](./operator-sse-output-consumption-2026-06-22.md) — the output channel; same dual-parser/contract-drift discipline, different frame.
 - [safe-operator-launch-surface](./safe-operator-launch-surface-2026-06-20.md) — the browser-direct `/operator/*` + CSRF/idempotency posture and the no-dashboard-proxy invariant.

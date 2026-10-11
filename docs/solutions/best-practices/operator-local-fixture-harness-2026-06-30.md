@@ -1,7 +1,7 @@
 ---
 title: Operator local fixture harness pattern
 date: 2026-06-30
-last_updated: 2026-07-10
+last_updated: 2026-10-10
 category: best-practices
 module: operator-fixture-harness
 problem_type: best_practice
@@ -273,6 +273,15 @@ a real browser with the no-watch dev-server recipe:
 ```sh
 pnpm dev:fixture
 ```
+
+`pnpm dev:fixture` stays in the foreground; background it per the dev-server recipe linked below.
+
+Browser checks must serve the fixture bundle. Build it with `pnpm build:web:fixture`
+(output `web/dist-fixture`) and serve it with `DASHBOARD_WEB_DIST=./web/dist-fixture`, or
+just run `pnpm dev:fixture`, which does both. Serving the production `web/dist` with the
+harness enabled shows no fixture indicator and no scenario select, and the run and repo
+requests 404. Tell it apart before spending a verification pass:
+`data-fixture-mode="true"` on the operator shell means the right bundle is being served.
 
 The browser pass should cover:
 
