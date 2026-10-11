@@ -1,6 +1,7 @@
 ---
 title: Consume a gateway operator contract bump as a full dashboard consumer (contract 1.8.0)
 date: 2026-10-07
+last_updated: 2026-10-10
 category: best-practices
 module: operator-contract-consumption
 problem_type: architecture_pattern
@@ -144,9 +145,9 @@ renderCheckoutDetail(checkoutEl, state.runs[runId], paintedPreparationHeadline |
 
 ### 7. Build ahead of the upstream gap with fixtures
 
-Until the gateway projects the new fields (fro-bot/agent#1737), the region stays
-hidden on live runs and the fixture harness is the only full exercise of the
-consumer. Its checkout scenarios cover every refusal reason, remote-freshness
+fro-bot/agent#1737 (the projection gap) is fixed upstream, and live display waits on
+deploying a gateway that carries the fix. Until then the region stays hidden on live
+runs and the fixture harness is the only full exercise of the consumer. Its checkout scenarios cover every refusal reason, remote-freshness
 variant, both new failure kinds, bidi and long-path input, and malformed
 preparation, and a coverage test proves the set hits every vocabulary value.
 
@@ -156,8 +157,19 @@ marcusrbrown/infra deploys both the dashboard and the gateway. The gateway pin i
 `apps/gateway/upstream.json` (an agent release tag such as `v0.118.2`), which is a
 different number from the contract version (`1.8.0`). The dashboard release and the
 gateway pin move must be approved in the same window. The infra health probes check
-only for HTTP 200, so after the deploy confirm `/operator/health` reports the new
+only for HTTP 200 and do not assert `contractVersion`, so after the deploy confirm `/operator/health` reports the new
 `contractVersion` and that an authenticated run stream reaches `ready`.
+
+## Every contract bump
+
+The steps above are not specific to one version. Each bump repeats them:
+
+- **Move every pin together.** The server constant and the browser pin move in one change
+  (parity test in `test/operator-stream-core.test.ts`).
+- **Build fixtures from the real upstream wire shapes**, not from the contract types or a
+  sibling route.
+- **Verify the wire against gateway source, not the contract types.** Projection gaps recur
+  (fro-bot/agent#1737, fro-bot/agent#1780).
 
 ## Why This Matters
 

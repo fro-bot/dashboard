@@ -1,6 +1,7 @@
 ---
 title: Three state machines had no way to do nothing, so unknown state became action
 date: 2026-09-21
+last_updated: 2026-10-10
 category: logic-errors
 module: dashboard
 problem_type: logic_error
@@ -82,7 +83,12 @@ Each fix added the missing non-action.
 
 **Permission is not consent** (`web/src/push/reconcile.ts:172`). Granted permission with no local subscription is a resting state — the operator simply is not subscribed. A browser permission grant survives an explicit unsubscribe, so auto-registering on it makes staying unsubscribed impossible. Registration is now reachable only through the explicit opt-in button.
 
-**A stable fact is not a transient one** (`public/operator-stream.js`, the `no-snapshot` branch of `case 'reset'`). For a run the client knows is terminal, `no-snapshot` is permanent: the Gateway's terminal replay cache is in-memory and does not survive a restart. Every reconnect returned a byte-identical response, so the client looped until the retry cap while rendering `"Connecting to run stream…"` — because `reconnecting` is exactly what renders that string. Known-terminal runs now close instead of retrying; unknown and active runs retry exactly as before.
+**A stable fact is not a transient one** (`public/operator-stream.js`, the `no-snapshot` branch of `case 'reset'`). For a run the client knows is terminal, `no-snapshot` is permanent: the Gateway's terminal replay cache is in-memory and does not survive a restart. Every reconnect returned a byte-identical response, so the client looped until the retry cap while rendering `"Connecting to run stream…"` — because both `connecting` and `reconnecting` render that string. The `no-snapshot` branch of `case 'reset'` in `nextStreamState` never reconnects:
+
+- **Known terminal** (from the stream, or from the run-list `summaryStatus` that `web/src/operator/runtime.ts` passes in): render the terminal status, plus "Output no longer available." when the run never delivered output, clear the run's drafts, close, no reconnect.
+- **Otherwise** (state unknown, which is not evidence of terminal): stay live, spend no retry, and mark `snapshotMissing` so a later terminal status with no output since can show the unavailable state.
+
+The gateway keeps the subscription open after `no-snapshot`. A client that merely stops reading holds the subscriber until the gateway's max stream duration (fro-bot/agent#1639: replay is in-memory, and a stream with no terminal frame stays open until that duration), so the stream must abort its own fetch: a per-connection `AbortController`, plus an `abortedByUs` flag so that self-abort never dispatches `unexpected-close` or schedules a reconnect.
 
 ## Why This Works
 
@@ -105,6 +111,7 @@ The mirror-image case is worth separating out. A guard that prevents an unwanted
 
 ## Related
 
+- fro-bot/dashboard#583 — expired run snapshots left cards on "Connecting".
 - `fro-bot/agent#1639` — the Gateway half of the stream bug: terminal replay is in-memory only, so any restart makes every completed run unreplayable, and the manager has no durable terminal lookup.
 - `docs/solutions/best-practices/operator-sse-output-consumption-2026-06-22.md` — the nearest sibling, covering the same `operator-stream.js` surface. It establishes that `final: true` is authoritative; this doc covers a different failure in the same state machine.
 - `docs/solutions/best-practices/authenticated-sse-consumption-fetch-stream-no-leak-2026-06-20.md` — already carries the "cap reconnect paths" principle. Consistent with this finding, not superseded by it.

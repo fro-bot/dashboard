@@ -1,6 +1,7 @@
 ---
 title: Unit-green is not feature-done — verify the assembled surface, not just units
 date: 2026-06-23
+last_updated: 2026-10-10
 module: dashboard
 problem_type: workflow_issue
 component: development_workflow
@@ -45,6 +46,10 @@ against. Before calling an operator-facing feature done:
 4. **Separate capability-shipped from surface-shipped in status reports.** "Approval
    decisions: shipped" (the client) is true and misleading if the page never renders a
    real approval. Say which layer shipped.
+5. **A static design mockup is not verification.** A mockup shows intent, not the assembled
+   app (the operator contract 1.8.0 checkout display: a static preview combined states the
+   real app never shows on one run). Check the real page on the fixture server (see
+   [the fixture harness](../best-practices/operator-local-fixture-harness-2026-06-30.md)).
 
 ## Why This Matters
 
