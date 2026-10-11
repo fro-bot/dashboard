@@ -182,7 +182,7 @@ Submit and Skip stay enabled from claimed-elsewhere. `QUESTION_SEND_BLOCKED_KIND
 The gateway's single settlement makes a second decision safe.
 
 > Pitfall: keeping the exemption across reconnects while still blocking sends left the card
-> with no way out. Blocking sends while the exemption held left the card with no way out. Allow sends.
+> with no way out. Allow sends.
 
 ### Bound every fetch
 

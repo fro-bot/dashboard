@@ -147,9 +147,10 @@ renderCheckoutDetail(checkoutEl, state.runs[runId], paintedPreparationHeadline |
 
 fro-bot/agent#1737 (the projection gap) is fixed upstream, and live display waits on
 deploying a gateway that carries the fix. Until then the region stays hidden on live
-runs and the fixture harness is the only full exercise of the consumer. Its checkout scenarios cover every refusal reason, remote-freshness
-variant, both new failure kinds, bidi and long-path input, and malformed
-preparation, and a coverage test proves the set hits every vocabulary value.
+runs and the fixture harness is the only full exercise of the consumer. Its checkout
+scenarios cover every refusal reason, remote-freshness variant, both new failure kinds,
+bidi and long-path input, and malformed preparation, and a coverage test proves the set
+hits every vocabulary value.
 
 ### 8. Ship through one infra deploy
 

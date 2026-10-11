@@ -43,7 +43,7 @@ git commit -m "docs(evidence): remove PR screenshots before merge"
 git push
 ```
 
-The pinned URL keeps resolving after the branch tip moves and after the PR is squash-merged. GitHub retains the PR's head ref (`refs/pull/<n>/head`), and the evidence commit is an ancestor of it.
+The pinned URL keeps resolving after the branch tip moves and after the PR is squash-merged. GitHub retains the PR's head ref (`refs/pull/<n>/head`), and the evidence commit is an ancestor of it. The same retention means removing the files does not purge them: anything committed stays readable at the pinned commit.
 
 Worked example: fro-bot/dashboard#599. Commit `71a16fe` added six PNGs under `docs/evidence/operator-questions/`, and commit `a4338c4` removed them. After the squash merge, `refs/pull/599/head` still pointed at `a4338c4`, with `71a16fe` as its ancestor, and the URL pinned to `71a16fe` returned HTTP 200.
 
