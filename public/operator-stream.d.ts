@@ -627,10 +627,11 @@ export declare function getOpenQuestions(runEntry: RunEntry | undefined | null):
 export declare function hasOpenQuestions(runEntry: RunEntry | undefined | null): boolean
 
 /**
- * The status to render: terminal wins; else wire `waiting_for_approval`; else a `running` run with
- * an open question → `waiting_for_question`; else a wire `waiting_for_question` with no open question
- * after a completed reconcile → `running`; else the wire value. Derived at render, never stored.
- * Returns '' for an absent entry.
+ * The status to render: terminal wins; else wire `waiting_for_approval`; else a `running` or
+ * `waiting_for_question` run with an open approval prompt → `waiting_for_approval`; else a `running`
+ * run with an open question → `waiting_for_question`; else a wire `waiting_for_question` with no open
+ * question after a completed reconcile → `running`; else the wire value. Derived at render, never
+ * stored. Returns '' for an absent entry.
  */
 export declare function getEffectiveStatus(runEntry: RunEntry | undefined | null): string
 
