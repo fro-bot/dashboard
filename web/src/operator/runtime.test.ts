@@ -862,7 +862,7 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
   })
 
   it('a status class outside the run-summary allowlist is never passed as summaryStatus', async () => {
-    document.body.innerHTML = `${cardHtml('run-q-wait', 'status-waiting_for_approval')}${cardHtml('run-q-evil', 'status-evil')}${cardHtml('run-q-none', '')}<div data-role="stream-status"></div>`
+    document.body.innerHTML = `${cardHtml('run-q-wait', 'status-waiting-for-approval')}${cardHtml('run-q-evil', 'status-evil')}${cardHtml('run-q-none', '')}<div data-role="stream-status"></div>`
     const {runtime, initCalls, select} = await mountLoader()
 
     select('run-q-wait')

@@ -245,12 +245,12 @@
   background: rgba(0, 96, 100, 0.1);
 }
 
-.run-status.status-waiting_for_approval {
+.run-status.status-waiting-for-approval {
   background: rgba(255, 193, 7, 0.1);
   color: var(--color-warning);
   border-color: rgba(255, 193, 7, 0.2);
 }
-[data-theme="light"] .run-status.status-waiting_for_approval {
+[data-theme="light"] .run-status.status-waiting-for-approval {
   background: rgba(230, 81, 0, 0.1);
 }
 

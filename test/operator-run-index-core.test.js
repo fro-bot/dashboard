@@ -2233,16 +2233,17 @@ describe('CSS selector ↔ status emitter agreement', () => {
 
     // All core index statuses plus the optimistic pending state
     const coreStatuses = Array.from(VALID_RUN_SUMMARY_STATUSES)
-    const requiredStatuses = [...coreStatuses, 'pending', 'blocked', 'waiting_for_approval']
+    const requiredStatuses = [...coreStatuses, 'pending', 'blocked', 'waiting_for_approval', 'waiting_for_question']
 
+    // The stream emitter hyphenates every status class (`waiting_for_approval` → `status-waiting-for-approval`).
     for (const status of requiredStatuses) {
-      const expectedSelector = `.status-${status}`
+      const expectedSelector = `.run-status.status-${status.replaceAll('_', '-')}`
       expect(cssContent).toContain(expectedSelector)
+      expect(cssContent).toContain(`[data-theme="light"] ${expectedSelector}`)
     }
 
-    // The stream emitter hyphenates stream-only statuses (`waiting_for_question` → `status-waiting-for-question`).
-    expect(cssContent).toContain('.run-status.status-waiting-for-question')
-    expect(cssContent).toContain('[data-theme="light"] .run-status.status-waiting-for-question')
+    // The emitter never produces an underscore status class, so such a selector could never match.
+    expect(cssContent).not.toMatch(/\.status-[a-z]+_[a-z_]+/)
 
     // Explicitly verify the old wrong ones are GONE
     expect(cssContent).not.toContain('.status-success')
