@@ -4648,6 +4648,7 @@ export function initOperatorStream(opts) {
         // A disposed control can no longer cancel; remove it rather than leave an inert button.
         cancelControl.el.remove()
       }
+      if (cancelEl !== undefined && cancelEl !== null) cancelEl.hidden = true
       state = nextStreamState(state, {type: 'stream-closed'})
     },
   }

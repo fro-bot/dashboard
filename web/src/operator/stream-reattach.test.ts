@@ -26,6 +26,13 @@ const APPROVAL = frame('approval', {
   command: 'echo hello',
   settled: false,
 })
+const LATE_APPROVAL = frame('approval', {
+  runId: RUN_ID,
+  requestID: 'req-late',
+  permission: 'shell',
+  command: 'echo late',
+  settled: false,
+})
 const SUCCEEDED = frame('status', {...RUNNING_STATUS, status: 'succeeded', phase: 'COMPLETED', completedAt: '2026-06-20T10:05:00Z'})
 
 /** A fetch stub whose response bodies the test feeds frame by frame. */
@@ -55,7 +62,10 @@ function stubStreamFetch() {
       },
     }
   }))
-  return {pushToLatest: (text: string) => pushes.at(-1)?.(text)}
+  return {
+    pushToLatest: (text: string) => pushes.at(-1)?.(text),
+    pushTo: (attachment: number, text: string) => pushes[attachment]?.(text),
+  }
 }
 
 function makeCard() {
@@ -140,5 +150,46 @@ describe('operator stream re-attach on one card', () => {
     handle.close()
 
     expect(parts.card.querySelectorAll('.run-cancel-control')).toHaveLength(0)
+    expect(parts.cancelEl.hidden).toBe(true)
+  })
+
+  it('ignores late frames on a closed attachment while a newer attachment owns the card', async () => {
+    const {pushTo, pushToLatest} = stubStreamFetch()
+    const parts = makeCard()
+
+    // Attachment A goes live but has not seen a running status when it is closed.
+    const closed = attach(parts)
+    pushTo(0, READY)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    closed.close()
+
+    const live = attach(parts)
+    pushToLatest(READY + RUNNING + APPROVAL)
+    await vi.waitFor(() => expect(parts.cancelEl.querySelectorAll('.run-cancel-btn-cancel')).toHaveLength(1))
+    await vi.waitFor(() => expect(parts.approvalsEl.querySelectorAll('.approval-prompt')).toHaveLength(1))
+
+    // Late frames reach the closed attachment's stream: they must not paint onto the shared card.
+    pushTo(0, READY + RUNNING + LATE_APPROVAL)
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    expect(parts.cancelEl.querySelectorAll('.run-cancel-control')).toHaveLength(1)
+    expect(parts.approvalsEl.querySelectorAll('.approval-prompt')).toHaveLength(1)
+    live.close()
+  })
+
+  it('clears stale approval markup already in the region when a new attachment starts', () => {
+    stubStreamFetch()
+    const parts = makeCard()
+    const stale = document.createElement('div')
+    stale.className = 'approval-prompt'
+    stale.textContent = 'stale prompt'
+    parts.approvalsEl.append(stale)
+    parts.approvalsEl.hidden = false
+
+    const handle = attach(parts)
+
+    expect(parts.approvalsEl.querySelectorAll('.approval-prompt')).toHaveLength(0)
+    expect(parts.approvalsEl.hidden).toBe(true)
+    handle.close()
   })
 })
