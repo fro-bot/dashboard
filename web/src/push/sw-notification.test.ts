@@ -1,6 +1,7 @@
 import {readFileSync} from 'node:fs'
 import {resolve} from 'node:path'
 import {describe, expect, it} from 'vitest'
+import {FAILURE_REASON_LABELS} from '../../../public/operator-stream.js'
 import {buildNotification, KNOWN_FAILURE_LABELS} from './sw-notification.ts'
 
 /**
@@ -53,21 +54,44 @@ describe('buildNotification (wire payload shape)', () => {
     })
   })
 
-  it('run_failed with a known allowlisted failureLabel renders that label', () => {
-    expect(KNOWN_FAILURE_LABELS.size).toBeGreaterThan(0)
-    for (const label of KNOWN_FAILURE_LABELS) {
-      const result = buildNotification(WIRE.runFailedWithLabel(label))
-      expect(result).toEqual({
+  it('run_failed renders the reason body for each gateway failure label', () => {
+    const expected = {
+      'inactivity-timeout': 'A run failed: no recent activity.',
+      'max-duration-timeout': 'A run failed: run timed out.',
+      'stream-ended': 'A run failed: stream ended early.',
+      'workspace-unreachable': 'A run failed: workspace unreachable.',
+      'session-error': 'A run failed: session error.',
+    }
+    for (const [label, body] of Object.entries(expected)) {
+      expect(buildNotification(WIRE.runFailedWithLabel(label))).toEqual({
         title: 'Run failed',
-        body: `A run failed: ${label}.`,
+        body,
         data: {type: 'run_failed', route: '/'},
       })
     }
   })
 
-  it('run_failed with an unknown failureLabel renders generic run-failed copy and never the label', () => {
-    // 'stream-ended' is a real gateway OperatorFailureKind that the dashboard does not allowlist.
-    for (const label of ['stream-ended', 'session-error', 'sql-injection-attempt']) {
+  it('run_failed with the gateway "unknown" label renders generic run-failed copy', () => {
+    const result = buildNotification(WIRE.runFailedWithLabel('unknown'))
+    expect(result.body).toBe('A run failed.')
+    expect(JSON.stringify(result)).not.toContain('unknown')
+  })
+
+  it('run_failed with an unrecognized failureLabel renders generic run-failed copy and never the label', () => {
+    // Labels the dashboard previously allowlisted, kinds the gateway never pushes,
+    // hostile text, and Object.prototype names must all collapse to generic copy.
+    const labels = [
+      'timeout',
+      'error',
+      'cancelled',
+      'checkout-substituted',
+      'workspace-unavailable',
+      'sql-injection-attempt',
+      'constructor',
+      '__proto__',
+      'toString',
+    ]
+    for (const label of labels) {
       const result = buildNotification(WIRE.runFailedWithLabel(label))
       expect(result).toEqual({
         title: 'Run failed',
@@ -91,7 +115,7 @@ describe('buildNotification (wire payload shape)', () => {
       WIRE.approval,
       WIRE.question,
       WIRE.runFailedNoLabel,
-      WIRE.runFailedWithLabel('timeout'),
+      WIRE.runFailedWithLabel('inactivity-timeout'),
       WIRE.runFailedWithLabel('stream-ended'),
     ]
     for (const payload of payloads) {
@@ -115,7 +139,7 @@ describe('buildNotification (wire payload shape)', () => {
   it('legacy flat shape {type} (never sent by the gateway) renders the generic fallback', () => {
     expect(buildNotification({type: 'approval'})).toEqual(GENERIC)
     expect(buildNotification({type: 'question'})).toEqual(GENERIC)
-    expect(buildNotification({type: 'run_failed', failureLabel: 'timeout'})).toEqual(GENERIC)
+    expect(buildNotification({type: 'run_failed', failureLabel: 'stream-ended'})).toEqual(GENERIC)
   })
 
   it('data missing, null, array, string, number, or boolean renders the generic fallback', () => {
@@ -151,7 +175,7 @@ describe('buildNotification (wire payload shape)', () => {
   it('a top-level failureLabel/type outside data is ignored', () => {
     const result = buildNotification({
       type: 'approval',
-      failureLabel: 'timeout',
+      failureLabel: 'stream-ended',
       data: {type: 'run_failed', route: '/'},
     })
     expect(result.title).toBe('Run failed')
@@ -172,7 +196,7 @@ describe('buildNotification (wire payload shape)', () => {
       data: {
         type: 'run_failed',
         route: '/elsewhere',
-        failureLabel: 'timeout',
+        failureLabel: 'session-error',
         runId: sentinel,
         question: sentinel,
         options: [{label: sentinel}],
@@ -181,7 +205,7 @@ describe('buildNotification (wire payload shape)', () => {
     })
     expect(result).toEqual({
       title: 'Run failed',
-      body: 'A run failed: timeout.',
+      body: 'A run failed: session error.',
       data: {type: 'run_failed', route: '/'},
     })
     const serialized = JSON.stringify(result)
@@ -200,7 +224,7 @@ describe('buildNotification (wire payload shape)', () => {
       {...WIRE.question, data: {type: 'question', route: '/operator#abc', runId: 'run-123'}},
       {
         ...WIRE.runFailedNoLabel,
-        data: {type: 'run_failed', route: '/operator#abc', runId: 'run-123', failureLabel: 'timeout'},
+        data: {type: 'run_failed', route: '/operator#abc', runId: 'run-123', failureLabel: 'stream-ended'},
       },
     ]
     for (const wire of wires) {
@@ -214,6 +238,41 @@ describe('buildNotification (wire payload shape)', () => {
     const fallback = buildNotification(null)
     expect(Object.keys(fallback.data).sort()).toEqual(['route', 'type'])
     expect(fallback.data.route).toBe('/')
+  })
+})
+
+describe('failure reason parity with run cards', () => {
+  const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1)
+  const pushKinds = [...KNOWN_FAILURE_LABELS].filter(kind => kind !== 'unknown')
+
+  it('the push allowlist is the gateway push allowlist', () => {
+    expect([...KNOWN_FAILURE_LABELS].sort()).toEqual(
+      [
+        'inactivity-timeout',
+        'max-duration-timeout',
+        'session-error',
+        'stream-ended',
+        'unknown',
+        'workspace-unreachable',
+      ].sort(),
+    )
+  })
+
+  it('every pushed failure kind has a run-card label', () => {
+    expect(pushKinds.length).toBeGreaterThan(0)
+    for (const kind of pushKinds) {
+      expect(Object.hasOwn(FAILURE_REASON_LABELS, kind), `run-card label missing for ${kind}`).toBe(true)
+    }
+  })
+
+  it('each push reason is the run-card label for the same kind, lower-cased into a sentence', () => {
+    for (const kind of pushKinds) {
+      const label = (FAILURE_REASON_LABELS as Record<string, string>)[kind]
+      expect(label).toBeTypeOf('string')
+      expect(buildNotification({data: {type: 'run_failed', route: '/', failureLabel: kind}}).body).toBe(
+        `A run failed: ${lowerFirst(label as string)}.`,
+      )
+    }
   })
 })
 

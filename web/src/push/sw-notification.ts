@@ -14,18 +14,35 @@
  *
  * Safe-copy notification rendering: copy is a fixed map keyed by
  * `data.type`, plus an optional `data.failureLabel` that must be a member of
- * the `KNOWN_FAILURE_LABELS` allowlist. Unknown/absent labels fall back to
- * generic "Run failed" copy — the raw label is NEVER rendered.
+ * the `KNOWN_FAILURE_LABELS` allowlist and maps to fixed reason text. Unknown,
+ * absent, or reasonless labels fall back to generic "Run failed" copy — the raw
+ * label is NEVER rendered.
  */
 
 export type PushNotificationType = 'approval' | 'run_failed' | 'question'
 
 /**
- * Allowlisted `data.failureLabel` values. An unrecognized label (including any
- * attacker-controlled string from the push payload) is never rendered —
- * only membership in this set unlocks the specific copy variant.
+ * Reason text for each failure kind the gateway may put in `data.failureLabel`.
+ * Each entry is the run-card label for the same kind (`FAILURE_REASON_LABELS` in
+ * `public/operator-stream.js`) with its first letter lower-cased, so it reads as
+ * the tail of a sentence; a test pins the two together. A `Map` keeps
+ * `Object.prototype` names like `constructor` from matching.
  */
-export const KNOWN_FAILURE_LABELS: ReadonlySet<string> = new Set(['timeout', 'error', 'cancelled'])
+const FAILURE_REASONS: ReadonlyMap<string, string> = new Map([
+  ['inactivity-timeout', 'no recent activity'],
+  ['max-duration-timeout', 'run timed out'],
+  ['stream-ended', 'stream ended early'],
+  ['workspace-unreachable', 'workspace unreachable'],
+  ['session-error', 'session error'],
+])
+
+/**
+ * Allowlisted `data.failureLabel` values: the failure kinds the gateway puts in
+ * a push payload. An unrecognized label (including any attacker-controlled
+ * string from the push payload) is never rendered. `unknown` is allowlisted
+ * but has no reason text, so it renders the generic copy.
+ */
+export const KNOWN_FAILURE_LABELS: ReadonlySet<string> = new Set([...FAILURE_REASONS.keys(), 'unknown'])
 
 export interface SafeNotification {
   readonly title: string
@@ -41,6 +58,11 @@ const GENERIC_FALLBACK: SafeNotification = {
 
 const RUN_FAILED_GENERIC_BODY = 'A run failed.'
 
+function runFailedBody(failureLabel: string | undefined): string {
+  const reason = failureLabel === undefined ? undefined : FAILURE_REASONS.get(failureLabel)
+  return reason === undefined ? RUN_FAILED_GENERIC_BODY : `A run failed: ${reason}.`
+}
+
 /** Exhaustive over known `type` values — every entry must produce copy without reading raw payload text. */
 const COPY_MAP: Record<PushNotificationType, (failureLabel: string | undefined) => SafeNotification> = {
   approval: () => ({
@@ -50,10 +72,7 @@ const COPY_MAP: Record<PushNotificationType, (failureLabel: string | undefined) 
   }),
   run_failed: failureLabel => ({
     title: 'Run failed',
-    body:
-      failureLabel !== undefined && KNOWN_FAILURE_LABELS.has(failureLabel)
-        ? `A run failed: ${failureLabel}.`
-        : RUN_FAILED_GENERIC_BODY,
+    body: runFailedBody(failureLabel),
     data: {type: 'run_failed', route: '/'},
   }),
   question: () => ({
@@ -76,7 +95,7 @@ function isKnownType(value: unknown): value is PushNotificationType {
  * `type`; anything else (including a flat `{type}` payload, or a missing,
  * null, array, or primitive `data`) falls back to the generic notification.
  * `data.failureLabel` is only ever rendered if it is a member of
- * `KNOWN_FAILURE_LABELS`; otherwise it is discarded.
+ * `KNOWN_FAILURE_LABELS` and has reason text; otherwise it is discarded.
  */
 export function buildNotification(rawPayload: unknown): SafeNotification {
   if (typeof rawPayload !== 'object' || rawPayload === null || Array.isArray(rawPayload)) {
