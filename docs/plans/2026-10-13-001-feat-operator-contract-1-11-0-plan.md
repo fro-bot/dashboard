@@ -183,7 +183,7 @@ Out of scope: displaying push health, durable terminal replay (fro-bot/agent#163
   - restores focus to the card that had it, without scrolling;
   - routes a 401 to the existing auth-required path and treats a 429 or network failure as "keep the current list".
 
-  A request that arrives while a refresh is in flight joins it, and one more refresh runs after it completes. That replaces the sequence token: responses can't arrive out of order. It never reuses `initOperatorRunIndex`.
+  A request that arrives while a refresh is in flight joins it, and one more refresh runs after it completes, so responses can't arrive out of order. It never reuses `initOperatorRunIndex`.
 - **Refresh triggers.** The runtime runs the refresh:
   - on a 30-second interval while `document.visibilityState` is `visible`, cleared while hidden and on cleanup;
   - immediately on becoming visible;
