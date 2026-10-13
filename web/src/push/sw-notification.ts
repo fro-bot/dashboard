@@ -38,9 +38,11 @@ const FAILURE_REASONS: ReadonlyMap<string, string> = new Map([
 
 /**
  * Allowlisted `data.failureLabel` values: the failure kinds the gateway puts in
- * a push payload. An unrecognized label (including any attacker-controlled
- * string from the push payload) is never rendered. `unknown` is allowlisted
- * but has no reason text, so it renders the generic copy.
+ * a push payload. The gateway's push allowlist leaves out
+ * `checkout-substituted` and `workspace-unavailable`, so those never arrive as
+ * a label. An unrecognized label (including any attacker-controlled string
+ * from the push payload) is never rendered. `unknown` is allowlisted but has
+ * no reason text, so it renders the generic copy.
  */
 export const KNOWN_FAILURE_LABELS: ReadonlySet<string> = new Set([...FAILURE_REASONS.keys(), 'unknown'])
 
