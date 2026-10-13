@@ -7,8 +7,13 @@
  * payloads are network-delivered) `unknown` payload to a fixed,
  * dashboard-owned notification descriptor.
  *
+ * Wire shape: the gateway sends `{title, body, data: {type, route, failureLabel?}}`.
+ * Top-level `title` and `body` are i18n keys, not display text, and are never
+ * rendered. Only `data.type` and `data.failureLabel` are read; `data.route`
+ * and any other field are ignored (the notification always routes to `/`).
+ *
  * Safe-copy notification rendering: copy is a fixed map keyed by
- * `payload.type`, plus an optional `failureLabel` that must be a member of
+ * `data.type`, plus an optional `data.failureLabel` that must be a member of
  * the `KNOWN_FAILURE_LABELS` allowlist. Unknown/absent labels fall back to
  * generic "Run failed" copy — the raw label is NEVER rendered.
  */
@@ -16,7 +21,7 @@
 export type PushNotificationType = 'approval' | 'run_failed' | 'question'
 
 /**
- * Allowlisted `failureLabel` values. An unrecognized label (including any
+ * Allowlisted `data.failureLabel` values. An unrecognized label (including any
  * attacker-controlled string from the push payload) is never rendered —
  * only membership in this set unlocks the specific copy variant.
  */
@@ -66,17 +71,24 @@ function isKnownType(value: unknown): value is PushNotificationType {
  * Build a safe notification descriptor from a raw, untrusted push payload.
  *
  * Always returns a notification — never throws, never returns null/undefined
- * — so callers can unconditionally `showNotification`. Any payload shape
- * that isn't a recognized `{type, failureLabel?}` object falls back to the
- * generic notification. `failureLabel` is only ever rendered if it is a
- * member of `KNOWN_FAILURE_LABELS`; otherwise it is discarded.
+ * — so callers can unconditionally `showNotification`. The payload must be an
+ * object whose `data` property is a non-array object with a recognized
+ * `type`; anything else (including a flat `{type}` payload, or a missing,
+ * null, array, or primitive `data`) falls back to the generic notification.
+ * `data.failureLabel` is only ever rendered if it is a member of
+ * `KNOWN_FAILURE_LABELS`; otherwise it is discarded.
  */
 export function buildNotification(rawPayload: unknown): SafeNotification {
   if (typeof rawPayload !== 'object' || rawPayload === null || Array.isArray(rawPayload)) {
     return GENERIC_FALLBACK
   }
 
-  const candidate = rawPayload as Record<string, unknown>
+  const {data} = rawPayload as Record<string, unknown>
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+    return GENERIC_FALLBACK
+  }
+
+  const candidate = data as Record<string, unknown>
   const {type} = candidate
 
   if (isKnownType(type) === false) {
