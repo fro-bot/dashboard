@@ -114,6 +114,13 @@ export declare function markCardExpandedForLaunch(runId: string): void
  */
 export declare function refreshOperatorRunIndex(): Promise<boolean>
 
+/**
+ * How an init ended: 'loaded' (cards shown), 'empty' (no runs), 'unavailable' (a non-auth failure),
+ * 'auth-required' (401/403, after `onAuthRequired`), 'stale' (a reset or a newer init replaced it
+ * while it fetched; it wrote nothing).
+ */
+export type RunIndexInitOutcome = 'loaded' | 'empty' | 'unavailable' | 'auth-required' | 'stale'
+
 export declare function initOperatorRunIndex(opts?: {
   endpointBase?: string
   fixtureSessionId?: string
@@ -150,4 +157,4 @@ export declare function initOperatorRunIndex(opts?: {
    * (401/403). The caller must reclassify to auth-required and skip any restore.
    */
   onAuthRequired?: () => void
-}): Promise<void>
+}): Promise<RunIndexInitOutcome>

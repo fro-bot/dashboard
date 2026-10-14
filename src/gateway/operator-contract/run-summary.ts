@@ -48,7 +48,11 @@ export const RUN_INDEX_CAP = 100
 const MAX_ID_LENGTH = 512
 const MAX_DATE_LENGTH = 128
 
-const VALID_RUN_SUMMARY_STATUSES: ReadonlySet<string> = new Set([
+/**
+ * The summary statuses as a runtime list, so a compile-time check can hold it to
+ * `RunSummaryStatus` in both directions. The parser's allowlist is built from it.
+ */
+export const RUN_SUMMARY_STATUSES = [
   'queued',
   'running',
   'succeeded',
@@ -56,7 +60,9 @@ const VALID_RUN_SUMMARY_STATUSES: ReadonlySet<string> = new Set([
   'cancelled',
   'waiting_for_approval',
   'waiting_for_question',
-])
+] as const
+
+const VALID_RUN_SUMMARY_STATUSES: ReadonlySet<string> = new Set(RUN_SUMMARY_STATUSES)
 
 function hasValidRunSummaryShape(value: unknown): value is RunSummary {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {

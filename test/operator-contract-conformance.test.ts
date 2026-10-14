@@ -80,6 +80,7 @@ import {
   QUESTION_OPTION_LABEL_MAX_LENGTH,
   QUESTION_TEXT_MAX_LENGTH,
   RUN_INDEX_CAP,
+  RUN_SUMMARY_STATUSES,
   UPDATE_FAILURE_REASONS,
 } from '../src/gateway/operator-contract/index.ts'
 import {isOperatorFailureKind, OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
@@ -538,6 +539,27 @@ describe('push runtime vocabularies', () => {
   it('trigger kinds: the exported list equals the union, with no duplicates', () => {
     expect([...OPERATOR_PUSH_TRIGGER_KINDS].toSorted()).toEqual(Object.keys(PUSH_TRIGGER_KIND_RECORD).toSorted())
     expect(new Set(OPERATOR_PUSH_TRIGGER_KINDS).size).toBe(OPERATOR_PUSH_TRIGGER_KINDS.length)
+  })
+})
+
+// The server parser's allowlist is built from RUN_SUMMARY_STATUSES, so holding that list to the union
+// holds the allowlist to it: a status added to one and not the other fails `check-types` here.
+export type RunSummaryStatusesAreExact = AssertTrue<
+  IsExactMatch<(typeof RUN_SUMMARY_STATUSES)[number], RunSummaryType['status']>
+>
+
+describe('run summary status vocabulary', () => {
+  it('the exported list equals the union, with no duplicates', () => {
+    expect([...RUN_SUMMARY_STATUSES].toSorted()).toEqual(Object.keys(SUMMARY_STATUS_RECORD).toSorted())
+    expect(new Set(RUN_SUMMARY_STATUSES).size).toBe(RUN_SUMMARY_STATUSES.length)
+  })
+
+  it('the parser accepts exactly the listed statuses', () => {
+    const summary = (status: string) => ({runId: 'run-1', repo: 'fro-bot/agent', status, createdAt: '2026-06-01T00:00:00.000Z'})
+    for (const status of RUN_SUMMARY_STATUSES) expect(parseRunSummary(summary(status)).success, status).toBe(true)
+    for (const status of ['blocked', 'unknown', 'RUNNING', 'waiting-for-question', '']) {
+      expect(parseRunSummary(summary(status)).success, status).toBe(false)
+    }
   })
 })
 

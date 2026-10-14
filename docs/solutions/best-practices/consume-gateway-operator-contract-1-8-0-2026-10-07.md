@@ -1,7 +1,7 @@
 ---
 title: Consume a gateway operator contract bump as a full dashboard consumer (contract 1.8.0)
 date: 2026-10-07
-last_updated: 2026-10-10
+last_updated: 2026-10-13
 category: best-practices
 module: operator-contract-consumption
 problem_type: architecture_pattern
@@ -155,11 +155,25 @@ hits every vocabulary value.
 ### 8. Ship through one infra deploy
 
 marcusrbrown/infra deploys both the dashboard and the gateway. The gateway pin is
-`apps/gateway/upstream.json` (an agent release tag such as `v0.118.2`), which is a
-different number from the contract version (`1.8.0`). The dashboard release and the
+`apps/gateway/upstream.json` (an agent release tag), which is a different number
+from the contract version. The dashboard release and the
 gateway pin move must be approved in the same window. The infra health probes check
 only for HTTP 200 and do not assert `contractVersion`, so after the deploy confirm `/operator/health` reports the new
 `contractVersion` and that an authenticated run stream reaches `ready`.
+
+### 9. Parse small response DTOs closed, and drop a malformed optional part
+
+The session response follows the same rule as the checkout parsers. `parseOperatorSessionInfo`
+returns a closed copy holding only the declared fields (`operatorId`, `login`, `expiresAt`, and
+`push` when valid), so an extra key from the wire never reaches a caller. A required field of
+the wrong type still rejects the whole response, with a fixed reason that echoes nothing.
+
+`push` is optional health, not identity. A `push` that is not an object, or whose `status` is not
+in the exported status list, is dropped and the session still parses. Do not turn a bad optional
+field into a failed login. When `push` is absent, push is not configured: there is no `disabled`
+value on the wire. `ready` means the gateway observed push working recently, not that a browser
+received anything, and `unknown` is never read as healthy. As with the other vocabularies, the
+status list is checked against its union at compile time.
 
 ## Every contract bump
 
@@ -171,6 +185,10 @@ The steps above are not specific to one version. Each bump repeats them:
   sibling route.
 - **Verify the wire against gateway source, not the contract types.** Projection gaps recur
   (fro-bot/agent#1737, fro-bot/agent#1780).
+- **Check every copy of a status set.** The run summary statuses live in the vendored list the
+  server parser builds its allowlist from, the browser run index, and the stream's summary
+  allowlist. A compile-time check holds the vendored list to its union, and parity tests hold the
+  browser sets to it.
 
 ## Why This Matters
 
@@ -196,8 +214,11 @@ gateway catches up.
 - Dashboard and gateway pins have to move in the same infra deploy.
 
 Do not apply the rendering parts to collapsed run-list summaries unless the summary
-contract carries the new fields. Here the run summaries stayed lean, and a static
-test pins that `public/operator-run-index.js` never reads checkout fields.
+contract carries the new fields. Here the run summaries carry only a status and a failure kind,
+and a static test pins that `public/operator-run-index.js` never reads checkout fields. A
+summary status that gains values (the waiting statuses) is a different change: it needs a label,
+a class token and a style rule on the collapsed card, and a terminal card must not take a
+non-terminal one back.
 
 ## Examples
 

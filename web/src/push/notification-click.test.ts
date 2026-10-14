@@ -8,11 +8,13 @@ const RUN_ID = '3f2b9c1e-7a4d-4e8b-9c55-0d1e2f3a4b5c'
 interface FakeClient extends ClickWindowClient {
   readonly focusCalls: number[]
   readonly messages: unknown[]
+  /** Whether the worker controls this window. The real WindowClient has no such flag; matchAll filters on it. */
+  readonly controlled: boolean
 }
 
 function makeClient(
   url: string,
-  options: {focused?: boolean; visibilityState?: string; focusRejects?: boolean} = {},
+  options: {focused?: boolean; visibilityState?: string; focusRejects?: boolean; controlled?: boolean} = {},
 ): FakeClient {
   const focusCalls: number[] = []
   const messages: unknown[] = []
@@ -22,6 +24,7 @@ function makeClient(
     visibilityState: options.visibilityState ?? 'hidden',
     focusCalls,
     messages,
+    controlled: options.controlled ?? true,
     focus: () => {
       focusCalls.push(1)
       return options.focusRejects === true ? Promise.reject(new Error('focus denied')) : Promise.resolve(undefined)
@@ -32,13 +35,14 @@ function makeClient(
   }
 }
 
-function makeClients(windowClients: readonly ClickWindowClient[]) {
+function makeClients(windowClients: readonly (ClickWindowClient & {readonly controlled?: boolean})[]) {
   const opened: string[] = []
   const matchAllOptions: unknown[] = []
   const clients: ClickClients = {
     matchAll: options => {
       matchAllOptions.push(options)
-      return Promise.resolve([...windowClients])
+      // Like the real API: uncontrolled windows only come back when asked for.
+      return Promise.resolve(windowClients.filter(client => options.includeUncontrolled || client.controlled !== false))
     },
     openWindow: url => {
       opened.push(url)
@@ -157,10 +161,35 @@ describe('handleNotificationClick: question with a valid runId', () => {
     expect(opened).toEqual([])
   })
 
-  it('asks for window clients, including uncontrolled ones', async () => {
+  it('asks only for controlled window clients, the only ones that can receive the message', async () => {
     const {clients, matchAllOptions} = makeClients([])
     await handleNotificationClick(clients, questionData(RUN_ID))
-    expect(matchAllOptions).toEqual([{type: 'window', includeUncontrolled: true}])
+    expect(matchAllOptions).toEqual([{type: 'window', includeUncontrolled: false}])
+  })
+
+  it('opens /#<runId> when the only app window is uncontrolled: no focus, no message to a window that would drop it', async () => {
+    const uncontrolled = makeClient('https://dash.example/', {focused: true, visibilityState: 'visible', controlled: false})
+    const {clients, opened} = makeClients([uncontrolled])
+
+    await handleNotificationClick(clients, questionData(RUN_ID))
+
+    expect(opened).toEqual([`/#${RUN_ID}`])
+    expect(uncontrolled.focusCalls).toHaveLength(0)
+    expect(uncontrolled.messages).toEqual([])
+  })
+
+  it('messages the controlled app window even when an uncontrolled one is focused', async () => {
+    const uncontrolled = makeClient('https://dash.example/', {focused: true, visibilityState: 'visible', controlled: false})
+    const controlled = makeClient('https://dash.example/', {visibilityState: 'hidden'})
+    const {clients, opened} = makeClients([uncontrolled, controlled])
+
+    await handleNotificationClick(clients, questionData(RUN_ID))
+
+    expect(controlled.focusCalls).toHaveLength(1)
+    expect(controlled.messages).toEqual([{type: 'OPEN_RUN', runId: RUN_ID}])
+    expect(uncontrolled.focusCalls).toHaveLength(0)
+    expect(uncontrolled.messages).toEqual([])
+    expect(opened).toEqual([])
   })
 })
 
@@ -227,6 +256,32 @@ describe('handleNotificationClick: other types focus an app window and never pos
       expect(opened).toEqual(['/'])
     })
   }
+
+  for (const type of ['approval', 'run_failed'] as const) {
+    it(`${type}: keeps looking at uncontrolled windows too, and focuses an uncontrolled-only app window`, async () => {
+      const uncontrolled = makeClient('https://dash.example/', {visibilityState: 'visible', controlled: false})
+      const {clients, opened, matchAllOptions} = makeClients([uncontrolled])
+
+      await handleNotificationClick(clients, {type, route: '/'})
+
+      expect(matchAllOptions).toEqual([{type: 'window', includeUncontrolled: true}])
+      expect(uncontrolled.focusCalls).toHaveLength(1)
+      expect(uncontrolled.messages).toEqual([])
+      expect(opened).toEqual([])
+    })
+  }
+
+  it('a question without a valid runId keeps looking at uncontrolled windows too', async () => {
+    const uncontrolled = makeClient('https://dash.example/', {visibilityState: 'visible', controlled: false})
+    const {clients, opened, matchAllOptions} = makeClients([uncontrolled])
+
+    await handleNotificationClick(clients, questionData('../x'))
+
+    expect(matchAllOptions).toEqual([{type: 'window', includeUncontrolled: true}])
+    expect(uncontrolled.focusCalls).toHaveLength(1)
+    expect(uncontrolled.messages).toEqual([])
+    expect(opened).toEqual([])
+  })
 
   it('a notification shown by the previous SW (data without runId) opens /', async () => {
     const {clients, opened} = makeClients([])

@@ -1,7 +1,7 @@
 ---
 title: Consuming the gateway operator approval channel safely in a read-only dashboard
 date: 2026-06-22
-last_updated: 2026-10-10
+last_updated: 2026-10-13
 category: best-practices
 module: dashboard
 component: authentication
@@ -196,11 +196,65 @@ unknown outcome: re-list, never resubmit. A timed-out list is a failed check and
 so collapsing and re-expanding a card, or switching cards, never resurrects a settled
 question or drops a draft. A terminal status clears that run's drafts.
 
-### Derive the waiting status at render
+### Waiting statuses: the gateway first, the client fills in only on `running`
 
-`getEffectiveStatus` computes `waiting_for_question` from the wire status and the open
-questions. It is never stored: the next `running` frame would overwrite a stored value. A
-terminal status wins, and wire `waiting_for_approval` wins over questions.
+Run summaries now carry `waiting_for_approval` and `waiting_for_question` as ordinary
+statuses. The gateway overlays them on a running run only, with approval winning, so a
+collapsed card shows a waiting run without opening a stream.
+
+For an expanded card, `getEffectiveStatus` fills the same overlay in from the wire status and
+the open prompts. It is never stored: the next `running` frame would overwrite a stored value.
+The rules, in order:
+
+- A terminal status wins.
+- Wire `waiting_for_approval` stays. It is never replaced by a question.
+- Only a wire `running` is overlaid, as the gateway does: an open approval gives
+  `waiting_for_approval`, otherwise an open question gives `waiting_for_question`.
+- A wire `waiting_for_question` with an open question stays. With none, it reads as `running`
+  once a question reconcile has completed in the current connection, and not before: until then
+  a missed settle frame cannot be told from a list that has not shown the question yet.
+
+### The run list stays current, and terminal is sticky
+
+The list refreshes in place while the window is visible: on an interval, on becoming visible,
+and before a card expands, so a stream starts from the current status instead of one that went
+stale while the card was collapsed. Refresh is single-flight, and a request that arrives
+mid-flight shares one trailing refresh, so responses never apply out of order. A failed refresh
+keeps the list as it was and the expand goes ahead; a 401 or 403 stops refreshing and moves the
+shell to auth-required.
+
+A card that already shows a terminal status never takes a non-terminal one. A run ID does not
+come back from terminal, so a later non-terminal view is stale: a list fetched before the run
+finished, or one racing the stream's own terminal write. The whole update is skipped, so the
+label, the accessible name and the reason line stay consistent.
+
+Class tokens are hyphenated and written from one map in the run index. The stream emitter and
+the runtime mirror it, with parity tests, and a token outside the map never reads back as a
+status.
+
+### A question notification opens the asking run in place
+
+The push payload carries a `runId` only on a `question`, and only when it matches the strict run
+ID pattern and its route is exactly the run's own. Everything else carries none, so the stored
+notification data stays `{type, route}` plus that one validated ID.
+
+On a tap, the service worker looks only at app windows its worker controls, because the page
+accepts the message only from its controlling worker. It focuses one and posts `OPEN_RUN` with
+the ID. With none, it opens `/#<runId>` in a new window, and the hash restore does the rest. Other
+notification types still focus any app window and post nothing.
+
+The page checks the message source by identity against its controlling worker and re-checks the
+ID, then asks the operator runtime to jump. The runtime refreshes the list, expands the card
+without toggling, attaches the stream, writes the hash, and focuses the card. It announces
+"Opened run" with the status label, never the ID. A card that is already open is revealed and
+announced too, and re-attached only if its stream has gone inactive.
+
+If the card is missing after a refresh that applied, a fixed "not in your recent runs" notice
+shows. If the refresh itself failed, the notice says the runs could not be loaded instead,
+because the run may exist. Neither notice echoes the ID. A tap that arrives before the list has
+loaded waits for it. One that arrives while the list is unavailable or the session has ended is
+dropped, not held for a later page, and an unavailable list accepts taps again once a refresh
+lands.
 
 ### Parse closed, render inert
 

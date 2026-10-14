@@ -254,10 +254,7 @@ const _runIndexSpecifier = '/static/operator-run-index.js' + '?manual=1'
 
 // Active-stream state owned by the runtime seam.
 // Only one stream is active at a time; switching cards closes the prior handle first.
-//
-// getConnectionStatus is declared required by the stream sidecar; it is typed optional here only
-// because a handle without it is treated as live (see _activeStreamServes), a deliberate tolerance.
-let _activeStreamHandle: (Pick<StreamHandle, 'close'> & Partial<Pick<StreamHandle, 'getConnectionStatus'>>) | null = null
+let _activeStreamHandle: Pick<StreamHandle, 'close' | 'getConnectionStatus'> | null = null
 
 // The runId whose stream is currently attached (mirrors _activeStreamHandle's target).
 // Used by onSelectRun to distinguish "expand a new run" (attach) from "select the
@@ -296,25 +293,47 @@ function _cancelPendingExpand(): void {
 // Jump to a run: a question notification tapped while the dashboard is open.
 //
 // The App's service-worker message listener cannot reach the loader's closure (the jump needs the
-// loader's refresh, attach and hash writers), so intent crosses through this module-level slot:
+// loader's refresh, attach and hash writers), so intent crosses through this module-level slot,
+// one discriminated value:
 //   - 'queue':  no loaded runtime yet (before the runtime mounts, or while its run index is loading).
-//               requestRunJump parks the ID in _pendingRunJump; one slot, last wins.
-//   - 'apply':  a loaded runtime is mounted; requestRunJump runs the jump at once.
+//               requestRunJump parks the ID in `pending`; one slot, last wins.
+//   - 'apply':  a loaded runtime is mounted; requestRunJump calls `apply` at once.
 //   - 'refuse': the current runtime's run index ended unavailable, stale or auth-required. A tap is
-//               an immediate intent, so it is dropped rather than held for some later mount.
+//               an immediate intent, so it is dropped rather than held for some later mount. A
+//               runtime whose list was only unavailable moves back to 'apply' once a refresh lands.
+// Every write goes through _setJumpSlot with the writer's loader epoch, so a loader that a newer
+// one has replaced can no longer touch the slot.
 // The ID lives only here and in the jump's locals: never logged, rendered or put in an attribute.
 // ---------------------------------------------------------------------------
 
-type RunJumpMode = 'queue' | 'apply' | 'refuse'
-let _runJumpMode: RunJumpMode = 'queue'
-let _pendingRunJump: string | null = null
-let _applyRunJump: ((runId: string) => void) | null = null
+type RunJumpSlot =
+  | {readonly mode: 'queue'; readonly pending: string | null}
+  | {readonly mode: 'apply'; readonly apply: (runId: string) => void}
+  | {readonly mode: 'refuse'}
+
+let _jumpSlot: RunJumpSlot = {mode: 'queue', pending: null}
 
 /** Identifies the newest defaultRuntimeLoader call; an older loader leaves the slot alone. */
 let _loaderEpoch = 0
 
 /** Identifies the newest jump; an older one stops after its refresh, so the last request wins. */
 let _jumpSeq = 0
+
+/** The one writer of the jump slot. Returns false (and writes nothing) once a newer loader owns it. */
+function _setJumpSlot(epoch: number, next: RunJumpSlot): boolean {
+  if (epoch !== _loaderEpoch) return false
+  _jumpSlot = next
+  return true
+}
+
+function _pendingRunJump(): string | null {
+  return _jumpSlot.mode === 'queue' ? _jumpSlot.pending : null
+}
+
+/** Forget an ID parked for a runtime that is gone. A no-op once a newer loader owns the slot. */
+function _dropPendingRunJump(epoch: number): void {
+  if (_jumpSlot.mode === 'queue') _setJumpSlot(epoch, {mode: 'queue', pending: null})
+}
 
 /**
  * Ask the mounted operator runtime to open a run: expand its card, attach its stream, update the
@@ -328,34 +347,23 @@ let _jumpSeq = 0
  */
 export function requestRunJump(runId: string): void {
   if (typeof runId !== 'string' || !RUN_ID_PATTERN.test(runId)) return
-  if (_runJumpMode === 'apply' && _applyRunJump !== null) {
-    _applyRunJump(runId)
-    return
-  }
-  if (_runJumpMode === 'queue') _pendingRunJump = runId
+  const slot = _jumpSlot
+  if (slot.mode === 'apply') slot.apply(runId)
+  else if (slot.mode === 'queue') _setJumpSlot(_loaderEpoch, {mode: 'queue', pending: runId})
 }
 
-function _dropPendingRunJump(): void {
-  _pendingRunJump = null
-}
-
-/**
- * Whether the active stream still serves `runId`'s card. A handle without the connection accessor
- * counts as serving: the runtime never re-attaches on a guess.
- */
+/** Whether the active stream still serves `runId`'s card: 'active' and 'terminal' do, 'inactive' does not. */
 function _activeStreamServes(runId: string): boolean {
   const handle = _activeStreamHandle
   if (_activeStreamRunId !== runId || handle === null) return false
-  if (typeof handle.getConnectionStatus !== 'function') return true
-  try {
-    return handle.getConnectionStatus() !== 'inactive'
-  } catch {
-    return false
-  }
+  return handle.getConnectionStatus() !== 'inactive'
 }
 
 /** Fixed copy: the run ID is never echoed. */
 const JUMP_MISS_COPY = "That run isn't in your recent runs."
+
+/** Fixed copy for a jump whose run list could not be refreshed: the run may exist, so this is not a miss. */
+const JUMP_RETRY_COPY = "Couldn't load your runs. Try again in a moment."
 
 /**
  * Wait for `refresh` or for EXPAND_REFRESH_CAP_MS, whichever comes first. `release` ends the wait
@@ -432,8 +440,7 @@ async function defaultRuntimeLoader(opts?: {
   // This loader owns the jump slot until a newer one starts. Starting resets the mode: the new run
   // index has not loaded yet, so a request waits (the pending ID itself is kept).
   const epoch = ++_loaderEpoch
-  _runJumpMode = 'queue'
-  _applyRunJump = null
+  _setJumpSlot(epoch, {mode: 'queue', pending: _pendingRunJump()})
 
   // The casts name the sidecar types, so renaming or retyping a member the runtime uses fails
   // check-types instead of surfacing as a silently skipped call. Only the members listed are read.
@@ -499,13 +506,19 @@ async function defaultRuntimeLoader(opts?: {
     }
   }
 
+  // Re-open a refused jump slot after the list recovers; assigned once jumpToRun exists (below).
+  let recoverJumps = () => {}
+
   // Refresh the run list in place (single-flight inside the run index). Triggers: the visible-window
-  // interval, becoming visible, and expand. Never rejects: a failed refresh just keeps the list.
+  // interval, becoming visible, expand, and a jump. Resolves true when fresh data was applied. Never
+  // rejects: a failed refresh just keeps the list.
   const refreshRunList = (): Promise<boolean> => {
-    // Never rejects: a failed refresh is just "keep the list as it is". A refresh that brings in the
-    // run a jump could not find clears that jump's notice.
     return runIndexMod.refreshOperatorRunIndex().catch(() => false).then(applied => {
-      if (jumpMissRunId !== null && findCard(jumpMissRunId) !== null) clearJumpMiss()
+      // A refresh that brings in the run a jump could not find clears that jump's notice, and any
+      // refresh that applies makes a "could not load" notice stale.
+      if (jumpNotice?.kind === 'miss' && findCard(jumpNotice.runId) !== null) clearJumpNotice()
+      else if (jumpNotice?.kind === 'retry' && applied) clearJumpNotice()
+      if (applied) recoverJumps()
       return applied
     })
   }
@@ -513,28 +526,29 @@ async function defaultRuntimeLoader(opts?: {
   const findCard = (runId: string): HTMLElement | null =>
     typeof document === 'undefined' ? null : document.querySelector<HTMLElement>(`[data-run-id="${CSS.escape(runId)}"]`)
 
-  // The run a jump could not find, held in memory only so a refresh can tell when it appears. It is
-  // never rendered, logged or written to an attribute; the notice below is fixed copy.
-  let jumpMissRunId: string | null = null
+  // What the jump notice currently says, held in memory only so a refresh can tell when it is stale.
+  // A miss keeps the run it could not find; it is never rendered, logged or written to an attribute,
+  // and both notices are fixed copy.
+  let jumpNotice: {readonly kind: 'miss'; readonly runId: string} | {readonly kind: 'retry'} | null = null
 
-  const jumpMissEl = (): HTMLElement | null => {
+  const jumpNoticeEl = (): HTMLElement | null => {
     const el = typeof document === 'undefined' ? null : document.querySelector('[data-role="run-jump-miss"]')
     return el instanceof HTMLElement ? el : null
   }
 
-  const clearJumpMiss = () => {
-    jumpMissRunId = null
-    const el = jumpMissEl()
+  const clearJumpNotice = () => {
+    jumpNotice = null
+    const el = jumpNoticeEl()
     if (el === null) return
     el.textContent = ''
     el.hidden = true
   }
 
-  const showJumpMiss = (runId: string) => {
-    jumpMissRunId = runId
-    const el = jumpMissEl()
+  const showJumpNotice = (notice: NonNullable<typeof jumpNotice>, copy: string) => {
+    jumpNotice = notice
+    const el = jumpNoticeEl()
     if (el === null) return
-    el.textContent = JUMP_MISS_COPY
+    el.textContent = copy
     el.hidden = false
   }
 
@@ -570,8 +584,8 @@ async function defaultRuntimeLoader(opts?: {
       return
     }
 
-    // From here the card is being expanded: a jump's "not in your recent runs" notice is stale.
-    clearJumpMiss()
+    // From here the card is being expanded: a jump's notice is stale.
+    clearJumpNotice()
 
     const attachExpanded = () => {
       // Find the card element for this runId to get its statusEl and noticeEl.
@@ -665,11 +679,7 @@ async function defaultRuntimeLoader(opts?: {
     authRequired = true
     stopRefreshTimer()
     // No session: a pending or arriving jump has nothing to open.
-    if (_loaderEpoch === epoch) {
-      _runJumpMode = 'refuse'
-      _applyRunJump = null
-      _dropPendingRunJump()
-    }
+    _setJumpSlot(epoch, {mode: 'refuse'})
     opts?.onStateChange?.('auth-required')
   }
 
@@ -706,22 +716,26 @@ async function defaultRuntimeLoader(opts?: {
   //   3. card collapsed: expand it (non-toggling), attach, write the hash, then reveal it and
   //      announce it; card expanded with a stream that still serves it (live or terminal): reveal
   //      only; card expanded but its stream is closed, failed or unavailable: re-attach (which
-  //      closes the old handle) and reveal; card missing: show the fixed notice and touch nothing
-  //      else (hash, expansion and stream stay as they are).
+  //      closes the old handle) and reveal; card missing: show a fixed notice and touch nothing
+  //      else (hash, expansion and stream stay as they are). The notice says "not in your recent
+  //      runs" when the refresh applied, and "could not load" when it did not.
   // The hash write is a plain location.hash assignment and nothing listens for it, so it cannot
   // start another jump.
   const jumpToRun = async (runId: string): Promise<void> => {
     const seq = ++_jumpSeq
-    clearJumpMiss()
+    clearJumpNotice()
     _cancelPendingExpand()
-    await refreshRunList()
+    const listFresh = await refreshRunList()
     if (disposed || authRequired || _jumpSeq !== seq) return
     // A click can start an expand while the refresh ran; the jump is the newer intent.
     _cancelPendingExpand()
 
+    // A card that is on the page opens whether or not the refresh applied. A missing card is only a
+    // miss when the refresh confirmed the list; otherwise the run may simply not have loaded yet.
     const card = findCard(runId)
     if (card === null) {
-      showJumpMiss(runId)
+      if (listFresh) showJumpNotice({kind: 'miss', runId}, JUMP_MISS_COPY)
+      else showJumpNotice({kind: 'retry'}, JUMP_RETRY_COPY)
       return
     }
 
@@ -730,6 +744,7 @@ async function defaultRuntimeLoader(opts?: {
     const wasExpanded = card.dataset.expanded === 'true'
 
     if (!wasExpanded) {
+      // The shared non-toggling expand, used for launches and jumps alike.
       runIndexMod.markCardExpandedForLaunch(runId)
       _attachStream(runId, statusEl, noticeEl)
       _writeRunHash(runId)
@@ -748,16 +763,30 @@ async function defaultRuntimeLoader(opts?: {
     if (announcer !== null) announcer.textContent = label === '' ? 'Opened run' : `Opened run, ${label}`
   }
 
+  // Open the jump slot for this loader and run the ID that was waiting for it, unless `skipRunId`
+  // names it (the hash restore already opened that run).
+  const armJumps = (skipRunId?: string) => {
+    const pending = _pendingRunJump()
+    if (!_setJumpSlot(epoch, {mode: 'apply', apply: runId => void jumpToRun(runId)})) return
+    if (pending !== null && pending !== skipRunId) void jumpToRun(pending)
+  }
+
+  // Set once, when the first load ended unavailable (not auth, not stale): the one reason a refused
+  // slot may open again, as soon as a refresh applies data.
+  let jumpsRecoverable = false
+  recoverJumps = () => {
+    if (!jumpsRecoverable || disposed || authRequired || opts?.isMounted?.() === false) return
+    if (_jumpSlot.mode !== 'refuse') return
+    jumpsRecoverable = false
+    armJumps()
+  }
+
   runIndexMod.resetRunIndexState()
   // The mount-time restore target: sanitized once, handed to the run index below, and compared with
   // a jump that was waiting for this mount (the restore opens that run, so it attaches once).
   const restoreRunId = typeof location !== 'undefined'
     ? sanitizeRunIdFromHash(location.hash) ?? undefined
     : undefined
-  // Whether this mount's run index finished loading its list. The run index reports it on its
-  // section: `loaded` or `empty`. Left at `loading` (a reset or a newer init replaced this one,
-  // or auth failed) or set to `unavailable`, the pending jump has nowhere to go.
-  let runIndexLoaded = false
   // The hash is actually read HERE, synchronously, before initOperatorRunIndex is
   // called — it is only consulted (as restoreRunId) after that function's internal
   // /operator/runs fetch resolves. So a user click that attaches a stream during
@@ -769,11 +798,11 @@ async function defaultRuntimeLoader(opts?: {
   const runIndexOpts = opts?.endpointBase !== undefined
     ? {endpointBase: opts.endpointBase, fixtureSessionId: opts.fixtureSessionId, onSelectRun, restoreRunId, onRestoreRun, onRestoreMiss, onAuthRequired}
     : {onSelectRun, restoreRunId, onRestoreRun, onRestoreMiss, onAuthRequired}
-  await runIndexMod.initOperatorRunIndex(runIndexOpts)
-  const listState = typeof document === 'undefined'
-    ? undefined
-    : document.querySelector<HTMLElement>('[data-role="run-index"]')?.dataset.state
-  runIndexLoaded = listState === 'loaded' || listState === 'empty'
+  // How the load ended comes back as the init's own outcome. 'loaded'/'empty' mean the list is there;
+  // 'unavailable' is a non-auth failure; 'auth-required' and 'stale' (a reset or a newer init
+  // replaced this one) have nowhere to open a run.
+  const initOutcome = await runIndexMod.initOperatorRunIndex(runIndexOpts)
+  const runIndexLoaded = initOutcome === 'loaded' || initOutcome === 'empty'
 
   launchMod.resetLaunchState()
   const launchOpts = opts?.endpointBase !== undefined
@@ -791,29 +820,19 @@ async function defaultRuntimeLoader(opts?: {
   // set up) leaves the pending ID for its successor.
   if (_loaderEpoch === epoch) {
     if (runIndexLoaded && !authRequired && opts?.isMounted?.() !== false) {
-      _runJumpMode = 'apply'
-      _applyRunJump = runId => {
-        void jumpToRun(runId)
-      }
-      const pending = _pendingRunJump
-      _pendingRunJump = null
       // The restore already opened the hash's run during init; opening it again would attach twice.
-      if (pending !== null && pending !== restoreRunId) void jumpToRun(pending)
+      armJumps(restoreRunId)
     } else {
       // Unavailable, stale, auth-required or already cleaned up: nothing to open it in.
-      _runJumpMode = 'refuse'
-      _applyRunJump = null
-      _dropPendingRunJump()
+      _setJumpSlot(epoch, {mode: 'refuse'})
+      jumpsRecoverable = initOutcome === 'unavailable' && !authRequired && opts?.isMounted?.() !== false
     }
   }
 
   return () => {
     disposed = true
-    if (_loaderEpoch === epoch) {
-      _runJumpMode = 'queue'
-      _applyRunJump = null
-      _dropPendingRunJump()
-    }
+    jumpsRecoverable = false
+    _setJumpSlot(epoch, {mode: 'queue', pending: null})
     stopRefreshTimer()
     if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibilityChange)
     _cancelPendingExpand()
@@ -862,8 +881,9 @@ export function createOperatorRuntime(opts: OperatorRuntimeOptions): OperatorRun
       }
       cleanupFns = []
       // A jump still waiting for a runtime that is now gone is stale. (Also covers a runtime cleaned
-      // up before its loader finished, whose own cleanup has not been registered yet.)
-      _dropPendingRunJump()
+      // up before its loader finished, whose own cleanup has not been registered yet.) Guarded by
+      // the loader's epoch: an ID queued for a newer loader is not this runtime's to drop.
+      _dropPendingRunJump(loaderEpoch)
     },
   }
 
@@ -886,7 +906,10 @@ export function createOperatorRuntime(opts: OperatorRuntimeOptions): OperatorRun
         }
       : undefined
 
-  loader(loaderOpts).then(maybeCleanup => {
+  const loading = loader(loaderOpts)
+  // The default loader takes its epoch synchronously, so this is the epoch it owns.
+  const loaderEpoch = _loaderEpoch
+  loading.then(maybeCleanup => {
     if (typeof maybeCleanup !== 'function') return
     if (mounted) {
       cleanupFns.push(maybeCleanup)

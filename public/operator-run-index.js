@@ -393,6 +393,12 @@ export function resetRunIndexState() {
   }
 }
 
+/**
+ * Load the run list and render it. Resolves with how the load ended, so the caller never has to read
+ * it back from the DOM: 'loaded' (cards shown), 'empty' (no runs), 'unavailable' (a non-auth failure,
+ * or no document), 'auth-required' (401/403, after onAuthRequired), 'stale' (a reset or a newer init
+ * replaced this one while it fetched; it wrote nothing).
+ */
 export async function initOperatorRunIndex(opts) {
   const myGeneration = ++_runIndexGeneration
 
@@ -407,8 +413,8 @@ export async function initOperatorRunIndex(opts) {
   const onRestoreMiss = opts?.onRestoreMiss
   const onAuthRequired = opts?.onAuthRequired
 
-  if (isRunIndexInitStale(myGeneration)) return
-  if (typeof document === 'undefined') return
+  if (isRunIndexInitStale(myGeneration)) return 'stale'
+  if (typeof document === 'undefined') return 'unavailable'
 
   if (typeof onSelectRun === 'function') _onSelectRun = onSelectRun
 
@@ -427,7 +433,7 @@ export async function initOperatorRunIndex(opts) {
   const result = await fetchRunIndex({endpointBase, fixtureSessionId})
 
   // Guard: bail if reset/replaced while awaiting fetch.
-  if (isRunIndexInitStale(myGeneration)) return
+  if (isRunIndexInitStale(myGeneration)) return 'stale'
 
   if (runIndexLoading !== null) runIndexLoading.hidden = true
 
@@ -442,10 +448,10 @@ export async function initOperatorRunIndex(opts) {
     if (result.authFailure === true && typeof onAuthRequired === 'function') {
       _refreshContext = null
       onAuthRequired()
-      return
+      return 'auth-required'
     }
     showRunIndexUnavailable({runIndexSection, runIndexUnavailable})
-    return
+    return 'unavailable'
   }
 
   const {summaries} = result
@@ -467,7 +473,7 @@ export async function initOperatorRunIndex(opts) {
     if (restoreRunId !== undefined && restoreRunId !== null && typeof onRestoreMiss === 'function') {
       onRestoreMiss()
     }
-    return
+    return 'empty'
   }
 
   // Reload restore: only after the list has resolved and been diffed. Presence in
@@ -497,6 +503,8 @@ export async function initOperatorRunIndex(opts) {
       }
     }
   }
+
+  return 'loaded'
 }
 
 /** The unavailable treatment: the unavailable notice up, section state to match. */

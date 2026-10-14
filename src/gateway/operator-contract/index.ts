@@ -110,6 +110,6 @@ export type {
   TerminalPhase,
 } from './run-status.ts'
 export type {RunsListResponse, RunSummary, RunSummaryStatus} from './run-summary.ts'
-export {parseRunsListResponse, parseRunSummary, parseRunSummaryList, RUN_INDEX_CAP} from './run-summary.ts'
+export {parseRunsListResponse, parseRunSummary, parseRunSummaryList, RUN_INDEX_CAP, RUN_SUMMARY_STATUSES} from './run-summary.ts'
 export type {ReadyFrame, ResetFrameData, ResetReason, RunStreamFrame, StatusFrameData} from './sse-frames.ts'
 export {OPERATOR_CONTRACT_VERSION} from './version.ts'

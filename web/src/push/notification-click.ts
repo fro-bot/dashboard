@@ -11,12 +11,13 @@
  * Behavior (only app windows count, for every type: URL pathname `/`, so a
  * `/privacy` tab is never focused or messaged):
  *   - pick the focused app window, then a visible one, then any;
- *   - `question` with a valid `runId`: focus the pick (a `focus()` failure is
- *     swallowed) and post `{type: 'OPEN_RUN', runId}` to that one client;
- *     with no app window, open `/#<runId>`;
+ *   - `question` with a valid `runId`: only controlled windows are considered
+ *     (the page accepts `OPEN_RUN` only from its controlling worker); focus the
+ *     pick (a `focus()` failure is swallowed) and post `{type: 'OPEN_RUN', runId}`
+ *     to that one client; with no controlled app window, open `/#<runId>`;
  *   - every other case (other types, a question with no valid `runId`, data
- *     from an older worker): focus the pick, post nothing; with no app
- *     window, open `/`.
+ *     from an older worker): all windows, controlled or not, are considered;
+ *     focus the pick, post nothing; with no app window, open `/`.
  */
 
 import {RUN_ID_PATTERN} from '../operator/run-id.ts'
@@ -67,8 +68,12 @@ function pickAppWindow(windowClients: readonly ClickWindowClient[]): ClickWindow
  * `data` is the notification's stored `data`, treated as untrusted.
  */
 export async function handleNotificationClick(clients: ClickClients, data: unknown): Promise<void> {
-  const windowClients = await clients.matchAll({type: 'window', includeUncontrolled: true})
   const runId = readStoredQuestionRunId(data)
+  // The OPEN_RUN message is only accepted from the worker that controls the page, so a question with
+  // a run ID looks only at controlled windows: an uncontrolled one (a page loaded before this worker
+  // activated) would take the focus and silently drop the message. With none, the run opens in a new
+  // window. Every other click keeps looking at all windows, since it only focuses one.
+  const windowClients = await clients.matchAll({type: 'window', includeUncontrolled: runId === undefined})
   const target = pickAppWindow(windowClients)
 
   if (target === undefined) {

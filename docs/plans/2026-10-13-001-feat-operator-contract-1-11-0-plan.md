@@ -190,17 +190,20 @@ Out of scope: displaying push health, durable terminal replay (fro-bot/agent#163
   - before an expand;
   - on a jump.
 
+  A hash restore does not refresh first: it relies on init's own fetch, which ran moments before.
+
   Expand waits for the refresh, then reads the card's summary status from the refreshed card. If the refresh fails, it expands with the status already on the card.
 - **Fallback alignment.** `getEffectiveStatus` applies the open-approval overlay only on a `running` base, so it matches the gateway. The existing test "wire waiting_for_question with an open approval is waiting_for_approval" (`test/operator-stream-core.test.ts`) flips on purpose to `waiting_for_question`. The existing demotion of a stale wire `waiting_for_question` with no open questions stays, and is pinned by a test.
 - **Notification data carries a validated runId.** `SafeNotification.data` becomes a discriminated shape, read from the payload's nested `data` object. A `question` keeps `runId` only when it matches `^[A-Za-z0-9_-]{1,128}$` and the wire `route` equals exactly `/operator#<runId>`, the tracker's allowed shape. Everything else carries no `runId`. Gateway run IDs are UUIDs, so they match.
 - **SW click logic in a pure module.** `notificationclick` is top-level code next to the Workbox precache, so tests cannot import it. A pure resolver beside `sw-notification.ts` takes the window clients and the notification data, and returns either "focus and post to this client" or "open this URL". `sw.ts` only wires it. The resolver:
   - considers only window clients whose URL path is `/`, the app shell; others, such as `/privacy`, don't count;
+  - for a question with a valid `runId`, considers only windows the worker controls, because an uncontrolled page drops the message;
   - picks the focused app window, then a visible one, then any;
   - catches a `focus()` failure and still posts `{type: 'OPEN_RUN', runId}` to that one client;
-  - with no app window, opens `/#<runId>`.
+  - with no suitable app window, opens `/#<runId>`.
 
-  Non-question types keep today's behavior.
-- **Jump intent through a runtime-module slot.** `App` registers the `navigator.serviceWorker` message listener once at mount. It requires `event.source` to be the active service worker, and `event.data` to be exactly `{type: 'OPEN_RUN', runId}` with a valid `runId`. It then switches to the operator view and calls `requestRunJump(runId)`, exported from `web/src/operator/runtime.ts`.
+  Other notification types focus any app window, or open `/`.
+- **Jump intent through a runtime-module slot.** `App` registers the `navigator.serviceWorker` message listener once at mount. It requires `event.source` to be the worker that controls the page (`navigator.serviceWorker.controller`), compared by identity, and `event.data` to be exactly `{type: 'OPEN_RUN', runId}` with a valid `runId`. It then switches to the operator view and calls `requestRunJump(runId)`, exported from `web/src/operator/runtime.ts`.
   - The runtime module holds one pending ID; last wins.
   - `defaultRuntimeLoader` consumes the ID once `initOperatorRunIndex` returns loaded.
   - Any other result (unavailable, auth, stale) drops it, as does runtime cleanup.
@@ -355,7 +358,7 @@ sequenceDiagram
 **Files:**
 - Modify:
   - `public/operator-run-index.js` and `public/operator-run-index.d.ts` (exported single-flight refresh)
-  - `web/src/operator/runtime.ts` (30-second visible interval, visibility trigger, refresh before expand in `onSelectRun` and `onRestoreRun`, cleanup, inline `runIndexMod` cast)
+  - `web/src/operator/runtime.ts` (30-second visible interval, visibility trigger, refresh before expand in `onSelectRun` (`onRestoreRun` relies on init's own fetch, which ran moments before), cleanup, inline `runIndexMod` cast)
 - Test: `test/operator-run-index-core.test.js`, `web/src/operator/runtime.test.ts`
 
 **Approach:** Follow the single-flight refresh and refresh-trigger decisions in Key Technical Decisions.
@@ -460,7 +463,7 @@ sequenceDiagram
 - Edge case: the message arrives before run-index init resolves → it is applied once init loads. Init ends unavailable or stale → the jump is dropped. Two rapid messages → the last one wins. A message equal to the mount-time restore target → only one attach.
 - Error path: the run is missing after the refresh → notice shown, current hash and expansion unchanged, no attach. The next jump or expand clears the notice.
 - Error path: auth-required during the refresh clears the pending jump.
-- Error path: a message whose source isn't the active service worker, or whose data has the wrong type, an invalid `runId` or isn't an object, is ignored.
+- Error path: a message whose source isn't the worker that controls the page (`navigator.serviceWorker.controller`, compared by identity), or whose data has the wrong type, an invalid `runId` or isn't an object, is ignored.
 - Integration: the hash write does not trigger another jump, and nothing listens for `hashchange`.
 - Safety: the listener and the jump make no `console.*` calls.
 

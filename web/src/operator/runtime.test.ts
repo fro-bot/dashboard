@@ -1955,7 +1955,7 @@ describe('URL-hash restore — expand sets hash, remount restores', () => {
 describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
   type StreamStatus = 'active' | 'terminal' | 'inactive'
   /** What the (mocked) run index leaves behind: `loaded`, `unavailable`, or `unsettled` (reset, replaced or auth: the section never leaves `loading`). */
-  type InitOutcome = 'loaded' | 'unavailable' | 'unsettled'
+  type InitOutcome = 'loaded' | 'unavailable' | 'unsettled' | 'auth-required'
   type InitOpts = {
     onSelectRun: (runId: string) => void | Promise<void>
     onAuthRequired: () => void
@@ -1965,6 +1965,7 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
   type StreamOpts = {runId: string; questionsEl?: Element | null}
 
   const MISS_COPY = "That run isn't in your recent runs."
+  const RETRY_COPY = "Couldn't load your runs. Try again in a moment."
 
   let scrolled: string[]
   let streamStatus: StreamStatus
@@ -2067,8 +2068,8 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
         captured = initOpts
         await options.gate
         options.onInit?.(initOpts)
-        const section = document.querySelector<HTMLElement>('[data-role="run-index"]')
-        if (section !== null && outcome !== 'unsettled') section.dataset.state = outcome
+        // The real run index resolves with how it ended; the loader branches on that, not on the DOM.
+        return outcome === 'unsettled' ? 'stale' : outcome
       },
       refreshOperatorRunIndex,
       resetRunIndexState: vi.fn(),
@@ -2192,7 +2193,7 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
     it('auth-required during init drops the pending jump', async () => {
       renderPage(cardHtml('run-j-a'))
       requestRunJump('run-j-a')
-      const first = await mountJump({outcome: 'unsettled', onInit: initOpts => initOpts.onAuthRequired()})
+      const first = await mountJump({outcome: 'auth-required', onInit: initOpts => initOpts.onAuthRequired()})
       await first.ready()
       expect(first.onStateChange).toHaveBeenCalledWith('auth-required')
       expect(first.refreshOperatorRunIndex).not.toHaveBeenCalled()
@@ -2322,6 +2323,92 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
       const second = await mountJump()
       await second.ready()
       expect(second.initOperatorStream).not.toHaveBeenCalled()
+    })
+
+    it("a jump requested while a newer loader is importing survives the older runtime's cleanup", async () => {
+      renderPage(cardHtml('run-j-a'))
+      const first = await mountJump()
+      await first.ready()
+      const gate = deferred()
+      const second = await mountJump({gate: gate.promise})
+
+      requestRunJump('run-j-a')
+      first.runtime.cleanup()
+      gate.resolve()
+      await second.ready()
+
+      expect(second.attachedRunIds()).toEqual(['run-j-a'])
+      expect(location.hash).toBe('#run-j-a')
+    })
+
+    it('an unavailable first load recovers: a refresh that applies re-arms the jump, and a tap then opens the run', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountJump({outcome: 'unavailable'})
+      await mounted.ready()
+
+      // Refused while the list is down: dropped, not held.
+      requestRunJump('run-j-a')
+      await tick()
+      expect(mounted.refreshOperatorRunIndex).not.toHaveBeenCalled()
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+
+      // The background refresh succeeds.
+      document.dispatchEvent(new Event('visibilitychange'))
+      await tick()
+      expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+
+      requestRunJump('run-j-a')
+      await tick()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+      expect(location.hash).toBe('#run-j-a')
+      expect(cardEl('run-j-a').dataset.expanded).toBe('true')
+    })
+
+    it('a refresh that does not apply leaves an unavailable load refused', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountJump({outcome: 'unavailable', refresh: async () => false})
+      await mounted.ready()
+
+      document.dispatchEvent(new Event('visibilitychange'))
+      await tick()
+      requestRunJump('run-j-a')
+      await tick()
+
+      expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+    })
+
+    it('recovery never re-arms a runtime that is auth-required, stale or cleaned up', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const auth = await mountJump({outcome: 'auth-required', onInit: initOpts => initOpts.onAuthRequired()})
+      await auth.ready()
+      document.dispatchEvent(new Event('visibilitychange'))
+      await tick()
+      requestRunJump('run-j-a')
+      await tick()
+      expect(auth.refreshOperatorRunIndex).not.toHaveBeenCalled()
+      expect(auth.initOperatorStream).not.toHaveBeenCalled()
+      auth.runtime.cleanup()
+
+      const stale = await mountJump({outcome: 'unsettled'})
+      await stale.ready()
+      document.dispatchEvent(new Event('visibilitychange'))
+      await tick()
+      requestRunJump('run-j-a')
+      await tick()
+      expect(stale.initOperatorStream).not.toHaveBeenCalled()
+      stale.runtime.cleanup()
+
+      const cleaned = await mountJump({outcome: 'unavailable'})
+      await cleaned.ready()
+      cleaned.runtime.cleanup()
+      document.dispatchEvent(new Event('visibilitychange'))
+      await tick()
+      requestRunJump('run-j-a')
+      await tick()
+      expect(cleaned.initOperatorStream).not.toHaveBeenCalled()
     })
 
     it('cleanup stops a jump waiting on its refresh and nothing is requested of a cleaned-up runtime', async () => {
@@ -2471,17 +2558,32 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
       expect(announcerEl().textContent).toBe('Opened run, Running')
     })
 
-    it('a stream handle with no connection accessor is treated as live (never re-attached on a guess)', async () => {
+    it("reads the stream's connection status live on each repeat jump, from the attached handle only", async () => {
       renderPage(cardHtml('run-j-a'))
       const mounted = await mountLoaded()
       requestRunJump('run-j-a')
       await tick()
-      Reflect.deleteProperty(mounted.handles[0]?.handle ?? {}, 'getConnectionStatus')
+      const [first] = mounted.handles
+      expect(first?.handle.getConnectionStatus).not.toHaveBeenCalled()
 
       requestRunJump('run-j-a')
       await tick()
-
       expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+      expect(first?.handle.getConnectionStatus).toHaveBeenCalledTimes(1)
+
+      streamStatus = 'inactive'
+      requestRunJump('run-j-a')
+      await tick()
+      const second = mounted.handles[1]
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a', 'run-j-a'])
+      expect(first?.handle.getConnectionStatus).toHaveBeenCalledTimes(2)
+
+      streamStatus = 'active'
+      requestRunJump('run-j-a')
+      await tick()
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a', 'run-j-a'])
+      expect(second?.handle.getConnectionStatus).toHaveBeenCalledTimes(1)
+      expect(first?.handle.getConnectionStatus).toHaveBeenCalledTimes(2)
     })
 
     it('switching runs closes the old stream, expands the new card, and leaves the other card\'s question draft in the page store for the return trip', async () => {
@@ -2737,14 +2839,89 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
       expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
     })
 
-    it('a miss when the refresh itself failed is still a miss (the list could not confirm the run)', async () => {
-      const mounted = await mountOnExpandedA({refresh: async () => Promise.reject(new Error('boom'))})
+    const failedRefreshes: [string, () => Promise<boolean>][] = [
+      ['resolves false (429, network, timeout, bad body)', async () => false],
+      ['rejects', async () => Promise.reject(new Error('boom'))],
+    ]
+    it.each(failedRefreshes)('a missing card after a refresh that %s shows the retry notice, not the not-found copy, and never echoes the ID', async (_label, refresh) => {
+      const mounted = await mountOnExpandedA({refresh})
 
       requestRunJump('run-j-gone')
       await tick()
 
-      expect(missEl().textContent).toBe(MISS_COPY)
+      expect(missEl().hidden).toBe(false)
+      expect(missEl().textContent).toBe(RETRY_COPY)
+      expect(missEl().textContent).not.toBe(MISS_COPY)
+      expect(missEl()).not.toBe(streamStatusEl())
+      expect(document.body.innerHTML).not.toContain('run-j-gone')
+      // Like a miss, it touches nothing else.
+      expect(location.hash).toBe('#run-j-a')
       expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+      expect(cardEl('run-j-a').dataset.expanded).toBe('true')
+    })
+
+    it('a card that is present opens normally even though its refresh failed, with no notice', async () => {
+      const mounted = await mountOnExpandedA({refresh: async () => false})
+      expect(missEl().hidden).toBe(true)
+
+      requestRunJump('run-j-b')
+      await tick()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a', 'run-j-b'])
+      expect(cardEl('run-j-b').dataset.expanded).toBe('true')
+      expect(location.hash).toBe('#run-j-b')
+      expect(missEl().hidden).toBe(true)
+      expect(announcerEl().textContent).toBe('Opened run, Running')
+    })
+
+    describe('the retry notice lifetime', () => {
+      let listLoads: boolean
+      beforeEach(() => {
+        listLoads = false
+      })
+      const mountWithRetryNotice = async () => {
+        const mounted = await mountOnExpandedA({refresh: async () => listLoads})
+        requestRunJump('run-j-gone')
+        await tick()
+        expect(missEl().textContent).toBe(RETRY_COPY)
+        return mounted
+      }
+
+      it('clears on the next refresh that applies, and stays through refreshes that do not', async () => {
+        await mountWithRetryNotice()
+
+        document.dispatchEvent(new Event('visibilitychange'))
+        await tick()
+        expect(missEl().hidden).toBe(false)
+
+        listLoads = true
+        document.dispatchEvent(new Event('visibilitychange'))
+        await tick()
+
+        expect(missEl().hidden).toBe(true)
+        expect(missEl().textContent).toBe('')
+      })
+
+      it('clears on the next jump, and shows afresh when that jump fails the same way', async () => {
+        await mountWithRetryNotice()
+
+        requestRunJump('run-j-b')
+        await tick()
+        expect(missEl().hidden).toBe(true)
+
+        requestRunJump('run-j-gone')
+        await tick()
+        expect(missEl().textContent).toBe(RETRY_COPY)
+      })
+
+      it('clears when a card expands', async () => {
+        const mounted = await mountWithRetryNotice()
+
+        await mounted.select('run-j-b')
+
+        expect(missEl().hidden).toBe(true)
+        expect(missEl().textContent).toBe('')
+      })
     })
 
     it('without a miss element on the page a miss is silent and harmless', async () => {
