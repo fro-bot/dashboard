@@ -9539,9 +9539,9 @@ describe('getEffectiveStatus — derived from the wire status and open questions
     expect(getEffectiveStatus(qEntry(state))).toBe('waiting_for_approval')
   })
 
-  it('wire waiting_for_question with an open approval is waiting_for_approval', () => {
+  it('wire waiting_for_question with an open approval stays waiting_for_question (the overlay applies to running only)', () => {
     const state = withApproval(qStatus(qLive(), 'waiting_for_question'))
-    expect(getEffectiveStatus(qEntry(state))).toBe('waiting_for_approval')
+    expect(getEffectiveStatus(qEntry(state))).toBe('waiting_for_question')
   })
 
   it('terminal wins over an open approval', () => {
@@ -9622,6 +9622,79 @@ describe('getEffectiveStatus — derived from the wire status and open questions
     expect(getEffectiveStatus(undefined)).toBe('')
     expect(getEffectiveStatus(null)).toBe('')
     expect(getEffectiveStatus({runId: 'r', status: 'running', phase: 'EXECUTING', startedAt: '', stale: false, terminal: false})).toBe('running')
+  })
+})
+
+// Truth table pinned to the gateway's overlay. Upstream: fro-bot/agent @ a119ba4ce8082b4c0bf2ce298466f31b42690541,
+// packages/gateway/src/web/sse/projection.ts `overlayWaitingStatus`:
+//   if (status !== 'running') return status
+//   if (hasPendingApproval(scope)) return 'waiting_for_approval'
+//   if (hasPendingQuestion(scope)) return 'waiting_for_question'
+//   return status
+// Only a wire `running` is overlaid; approval beats question; every other wire status passes through.
+// The one client-only rule on top (not in the gateway): a wire `waiting_for_question` with no open question
+// demotes to `running` once a question reconcile has completed (pinned separately below).
+describe('getEffectiveStatus — gateway overlay truth table', () => {
+  beforeEach(() => resetQuestionPageStore())
+  afterEach(() => resetQuestionPageStore())
+
+  const TERMINAL = ['succeeded', 'failed', 'cancelled']
+  const PASS_THROUGH = ['waiting_for_approval', 'queued', 'blocked', ...TERMINAL]
+
+  function entryWith(status: string, approval: boolean, question: boolean): RunEntry {
+    const base = qEntry(qStatus(qLive(), status))
+    return {
+      ...base,
+      status,
+      terminal: TERMINAL.includes(status),
+      approvalOpenPrompts: approval
+        ? {'req-a-1': {runId: Q_RUN, requestID: 'req-a-1', permission: 'shell', settled: false}}
+        : {},
+      questionOpen: new Map(question ? [['req-q-1', {requestID: 'req-q-1', questions: []}]] : []),
+    }
+  }
+
+  // [wire status, open approval, open question, expected]
+  const rows: [string, boolean, boolean, string][] = [
+    ['running', false, false, 'running'],
+    ['running', false, true, 'waiting_for_question'],
+    ['running', true, false, 'waiting_for_approval'],
+    ['running', true, true, 'waiting_for_approval'],
+    // No question is open and no reconcile has completed, so the wire value is kept.
+    ['waiting_for_question', false, false, 'waiting_for_question'],
+    ['waiting_for_question', false, true, 'waiting_for_question'],
+    ['waiting_for_question', true, false, 'waiting_for_question'],
+    ['waiting_for_question', true, true, 'waiting_for_question'],
+    ...PASS_THROUGH.flatMap((status): [string, boolean, boolean, string][] => [
+      [status, false, false, status],
+      [status, false, true, status],
+      [status, true, false, status],
+      [status, true, true, status],
+    ]),
+  ]
+
+  it.each(rows)('wire %s, open approval %s, open question %s -> %s', (status, approval, question, expected) => {
+    expect(getEffectiveStatus(entryWith(status, approval, question))).toBe(expected)
+  })
+
+  it('a terminal status always wins, whatever is open', () => {
+    for (const status of TERMINAL) {
+      for (const approval of [false, true]) {
+        for (const question of [false, true]) {
+          expect(getEffectiveStatus(entryWith(status, approval, question))).toBe(status)
+        }
+      }
+    }
+  })
+
+  it('a wire waiting_for_question with no open question demotes to running once a reconcile has completed', () => {
+    const entry = {...entryWith('waiting_for_question', false, false), questionReconcileDone: true}
+    expect(getEffectiveStatus(entry)).toBe('running')
+  })
+
+  it('a wire waiting_for_question with an open question is not demoted by a completed reconcile', () => {
+    const entry = {...entryWith('waiting_for_question', false, true), questionReconcileDone: true}
+    expect(getEffectiveStatus(entry)).toBe('waiting_for_question')
   })
 })
 

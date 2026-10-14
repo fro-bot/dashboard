@@ -1853,9 +1853,11 @@ export function hasOpenQuestions(runEntry) {
  *
  *   1. Terminal wins.
  *   2. Wire `waiting_for_approval` stays.
- *   3. A `running` or `waiting_for_question` run with any open approval prompt is
- *      `waiting_for_approval`. The gateway does not re-send status when an approval opens, so
- *      the wire value alone cannot show it.
+ *   3. A `running` run with any open approval prompt is `waiting_for_approval`. The gateway does
+ *      not re-send status when an approval opens, so the wire value alone cannot show it. Only a
+ *      wire `running` is overlaid, matching the gateway's `overlayWaitingStatus`
+ *      (fro-bot/agent packages/gateway/src/web/sse/projection.ts): a wire `waiting_for_question`
+ *      is never turned into `waiting_for_approval`.
  *   4. A `running` run with any open question is `waiting_for_question`.
  *   5. A wire `waiting_for_question` with an open question stays; with none, once a question
  *      reconcile has completed in the current connection cycle, it is really `running`. (Before
@@ -1871,10 +1873,10 @@ export function getEffectiveStatus(runEntry) {
   const wire = runEntry.status
   if (runEntry.terminal === true) return wire
   if (wire === 'waiting_for_approval') return wire
-  if ((wire === 'running' || wire === 'waiting_for_question') && hasOpenApprovals(runEntry)) {
-    return 'waiting_for_approval'
+  if (wire === 'running') {
+    if (hasOpenApprovals(runEntry)) return 'waiting_for_approval'
+    return hasOpenQuestions(runEntry) ? 'waiting_for_question' : wire
   }
-  if (wire === 'running') return hasOpenQuestions(runEntry) ? 'waiting_for_question' : wire
   if (wire === 'waiting_for_question') {
     if (hasOpenQuestions(runEntry)) return wire
     return runEntry.questionReconcileDone === true ? 'running' : wire
