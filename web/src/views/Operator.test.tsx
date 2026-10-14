@@ -914,6 +914,17 @@ describe('Operator — stream and status announcement hooks', () => {
     expect(document.querySelector('[data-role="run-index"]')?.contains(missEl)).toBe(true)
   })
 
+  it('places the dismissible jump notice before the run list', () => {
+    render(<Operator state="ready" />)
+    const notice = document.querySelector('[data-role="run-jump-notice"]')
+    const runList = document.querySelector('[data-role="run-index-list"]')
+
+    expect(notice).not.toBeNull()
+    expect(runList).not.toBeNull()
+    expect((notice?.compareDocumentPosition(runList as Node) ?? 0) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    expect(screen.getByRole('button', {name: 'Dismiss notice', hidden: true})).toBeInTheDocument()
+  })
+
   it('renders a visually-hidden polite live region for the jump announcement', () => {
     render(<Operator state="ready" />)
     const announcer = document.querySelector('[data-role="run-jump-announcer"]')

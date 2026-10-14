@@ -2026,11 +2026,12 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
   }
 
   function renderPage(...cards: string[]): void {
-    document.body.innerHTML = `<section data-role="run-index" data-state="loading"><div data-role="run-index-list">${cards.join('')}</div><div data-role="stream-status" hidden></div><div data-role="run-jump-miss" role="status" hidden></div><div data-role="run-jump-announcer" role="status" aria-live="polite"></div></section>`
+    document.body.innerHTML = `<section data-role="run-index" data-state="loading"><div data-role="run-jump-notice" hidden><div data-role="run-jump-miss" role="status" aria-live="polite" hidden></div><button type="button" data-role="run-jump-dismiss" aria-label="Dismiss notice"></button></div><div data-role="run-index-list">${cards.join('')}</div><div data-role="stream-status" hidden></div><div data-role="run-jump-announcer" role="status" aria-live="polite"></div></section>`
   }
 
   const cardEl = (runId: string) => document.querySelector(`[data-run-id="${runId}"]`) as HTMLElement
   const missEl = () => document.querySelector('[data-role="run-jump-miss"]') as HTMLElement
+  const jumpNoticeEl = () => document.querySelector('[data-role="run-jump-notice"]') as HTMLElement
   const announcerEl = () => document.querySelector('[data-role="run-jump-announcer"]') as HTMLElement
   const streamStatusEl = () => document.querySelector('[data-role="stream-status"]') as HTMLElement
 
@@ -2773,6 +2774,20 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
 
       expect(missEl().hidden).toBe(true)
       expect(missEl().textContent).toBe('')
+    })
+
+    it('can be dismissed without changing the jump announcement', async () => {
+      await mountOnExpandedA()
+      const announcedBefore = announcerEl().textContent
+      requestRunJump('run-j-gone')
+      await tick()
+
+      ;(document.querySelector('[data-role="run-jump-dismiss"]') as HTMLButtonElement).click()
+
+      expect(jumpNoticeEl().hidden).toBe(true)
+      expect(missEl().hidden).toBe(true)
+      expect(missEl().textContent).toBe('')
+      expect(announcerEl().textContent).toBe(announcedBefore)
     })
 
     it('the notice clears on the next jump even when that jump misses too (it shows afresh, not stacked)', async () => {

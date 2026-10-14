@@ -536,12 +536,20 @@ async function defaultRuntimeLoader(opts?: {
     return el instanceof HTMLElement ? el : null
   }
 
+  const jumpNoticeContainerEl = (): HTMLElement | null => {
+    const el = typeof document === 'undefined' ? null : document.querySelector('[data-role="run-jump-notice"]')
+    return el instanceof HTMLElement ? el : null
+  }
+
   const clearJumpNotice = () => {
     jumpNotice = null
     const el = jumpNoticeEl()
-    if (el === null) return
-    el.textContent = ''
-    el.hidden = true
+    if (el !== null) {
+      el.textContent = ''
+      el.hidden = true
+    }
+    const container = jumpNoticeContainerEl()
+    if (container !== null) container.hidden = true
   }
 
   const showJumpNotice = (notice: NonNullable<typeof jumpNotice>, copy: string) => {
@@ -550,7 +558,15 @@ async function defaultRuntimeLoader(opts?: {
     if (el === null) return
     el.textContent = copy
     el.hidden = false
+    const container = jumpNoticeContainerEl()
+    if (container !== null) container.hidden = false
   }
+
+  const dismissJumpNoticeButton = typeof document === 'undefined'
+    ? null
+    : document.querySelector<HTMLButtonElement>('[data-role="run-jump-dismiss"]')
+  const onDismissJumpNotice = () => clearJumpNotice()
+  dismissJumpNoticeButton?.addEventListener('click', onDismissJumpNotice)
 
   // Build the active-stream coordination callbacks. These are passed to run-index and
   // launch modules so the runtime seam owns the single active stream handle.
@@ -835,6 +851,7 @@ async function defaultRuntimeLoader(opts?: {
     _setJumpSlot(epoch, {mode: 'queue', pending: null})
     stopRefreshTimer()
     if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibilityChange)
+    dismissJumpNoticeButton?.removeEventListener('click', onDismissJumpNotice)
     _cancelPendingExpand()
     // Close the active stream handle on cleanup.
     _closeActiveStream()

@@ -205,6 +205,7 @@
   font-family: var(--font-mono);
   font-weight: 600;
   text-transform: uppercase;
+  white-space: nowrap;
   letter-spacing: var(--tracking-label);
   border-radius: var(--radius-sm);
   border: 1px solid transparent;
@@ -696,6 +697,54 @@
   font-size: var(--text-body-sm);
   color: var(--color-text-muted);
   margin-bottom: var(--space-2);
+}
+
+.operator-run-jump-notice {
+  position: sticky;
+  top: calc(var(--space-12) + var(--space-3));
+  z-index: 10;
+  justify-content: space-between;
+  color: var(--color-text);
+}
+
+.operator-run-jump-notice [data-role="run-jump-miss"] {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.5;
+}
+
+.operator-run-jump-notice[hidden] {
+  display: none;
+}
+
+.operator-run-jump-dismiss {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--text-body-lg);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+
+.operator-run-jump-dismiss:hover {
+  background: var(--color-surface-raised);
+  border-color: var(--color-border-accent);
+  color: var(--color-text);
+}
+
+.operator-run-jump-dismiss:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-accent);
 }
 
 .operator-form-group {
