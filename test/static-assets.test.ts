@@ -236,6 +236,68 @@ describe('static route absent when operator UI disabled', () => {
 // flag-gate was for the SSR /operator route, not the root app.
 // ---------------------------------------------------------------------------
 
+describe('/static/* revalidation — a deploy must not leave a stale operator module in the browser', () => {
+  const unconditionalModules = [
+    '/static/operator-stream.js',
+    '/static/operator-launch.js',
+    '/static/operator-run-index.js',
+  ] as const
+
+  it.each(unconditionalModules)('%s carries Cache-Control: no-cache and keeps Last-Modified (flag off)', async path => {
+    const app = await buildTestApp(false)
+    const res = await app.request(path)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('cache-control')).toBe('no-cache')
+    expect(res.headers.get('last-modified')).not.toBeNull()
+  })
+
+  it.each(unconditionalModules)('%s carries Cache-Control: no-cache with the ?manual=1 query the loader uses', async path => {
+    const app = await buildTestApp(true)
+    const res = await app.request(`${path}?manual=1`)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('cache-control')).toBe('no-cache')
+    expect(res.headers.get('last-modified')).not.toBeNull()
+  })
+
+  it('a flag-gated /static asset (operator.css) carries Cache-Control: no-cache and keeps Last-Modified', async () => {
+    const app = await buildTestApp(true)
+    const res = await app.request('/static/operator.css')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('cache-control')).toBe('no-cache')
+    expect(res.headers.get('last-modified')).not.toBeNull()
+  })
+
+  it('never uses no-store: the browser may keep the file and revalidate it', async () => {
+    const app = await buildTestApp(true)
+    for (const path of [...unconditionalModules, '/static/operator.css']) {
+      const res = await app.request(path)
+      expect(res.headers.get('cache-control'), path).not.toContain('no-store')
+    }
+  })
+
+  it('a missing /static file is still a 404 with no cache header added', async () => {
+    const app = await buildTestApp(true)
+    const res = await app.request('/static/does-not-exist.js')
+    expect(res.status).toBe(404)
+    expect(res.headers.get('cache-control')).toBeNull()
+  })
+
+  it('a flag-gated /static asset is still not served with the flag off, and gets no cache header', async () => {
+    const app = await buildTestApp(false)
+    const res = await app.request('/static/operator.css')
+    expect(res.status).not.toBe(200)
+    expect(res.headers.get('cache-control')).toBeNull()
+  })
+
+  it('the auth flow on /static is unchanged: an unauthenticated flag-on request is public (200), and flag-off non-module paths never leak a file', async () => {
+    const on = await buildTestApp(true)
+    expect((await on.request('/static/operator.css')).status).toBe(200)
+    const off = await buildTestApp(false)
+    const gated = await off.request('/static/operator.css')
+    expect(gated.status).not.toBe(200)
+  })
+})
+
 describe('operator runtime JS assets — served regardless of operatorUiEnabled flag', () => {
   it('GET /static/operator-stream.js returns 200 when operatorUiEnabled=false', async () => {
     const app = await buildTestApp(false)

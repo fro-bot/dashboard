@@ -766,6 +766,13 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   app.get('/operator', c => c.redirect('/', 302))
   app.get('/operator/', c => c.redirect('/', 302))
 
+  // /static files are un-hashed and not precached, so without this a browser can heuristically reuse a
+  // stale module next to a fresh bundle after a deploy. Registered before every /static mount below.
+  app.use('/static/*', async (c, next) => {
+    await next()
+    if (c.res.ok) c.res.headers.set('cache-control', 'no-cache')
+  })
+
   // ── Operator runtime JS assets — always served (flag-independent) ────────────
   // Root / owns the operator shell and always depends on these modules.
   // Mounted unconditionally so they are available regardless of operatorUiEnabled.

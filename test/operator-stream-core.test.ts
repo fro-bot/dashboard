@@ -9923,13 +9923,13 @@ describe('question status — label, wire acceptance and styling', () => {
   it('keeps run-status badges on one line at narrow widths', async () => {
     const fs = await import('node:fs/promises')
     const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
-    expect(css).toMatch(/\.run-status\s*\{[^}]*white-space:\s*nowrap;/s)
+    expect(css).toMatch(/\.run-status\s*\{[^}]*white-space:\s*nowrap;/)
   })
 
   it('keeps jump notices visible while the run list is scrolled', async () => {
     const fs = await import('node:fs/promises')
     const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
-    const noticeStyles = css.match(/\.operator-run-jump-notice\s*\{([^}]*)\}/s)?.[1] ?? ''
+    const noticeStyles = css.match(/\.operator-run-jump-notice\s*\{([^}]*)\}/)?.[1] ?? ''
     expect(noticeStyles).toMatch(/position:\s*sticky;/)
     expect(noticeStyles).toMatch(/top:\s*calc\(var\(--space-12\)\s*\+\s*var\(--space-3\)\);/)
   })
