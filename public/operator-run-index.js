@@ -39,6 +39,32 @@ const STATUS_LABELS = {
 }
 
 /**
+ * Run-summary status ↔ CSS class token, the single two-way map for the run-list card badge.
+ *
+ * Tokens are hyphenated (`waiting_for_question` → `status-waiting-for-question`), matching the
+ * stream emitter (operator-stream.js) and the rules in web/src/index.css. The card emitter below
+ * writes through this map, and web/src/operator/runtime.ts reads a card's class back through its
+ * mirror (STATUS_CLASS_TOKENS; a parity test pins the two together). Underscore tokens are not
+ * in the map, so they never read back as a status.
+ */
+export const RUN_STATUS_CLASS_TOKENS = Object.freeze({
+  queued: 'status-queued',
+  running: 'status-running',
+  waiting_for_approval: 'status-waiting-for-approval',
+  waiting_for_question: 'status-waiting-for-question',
+  succeeded: 'status-succeeded',
+  failed: 'status-failed',
+  cancelled: 'status-cancelled',
+})
+
+const STATUS_BY_CLASS_TOKEN = new Map(Object.entries(RUN_STATUS_CLASS_TOKENS).map(([status, token]) => [token, status]))
+
+/** The summary status a class token stands for, or undefined for any token the map does not own. */
+export function summaryStatusFromClassToken(token) {
+  return typeof token === 'string' ? STATUS_BY_CLASS_TOKEN.get(token) : undefined
+}
+
+/**
  * data-role of the hidden checkout-detail region (provenance / preparation). Unit-3 anatomy
  * only: this module creates and shows/hides the region; operator-stream.js renders into it.
  */
@@ -595,8 +621,9 @@ function cardShowsTerminalStatus(card) {
   const statusEl = card.querySelector('[data-role="run-status"]')
   if (statusEl === null || statusEl === undefined) return false
   const className = typeof statusEl.className === 'string' ? statusEl.className : ''
-  for (const status of TERMINAL_RUN_STATUSES) {
-    if (className.includes(`status-${status}`)) return true
+  for (const token of className.split(/\s+/)) {
+    const status = summaryStatusFromClassToken(token)
+    if (status !== undefined && TERMINAL_RUN_STATUSES.has(status)) return true
   }
   return false
 }
@@ -607,8 +634,17 @@ function cardShowsTerminalStatus(card) {
  * Never touches data-run-id or data-expanded on the card itself. The one structural
  * addition is a missing <time> (see below), built with the same safe-DOM shape as renderRunCard.
  * Never called for the active-stream card (the diff write-protects it).
+ *
+ * Terminal is sticky: a card already showing succeeded/failed/cancelled never takes a
+ * non-terminal view. A run ID never returns to a non-terminal status once terminal (a launch
+ * mints a fresh ID), so such a view is stale — a list fetched before the run finished, or one
+ * racing the stream's own terminal write. The whole update is skipped: the label, aria-label and
+ * reason all describe the terminal status and must stay together. Terminal → terminal and
+ * non-terminal → anything still update.
  */
 function updateCardInPlace(card, view) {
+  if (!TERMINAL_RUN_STATUSES.has(view.status) && cardShowsTerminalStatus(card)) return
+
   card.setAttribute(
     'aria-label',
     `Run, status: ${view.statusLabel}${view.reasonLabel === undefined ? '' : `, reason: ${view.reasonLabel}`}`,
@@ -617,7 +653,7 @@ function updateCardInPlace(card, view) {
   if (typeof card.querySelector === 'function') {
     const statusEl = card.querySelector('[data-role="run-status"]')
     if (statusEl !== null && statusEl !== undefined) {
-      statusEl.className = `run-status status-${view.status}`
+      statusEl.className = statusClassName(view.status)
       statusEl.textContent = view.statusLabel
     }
 
@@ -652,6 +688,11 @@ function updateCardInPlace(card, view) {
   }
 }
 
+/** The card badge's class list: the base class plus the status token from the map. */
+function statusClassName(status) {
+  return Object.hasOwn(RUN_STATUS_CLASS_TOKENS, status) ? `run-status ${RUN_STATUS_CLASS_TOKENS[status]}` : 'run-status'
+}
+
 /** Safe DOM writes only — no innerHTML for Gateway content. */
 function renderRunCard(view, onSelectRun) {
   const card = document.createElement('div')
@@ -670,7 +711,7 @@ function renderRunCard(view, onSelectRun) {
   statusGroup.dataset.role = 'run-status-group'
 
   const statusSpan = document.createElement('span')
-  statusSpan.className = `run-status status-${view.status}`
+  statusSpan.className = statusClassName(view.status)
   statusSpan.dataset.role = 'run-status'
   statusSpan.textContent = view.statusLabel
   statusGroup.append(statusSpan)

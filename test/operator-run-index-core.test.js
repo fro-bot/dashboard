@@ -5,7 +5,7 @@
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 
-import {buildRunSafeView, FETCH_TIMEOUT_MS, fetchRunIndex, formatRelativeTime, initOperatorRunIndex, markCardExpandedForLaunch, markRunStreamAttached, parseRunSummaryItem, parseRunSummaryList, resetRunIndexState, RUN_INDEX_CAP, FAILURE_REASON_LABELS as RUN_INDEX_FAILURE_REASON_LABELS, VALID_RUN_SUMMARY_STATUSES} from '../public/operator-run-index.js'
+import {buildRunSafeView, FETCH_TIMEOUT_MS, fetchRunIndex, formatRelativeTime, initOperatorRunIndex, markCardExpandedForLaunch, markRunStreamAttached, parseRunSummaryItem, parseRunSummaryList, resetRunIndexState, RUN_INDEX_CAP, FAILURE_REASON_LABELS as RUN_INDEX_FAILURE_REASON_LABELS, RUN_STATUS_CLASS_TOKENS, summaryStatusFromClassToken, VALID_RUN_SUMMARY_STATUSES} from '../public/operator-run-index.js'
 import {FAILURE_REASON_LABELS as STREAM_FAILURE_REASON_LABELS} from '../public/operator-stream.js'
 import {isOperatorFailureKind, OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
 import {parseRunSummary as parseServerRunSummary} from '../src/gateway/operator-contract/run-summary.ts'
@@ -2266,21 +2266,224 @@ function renderRunCardForTest(cards, summaryLike) {
   return card
 }
 
+function statusElOf(card) {
+  return card.querySelector('[data-role="run-status"]')
+}
+
+describe('status class token map — summary status ↔ hyphenated class token', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  const STATUSES = Array.from(VALID_RUN_SUMMARY_STATUSES)
+
+  it('maps all seven summary statuses to their hyphenated token, and nothing else', () => {
+    expect(STATUSES).toHaveLength(7)
+    expect(Object.keys(RUN_STATUS_CLASS_TOKENS).toSorted()).toEqual([...STATUSES].toSorted())
+    for (const status of STATUSES) {
+      expect(RUN_STATUS_CLASS_TOKENS[status], status).toBe(`status-${status.replaceAll('_', '-')}`)
+    }
+    expect(RUN_STATUS_CLASS_TOKENS.waiting_for_question).toBe('status-waiting-for-question')
+    expect(RUN_STATUS_CLASS_TOKENS.waiting_for_approval).toBe('status-waiting-for-approval')
+  })
+
+  it('round-trips every status: summary → token → summary', () => {
+    for (const status of STATUSES) {
+      expect(summaryStatusFromClassToken(RUN_STATUS_CLASS_TOKENS[status]), status).toBe(status)
+    }
+  })
+
+  it('rejects underscore, unknown, stream-only and prototype-key tokens', () => {
+    for (const token of [
+      'status-waiting_for_question',
+      'status-waiting_for_approval',
+      'waiting-for-question',
+      'status-pending',
+      'status-blocked',
+      'status-unavailable',
+      'status-evil',
+      'status-',
+      'status-constructor',
+      '__proto__',
+      '',
+    ]) {
+      expect(summaryStatusFromClassToken(token), token).toBeUndefined()
+    }
+    expect(summaryStatusFromClassToken(undefined)).toBeUndefined()
+    expect(summaryStatusFromClassToken(42)).toBeUndefined()
+  })
+
+  it('a collapsed card renders every status with its hyphenated class and its label', async () => {
+    const labels = {
+      queued: 'Queued',
+      running: 'Running',
+      waiting_for_approval: 'Waiting for approval',
+      waiting_for_question: 'Waiting for answer',
+      succeeded: 'Succeeded',
+      failed: 'Failed',
+      cancelled: 'Cancelled',
+    }
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns(STATUSES.map(status => makeValidSummary({runId: `run-tok-${status}`, status})))
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(7)
+    for (const status of STATUSES) {
+      const card = cards.find(c => c.dataset.runId === `run-tok-${status}`)
+      const statusEl = statusElOf(card)
+      expect(statusEl.className, status).toBe(`run-status ${RUN_STATUS_CLASS_TOKENS[status]}`)
+      expect(statusEl.className, status).not.toContain('_')
+      expect(statusEl.textContent, status).toBe(labels[status])
+      expect(card.attributes['aria-label'], status).toContain(`status: ${labels[status]}`)
+    }
+  })
+
+  it('an in-place update to a waiting status writes the hyphenated class and label', async () => {
+    const runId = 'run-tok-update-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    const statusEl = statusElOf(cards[0])
+    expect(statusEl.className).toBe('run-status status-running')
+
+    stubFetchRuns([makeValidSummary({runId, status: 'waiting_for_question'})])
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    expect(statusEl.className).toBe('run-status status-waiting-for-question')
+    expect(statusEl.textContent).toBe('Waiting for answer')
+
+    stubFetchRuns([makeValidSummary({runId, status: 'waiting_for_approval'})])
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    expect(statusEl.className).toBe('run-status status-waiting-for-approval')
+    expect(statusEl.textContent).toBe('Waiting for approval')
+  })
+
+  it('terminal is sticky: a card showing succeeded keeps it when a waiting or running view arrives', async () => {
+    const runId = 'run-tok-sticky-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([makeValidSummary({runId, status: 'succeeded'})])
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    const card = cards[0]
+    const statusEl = statusElOf(card)
+    const ariaBefore = card.attributes['aria-label']
+    expect(statusEl.className).toBe('run-status status-succeeded')
+
+    for (const status of ['waiting_for_question', 'waiting_for_approval', 'running', 'queued']) {
+      stubFetchRuns([makeValidSummary({runId, status})])
+      await initOperatorRunIndex({endpointBase: '/operator'})
+      expect(cards[0], status).toBe(card)
+      expect(statusEl.className, status).toBe('run-status status-succeeded')
+      expect(statusEl.textContent, status).toBe('Succeeded')
+      expect(card.attributes['aria-label'], status).toBe(ariaBefore)
+    }
+  })
+
+  it.each(['succeeded', 'failed', 'cancelled'])('terminal is sticky for %s as the shown status', async shown => {
+    const runId = `run-tok-sticky-${shown}`
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([makeValidSummary({runId, status: shown})])
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    const statusEl = statusElOf(cards[0])
+
+    stubFetchRuns([makeValidSummary({runId, status: 'waiting_for_question'})])
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(statusEl.className).toBe(`run-status ${RUN_STATUS_CLASS_TOKENS[shown]}`)
+  })
+
+  it('stickiness keeps a failed card’s reason label when a non-terminal view arrives', async () => {
+    const runId = 'run-tok-sticky-reason-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([makeValidSummary({runId, status: 'failed', failureKind: 'inactivity-timeout'})])
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    const reasonEl = cards[0].querySelector('[data-role="run-reason"]')
+    const reasonBefore = reasonEl.textContent
+    expect(reasonBefore).not.toBe('')
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(reasonEl.textContent).toBe(reasonBefore)
+  })
+
+  it('stickiness does not block non-terminal moves or terminal-to-terminal corrections', async () => {
+    const runId = 'run-tok-move-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const statusClassAfter = async status => {
+      stubFetchRuns([makeValidSummary({runId, status})])
+      await initOperatorRunIndex({endpointBase: '/operator'})
+      return statusElOf(cards[0]).className
+    }
+
+    expect(await statusClassAfter('queued')).toBe('run-status status-queued')
+    expect(await statusClassAfter('running')).toBe('run-status status-running')
+    expect(await statusClassAfter('waiting_for_question')).toBe('run-status status-waiting-for-question')
+    expect(await statusClassAfter('running')).toBe('run-status status-running')
+    expect(await statusClassAfter('succeeded')).toBe('run-status status-succeeded')
+    expect(await statusClassAfter('failed')).toBe('run-status status-failed')
+  })
+
+  it('a stream-written terminal class (hyphenated, from updateDOM) on an adopted card is also sticky', async () => {
+    const runId = 'run-tok-adopt-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimisticCard = makeStatusOnlyOptimisticCard(cards, runId)
+    const statusEl = statusElOf(optimisticCard)
+    statusEl.className = 'run-status status-failed'
+    statusEl.textContent = 'Failed'
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(1)
+    expect(statusEl.className).toBe('run-status status-failed')
+    expect(statusEl.textContent).toBe('Failed')
+  })
+})
+
+/** Parse `#rrggbb` into [r, g, b]. */
+function hexToRgb(hex) {
+  const m = hex.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i)
+  if (m === null) throw new Error(`not a hex color: ${hex}`)
+  return [Number.parseInt(m[1], 16), Number.parseInt(m[2], 16), Number.parseInt(m[3], 16)]
+}
+
+function relativeLuminance([r, g, b]) {
+  const lin = c => {
+    const v = c / 255
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4
+  }
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+}
+
+function contrastRatio(a, b) {
+  const [hi, lo] = [relativeLuminance(a), relativeLuminance(b)].toSorted((x, y) => y - x)
+  return (hi + 0.05) / (lo + 0.05)
+}
+
 describe('CSS selector ↔ status emitter agreement', () => {
-  it('has a .status-<value> selector in web/src/index.css for every valid status', async () => {
+  it('has a .status-<token> selector in web/src/index.css, in both themes, for every token the emitter can write', async () => {
     const fs = await import('node:fs/promises')
     const cssPath = new URL('../web/src/index.css', import.meta.url).pathname
     const cssContent = await fs.readFile(cssPath, 'utf8')
 
-    // All core index statuses plus the optimistic pending state
-    const coreStatuses = Array.from(VALID_RUN_SUMMARY_STATUSES)
-    const requiredStatuses = [...coreStatuses, 'pending', 'blocked', 'waiting_for_approval', 'waiting_for_question']
+    // Every token the run index can emit (the map covers all seven summary statuses, both waiting
+    // ones included) plus the optimistic pending state and the stream-only blocked status.
+    const tokens = [...Object.values(RUN_STATUS_CLASS_TOKENS), 'status-pending', 'status-blocked']
+    expect(tokens).toContain('status-waiting-for-approval')
+    expect(tokens).toContain('status-waiting-for-question')
 
-    // The stream emitter hyphenates every status class (`waiting_for_approval` → `status-waiting-for-approval`).
-    for (const status of requiredStatuses) {
-      const expectedSelector = `.run-status.status-${status.replaceAll('_', '-')}`
-      expect(cssContent).toContain(expectedSelector)
-      expect(cssContent).toContain(`[data-theme="light"] ${expectedSelector}`)
+    for (const token of tokens) {
+      const expectedSelector = `.run-status.${token}`
+      expect(cssContent, token).toContain(expectedSelector)
+      expect(cssContent, token).toContain(`[data-theme="light"] ${expectedSelector}`)
     }
 
     // The emitter never produces an underscore status class, so such a selector could never match.
@@ -2301,6 +2504,32 @@ describe('CSS selector ↔ status emitter agreement', () => {
     expect(cssContent).toContain('.run-status-group')
     expect(cssContent).toContain('.run-reason')
     expect(cssContent).toContain('.run-reason:empty')
+  })
+
+  it.each(['status-waiting-for-approval', 'status-waiting-for-question'])('light theme: %s badge text meets 4.5:1 on a collapsed card', async token => {
+    const fs = await import('node:fs/promises')
+    const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
+    const tokensCss = await fs.readFile(new URL('../web/src/styles/tokens.css', import.meta.url).pathname, 'utf8')
+
+    const lightTokens = tokensCss.match(/\[data-theme="light"\] \{([^}]*)\}/)?.[1] ?? ''
+    const lightColor = name => hexToRgb(lightTokens.match(new RegExp(`--${name}: (#[0-9a-fA-F]{6})`))?.[1] ?? '')
+    const [warning, text, bg] = [lightColor('color-warning'), lightColor('color-text'), lightColor('color-bg')]
+
+    const rule = css.match(new RegExp(String.raw`\[data-theme="light"\] \.run-status\.${token}\s*\{([^}]*)\}`))?.[1] ?? ''
+    expect(rule, `light rule for ${token}`).not.toBe('')
+    const tint = rule.match(/background:\s*rgba\((\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\)/)
+    expect(tint, 'light background tint').not.toBeNull()
+    const alpha = Number(tint[4])
+    const badgeBg = [1, 2, 3].map((i, channel) => Number(tint[i]) * alpha + bg[channel] * (1 - alpha))
+
+    // Text colour: the light rule's own override when it declares one; otherwise the dark-theme
+    // rule's var(--color-warning) still applies.
+    const mix = rule.match(/color:\s*color-mix\(in srgb,\s*var\(--color-warning\)\s+(\d+)%,\s*var\(--color-text\)\s+(\d+)%\)/)
+    const fg = mix === null
+      ? warning
+      : warning.map((v, channel) => (v * Number(mix[1]) + text[channel] * Number(mix[2])) / 100)
+
+    expect(contrastRatio(fg, badgeBg)).toBeGreaterThanOrEqual(4.5)
   })
 })
 

@@ -13,6 +13,15 @@ export type RunSummaryStatus =
   | 'failed'
   | 'cancelled'
 
+/**
+ * Run-summary status ↔ hyphenated CSS class token (`waiting_for_question` → `status-waiting-for-question`).
+ * The card emitter writes through it; web/src/operator/runtime.ts mirrors it to read a card's class back.
+ */
+export declare const RUN_STATUS_CLASS_TOKENS: Readonly<Record<RunSummaryStatus, string>>
+
+/** The summary status a class token stands for, or undefined for a token the map does not own. */
+export declare function summaryStatusFromClassToken(token: unknown): RunSummaryStatus | undefined
+
 /** Operator-safe failure-reason code. */
 export type FailureKind =
   | 'inactivity-timeout'

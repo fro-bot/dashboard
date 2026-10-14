@@ -24,13 +24,15 @@
  */
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {VALID_RUN_SUMMARY_STATUSES} from '../../../public/operator-run-index.js'
+import {RUN_STATUS_CLASS_TOKENS, VALID_RUN_SUMMARY_STATUSES} from '../../../public/operator-run-index.js'
 import {PINNED_CONTRACT_VERSION} from '../../../public/operator-stream.js'
 import {
   createOperatorRuntime,
   discoverCardStreamTargets,
+  discoverCardSummaryStatus,
   MAX_HASH_ID_LENGTH,
   sanitizeRunIdFromHash,
+  STATUS_CLASS_TOKENS,
   type OperatorRuntimeHandle,
   type OperatorRuntimeOptions,
 } from './runtime.ts'
@@ -863,11 +865,10 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
   })
 
   it('every status the run index accepts, waiting ones included, is passed as summaryStatus', async () => {
-    // The class token here is the one the run index writes today (the raw status). The status-token
-    // map in the next unit replaces it; the allowlist parity this pins stays.
-    const statuses = [...VALID_RUN_SUMMARY_STATUSES]
+    // The class token is the one the run index emits: RUN_STATUS_CLASS_TOKENS, hyphenated.
+    const statuses = [...VALID_RUN_SUMMARY_STATUSES] as (keyof typeof RUN_STATUS_CLASS_TOKENS)[]
     expect(statuses).toHaveLength(7)
-    document.body.innerHTML = `${statuses.map(status => cardHtml(`run-q-${status}`, `status-${status}`)).join('')}<div data-role="stream-status"></div>`
+    document.body.innerHTML = `${statuses.map(status => cardHtml(`run-q-${status}`, RUN_STATUS_CLASS_TOKENS[status])).join('')}<div data-role="stream-status"></div>`
     const {runtime, initCalls, select} = await mountLoader()
 
     for (const status of statuses) select(`run-q-${status}`)
@@ -876,15 +877,42 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
     runtime.cleanup()
   })
 
-  it('a status class outside the run-summary allowlist is never passed as summaryStatus', async () => {
-    document.body.innerHTML = `${cardHtml('run-q-wait', 'status-waiting-for-approval')}${cardHtml('run-q-evil', 'status-evil')}${cardHtml('run-q-none', '')}<div data-role="stream-status"></div>`
+  it.each([
+    ['waiting_for_question', 'status-waiting-for-question'],
+    ['waiting_for_approval', 'status-waiting-for-approval'],
+  ] as const)('a waiting class read from a card maps to the %s summary status', async (status, token) => {
+    document.body.innerHTML = `${cardHtml('run-q-wait', token)}<div data-role="stream-status"></div>`
     const {runtime, initCalls, select} = await mountLoader()
 
     select('run-q-wait')
-    select('run-q-evil')
-    select('run-q-none')
 
-    expect(initCalls).toHaveLength(3)
+    expect(discoverCardSummaryStatus('run-q-wait')).toBe(status)
+    expect(initCalls).toHaveLength(1)
+    expect(initCalls[0]?.opts.summaryStatus).toBe(status)
+    runtime.cleanup()
+  })
+
+  it('the runtime class-token map mirrors the run index map exactly', () => {
+    expect(Object.keys(RUN_STATUS_CLASS_TOKENS).toSorted()).toEqual([...VALID_RUN_SUMMARY_STATUSES].toSorted())
+    expect(STATUS_CLASS_TOKENS).toEqual({...RUN_STATUS_CLASS_TOKENS})
+  })
+
+  it('a status class outside the run-summary allowlist is never passed as summaryStatus', async () => {
+    // Underscore tokens (the old emitter output) and unknown tokens are rejected; only the hyphenated
+    // token the run index emits is read back.
+    document.body.innerHTML = [
+      cardHtml('run-q-under-q', 'status-waiting_for_question'),
+      cardHtml('run-q-under-a', 'status-waiting_for_approval'),
+      cardHtml('run-q-evil', 'status-evil'),
+      cardHtml('run-q-pending', 'status-pending'),
+      cardHtml('run-q-none', ''),
+      '<div data-role="stream-status"></div>',
+    ].join('')
+    const {runtime, initCalls, select} = await mountLoader()
+
+    for (const id of ['run-q-under-q', 'run-q-under-a', 'run-q-evil', 'run-q-pending', 'run-q-none']) select(id)
+
+    expect(initCalls).toHaveLength(5)
     for (const call of initCalls) expect('summaryStatus' in call.opts).toBe(false)
     runtime.cleanup()
   })

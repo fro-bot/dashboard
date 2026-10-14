@@ -72,31 +72,37 @@ export function discoverCardStreamTargets(runId: string): {
 }
 
 /**
- * The run-list summary statuses the run index parser keeps (public/operator-run-index.js
- * VALID_RUN_SUMMARY_STATUSES). The stream-only blocked status is not a summary.
+ * Run-list summary status → hyphenated class token: a mirror of RUN_STATUS_CLASS_TOKENS in
+ * public/operator-run-index.js, which the run index writes onto each card's run-status element.
+ * The seven summary statuses are exactly the run index parser's VALID_RUN_SUMMARY_STATUSES; the
+ * stream-only blocked status is not a summary.
+ *
+ * Mirrored, not imported: this file only takes types from public/ — the run index is loaded at
+ * runtime from /static (see _runIndexSpecifier) and must not be bundled a second time into the
+ * client. runtime.test.ts pins the two maps together (parity), so they cannot drift silently.
  */
-const SUMMARY_STATUSES: ReadonlySet<RunSummaryStatus> = new Set<RunSummaryStatus>([
-  'queued',
-  'running',
-  'waiting_for_approval',
-  'waiting_for_question',
-  'succeeded',
-  'failed',
-  'cancelled',
-])
+export const STATUS_CLASS_TOKENS = {
+  queued: 'status-queued',
+  running: 'status-running',
+  waiting_for_approval: 'status-waiting-for-approval',
+  waiting_for_question: 'status-waiting-for-question',
+  succeeded: 'status-succeeded',
+  failed: 'status-failed',
+  cancelled: 'status-cancelled',
+} as const satisfies Record<RunSummaryStatus, string>
 
-function isRunSummaryStatus(value: string): value is RunSummaryStatus {
-  return (SUMMARY_STATUSES as ReadonlySet<string>).has(value)
-}
+const STATUS_BY_CLASS_TOKEN: ReadonlyMap<string, RunSummaryStatus> = new Map(
+  (Object.entries(STATUS_CLASS_TOKENS) as [RunSummaryStatus, string][]).map(([status, token]) => [token, status]),
+)
 
 /**
  * The expanded card's run-list summary status, or undefined when the card has none to offer.
  *
- * Source: the card's run-status element carries a `status-<value>` class that the run index
- * writes only from its parsed summary (an allowlist-validated value) — no free text is read.
- * The token is re-checked against the same allowlist here, so anything else (the optimistic
- * `status-pending`, stream-only statuses, an unknown token) yields undefined. An optimistic
- * launch card carries no run-list summary yet, so it never offers one.
+ * Source: the card's run-status element carries the hyphenated class token the run index writes
+ * only from its parsed summary (an allowlist-validated value) — no free text is read. The token
+ * is mapped back through STATUS_CLASS_TOKENS, so anything else (an underscore token, the
+ * optimistic `status-pending`, stream-only statuses, an unknown token) yields undefined. An
+ * optimistic launch card carries no run-list summary yet, so it never offers one.
  *
  * Exported so tests exercise the exact production lookup.
  */
@@ -108,9 +114,8 @@ export function discoverCardSummaryStatus(runId: string): RunSummaryStatus | und
   const statusEl = card.querySelector('[data-role="run-status"]')
   if (statusEl === null) return undefined
   for (const token of Array.from(statusEl.classList)) {
-    if (!token.startsWith('status-')) continue
-    const status = token.slice('status-'.length)
-    if (isRunSummaryStatus(status)) return status
+    const status = STATUS_BY_CLASS_TOKEN.get(token)
+    if (status !== undefined) return status
   }
   return undefined
 }

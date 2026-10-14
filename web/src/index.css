@@ -250,8 +250,11 @@
   color: var(--color-warning);
   border-color: rgba(255, 193, 7, 0.2);
 }
+/* Light theme: --color-warning (#e65100) is AA Large only; on the 10% tint it is 3.3:1. Darken the
+   small badge text toward --color-text, as .checkout-detail__flags does, to clear 4.5:1. */
 [data-theme="light"] .run-status.status-waiting-for-approval {
   background: rgba(230, 81, 0, 0.1);
+  color: color-mix(in srgb, var(--color-warning) 65%, var(--color-text) 35%);
 }
 
 .run-status.status-waiting-for-question {
@@ -261,6 +264,7 @@
 }
 [data-theme="light"] .run-status.status-waiting-for-question {
   background: rgba(230, 81, 0, 0.1);
+  color: color-mix(in srgb, var(--color-warning) 65%, var(--color-text) 35%);
 }
 
 .run-status.status-pending,
