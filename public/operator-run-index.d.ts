@@ -117,7 +117,7 @@ export declare function refreshOperatorRunIndex(): Promise<boolean>
 /**
  * How an init ended: 'loaded' (cards shown), 'empty' (no runs), 'unavailable' (a non-auth failure),
  * 'auth-required' (401/403, after `onAuthRequired`), 'stale' (a reset or a newer init replaced it
- * while it fetched; it wrote nothing).
+ * while it fetched; it rendered no result and left the loading state to the newer owner).
  */
 export type RunIndexInitOutcome = 'loaded' | 'empty' | 'unavailable' | 'auth-required' | 'stale'
 

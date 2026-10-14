@@ -397,7 +397,7 @@ export function resetRunIndexState() {
  * Load the run list and render it. Resolves with how the load ended, so the caller never has to read
  * it back from the DOM: 'loaded' (cards shown), 'empty' (no runs), 'unavailable' (a non-auth failure,
  * or no document), 'auth-required' (401/403, after onAuthRequired), 'stale' (a reset or a newer init
- * replaced this one while it fetched; it wrote nothing).
+ * replaced this one while it fetched; it rendered no result and left the loading state to the newer owner).
  */
 export async function initOperatorRunIndex(opts) {
   const myGeneration = ++_runIndexGeneration
