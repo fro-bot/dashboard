@@ -675,6 +675,18 @@ describe('nextStreamState — ready frame', () => {
     expect(state.connection).toBe('drift')
   })
 
+  it('drifts on the two minors behind the pin: an older gateway can never pass as current', () => {
+    const [major = 0, minor = 0] = PINNED_CONTRACT_VERSION.split('.').map(Number)
+    const olderMinors = [1, 2].map(back => `${major}.${minor - back}.0`)
+    expect(olderMinors).toHaveLength(2)
+    for (const contractVersion of olderMinors) {
+      expect(contractVersion).not.toBe(PINNED_CONTRACT_VERSION)
+      const state = nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion}})
+      expect(state.connection, contractVersion).toBe('drift')
+      expect(state.shouldReconnect, contractVersion).toBe(false)
+    }
+  })
+
   it('does not retain any run status on drift', () => {
     // Pre-populate a run, then drift
     const withRun = nextStreamState(INITIAL_STATE, {
@@ -9811,6 +9823,21 @@ describe('question status — label, wire acceptance and styling', () => {
     expect((await paintedStatus([statusRecord('queued'), qSse(qOpen('req-q-1'))])).textContent).toBe('Queued')
     resetQuestionPageStore()
     expect((await paintedStatus([statusRecord('running'), qSse(qOpen('req-q-1')), statusRecord('succeeded')])).textContent).toBe('Succeeded')
+  })
+
+  it.each([
+    ['queued', 'Queued'],
+    ['running', 'Running'],
+    ['waiting_for_approval', 'Waiting for approval'],
+    ['waiting_for_question', 'Waiting for answer'],
+    ['succeeded', 'Succeeded'],
+    ['failed', 'Failed'],
+    ['cancelled', 'Cancelled'],
+  ])('paints the label for the wire summary status %s, never the raw string', async (wire, label) => {
+    resetQuestionPageStore()
+    const status = await paintedStatus([statusRecord(wire)])
+    expect(status.textContent).toBe(label)
+    expect(status.textContent).not.toBe(wire)
   })
 
   it('has a CSS rule matching the class the status emitter produces, in both themes', async () => {

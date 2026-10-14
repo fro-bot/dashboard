@@ -30,7 +30,7 @@
 // ---------------------------------------------------------------------------
 
 /** Contract version this client expects on the ready frame. */
-export const PINNED_CONTRACT_VERSION = '1.9.0'
+export const PINNED_CONTRACT_VERSION = '1.11.0'
 
 /** Base delay in milliseconds for exponential backoff. */
 export const RETRY_BASE_MS = 1000
@@ -113,7 +113,15 @@ const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
  * Statuses a run-list summary can carry (the run index parser keeps only these). The optional
  * `summaryStatus` init option is accepted only from this set; anything else is dropped.
  */
-const SUMMARY_STATUSES = new Set(['queued', 'running', 'succeeded', 'failed', 'cancelled'])
+const SUMMARY_STATUSES = new Set([
+  'queued',
+  'running',
+  'waiting_for_approval',
+  'waiting_for_question',
+  'succeeded',
+  'failed',
+  'cancelled',
+])
 
 /** In-card copy for an expired run snapshot. Dashboard-owned; never wire text. */
 const OUTPUT_UNAVAILABLE_COPY = 'Output no longer available.'

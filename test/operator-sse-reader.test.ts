@@ -680,6 +680,29 @@ describe('createOperatorSseReader — contract-version gate', () => {
     expect(closed).toBe(true)
   })
 
+  it('drifts on the two minors behind the pin: an older gateway can never pass as current', async () => {
+    const [major = 0, minor = 0] = OPERATOR_CONTRACT_VERSION.split('.').map(Number)
+    for (const back of [1, 2]) {
+      const olderMinor = `${major}.${minor - back}.0`
+      expect(olderMinor).not.toBe(OPERATOR_CONTRACT_VERSION)
+      const sseText = `event: ready\ndata: {"contractVersion":"${olderMinor}"}\n\n`
+      const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseText]))
+      const reader = createOperatorSseReader({fetchImpl})
+
+      const events: RunStreamFrame[] = []
+      const errors: Error[] = []
+      await reader.open('/operator/runs/run-001/stream', {
+        onEvent: frame => events.push(frame),
+        onError: err => errors.push(err),
+        onClose: () => {},
+      })
+
+      expect(errors, olderMinor).toHaveLength(1)
+      expect(errors[0]?.message).toContain('contract-drift')
+      expect(events).toHaveLength(0)
+    }
+  })
+
   it('contract-drift error message does not echo the mismatched version', async () => {
     const sseText = `event: ready\ndata: {"contractVersion":"${DRIFTED_VERSION}"}\n\n`
     const {fetchImpl} = makeFakeFetch(makeResponse(200, [sseText]))

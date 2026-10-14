@@ -94,6 +94,9 @@ The following upstream exports are omitted because they depend on upstream-only 
   `RunCoreErrorKind` from gateway-only execute code. `run-status.ts` keeps a local
   `OPERATOR_FAILURE_KINDS` set and `isOperatorFailureKind` instead.
 - `DecisionInput` — requires `ApprovalActor` from `../approvals/registry.js`
+- `toRunSummary` — requires `RunState` from `@fro-bot/runtime`
+- `OperatorPushVapidKeyResponse`, the subscription metadata and request types — not vendored from `responses.ts`;
+  `push.ts` is the dashboard's own copy of those shapes.
 
 The PUBLIC frozen types (OperatorDecisionState, OperatorWebStatus, OperatorRunStatus,
 OperatorSessionInfo, OperatorCsrfToken, OperatorOk, OperatorError, OperatorIdentity,

@@ -15,6 +15,8 @@ import type {
   OperatorLayoutRefusalReason,
   OperatorObstructionKind,
   OperatorOutputFrame,
+  OperatorPushHealthStatus,
+  OperatorPushTriggerKind,
   OperatorRunStatus,
   OperatorUpdateFailureReason,
   OperatorWebStatus,
@@ -55,6 +57,8 @@ import {
   MAX_QUESTIONS_PER_REQUEST,
   OBSTRUCTION_KINDS,
   OPERATOR_CONTRACT_VERSION,
+  OPERATOR_PUSH_HEALTH_STATUSES,
+  OPERATOR_PUSH_TRIGGER_KINDS,
   parseOperatorCancelResponse,
   parseOperatorCheckoutPreparation,
   parseOperatorCheckoutProvenance,
@@ -499,6 +503,44 @@ export type BrowserQuestionDecisionStatesAreExact = AssertTrue<
 export type BrowserQuestionInvalidReasonsAreExact = AssertTrue<
   IsExactMatch<(typeof BROWSER_QUESTION_INVALID_REASONS)[number], QuestionDecisionInvalidReason>
 >
+// Exhaustive over the summary union: adding or removing a member without updating this record fails tsc.
+const SUMMARY_STATUS_RECORD = {
+  queued: true,
+  running: true,
+  waiting_for_approval: true,
+  waiting_for_question: true,
+  succeeded: true,
+  failed: true,
+  cancelled: true,
+} satisfies Record<RunSummaryType['status'], true>
+const SUMMARY_STATUS_RECORD_KEYS = Object.keys(SUMMARY_STATUS_RECORD) as RunSummaryType['status'][]
+
+// The push vocabularies are readonly tuples; their unions are derived from them, so each record
+// below fails tsc if the tuple and the type it names diverge.
+const PUSH_HEALTH_STATUS_RECORD = {
+  ready: true,
+  degraded: true,
+  unknown: true,
+} satisfies Record<OperatorPushHealthStatus, true>
+
+const PUSH_TRIGGER_KIND_RECORD = {
+  approval: true,
+  question: true,
+  run_failed: true,
+} satisfies Record<OperatorPushTriggerKind, true>
+
+describe('push runtime vocabularies', () => {
+  it('health statuses: the exported list equals the union, with no duplicates', () => {
+    expect([...OPERATOR_PUSH_HEALTH_STATUSES].toSorted()).toEqual(Object.keys(PUSH_HEALTH_STATUS_RECORD).toSorted())
+    expect(new Set(OPERATOR_PUSH_HEALTH_STATUSES).size).toBe(OPERATOR_PUSH_HEALTH_STATUSES.length)
+  })
+
+  it('trigger kinds: the exported list equals the union, with no duplicates', () => {
+    expect([...OPERATOR_PUSH_TRIGGER_KINDS].toSorted()).toEqual(Object.keys(PUSH_TRIGGER_KIND_RECORD).toSorted())
+    expect(new Set(OPERATOR_PUSH_TRIGGER_KINDS).size).toBe(OPERATOR_PUSH_TRIGGER_KINDS.length)
+  })
+})
+
 export type BrowserStreamRunSummaryStatusIsExact = AssertTrue<
   IsExactMatch<BrowserStreamRunSummaryStatus, RunSummaryType['status']>
 >
@@ -779,10 +821,57 @@ describe('parseOperatorSessionInfo', () => {
     }
   })
 
-  it('accepts extra fields (permissive structural subtyping)', () => {
-    const input = {operatorId: 1, login: 'x', expiresAt: 1000, extra: 'ignored'}
+  it('accepts extra fields but drops them: the DTO is a closed copy', () => {
+    const input = {operatorId: 1, login: 'x', expiresAt: 1000, extra: 'ignored', secret: {nested: true}}
     const result = parseOperatorSessionInfo(input)
     expect(result.success).toBe(true)
+    if (result.success) {
+      expect(Object.keys(result.data).toSorted()).toEqual(['expiresAt', 'login', 'operatorId'])
+      expect(result.data).not.toBe(input)
+    }
+  })
+
+  describe('optional push health', () => {
+    const base = {operatorId: 7, login: 'octocat', expiresAt: 4070908800000}
+
+    it.each(OPERATOR_PUSH_HEALTH_STATUSES)('keeps a valid push status "%s" as {status} only', status => {
+      const push = {status, observedAt: 1, extra: 'dropped'}
+      const result = parseOperatorSessionInfo({...base, push})
+      expect(result.success).toBe(true)
+      if (result.success) {
+        expect(result.data).toEqual({...base, push: {status}})
+        expect(Object.keys(result.data.push ?? {})).toEqual(['status'])
+        expect(result.data.push).not.toBe(push)
+      }
+    })
+
+    it.each([
+      ['an unknown status', {status: 'bad'}],
+      ['a non-string status', {status: 1}],
+      ['a missing status', {}],
+      ['a string', 'x'],
+      ['null', null],
+      ['an array', [{status: 'ready'}]],
+      ['a number', 7],
+    ])('omits push for %s and keeps every other field', (_label, push) => {
+      const result = parseOperatorSessionInfo({...base, push})
+      expect(result.success).toBe(true)
+      if (result.success) {
+        expect(result.data).toEqual(base)
+        expect(Object.hasOwn(result.data, 'push')).toBe(false)
+      }
+    })
+
+    it('omits push when absent', () => {
+      const result = parseOperatorSessionInfo(base)
+      expect(result.success && Object.hasOwn(result.data, 'push')).toBe(false)
+    })
+
+    it('still rejects a missing required field whatever push says', () => {
+      const result = parseOperatorSessionInfo({login: 'octocat', expiresAt: 1, push: {status: 'ready'}})
+      expect(result.success).toBe(false)
+      if (!result.success) expect(result.error.message).toBe('invalid operator session info shape')
+    })
   })
 
   it('rejects string expiresAt (canonical type is number)', () => {
@@ -1335,12 +1424,11 @@ describe('parseRunSummary', () => {
     }
   })
 
-  it('accepts all five valid index statuses', () => {
-    const statuses = ['queued', 'running', 'succeeded', 'failed', 'cancelled'] as const
-    for (const status of statuses) {
+  it('accepts all seven valid summary statuses', () => {
+    for (const status of SUMMARY_STATUS_RECORD_KEYS) {
       const input = {runId: 'run-1', repo: 'fro-bot/agent', status, createdAt: '2026-06-01T00:00:00.000Z'}
       const result = parseRunSummary(input)
-      expect(result.success).toBe(true)
+      expect(result.success, `status "${status}" should parse`).toBe(true)
       if (result.success) {
         expect(result.data.status).toBe(status)
       }
@@ -1357,12 +1445,12 @@ describe('parseRunSummary', () => {
     }
   })
 
-  it('rejects stream-only status: waiting_for_approval', () => {
-    const input = {runId: 'run-1', repo: 'fro-bot/agent', status: 'waiting_for_approval', createdAt: '2026-06-01T00:00:00.000Z'}
+  it.each(['waiting_for_approval', 'waiting_for_question'] as const)('accepts the waiting status %s', status => {
+    const input = {runId: 'run-1', repo: 'fro-bot/agent', status, createdAt: '2026-06-01T00:00:00.000Z'}
     const result = parseRunSummary(input)
-    expect(result.success).toBe(false)
-    if (!result.success) {
-      expect(result.error.message).toBe('invalid run summary shape')
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.status).toBe(status)
     }
   })
 
@@ -1640,12 +1728,25 @@ describe('parseRunSummaryList', () => {
   it('returns empty array when all items are invalid', () => {
     const input = [
       {runId: 'run-1', repo: 'fro-bot/agent', status: 'blocked', createdAt: '2026-06-01T00:00:00.000Z'},
-      {runId: 'run-2', repo: 'fro-bot/agent', status: 'waiting_for_approval', createdAt: '2026-06-01T00:00:00.000Z'},
+      {runId: 'run-2', repo: 'fro-bot/agent', status: 'waiting-for-approval', createdAt: '2026-06-01T00:00:00.000Z'},
     ]
     const result = parseRunSummaryList(input)
     expect(result.success).toBe(true)
     if (result.success) {
       expect(result.data).toHaveLength(0)
+    }
+  })
+
+  it('keeps waiting summaries in the list next to lifecycle ones', () => {
+    const input = [
+      {runId: 'run-1', repo: 'fro-bot/agent', status: 'waiting_for_question', createdAt: '2026-06-01T00:00:00.000Z'},
+      {runId: 'run-2', repo: 'fro-bot/agent', status: 'blocked', createdAt: '2026-06-01T00:00:00.000Z'},
+      {runId: 'run-3', repo: 'fro-bot/agent', status: 'waiting_for_approval', createdAt: '2026-06-01T00:00:00.000Z'},
+    ]
+    const result = parseRunSummaryList(input)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.map(summary => summary.runId)).toEqual(['run-1', 'run-3'])
     }
   })
 

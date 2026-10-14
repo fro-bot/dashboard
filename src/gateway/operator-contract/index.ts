@@ -8,6 +8,7 @@
  * - toOperatorDecisionState: omitted — requires DecisionOutcome (upstream-only registry type)
  * - toOperatorRunStatus: omitted — requires RunState (upstream-only coordination type)
  * - DecisionInput: omitted — requires ApprovalActor (upstream-only registry type)
+ * - toRunSummary: omitted — requires RunState (upstream-only coordination type)
  *
  * The PUBLIC frozen types (unions + response interfaces + parse helpers) are all present.
  *
@@ -93,8 +94,12 @@ export type {
   OperatorCsrfToken,
   OperatorError,
   OperatorOk,
+  OperatorPushHealth,
+  OperatorPushHealthStatus,
+  OperatorPushTriggerKind,
   OperatorSessionInfo,
 } from './responses.ts'
+export {OPERATOR_PUSH_HEALTH_STATUSES, OPERATOR_PUSH_TRIGGER_KINDS} from './responses.ts'
 export {PHASE_TO_WEB_STATUS} from './run-status.ts'
 export type {
   OperatorFailureKind,

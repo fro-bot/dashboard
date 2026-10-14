@@ -8,6 +8,18 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {buildRunSafeView, FETCH_TIMEOUT_MS, fetchRunIndex, formatRelativeTime, initOperatorRunIndex, markCardExpandedForLaunch, markRunStreamAttached, parseRunSummaryItem, parseRunSummaryList, resetRunIndexState, RUN_INDEX_CAP, FAILURE_REASON_LABELS as RUN_INDEX_FAILURE_REASON_LABELS, VALID_RUN_SUMMARY_STATUSES} from '../public/operator-run-index.js'
 import {FAILURE_REASON_LABELS as STREAM_FAILURE_REASON_LABELS} from '../public/operator-stream.js'
 import {isOperatorFailureKind, OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
+import {parseRunSummary as parseServerRunSummary} from '../src/gateway/operator-contract/run-summary.ts'
+
+/** The seven statuses a run summary can carry, with the label each renders. Never the raw wire string. */
+const SUMMARY_STATUS_LABELS = {
+  queued: 'Queued',
+  running: 'Running',
+  waiting_for_approval: 'Waiting for approval',
+  waiting_for_question: 'Waiting for answer',
+  succeeded: 'Succeeded',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+}
 
 function makeValidSummary(overrides = {}) {
   return {
@@ -106,9 +118,10 @@ describe('parseRunSummaryItem — error paths', () => {
     expect(result.success).toBe(false)
   })
 
-  it('rejects stream-only status: waiting_for_approval', () => {
-    const result = parseRunSummaryItem(makeValidSummary({status: 'waiting_for_approval'}))
-    expect(result.success).toBe(false)
+  it.each(['waiting_for_approval', 'waiting_for_question'])('accepts the waiting status %s', status => {
+    const result = parseRunSummaryItem(makeValidSummary({status}))
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data.status).toBe(status)
   })
 
   it('rejects stream-only status: blocked', () => {
@@ -200,15 +213,27 @@ describe('parseRunSummaryList — cap and dedupe', () => {
   })
 })
 
-describe('VALID_RUN_SUMMARY_STATUSES — exact index-only set', () => {
-  it('contains exactly the five index-only statuses', () => {
-    const expected = new Set(['queued', 'running', 'succeeded', 'failed', 'cancelled'])
-    expect(VALID_RUN_SUMMARY_STATUSES).toEqual(expected)
+describe('VALID_RUN_SUMMARY_STATUSES — exact summary set', () => {
+  it('contains exactly the seven summary statuses', () => {
+    expect(VALID_RUN_SUMMARY_STATUSES).toEqual(new Set(Object.keys(SUMMARY_STATUS_LABELS)))
   })
 
-  it('does not contain stream-only statuses', () => {
-    expect(VALID_RUN_SUMMARY_STATUSES.has('waiting_for_approval')).toBe(false)
+  it('does not contain the stream-only blocked status', () => {
     expect(VALID_RUN_SUMMARY_STATUSES.has('blocked')).toBe(false)
+  })
+})
+
+describe('buildRunSafeView — status labels', () => {
+  it.each(Object.entries(SUMMARY_STATUS_LABELS))('labels %s as "%s", never the raw wire string', (status, label) => {
+    const view = buildRunSafeView(makeValidSummary({status}))
+    expect(view.statusLabel).toBe(label)
+    expect(view.statusLabel).not.toBe(status)
+  })
+
+  it('every accepted status has a label (no allowlist entry without a label)', () => {
+    for (const status of VALID_RUN_SUMMARY_STATUSES) {
+      expect(buildRunSafeView(makeValidSummary({status})).statusLabel, status).toBe(SUMMARY_STATUS_LABELS[status])
+    }
   })
 })
 
@@ -724,10 +749,26 @@ describe('parser parity — JS parser mirrors vendored TS parser behavior', () =
   })
 
   it('invalid status: JS parser rejects same invalid statuses as TS parser', () => {
-    const invalidStatuses = ['waiting_for_approval', 'blocked', 'unknown', 'RUNNING', '']
+    const invalidStatuses = ['blocked', 'unknown', 'RUNNING', 'waiting-for-question', '']
     for (const status of invalidStatuses) {
       const result = parseRunSummaryItem(makeValidSummary({status}))
       expect(result.success, `status "${status}" should be rejected`).toBe(false)
+    }
+  })
+
+  it('the stream summaryStatus allowlist equals the index allowlist (read from source: it is not exported)', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-stream.js', 'utf8')
+    const literal = src.match(/const SUMMARY_STATUSES = new Set\(\[([^\]]*)\]\)/)?.[1] ?? ''
+    const streamStatuses = new Set([...literal.matchAll(/'([a-z_]+)'/g)].map(match => match[1]))
+    expect(streamStatuses.size).toBeGreaterThan(0)
+    expect(streamStatuses).toEqual(VALID_RUN_SUMMARY_STATUSES)
+  })
+
+  it('status agreement: the JS and TS parsers agree on all seven statuses and on unknowns', () => {
+    for (const status of [...Object.keys(SUMMARY_STATUS_LABELS), 'blocked', 'unknown', 'RUNNING', '']) {
+      const input = makeValidSummary({status})
+      expect(parseRunSummaryItem(input).success, `status "${status}"`).toBe(parseServerRunSummary(input).success)
     }
   })
 
@@ -3237,12 +3278,13 @@ describe('question region — fetched cards (renderRunCard)', () => {
     expect(list).toContain('QUESTIONS_ROLE')
   })
 
-  it('regression: the run-summary parser still rejects waiting statuses', () => {
-    for (const status of ['waiting_for_question', 'waiting_for_approval', 'blocked']) {
-      const parsed = parseRunSummaryItem(makeValidSummary({runId: 'run-q-reject-001', status}))
-      expect(parsed.success).toBe(false)
+  it('the run-summary parser accepts the waiting statuses and still rejects blocked', () => {
+    for (const status of ['waiting_for_question', 'waiting_for_approval']) {
+      const parsed = parseRunSummaryItem(makeValidSummary({runId: 'run-q-accept-001', status}))
+      expect(parsed.success, status).toBe(true)
+      expect(VALID_RUN_SUMMARY_STATUSES.has(status), status).toBe(true)
     }
-    expect(VALID_RUN_SUMMARY_STATUSES.has('waiting_for_question')).toBe(false)
+    expect(parseRunSummaryItem(makeValidSummary({runId: 'run-q-reject-001', status: 'blocked'})).success).toBe(false)
   })
 })
 

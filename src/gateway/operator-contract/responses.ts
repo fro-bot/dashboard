@@ -19,11 +19,35 @@ import type {TerminalPhase} from './run-status.ts'
  *   Prefer this over `login` for any access-control or audit decision.
  * - `login`: GitHub display login (mutable, for display only).
  * - `expiresAt`: ms-since-epoch timestamp of the sooner of absolute or idle expiry.
+ * - `push`: optional coarse push-health report; omitted entirely when push is not
+ *   configured. Authenticated-only by construction (this is a privileged route).
  */
 export interface OperatorSessionInfo {
   readonly operatorId: number
   readonly login: string
   readonly expiresAt: number
+  readonly push?: OperatorPushHealth
+}
+
+/**
+ * Coarse push health, as last OBSERVED by the gateway (no probing).
+ *
+ * - `ready`: the push subsystem was observed working within the last hour.
+ *   This is observed readiness, NOT guaranteed delivery to a browser.
+ * - `degraded`: the startup self-test failed, or the most recent fresh
+ *   observation of the store backend or relay delivery failed.
+ * - `unknown`: configured, but nothing fresh has been observed (every observation
+ *   is older than one hour). Never read as healthy.
+ *
+ * Push that is not configured is reported by omitting `push` from the session
+ * response, so there is no `disabled` value on the wire.
+ */
+export const OPERATOR_PUSH_HEALTH_STATUSES = ['ready', 'degraded', 'unknown'] as const
+
+export type OperatorPushHealthStatus = (typeof OPERATOR_PUSH_HEALTH_STATUSES)[number]
+
+export interface OperatorPushHealth {
+  readonly status: OperatorPushHealthStatus
 }
 
 /**
@@ -73,3 +97,11 @@ export interface OperatorCancelResponse {
   readonly runId: string
   readonly phase: TerminalPhase
 }
+
+/**
+ * The closed set of events that produce an operator push notification. The
+ * kind crosses the wire as `data.type` on the push payload. The union is
+ * derived from the tuple so the two cannot drift.
+ */
+export const OPERATOR_PUSH_TRIGGER_KINDS = ['approval', 'question', 'run_failed'] as const
+export type OperatorPushTriggerKind = (typeof OPERATOR_PUSH_TRIGGER_KINDS)[number]

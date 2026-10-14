@@ -19,10 +19,12 @@ import {err, ok} from '../../result.ts'
 import {isOperatorFailureKind} from './run-status.ts'
 
 /**
- * Index-only status set. 'blocked' and 'waiting_for_approval' are stream-only
- * overlays — never produced by the run-summary projector.
+ * The status set a run summary can carry: the five lifecycle values plus the two
+ * waiting overlays, which the gateway applies only on a running run. 'blocked' is
+ * never carried by a summary.
  */
-export type RunSummaryStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+export type RunSummaryStatus =
+  'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'waiting_for_approval' | 'waiting_for_question'
 
 /**
  * Operator-safe projection of a run's summary.
@@ -52,6 +54,8 @@ const VALID_RUN_SUMMARY_STATUSES: ReadonlySet<string> = new Set([
   'succeeded',
   'failed',
   'cancelled',
+  'waiting_for_approval',
+  'waiting_for_question',
 ])
 
 function hasValidRunSummaryShape(value: unknown): value is RunSummary {

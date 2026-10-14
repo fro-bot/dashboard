@@ -445,7 +445,14 @@ export interface CancelActionEvent {
 }
 
 /** Statuses a run-list summary can carry. */
-export type RunSummaryStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+export type RunSummaryStatus =
+  | 'queued'
+  | 'running'
+  | 'waiting_for_approval'
+  | 'waiting_for_question'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
 
 export interface StreamState {
   readonly connection: ConnectionStatus

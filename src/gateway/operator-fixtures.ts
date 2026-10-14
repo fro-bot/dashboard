@@ -1,4 +1,7 @@
 import type {CsrfDto, LaunchRunRequest, LaunchRunResponse, RunApprovalDecisionResponse, RunApprovalsResponse, RunApprovalSummary, RunSnapshotDto, RunStreamEvent, SessionDto} from './operator-client.ts'
+
+import {OPERATOR_CONTRACT_VERSION} from './operator-contract/version.ts'
+
 /**
  * Typed fixtures for the operator UI skeleton.
  *
@@ -129,7 +132,7 @@ export const FIXTURE_UNKNOWN_FAILURE_REASON = 'fixture-unrecognized-reason'
 export const FIXTURE_RUN_TIMELINE: readonly RunStreamEvent[] = [
   {
     type: 'ready',
-    data: {contractVersion: '1.1.0'},
+    data: {contractVersion: OPERATOR_CONTRACT_VERSION},
   },
   {
     type: 'status',

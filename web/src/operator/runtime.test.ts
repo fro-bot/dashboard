@@ -24,6 +24,7 @@
  */
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
+import {VALID_RUN_SUMMARY_STATUSES} from '../../../public/operator-run-index.js'
 import {PINNED_CONTRACT_VERSION} from '../../../public/operator-stream.js'
 import {
   createOperatorRuntime,
@@ -858,6 +859,20 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
       expect(call.opts.questionsEl).not.toBeNull()
       expect('summaryStatus' in call.opts).toBe(false)
     }
+    runtime.cleanup()
+  })
+
+  it('every status the run index accepts, waiting ones included, is passed as summaryStatus', async () => {
+    // The class token here is the one the run index writes today (the raw status). The status-token
+    // map in the next unit replaces it; the allowlist parity this pins stays.
+    const statuses = [...VALID_RUN_SUMMARY_STATUSES]
+    expect(statuses).toHaveLength(7)
+    document.body.innerHTML = `${statuses.map(status => cardHtml(`run-q-${status}`, `status-${status}`)).join('')}<div data-role="stream-status"></div>`
+    const {runtime, initCalls, select} = await mountLoader()
+
+    for (const status of statuses) select(`run-q-${status}`)
+
+    expect(initCalls.map(call => call.opts.summaryStatus)).toEqual(statuses)
     runtime.cleanup()
   })
 
