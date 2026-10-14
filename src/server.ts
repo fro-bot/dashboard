@@ -54,6 +54,7 @@ import {buildAuthRouter} from './routes/auth.ts'
 import {buildListenerRouter} from './routes/listener.ts'
 import {readOptionalMultilineSecret, readOptionalSecret} from './secrets.ts'
 import {loadCookieKey, SessionManager} from './session.ts'
+import {createPublicStatic} from './static-files.ts'
 
 /** Hono context variables set by auth middleware */
 interface Variables {
@@ -768,27 +769,16 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
 
   // /static files are un-hashed and not precached, so without this a browser can heuristically reuse a
   // stale module next to a fresh bundle after a deploy. Registered before every /static mount below.
-  app.use('/static/*', async (c, next) => {
-    await next()
-    if (c.res.ok) c.res.headers.set('cache-control', 'no-cache')
-  })
+  const publicStatic = createPublicStatic('./public')
+  app.use('/static/*', publicStatic.revalidate)
 
   // ── Operator runtime JS assets — always served (flag-independent) ────────────
   // Root / owns the operator shell and always depends on these modules.
   // Mounted unconditionally so they are available regardless of operatorUiEnabled.
   // isPublicPath already allows these paths so auth middleware passes them through.
-  app.use(
-    '/static/operator-stream.js',
-    serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}),
-  )
-  app.use(
-    '/static/operator-launch.js',
-    serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}),
-  )
-  app.use(
-    '/static/operator-run-index.js',
-    serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}),
-  )
+  app.use('/static/operator-stream.js', publicStatic.serve)
+  app.use('/static/operator-launch.js', publicStatic.serve)
+  app.use('/static/operator-run-index.js', publicStatic.serve)
 
   // ── Operator UI skeleton route ────────────────────────────────────────────────
   // Only mounted when operatorUiEnabled is true (default: false).
@@ -800,7 +790,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     // /static/ is in isPublicPath so unauthenticated browsers can load assets.
     // Note: operator-stream.js and operator-launch.js are already mounted above;
     // this catch-all additionally serves operator.css and any other static assets.
-    app.use('/static/*', serveStatic({root: './public', rewriteRequestPath: path => path.replace(/^\/static/, '')}))
+    app.use('/static/*', publicStatic.serve)
   }
 
   // ── Fixture harness routes (DEV-ONLY) ─────────────────────────────────────

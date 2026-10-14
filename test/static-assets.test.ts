@@ -11,13 +11,18 @@
  */
 import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
 import {Buffer} from 'node:buffer'
+import {mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
 import process from 'node:process'
+import {Hono} from 'hono'
 import {afterEach, describe, expect, it} from 'vitest'
 import {PINNED_CONTRACT_VERSION} from '../public/operator-stream.js'
 import {OPERATOR_CONTRACT_VERSION} from '../src/gateway/operator-contract/version.ts'
 import {FIXTURE_QUESTION_SCENARIO_ROWS} from '../src/gateway/operator-fixture-sse.ts'
 import {buildDashboardApp} from '../src/server.ts'
 import {SessionManager} from '../src/session.ts'
+import {createPublicStatic} from '../src/static-files.ts'
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -295,6 +300,165 @@ describe('/static/* revalidation — a deploy must not leave a stale operator mo
     const off = await buildTestApp(false)
     const gated = await off.request('/static/operator.css')
     expect(gated.status).not.toBe(200)
+  })
+})
+
+describe('/static/* conditional GET — revalidation answers 304 instead of re-sending the file', () => {
+  const ETAG_PATTERN = /^"[\w-]{43}"$/
+  const paths = ['/static/operator-stream.js', '/static/operator-launch.js', '/static/operator-run-index.js', '/static/operator.css'] as const
+
+  it.each(paths)('GET %s returns 200 with a strong content-based ETag', async path => {
+    const app = await buildTestApp(true)
+    const res = await app.request(path)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('etag')).toMatch(ETAG_PATTERN)
+    expect(res.headers.get('last-modified')).not.toBeNull()
+    expect((await res.text()).length).toBeGreaterThan(0)
+  })
+
+  it.each(paths)('GET %s with its own ETag returns 304: no body, no-cache, validators kept', async path => {
+    const app = await buildTestApp(true)
+    const first = await app.request(path)
+    const etag = first.headers.get('etag') ?? ''
+    expect(etag).toMatch(ETAG_PATTERN)
+
+    const res = await app.request(path, {headers: {'if-none-match': etag}})
+
+    expect(res.status).toBe(304)
+    expect(await res.text()).toBe('')
+    expect(res.headers.get('cache-control')).toBe('no-cache')
+    expect(res.headers.get('etag')).toBe(etag)
+    expect(res.headers.get('last-modified')).toBe(first.headers.get('last-modified'))
+  })
+
+  it('a stale or mismatched validator returns 200 with the full body', async () => {
+    const app = await buildTestApp(true)
+    const first = await app.request('/static/operator-run-index.js')
+    const body = await first.text()
+    for (const validator of ['"stale"', '"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"', 'garbage', '']) {
+      const res = await app.request('/static/operator-run-index.js', {headers: {'if-none-match': validator}})
+      expect(res.status, validator).toBe(200)
+      expect(await res.text(), validator).toBe(body)
+      expect(res.headers.get('cache-control'), validator).toBe('no-cache')
+    }
+  })
+
+  it('matches the way If-None-Match is defined: weak form, a list, and *', async () => {
+    const app = await buildTestApp(true)
+    const etag = (await app.request('/static/operator-launch.js')).headers.get('etag') ?? ''
+    for (const validator of [`W/${etag}`, `"other", ${etag}`, '*']) {
+      const res = await app.request('/static/operator-launch.js', {headers: {'if-none-match': validator}})
+      expect(res.status, validator).toBe(304)
+    }
+  })
+
+  it('a HEAD revalidation returns 304 too', async () => {
+    const app = await buildTestApp(true)
+    const etag = (await app.request('/static/operator-launch.js')).headers.get('etag') ?? ''
+    const res = await app.request('/static/operator-launch.js', {method: 'HEAD', headers: {'if-none-match': etag}})
+    expect(res.status).toBe(304)
+  })
+
+  it('a ranged request is not turned into a 304', async () => {
+    const app = await buildTestApp(true)
+    const etag = (await app.request('/static/operator-launch.js')).headers.get('etag') ?? ''
+    const res = await app.request('/static/operator-launch.js', {headers: {'if-none-match': etag, range: 'bytes=0-9'}})
+    expect(res.status).toBe(206)
+  })
+
+  it('works for the unconditional modules with the flag off', async () => {
+    const app = await buildTestApp(false)
+    const etag = (await app.request('/static/operator-stream.js')).headers.get('etag') ?? ''
+    expect(etag).toMatch(ETAG_PATTERN)
+    expect((await app.request('/static/operator-stream.js', {headers: {'if-none-match': etag}})).status).toBe(304)
+  })
+
+  it('404s and the flag-gated paths are unchanged: no ETag, no cache header, never a 304', async () => {
+    const on = await buildTestApp(true)
+    const missing = await on.request('/static/does-not-exist.js', {headers: {'if-none-match': '*'}})
+    expect(missing.status).toBe(404)
+    expect(missing.headers.get('etag')).toBeNull()
+    expect(missing.headers.get('cache-control')).toBeNull()
+
+    const off = await buildTestApp(false)
+    const gated = await off.request('/static/operator.css', {headers: {'if-none-match': '*'}})
+    expect(gated.status).not.toBe(200)
+    expect(gated.status).not.toBe(304)
+    expect(gated.headers.get('etag')).toBeNull()
+  })
+
+  it('does not resolve outside public/: traversal paths are not served and never get a validator', async () => {
+    const app = await buildTestApp(true)
+    for (const path of ['/static/../package.json', '/static/%2e%2e/package.json', '/static/..%2fpackage.json']) {
+      const res = await app.request(path, {headers: {'if-none-match': '*'}})
+      expect(res.status, path).not.toBe(200)
+      expect(res.status, path).not.toBe(304)
+      expect(res.headers.get('etag'), path).toBeNull()
+    }
+  })
+})
+
+describe('/static/* validators follow the content, not the mtime', () => {
+  const dirs: string[] = []
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, {recursive: true, force: true})
+  })
+
+  function makeRoot(content: string) {
+    const root = mkdtempSync(join(tmpdir(), 'static-files-'))
+    dirs.push(root)
+    mkdirSync(root, {recursive: true})
+    const file = join(root, 'mod.js')
+    writeFileSync(file, content)
+    const publicStatic = createPublicStatic(root)
+    const app = new Hono()
+    app.use('/static/*', publicStatic.revalidate)
+    app.use('/static/*', publicStatic.serve)
+    return {app, file}
+  }
+
+  it('a same-size file with different content and an OLDER mtime gets a new ETag and no false 304', async () => {
+    const {app, file} = makeRoot('export const v = "aaaa"\n')
+    const first = await app.request('/static/mod.js')
+    const etag1 = first.headers.get('etag') ?? ''
+    expect(etag1).not.toBe('')
+    expect((await app.request('/static/mod.js', {headers: {'if-none-match': etag1}})).status).toBe(304)
+
+    writeFileSync(file, 'export const v = "bbbb"\n')
+    utimesSync(file, new Date(0), new Date(0))
+
+    const afterDeploy = await app.request('/static/mod.js', {headers: {'if-none-match': etag1}})
+    expect(afterDeploy.status).toBe(200)
+    expect(await afterDeploy.text()).toBe('export const v = "bbbb"\n')
+    expect(afterDeploy.headers.get('etag')).not.toBe(etag1)
+  })
+
+  it('a same-size file with different content and a NEWER mtime gets a new ETag and no false 304', async () => {
+    const {app, file} = makeRoot('export const v = "aaaa"\n')
+    const etag1 = (await app.request('/static/mod.js')).headers.get('etag') ?? ''
+
+    writeFileSync(file, 'export const v = "cccc"\n')
+    utimesSync(file, new Date(Date.now() + 60_000), new Date(Date.now() + 60_000))
+
+    const res = await app.request('/static/mod.js', {headers: {'if-none-match': etag1}})
+    expect(res.status).toBe(200)
+    expect(res.headers.get('etag')).not.toBe(etag1)
+  })
+
+  it('the same content with a newer mtime keeps its ETag, so the browser still gets a 304', async () => {
+    const {app, file} = makeRoot('export const v = "aaaa"\n')
+    const etag1 = (await app.request('/static/mod.js')).headers.get('etag') ?? ''
+
+    utimesSync(file, new Date(Date.now() + 60_000), new Date(Date.now() + 60_000))
+
+    expect((await app.request('/static/mod.js', {headers: {'if-none-match': etag1}})).status).toBe(304)
+  })
+
+  it('only files under the root are reachable: a traversal path is a 404 with no validator', async () => {
+    const {app} = makeRoot('export const v = 1\n')
+    const res = await app.request('/static/../mod.js', {headers: {'if-none-match': '*'}})
+    expect(res.status).toBe(404)
+    expect(res.headers.get('etag')).toBeNull()
   })
 })
 
