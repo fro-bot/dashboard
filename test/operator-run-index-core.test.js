@@ -5,7 +5,7 @@
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 
-import {buildRunSafeView, FETCH_TIMEOUT_MS, fetchRunIndex, formatRelativeTime, initOperatorRunIndex, markCardExpandedForLaunch, markRunStreamAttached, parseRunSummaryItem, parseRunSummaryList, resetRunIndexState, RUN_INDEX_CAP, FAILURE_REASON_LABELS as RUN_INDEX_FAILURE_REASON_LABELS, RUN_STATUS_CLASS_TOKENS, summaryStatusFromClassToken, VALID_RUN_SUMMARY_STATUSES} from '../public/operator-run-index.js'
+import {buildRunSafeView, FETCH_TIMEOUT_MS, fetchRunIndex, formatRelativeTime, initOperatorRunIndex, markCardExpandedForLaunch, markRunStreamAttached, parseRunSummaryItem, parseRunSummaryList, refreshOperatorRunIndex, resetRunIndexState, RUN_INDEX_CAP, FAILURE_REASON_LABELS as RUN_INDEX_FAILURE_REASON_LABELS, RUN_STATUS_CLASS_TOKENS, summaryStatusFromClassToken, VALID_RUN_SUMMARY_STATUSES} from '../public/operator-run-index.js'
 import {FAILURE_REASON_LABELS as STREAM_FAILURE_REASON_LABELS} from '../public/operator-stream.js'
 import {isOperatorFailureKind, OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
 import {parseRunSummary as parseServerRunSummary} from '../src/gateway/operator-contract/run-summary.ts'
@@ -1072,6 +1072,14 @@ describe('markRunStreamAttached — sets data-stream-attached on matching card',
 // Keyboard activation on run cards
 // ---------------------------------------------------------------------------
 
+/**
+ * Focus bookkeeping shared by the element stubs. Like a browser, focus() makes the element the
+ * document's activeElement; a stub document without the property just ignores it.
+ */
+function markFocused(el) {
+  if (typeof document !== 'undefined' && document !== null) document.activeElement = el
+}
+
 /** Minimal element stub with event dispatch. */
 function makeElStub() {
   return {
@@ -1079,6 +1087,13 @@ function makeElStub() {
     _parentList: null,
     className: '', tabIndex: 0, dataset: {}, textContent: '',
     setAttribute() {}, append() {},
+    focusCalls: [],
+    scrollIntoViewCalls: 0,
+    focus(options) {
+      this.focusCalls.push(options)
+      markFocused(this)
+    },
+    scrollIntoView() { this.scrollIntoViewCalls++ },
     remove() {
       if (this._parentList !== null) {
         const idx = this._parentList.children.indexOf(this)
@@ -1124,8 +1139,13 @@ function makeMockListUsing(children) {
       el._parentList = list
       children.push(el)
     },
+    contains(el) {
+      return children.some(child => child === el || child.contains?.(el) === true)
+    },
     insertBefore(el, ref) {
       el._parentList = list
+      // A real browser blurs a focused node that is moved within the DOM.
+      if (typeof document !== 'undefined' && document !== null && document.activeElement === el) document.activeElement = null
       const existingIdx = children.indexOf(el)
       if (existingIdx !== -1) children.splice(existingIdx, 1)
       const idx = ref === null || ref === undefined ? children.length : children.indexOf(ref)
@@ -1469,6 +1489,13 @@ function makeSubstructureElStub() {
     hidden: false,
     attributes: {},
     setAttribute(name, value) { this.attributes[name] = value },
+    focusCalls: [],
+    scrollIntoViewCalls: 0,
+    focus(options) {
+      this.focusCalls.push(options)
+      markFocused(this)
+    },
+    scrollIntoView() { this.scrollIntoViewCalls++ },
     _parentEl: null,
     append(...els) {
       for (const el of els) el._parentEl = this
@@ -3580,5 +3607,508 @@ describe('question region — adopted optimistic cards (ensureRunCardAnatomy)', 
     const hiddenRoles = card => childRoles(card).filter(role => role !== undefined && !['run-status-group', 'run-repo', 'run-updated-at'].includes(role))
     expect(hiddenRoles(optimistic)).toEqual(hiddenRoles(fetched))
     expect(hiddenRoles(fetched)).toContain(QUESTIONS_ROLE)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Single-flight in-place refresh (refreshOperatorRunIndex)
+// ---------------------------------------------------------------------------
+
+/** Full run-index DOM stub: section state log, loading/empty/unavailable toggles, a focusable list. */
+function stubDOMForRefresh() {
+  const stateLog = []
+  let currentState
+  const section = {dataset: {}}
+  Object.defineProperty(section.dataset, 'state', {
+    enumerable: true,
+    configurable: true,
+    get: () => currentState,
+    set: value => {
+      currentState = value
+      stateLog.push(value)
+    },
+  })
+  const loading = {hidden: false}
+  const empty = {hidden: true}
+  const unavailable = {hidden: true}
+  const cards = []
+  const list = makeMockListUsing(cards)
+  const doc = {
+    activeElement: null,
+    querySelector(sel) {
+      if (sel === '[data-role="run-index"]') return section
+      if (sel === '[data-role="run-index-loading"]') return loading
+      if (sel === '[data-role="run-index-list"]') return list
+      if (sel === '[data-role="run-index-empty"]') return empty
+      if (sel === '[data-role="run-index-unavailable"]') return unavailable
+      const runIdMatch = sel.match(/^\[data-run-id="([^"]+)"\]$/)
+      if (runIdMatch) return cards.find(c => c.dataset?.runId === runIdMatch[1]) ?? null
+      return null
+    },
+    createElement() { return makeSubstructureElStub() },
+  }
+  vi.stubGlobal('CSS', {escape: s => s})
+  vi.stubGlobal('document', doc)
+  return {section, stateLog, loading, list, empty, unavailable, cards, doc}
+}
+
+/** A fetch whose responses the test releases by hand, so a refresh can be held in flight. */
+function stubControlledFetch() {
+  const resolvers = []
+  const fn = vi.fn(() => new Promise((resolve, reject) => {
+    resolvers.push({resolve, reject})
+  }))
+  vi.stubGlobal('fetch', fn)
+  return {
+    fn,
+    respond(index, runs) {
+      resolvers[index].resolve({ok: true, status: 200, json: async () => ({runs})})
+    },
+    respondStatus(index, status) {
+      resolvers[index].resolve({ok: false, status, json: async () => ({})})
+    },
+    fail(index) {
+      resolvers[index].reject(new Error('network error'))
+    },
+  }
+}
+
+/** Let fetch + json parsing + the diff settle. */
+const flush = () => new Promise(resolve => setTimeout(resolve, 0))
+
+/** A card's observable state as one comparable value (the "byte-identical" check). */
+function snapshotCard(card) {
+  return JSON.stringify({
+    className: card.className,
+    textContent: card.textContent,
+    hidden: card.hidden,
+    dataset: card.dataset,
+    attributes: card.attributes,
+    children: (card._children ?? []).map(snapshotCard),
+  })
+}
+
+describe('refreshOperatorRunIndex — single-flight in-place refresh', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('exports a refresh that resolves as a no-op before init has loaded (no fetch)', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    stubDOMForRefresh()
+
+    await expect(refreshOperatorRunIndex()).resolves.toBe(false)
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('a refresh requested while init is still in flight is a no-op and does not kill the init', async () => {
+    const net = stubControlledFetch()
+    const {section, cards} = stubDOMForRefresh()
+
+    const initPromise = initOperatorRunIndex({endpointBase: '/operator'})
+    await expect(refreshOperatorRunIndex()).resolves.toBe(false)
+    expect(net.fn).toHaveBeenCalledTimes(1)
+
+    net.respond(0, [makeValidSummary({runId: 'run-rf-init-001'})])
+    await initPromise
+
+    expect(section.dataset.state).toBe('loaded')
+    expect(cards).toHaveLength(1)
+  })
+
+  it('adds a run started elsewhere and moves a collapsed card running → waiting_for_question → succeeded, keeping node identity', async () => {
+    const runId = 'run-rf-progress-001'
+    const net = stubControlledFetch()
+    const {cards} = stubDOMForRefresh()
+    const init = initOperatorRunIndex({endpointBase: '/operator'})
+    net.respond(0, [makeValidSummary({runId, status: 'running'})])
+    await init
+    const card = cards[0]
+    const statusEl = card.querySelector('[data-role="run-status"]')
+    expect(statusEl.className).toBe('run-status status-running')
+
+    // A run started elsewhere appears, and the existing run now waits for an answer.
+    const refresh1 = refreshOperatorRunIndex()
+    net.respond(1, [
+      makeValidSummary({runId: 'run-rf-new-001', status: 'queued'}),
+      makeValidSummary({runId, status: 'waiting_for_question'}),
+    ])
+    await expect(refresh1).resolves.toBe(true)
+    expect(cards.map(c => c.dataset.runId)).toEqual(['run-rf-new-001', runId])
+    expect(cards.find(c => c.dataset.runId === runId)).toBe(card)
+    expect(statusEl.className).toBe('run-status status-waiting-for-question')
+    expect(statusEl.textContent).toBe('Waiting for answer')
+
+    // Later it finishes.
+    const refresh2 = refreshOperatorRunIndex()
+    net.respond(2, [
+      makeValidSummary({runId: 'run-rf-new-001', status: 'running'}),
+      makeValidSummary({runId, status: 'succeeded'}),
+    ])
+    await refresh2
+    expect(statusEl.className).toBe('run-status status-succeeded')
+    expect(statusEl.textContent).toBe('Succeeded')
+  })
+
+  it('does not toggle the loading state: no loading flash, no data-state="loading" on a refresh', async () => {
+    const net = stubControlledFetch()
+    const {stateLog, loading, list} = stubDOMForRefresh()
+    const init = initOperatorRunIndex({endpointBase: '/operator'})
+    net.respond(0, [makeValidSummary({runId: 'run-rf-noload-001'})])
+    await init
+    const statesAfterInit = [...stateLog]
+    expect(loading.hidden).toBe(true)
+
+    const pending = refreshOperatorRunIndex()
+    // While the refresh fetch is in flight the list stays visible and loading stays hidden.
+    expect(loading.hidden).toBe(true)
+    expect(list.hidden).toBe(false)
+    net.respond(1, [makeValidSummary({runId: 'run-rf-noload-001', status: 'succeeded'})])
+    await pending
+
+    expect(stateLog.slice(statesAfterInit.length)).not.toContain('loading')
+    expect(loading.hidden).toBe(true)
+  })
+
+  it('the stream-attached card is byte-identical after a refresh that reports it differently', async () => {
+    const runId = 'run-rf-attached-001'
+    const net = stubControlledFetch()
+    const {cards} = stubDOMForRefresh()
+    const init = initOperatorRunIndex({endpointBase: '/operator'})
+    net.respond(0, [makeValidSummary({runId, status: 'running', repo: 'fro-bot/agent'})])
+    await init
+    const card = cards[0]
+    markRunStreamAttached(runId)
+    // updateDOM's live writes.
+    card.querySelector('[data-role="run-output"]').textContent = 'live streamed output'
+    card.querySelector('[data-role="run-output"]').hidden = false
+    card.querySelector('[data-role="run-status"]').textContent = 'Running'
+    const before = snapshotCard(card)
+
+    const pending = refreshOperatorRunIndex()
+    net.respond(1, [makeValidSummary({runId, status: 'succeeded', repo: 'fro-bot/other', updatedAt: '2026-06-26T13:00:00.000Z'})])
+    await pending
+
+    expect(cards[0]).toBe(card)
+    expect(snapshotCard(card)).toBe(before)
+  })
+
+  it('three requests during one in-flight fetch produce exactly one more fetch, and share its promise', async () => {
+    const runId = 'run-rf-single-001'
+    const net = stubControlledFetch()
+    const {cards} = stubDOMForRefresh()
+    const init = initOperatorRunIndex({endpointBase: '/operator'})
+    net.respond(0, [makeValidSummary({runId, status: 'running'})])
+    await init
+    expect(net.fn).toHaveBeenCalledTimes(1)
+
+    const first = refreshOperatorRunIndex()
+    expect(net.fn).toHaveBeenCalledTimes(2)
+    const second = refreshOperatorRunIndex()
+    const third = refreshOperatorRunIndex()
+    const fourth = refreshOperatorRunIndex()
+    expect(net.fn).toHaveBeenCalledTimes(2)
+    expect(third).toBe(second)
+    expect(fourth).toBe(second)
+
+    let joinedSettled = false
+    second.then(() => {
+      joinedSettled = true
+    })
+
+    // The in-flight fetch finishes: the trailing refresh starts, and only now.
+    net.respond(1, [makeValidSummary({runId, status: 'waiting_for_approval'})])
+    await first
+    await flush()
+    expect(net.fn).toHaveBeenCalledTimes(3)
+    // A joined request must not settle on the stale in-flight data.
+    expect(joinedSettled).toBe(false)
+
+    net.respond(2, [makeValidSummary({runId, status: 'succeeded'})])
+    await second
+    await flush()
+    // Exactly one trailing fetch — nothing further was queued.
+    expect(net.fn).toHaveBeenCalledTimes(3)
+    expect(cards[0].querySelector('[data-role="run-status"]').className).toBe('run-status status-succeeded')
+
+    // Once idle, a new request starts a new fetch.
+    const later = refreshOperatorRunIndex()
+    expect(net.fn).toHaveBeenCalledTimes(4)
+    net.respond(3, [makeValidSummary({runId, status: 'succeeded'})])
+    await later
+  })
+
+  it('responses apply in order: a stale in-flight response is applied before the trailing one', async () => {
+    const runId = 'run-rf-order-001'
+    const net = stubControlledFetch()
+    const {cards} = stubDOMForRefresh()
+    const init = initOperatorRunIndex({endpointBase: '/operator'})
+    net.respond(0, [makeValidSummary({runId, status: 'queued'})])
+    await init
+
+    const first = refreshOperatorRunIndex()
+    const second = refreshOperatorRunIndex()
+    net.respond(1, [makeValidSummary({runId, status: 'running'})])
+    await first
+    expect(cards[0].querySelector('[data-role="run-status"]').className).toBe('run-status status-running')
+    await flush()
+    net.respond(2, [makeValidSummary({runId, status: 'waiting_for_approval'})])
+    await second
+
+    expect(cards[0].querySelector('[data-role="run-status"]').className).toBe('run-status status-waiting-for-approval')
+  })
+
+  it('a list that mounted unavailable becomes a populated list on a successful refresh', async () => {
+    const net = stubControlledFetch()
+    const {section, list, unavailable, empty, cards} = stubDOMForRefresh()
+    const init = initOperatorRunIndex({endpointBase: '/operator'})
+    net.respondStatus(0, 500)
+    await init
+    expect(section.dataset.state).toBe('unavailable')
+    expect(unavailable.hidden).toBe(false)
+
+    const pending = refreshOperatorRunIndex()
+    net.respond(1, [makeValidSummary({runId: 'run-rf-recover-001'})])
+    await expect(pending).resolves.toBe(true)
+
+    expect(section.dataset.state).toBe('loaded')
+    expect(unavailable.hidden).toBe(true)
+    expect(empty.hidden).toBe(true)
+    expect(list.hidden).toBe(false)
+    expect(cards).toHaveLength(1)
+  })
+
+  it('a refresh that returns no runs shows the empty state', async () => {
+    const net = stubControlledFetch()
+    const {section, list, unavailable, empty, cards} = stubDOMForRefresh()
+    const init = initOperatorRunIndex({endpointBase: '/operator'})
+    net.respond(0, [makeValidSummary({runId: 'run-rf-empty-001'})])
+    await init
+    expect(section.dataset.state).toBe('loaded')
+
+    const pending = refreshOperatorRunIndex()
+    net.respond(1, [])
+    await pending
+
+    expect(cards).toHaveLength(0)
+    expect(section.dataset.state).toBe('empty')
+    expect(empty.hidden).toBe(false)
+    expect(list.hidden).toBe(true)
+    expect(unavailable.hidden).toBe(true)
+  })
+
+  it('an empty list that later gains a run leaves the empty state', async () => {
+    const net = stubControlledFetch()
+    const {section, list, empty} = stubDOMForRefresh()
+    const init = initOperatorRunIndex({endpointBase: '/operator'})
+    net.respond(0, [])
+    await init
+    expect(section.dataset.state).toBe('empty')
+
+    const pending = refreshOperatorRunIndex()
+    net.respond(1, [makeValidSummary({runId: 'run-rf-gain-001'})])
+    await pending
+
+    expect(section.dataset.state).toBe('loaded')
+    expect(empty.hidden).toBe(true)
+    expect(list.hidden).toBe(false)
+  })
+
+  it('a focused collapsed card that moves during a refresh keeps focus, and nothing scrolls', async () => {
+    const net = stubControlledFetch()
+    const {cards, doc} = stubDOMForRefresh()
+    const init = initOperatorRunIndex({endpointBase: '/operator'})
+    net.respond(0, [
+      makeValidSummary({runId: 'run-rf-focus-a', status: 'running'}),
+      makeValidSummary({runId: 'run-rf-focus-b', status: 'running'}),
+      makeValidSummary({runId: 'run-rf-focus-c', status: 'running'}),
+    ])
+    await init
+    const [cardA, cardB, cardC] = cards
+    cardB.focus()
+    expect(doc.activeElement).toBe(cardB)
+    cardB.focusCalls.length = 0
+
+    // B jumps to the top of the list: the DOM move blurs it, so the refresh must put focus back.
+    const pending = refreshOperatorRunIndex()
+    net.respond(1, [
+      makeValidSummary({runId: 'run-rf-focus-b', status: 'waiting_for_question'}),
+      makeValidSummary({runId: 'run-rf-focus-a', status: 'running'}),
+      makeValidSummary({runId: 'run-rf-focus-c', status: 'running'}),
+    ])
+    await pending
+
+    expect(cards).toEqual([cardB, cardA, cardC])
+    expect(doc.activeElement).toBe(cardB)
+    expect(cardB.focusCalls).toEqual([{preventScroll: true}])
+    for (const card of cards) expect(card.scrollIntoViewCalls).toBe(0)
+    expect(cardA.focusCalls).toHaveLength(0)
+    expect(cardC.focusCalls).toHaveLength(0)
+  })
+
+  it('a refresh with nothing focused in the list focuses nothing; a focused card that is removed does not throw', async () => {
+    const net = stubControlledFetch()
+    const {cards, doc} = stubDOMForRefresh()
+    const init = initOperatorRunIndex({endpointBase: '/operator'})
+    net.respond(0, [
+      makeValidSummary({runId: 'run-rf-nofocus-a'}),
+      makeValidSummary({runId: 'run-rf-nofocus-b'}),
+    ])
+    await init
+    const [cardA, cardB] = cards
+
+    const first = refreshOperatorRunIndex()
+    net.respond(1, [makeValidSummary({runId: 'run-rf-nofocus-b'}), makeValidSummary({runId: 'run-rf-nofocus-a'})])
+    await first
+    expect(cardA.focusCalls).toHaveLength(0)
+    expect(cardB.focusCalls).toHaveLength(0)
+
+    cardA.focus()
+    cardA.focusCalls.length = 0
+    const second = refreshOperatorRunIndex()
+    net.respond(2, [makeValidSummary({runId: 'run-rf-nofocus-b'})])
+    await expect(second).resolves.toBe(true)
+    expect(cards).toEqual([cardB])
+    expect(cardA.focusCalls).toHaveLength(0)
+    expect(doc.activeElement).toBe(cardA)
+  })
+
+  it('a 401 reports auth-required once, leaves the list alone, and stops further refreshes', async () => {
+    const runId = 'run-rf-401-001'
+    const onAuthRequired = vi.fn()
+    const net = stubControlledFetch()
+    const {cards, section} = stubDOMForRefresh()
+    const init = initOperatorRunIndex({endpointBase: '/operator', onAuthRequired})
+    net.respond(0, [makeValidSummary({runId})])
+    await init
+    const card = cards[0]
+
+    const pending = refreshOperatorRunIndex()
+    net.respondStatus(1, 401)
+    await expect(pending).resolves.toBe(false)
+
+    expect(onAuthRequired).toHaveBeenCalledTimes(1)
+    expect(cards).toEqual([card])
+    expect(section.dataset.state).toBe('loaded')
+
+    // The session is gone: another refresh must not keep hitting the gateway.
+    await expect(refreshOperatorRunIndex()).resolves.toBe(false)
+    expect(net.fn).toHaveBeenCalledTimes(2)
+    expect(onAuthRequired).toHaveBeenCalledTimes(1)
+  })
+
+  it('a 429 leaves the list as it was and the next refresh tries again', async () => {
+    const runId = 'run-rf-429-001'
+    const onAuthRequired = vi.fn()
+    const net = stubControlledFetch()
+    const {cards, section, unavailable} = stubDOMForRefresh()
+    const init = initOperatorRunIndex({endpointBase: '/operator', onAuthRequired})
+    net.respond(0, [makeValidSummary({runId, status: 'running'})])
+    await init
+    const card = cards[0]
+
+    const limited = refreshOperatorRunIndex()
+    net.respondStatus(1, 429)
+    await expect(limited).resolves.toBe(false)
+    expect(cards).toEqual([card])
+    expect(section.dataset.state).toBe('loaded')
+    expect(unavailable.hidden).toBe(true)
+    expect(onAuthRequired).not.toHaveBeenCalled()
+    expect(card.querySelector('[data-role="run-status"]').className).toBe('run-status status-running')
+
+    const retry = refreshOperatorRunIndex()
+    expect(net.fn).toHaveBeenCalledTimes(3)
+    net.respond(2, [makeValidSummary({runId, status: 'succeeded'})])
+    await expect(retry).resolves.toBe(true)
+    expect(card.querySelector('[data-role="run-status"]').className).toBe('run-status status-succeeded')
+  })
+
+  it('a network failure leaves the list as it was and the next refresh tries again', async () => {
+    const runId = 'run-rf-net-001'
+    const net = stubControlledFetch()
+    const {cards, section, unavailable} = stubDOMForRefresh()
+    const init = initOperatorRunIndex({endpointBase: '/operator'})
+    net.respond(0, [makeValidSummary({runId, status: 'running'})])
+    await init
+    const card = cards[0]
+
+    const failed = refreshOperatorRunIndex()
+    net.fail(1)
+    await expect(failed).resolves.toBe(false)
+    expect(cards).toEqual([card])
+    expect(section.dataset.state).toBe('loaded')
+    expect(unavailable.hidden).toBe(true)
+
+    const retry = refreshOperatorRunIndex()
+    net.respond(2, [makeValidSummary({runId, status: 'succeeded'})])
+    await expect(retry).resolves.toBe(true)
+  })
+
+  it('a failed refresh on an unavailable list keeps the unavailable state', async () => {
+    const net = stubControlledFetch()
+    const {section, unavailable} = stubDOMForRefresh()
+    const init = initOperatorRunIndex({endpointBase: '/operator'})
+    net.respondStatus(0, 500)
+    await init
+
+    const failed = refreshOperatorRunIndex()
+    net.respondStatus(1, 429)
+    await failed
+
+    expect(section.dataset.state).toBe('unavailable')
+    expect(unavailable.hidden).toBe(false)
+  })
+
+  it('cards added by a refresh are wired to the selection handler from init', async () => {
+    const net = stubControlledFetch()
+    const {cards} = stubDOMForRefresh()
+    const onSelectRun = vi.fn()
+    const init = initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+    net.respond(0, [makeValidSummary({runId: 'run-rf-wire-old'})])
+    await init
+
+    const pending = refreshOperatorRunIndex()
+    net.respond(1, [makeValidSummary({runId: 'run-rf-wire-new'}), makeValidSummary({runId: 'run-rf-wire-old'})])
+    await pending
+
+    cards.find(c => c.dataset.runId === 'run-rf-wire-new').dispatchEvent({type: 'click'})
+    expect(onSelectRun).toHaveBeenCalledWith('run-rf-wire-new')
+  })
+
+  it('a reset while a refresh is in flight discards its response and settles every waiter', async () => {
+    const net = stubControlledFetch()
+    const {cards} = stubDOMForRefresh()
+    const init = initOperatorRunIndex({endpointBase: '/operator'})
+    net.respond(0, [makeValidSummary({runId: 'run-rf-reset-001', status: 'running'})])
+    await init
+    const card = cards[0]
+
+    const inFlight = refreshOperatorRunIndex()
+    const joined = refreshOperatorRunIndex()
+    resetRunIndexState()
+    net.respond(1, [makeValidSummary({runId: 'run-rf-reset-001', status: 'succeeded'})])
+
+    await expect(inFlight).resolves.toBe(false)
+    await expect(joined).resolves.toBe(false)
+    await flush()
+    expect(card.querySelector('[data-role="run-status"]').className).toBe('run-status status-running')
+    expect(net.fn).toHaveBeenCalledTimes(2)
+    // Nothing is loaded after a reset, so a later refresh stays a no-op.
+    await expect(refreshOperatorRunIndex()).resolves.toBe(false)
+    expect(net.fn).toHaveBeenCalledTimes(2)
+  })
+
+  it('source: the refresh never bumps the generation counter and never reuses initOperatorRunIndex', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    const body = src.match(/export function refreshOperatorRunIndex[\s\S]*?\n\}\n/)?.[0] ?? ''
+    expect(body).not.toBe('')
+    const refreshSource = src.slice(src.indexOf('async function applyRefresh'), src.indexOf('export function refreshOperatorRunIndex')) + body
+    expect(refreshSource).not.toContain('_runIndexGeneration++')
+    expect(refreshSource).not.toContain('initOperatorRunIndex(')
   })
 })

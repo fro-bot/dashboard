@@ -95,6 +95,21 @@ export declare function resetRunIndexState(): void
  */
 export declare function markRunStreamAttached(runId: string): void
 
+/**
+ * Refresh the run list in place: fetch, then diff without the loading toggle. Single-flight — a
+ * request while a refresh is in flight joins ONE more refresh that starts after it, so a joined
+ * request is never answered with data fetched before it was made, and responses apply in order.
+ *
+ * Never writes the stream-attached card; updates the empty/unavailable states from the result;
+ * refocuses the card that had focus (preventScroll). A 401/403 routes to the `onAuthRequired` given
+ * to init and stops further refreshes; a 429, network failure or any other failure keeps the current
+ * list. Does not touch the init generation. Resolves false without fetching before init has loaded.
+ *
+ * The promise settles once its data has been applied (or dropped) and never rejects: true when fresh
+ * data was applied, false otherwise.
+ */
+export declare function refreshOperatorRunIndex(): Promise<boolean>
+
 export declare function initOperatorRunIndex(opts?: {
   endpointBase?: string
   fixtureSessionId?: string

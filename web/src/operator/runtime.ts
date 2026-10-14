@@ -251,6 +251,52 @@ let _activeStreamHandle: {close(): void} | null = null
 // already-expanded run again" (collapse) — the single-open accordion's decision point.
 let _activeStreamRunId: string | null = null
 
+/** How often the visible window refreshes the run list. Well inside the gateway's 20/min limit on GET /operator/runs. */
+export const RUN_LIST_REFRESH_INTERVAL_MS = 30_000
+
+/**
+ * The longest an expand waits for the run-list refresh. Past it the stream attaches with the status
+ * already on the card, so a slow gateway can't leave an opened card empty; the refresh itself keeps
+ * going in the background and updates the list as usual.
+ */
+export const EXPAND_REFRESH_CAP_MS = 2000
+
+// The expand that is waiting on the run-list refresh, if any. An expand only attaches its stream
+// once the refresh has landed (or the cap has passed), so the stream starts from the current summary;
+// until then this is what tells onSelectRun that a second activation of the same card is a collapse,
+// not another expand. The object identity is the token: anything that supersedes the expand (a
+// collapse, another expand, a launch, cleanup) goes through _cancelPendingExpand, which clears it and
+// releases the wait (and its cap timer); the waiting continuation checks the token still holds.
+interface PendingExpand {
+  readonly runId: string
+  readonly release: () => void
+}
+let _pendingExpand: PendingExpand | null = null
+
+function _cancelPendingExpand(): void {
+  const pending = _pendingExpand
+  _pendingExpand = null
+  pending?.release()
+}
+
+/**
+ * Wait for `refresh` or for EXPAND_REFRESH_CAP_MS, whichever comes first. `release` ends the wait
+ * early (cancellation). Whichever way the wait ends, the cap timer is cleared, so none leaks. `refresh`
+ * must never reject.
+ */
+function _waitForRefreshOrCap(refresh: Promise<boolean>): {settled: Promise<void>; release: () => void} {
+  let release = () => {}
+  const settled = new Promise<void>(resolve => {
+    const timer = setTimeout(() => release(), EXPAND_REFRESH_CAP_MS)
+    release = () => {
+      clearTimeout(timer)
+      resolve()
+    }
+    void refresh.then(() => release())
+  })
+  return {settled, release}
+}
+
 /**
  * Write the expanded runId to location.hash. runId is used ONLY for setting the
  * hash fragment here — never interpolated into HTML, textContent, or a logger.
@@ -343,6 +389,7 @@ async function defaultRuntimeLoader(opts?: {
       onRestoreMiss?: () => void
       onAuthRequired?: () => void
     }) => Promise<void>
+    refreshOperatorRunIndex?: () => Promise<boolean>
     resetRunIndexState?: () => void
     markRunStreamAttached?: (runId: string) => void
     markCardExpandedForLaunch?: (runId: string) => void
@@ -354,6 +401,8 @@ async function defaultRuntimeLoader(opts?: {
   }
 
   function _attachStream(runId: string, statusEl: Element | null, noticeEl: Element | null): void {
+    // Any attach supersedes an expand still waiting on the refresh.
+    _cancelPendingExpand()
     _closeActiveStream()
 
     if (typeof streamMod.initOperatorStream !== 'function') return
@@ -397,6 +446,14 @@ async function defaultRuntimeLoader(opts?: {
     }
   }
 
+  // Refresh the run list in place (single-flight inside the run index). Triggers: the visible-window
+  // interval, becoming visible, and expand. Never rejects: a failed refresh just keeps the list.
+  const refreshRunList = (): Promise<boolean> => {
+    if (typeof runIndexMod.refreshOperatorRunIndex !== 'function') return Promise.resolve(false)
+    // Never rejects: a failed refresh is just "keep the list as it is".
+    return runIndexMod.refreshOperatorRunIndex().catch(() => false)
+  }
+
   // Build the active-stream coordination callbacks. These are passed to run-index and
   // launch modules so the runtime seam owns the single active stream handle.
   //
@@ -409,22 +466,65 @@ async function defaultRuntimeLoader(opts?: {
   // - Otherwise the card was just expanded — close whichever stream is active
   //   (if any) and attach the new one. _attachStream already closes the prior
   //   handle first, so this covers both "nothing was open" and "switching cards."
-  const onSelectRun = (runId: string) => {
+  //
+  // Expanding first refreshes the run list, so the stream starts from the current summary (a run
+  // that finished while its card was collapsed seeds its terminal status). The attach reads the
+  // card's summary status only after the refresh has landed. If the refresh fails the card keeps the
+  // status it already shows, and the expand proceeds. The whole wait is cancelable: a collapse
+  // never waits, and supersedes an expand that is still waiting.
+  const onSelectRun = (runId: string): Promise<void> | void => {
     if (_activeStreamRunId === runId) {
+      _cancelPendingExpand()
       _closeActiveStream()
       _clearRunHash()
       return
     }
-    // Find the card element for this runId to get its statusEl and noticeEl.
-    const card = typeof document !== 'undefined'
-      ? document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
-      : null
-    const statusEl = card?.querySelector('[data-role="run-status"]') ?? null
-    const noticeEl = typeof document !== 'undefined'
-      ? document.querySelector('[data-role="stream-status"]')
-      : null
-    _attachStream(runId, statusEl, noticeEl)
+    if (_pendingExpand?.runId === runId) {
+      // The card was activated again while its expand waited on the refresh: that is a collapse.
+      _cancelPendingExpand()
+      _clearRunHash()
+      return
+    }
+
+    const attachExpanded = () => {
+      // Find the card element for this runId to get its statusEl and noticeEl.
+      const card = typeof document !== 'undefined'
+        ? document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
+        : null
+      const statusEl = card?.querySelector('[data-role="run-status"]') ?? null
+      const noticeEl = typeof document !== 'undefined'
+        ? document.querySelector('[data-role="stream-status"]')
+        : null
+      _attachStream(runId, statusEl, noticeEl)
+    }
+
+    // No refresh seam (a runtime module without it): expand exactly as before, synchronously.
+    if (typeof runIndexMod.refreshOperatorRunIndex !== 'function') {
+      attachExpanded()
+      _writeRunHash(runId)
+      return
+    }
+
+    // Expanding another card ends the open stream now; only the new attach waits, for the refresh
+    // or the cap. Cancelling first releases a previous waiting expand and its cap timer.
+    _cancelPendingExpand()
+    _closeActiveStream()
     _writeRunHash(runId)
+    const wait = _waitForRefreshOrCap(refreshRunList())
+    const pending = {runId, release: wait.release}
+    _pendingExpand = pending
+    return wait.settled.then(() => {
+      if (disposed || _pendingExpand !== pending) return
+      _pendingExpand = null
+      // The refresh may have dropped the run from the list; there is nothing left to stream into.
+      const stillListed = typeof document !== 'undefined'
+        && document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`) !== null
+      if (!stillListed) {
+        _clearRunHash()
+        return
+      }
+      attachExpanded()
+    })
   }
 
   // Reload restore: a hash-restored run is expanded via a distinct, non-toggle DOM
@@ -461,8 +561,41 @@ async function defaultRuntimeLoader(opts?: {
     }
   }
 
+  // Run-list refresh timer: ticks every RUN_LIST_REFRESH_INTERVAL_MS while the window is visible.
+  // Cleared while hidden, on auth-required, and on cleanup.
+  let disposed = false
+  let authRequired = false
+  let refreshTimer: ReturnType<typeof setInterval> | undefined
+
+  const stopRefreshTimer = () => {
+    if (refreshTimer === undefined) return
+    clearInterval(refreshTimer)
+    refreshTimer = undefined
+  }
+
+  // Restarts rather than stacks, so a visibility event never leaves two intervals running.
+  const startRefreshTimer = () => {
+    stopRefreshTimer()
+    refreshTimer = setInterval(() => {
+      void refreshRunList()
+    }, RUN_LIST_REFRESH_INTERVAL_MS)
+  }
+
   const onAuthRequired = () => {
+    authRequired = true
+    stopRefreshTimer()
     opts?.onStateChange?.('auth-required')
+  }
+
+  const onVisibilityChange = () => {
+    if (disposed || authRequired) return
+    if (document.visibilityState === 'visible') {
+      // Returning to the window: catch up now instead of waiting out the period, and restart it.
+      void refreshRunList()
+      startRefreshTimer()
+    } else {
+      stopRefreshTimer()
+    }
   }
 
   const onRunLaunched = (runId: string, card: HTMLElement) => {
@@ -511,7 +644,17 @@ async function defaultRuntimeLoader(opts?: {
     await launchMod.initOperatorLaunch(launchOpts)
   }
 
+  // Start refreshing once init has loaded the list. Init just fetched it, so no refresh is due yet.
+  if (typeof document !== 'undefined' && !authRequired) {
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    if (document.visibilityState === 'visible') startRefreshTimer()
+  }
+
   return () => {
+    disposed = true
+    stopRefreshTimer()
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibilityChange)
+    _cancelPendingExpand()
     // Close the active stream handle on cleanup.
     _closeActiveStream()
     if (typeof streamMod.resetBootstrapState === 'function') {

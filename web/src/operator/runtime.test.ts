@@ -30,12 +30,16 @@ import {
   createOperatorRuntime,
   discoverCardStreamTargets,
   discoverCardSummaryStatus,
+  EXPAND_REFRESH_CAP_MS,
   MAX_HASH_ID_LENGTH,
   sanitizeRunIdFromHash,
   STATUS_CLASS_TOKENS,
   type OperatorRuntimeHandle,
   type OperatorRuntimeOptions,
 } from './runtime.ts'
+
+// Captured before any test installs fake timers, for polling that must keep running on the real clock.
+const realSetTimeout = globalThis.setTimeout
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -725,7 +729,7 @@ describe('defaultRuntimeLoader — production stream wiring', () => {
   it('selecting a card runs the real _attachStream, which hands the discovered checkoutEl to initOperatorStream', async () => {
     const handle = {close: vi.fn()}
     const initOperatorStream = vi.fn((_opts: {runId: string; checkoutEl?: Element | null}) => handle)
-    let onSelectRun: ((runId: string) => void) | undefined
+    let onSelectRun: ((runId: string) => void | Promise<void>) | undefined
     // A vitest module mock throws on any export the factory omits, so every export the loader reads is listed.
     vi.doMock('/static/operator-stream.js?manual=1', () => ({
       initOperatorStream,
@@ -733,9 +737,10 @@ describe('defaultRuntimeLoader — production stream wiring', () => {
       resetBootstrapState: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
-      initOperatorRunIndex: async (opts: {onSelectRun: (runId: string) => void}) => {
+      initOperatorRunIndex: async (opts: {onSelectRun: (runId: string) => void | Promise<void>}) => {
         onSelectRun = opts.onSelectRun
       },
+      refreshOperatorRunIndex: vi.fn(async () => true),
       resetRunIndexState: vi.fn(),
       markRunStreamAttached: vi.fn(),
       markCardExpandedForLaunch: vi.fn(),
@@ -758,7 +763,7 @@ describe('defaultRuntimeLoader — production stream wiring', () => {
     await vi.waitFor(() => expect(onSelectRun).toBeDefined())
     expect(onStateChange).not.toHaveBeenCalled()
 
-    onSelectRun?.('run-wired-1')
+    await onSelectRun?.('run-wired-1')
 
     expect(region).not.toBeNull()
     expect(initOperatorStream).toHaveBeenCalledTimes(1)
@@ -789,7 +794,7 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
       initCalls.push({opts, regionChildrenAtInit: opts.questionsEl?.childNodes.length})
       return handle
     })
-    let onSelectRun: ((runId: string) => void) | undefined
+    let onSelectRun: ((runId: string) => void | Promise<void>) | undefined
     let onRunLaunched: ((runId: string, card: HTMLElement) => void) | undefined
     vi.doMock('/static/operator-stream.js?manual=1', () => ({
       initOperatorStream,
@@ -797,9 +802,10 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
       resetBootstrapState: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
-      initOperatorRunIndex: async (opts: {onSelectRun: (runId: string) => void}) => {
+      initOperatorRunIndex: async (opts: {onSelectRun: (runId: string) => void | Promise<void>}) => {
         onSelectRun = opts.onSelectRun
       },
+      refreshOperatorRunIndex: vi.fn(async () => true),
       resetRunIndexState: vi.fn(),
       markRunStreamAttached: vi.fn(),
       markCardExpandedForLaunch: vi.fn(),
@@ -818,7 +824,8 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
     return {
       runtime,
       initCalls,
-      select: (runId: string) => onSelectRun?.(runId),
+      // Expanding waits for the run-list refresh, so a select settles once the stream is attached.
+      select: async (runId: string) => { await onSelectRun?.(runId) },
       launched: (runId: string, card: HTMLElement) => onRunLaunched?.(runId, card),
     }
   }
@@ -837,8 +844,8 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
     const regionB = document.querySelector('[data-run-id="run-q-b"] [data-role="run-questions"]')
     const {runtime, initCalls, select} = await mountLoader()
 
-    select('run-q-a')
-    select('run-q-b')
+    await select('run-q-a')
+    await select('run-q-b')
 
     expect(initCalls).toHaveLength(2)
     expect(initCalls[0]?.opts.runId).toBe('run-q-a')
@@ -871,7 +878,7 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
     document.body.innerHTML = `${statuses.map(status => cardHtml(`run-q-${status}`, RUN_STATUS_CLASS_TOKENS[status])).join('')}<div data-role="stream-status"></div>`
     const {runtime, initCalls, select} = await mountLoader()
 
-    for (const status of statuses) select(`run-q-${status}`)
+    for (const status of statuses) await select(`run-q-${status}`)
 
     expect(initCalls.map(call => call.opts.summaryStatus)).toEqual(statuses)
     runtime.cleanup()
@@ -884,7 +891,7 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
     document.body.innerHTML = `${cardHtml('run-q-wait', token)}<div data-role="stream-status"></div>`
     const {runtime, initCalls, select} = await mountLoader()
 
-    select('run-q-wait')
+    await select('run-q-wait')
 
     expect(discoverCardSummaryStatus('run-q-wait')).toBe(status)
     expect(initCalls).toHaveLength(1)
@@ -910,7 +917,7 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
     ].join('')
     const {runtime, initCalls, select} = await mountLoader()
 
-    for (const id of ['run-q-under-q', 'run-q-under-a', 'run-q-evil', 'run-q-pending', 'run-q-none']) select(id)
+    for (const id of ['run-q-under-q', 'run-q-under-a', 'run-q-evil', 'run-q-pending', 'run-q-none']) await select(id)
 
     expect(initCalls).toHaveLength(5)
     for (const call of initCalls) expect('summaryStatus' in call.opts).toBe(false)
@@ -923,15 +930,15 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
     const regionB = document.querySelector('[data-run-id="run-q-sw-b"] [data-role="run-questions"]') as HTMLElement
     const {runtime, initCalls, select} = await mountLoader()
 
-    select('run-q-sw-a')
+    await select('run-q-sw-a')
     expect(initCalls[0]?.regionChildrenAtInit).toBe(0)
     // The stream renders a question into A's region, then the operator switches away and back.
     regionA.append(document.createElement('p'))
     regionB.append(document.createElement('p'))
-    select('run-q-sw-b')
+    await select('run-q-sw-b')
     expect(initCalls[1]?.regionChildrenAtInit).toBe(0)
     // Switching away leaves A's DOM alone; only the re-attach clears it.
-    select('run-q-sw-a')
+    await select('run-q-sw-a')
 
     expect(initCalls).toHaveLength(3)
     expect(initCalls[2]?.opts.questionsEl).toBe(regionA)
@@ -944,11 +951,516 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
     document.body.innerHTML = `<div data-run-id="run-q-legacy"><span data-role="run-status" class="run-status status-running"></span></div><div data-role="stream-status"></div>`
     const {runtime, initCalls, select} = await mountLoader()
 
-    select('run-q-legacy')
+    await select('run-q-legacy')
 
     expect(initCalls).toHaveLength(1)
     expect(initCalls[0]?.opts.questionsEl).toBeNull()
     runtime.cleanup()
+  })
+})
+
+describe('defaultRuntimeLoader — run-list refresh triggers', () => {
+  type InitOpts = {runId: string; summaryStatus?: string}
+
+  let visibility: DocumentVisibilityState = 'visible'
+
+  beforeEach(() => {
+    visibility = 'visible'
+    Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => visibility})
+    // Interval and timeout are faked (the refresh interval and the expand cap). The mount polling below
+    // uses the real setTimeout captured at file load.
+    vi.useFakeTimers({toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout']})
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    Reflect.deleteProperty(document, 'visibilityState')
+    document.body.innerHTML = ''
+    if (location.hash !== '') history.replaceState(null, '', location.pathname + location.search)
+    vi.doUnmock('/static/operator-stream.js?manual=1')
+    vi.doUnmock('/static/operator-run-index.js?manual=1')
+    vi.doUnmock('/static/operator-launch.js?manual=1')
+    vi.restoreAllMocks()
+  })
+
+  function setVisibility(next: DocumentVisibilityState): void {
+    visibility = next
+    document.dispatchEvent(new Event('visibilitychange'))
+  }
+
+  /** A refresh the test settles by hand; each call gets its own resolver. */
+  function controllableRefresh() {
+    const resolvers: ((applied: boolean) => void)[] = []
+    const refresh = vi.fn(() => new Promise<boolean>(resolve => {
+      resolvers.push(resolve)
+    }))
+    return {refresh, resolvers}
+  }
+
+  async function mountLoader(refresh: () => Promise<boolean> = async () => true) {
+    const handle = {close: vi.fn()}
+    const initOperatorStream = vi.fn((_opts: InitOpts) => handle)
+    const refreshOperatorRunIndex = vi.fn(refresh)
+    let onSelectRun: ((runId: string) => void | Promise<void>) | undefined
+    let onAuthRequired: (() => void) | undefined
+    let onRunLaunched: ((runId: string, card: HTMLElement) => void) | undefined
+    vi.doMock('/static/operator-stream.js?manual=1', () => ({
+      initOperatorStream,
+      bootstrapOperatorStreams: vi.fn(),
+      resetBootstrapState: vi.fn(),
+    }))
+    vi.doMock('/static/operator-run-index.js?manual=1', () => ({
+      initOperatorRunIndex: async (opts: {onSelectRun: (runId: string) => void | Promise<void>; onAuthRequired: () => void}) => {
+        onSelectRun = opts.onSelectRun
+        onAuthRequired = opts.onAuthRequired
+      },
+      refreshOperatorRunIndex,
+      resetRunIndexState: vi.fn(),
+      markRunStreamAttached: vi.fn(),
+      markCardExpandedForLaunch: vi.fn(),
+    }))
+    vi.doMock('/static/operator-launch.js?manual=1', () => ({
+      initOperatorLaunch: vi.fn(async (opts: {onRunLaunched: (runId: string, card: HTMLElement) => void}) => {
+        onRunLaunched = opts.onRunLaunched
+      }),
+      resetLaunchState: vi.fn(),
+    }))
+    const onStateChange = vi.fn()
+    const runtime = createOperatorRuntime({container: makeContainer(), onStateChange})
+    // Poll on real timers. vi.waitFor would advance the fake clock while it waits, which would shift
+    // the interval's start and make the 30-second boundaries below inexact.
+    for (let attempt = 0; attempt < 200 && (onSelectRun === undefined || onRunLaunched === undefined); attempt++) {
+      await new Promise(resolve => realSetTimeout(resolve, 5))
+    }
+    expect(onSelectRun).toBeDefined()
+    expect(onRunLaunched).toBeDefined()
+    // The loader finishes its setup (interval, listener, cleanup registration) a few microtasks later.
+    await new Promise(resolve => realSetTimeout(resolve, 5))
+    return {
+      runtime,
+      handle,
+      initOperatorStream,
+      refreshOperatorRunIndex,
+      onStateChange,
+      select: (runId: string) => onSelectRun?.(runId),
+      authRequired: () => onAuthRequired?.(),
+      launched: (runId: string, card: HTMLElement) => onRunLaunched?.(runId, card),
+    }
+  }
+
+  function cardHtml(runId: string, statusClass: string): string {
+    return `<div data-run-id="${runId}"><span data-role="run-status" class="run-status ${statusClass}"></span></div>`
+  }
+
+  /** jsdom defers the hashchange event of a location.hash write onto a (faked) timeout; run it so timer counts see only the runtime's own timers. */
+  const flushHashEvent = () => vi.advanceTimersByTimeAsync(0)
+
+  function setStatusClass(runId: string, statusClass: string): void {
+    const statusEl = document.querySelector(`[data-run-id="${runId}"] [data-role="run-status"]`)
+    if (statusEl !== null) statusEl.className = `run-status ${statusClass}`
+  }
+
+  describe('interval and visibility', () => {
+    it('does not refresh at mount (init just fetched), then refreshes every 30 seconds while visible', async () => {
+      const {runtime, refreshOperatorRunIndex} = await mountLoader()
+      expect(refreshOperatorRunIndex).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(29_999)
+      expect(refreshOperatorRunIndex).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(refreshOperatorRunIndex).toHaveBeenCalledTimes(2)
+      runtime.cleanup()
+    })
+
+    it('runs no refresh while hidden, and the interval is cleared (not merely skipped)', async () => {
+      const {runtime, refreshOperatorRunIndex} = await mountLoader()
+
+      setVisibility('hidden')
+      await vi.advanceTimersByTimeAsync(300_000)
+
+      expect(refreshOperatorRunIndex).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(0)
+      runtime.cleanup()
+    })
+
+    it('mounting while hidden starts no interval until the window becomes visible', async () => {
+      visibility = 'hidden'
+      const {runtime, refreshOperatorRunIndex} = await mountLoader()
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(refreshOperatorRunIndex).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(0)
+
+      setVisibility('visible')
+      expect(refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(refreshOperatorRunIndex).toHaveBeenCalledTimes(2)
+      runtime.cleanup()
+    })
+
+    it('becoming visible refreshes at once and restarts the interval from that moment', async () => {
+      const {runtime, refreshOperatorRunIndex} = await mountLoader()
+      await vi.advanceTimersByTimeAsync(20_000)
+      setVisibility('hidden')
+      await vi.advanceTimersByTimeAsync(5000)
+
+      setVisibility('visible')
+      expect(refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(1)
+
+      // A fresh 30-second period: the 20 seconds already elapsed before hiding do not count.
+      await vi.advanceTimersByTimeAsync(29_999)
+      expect(refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(refreshOperatorRunIndex).toHaveBeenCalledTimes(2)
+      runtime.cleanup()
+    })
+
+    it('a visibilitychange that stays visible does not stack a second interval', async () => {
+      const {runtime, refreshOperatorRunIndex} = await mountLoader()
+
+      setVisibility('visible')
+      setVisibility('visible')
+      expect(vi.getTimerCount()).toBe(1)
+
+      await vi.advanceTimersByTimeAsync(30_000)
+      // Two immediate refreshes from the two events, plus exactly one interval tick.
+      expect(refreshOperatorRunIndex).toHaveBeenCalledTimes(3)
+      runtime.cleanup()
+    })
+
+    it('a rejected refresh never surfaces: the next cycle just runs again', async () => {
+      const {runtime, refreshOperatorRunIndex, onStateChange} = await mountLoader(async () => {
+        throw new Error('boom')
+      })
+
+      await vi.advanceTimersByTimeAsync(60_000)
+
+      expect(refreshOperatorRunIndex).toHaveBeenCalledTimes(2)
+      expect(onStateChange).not.toHaveBeenCalled()
+      runtime.cleanup()
+    })
+
+    it('auth-required stops the interval and a later visibility change does not restart it', async () => {
+      const {runtime, refreshOperatorRunIndex, onStateChange, authRequired} = await mountLoader()
+
+      authRequired()
+      expect(onStateChange).toHaveBeenCalledWith('auth-required')
+      expect(vi.getTimerCount()).toBe(0)
+
+      await vi.advanceTimersByTimeAsync(120_000)
+      setVisibility('hidden')
+      setVisibility('visible')
+      await vi.advanceTimersByTimeAsync(120_000)
+
+      expect(refreshOperatorRunIndex).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(0)
+      runtime.cleanup()
+    })
+
+    it('cleanup clears the interval and the visibility listener, and no refresh fires after unmount', async () => {
+      const added = vi.spyOn(document, 'addEventListener')
+      const removed = vi.spyOn(document, 'removeEventListener')
+      const {runtime, refreshOperatorRunIndex} = await mountLoader()
+      const listener = added.mock.calls.find(([type]) => type === 'visibilitychange')?.[1]
+      expect(listener).toBeDefined()
+      expect(vi.getTimerCount()).toBe(1)
+
+      runtime.cleanup()
+
+      expect(removed).toHaveBeenCalledWith('visibilitychange', listener)
+      expect(vi.getTimerCount()).toBe(0)
+      await vi.advanceTimersByTimeAsync(120_000)
+      setVisibility('hidden')
+      setVisibility('visible')
+      expect(refreshOperatorRunIndex).not.toHaveBeenCalled()
+    })
+
+    it('cleanup before the loader finishes still tears down what it set up', async () => {
+      const {runtime} = await mountLoader()
+      runtime.cleanup()
+      // A second mount/cleanup cycle (React Strict Mode) leaves no timers behind.
+      const second = await mountLoader()
+      second.runtime.cleanup()
+      expect(vi.getTimerCount()).toBe(0)
+    })
+  })
+
+  describe('refresh before expand', () => {
+    it('waits for the refresh, then seeds the stream from the refreshed card status (a run that finished while collapsed seeds succeeded)', async () => {
+      document.body.innerHTML = `${cardHtml('run-x-fin', 'status-running')}<div data-role="stream-status"></div>`
+      const {refresh, resolvers} = controllableRefresh()
+      const {runtime, initOperatorStream, select} = await mountLoader(refresh)
+
+      const selecting = select('run-x-fin')
+      expect(refresh).toHaveBeenCalledTimes(1)
+      expect(initOperatorStream).not.toHaveBeenCalled()
+
+      // The refresh lands: the run finished while its card was collapsed.
+      setStatusClass('run-x-fin', 'status-succeeded')
+      resolvers[0]?.(true)
+      await selecting
+
+      expect(initOperatorStream).toHaveBeenCalledTimes(1)
+      expect(initOperatorStream.mock.calls[0]?.[0].runId).toBe('run-x-fin')
+      expect(initOperatorStream.mock.calls[0]?.[0].summaryStatus).toBe('succeeded')
+      runtime.cleanup()
+    })
+
+    const failingRefreshes: [string, () => Promise<boolean>][] = [
+      ['rejects', () => Promise.reject(new Error('boom'))],
+      ['reports nothing applied', () => Promise.resolve(false)],
+    ]
+    it.each(failingRefreshes)('a refresh that %s still expands, from the status already on the card', async (_label, refresh) => {
+      document.body.innerHTML = `${cardHtml('run-x-fail', 'status-waiting-for-question')}<div data-role="stream-status"></div>`
+      const {runtime, initOperatorStream, select} = await mountLoader(refresh)
+
+      await select('run-x-fail')
+
+      expect(initOperatorStream).toHaveBeenCalledTimes(1)
+      expect(initOperatorStream.mock.calls[0]?.[0].summaryStatus).toBe('waiting_for_question')
+      runtime.cleanup()
+    })
+
+    it('the hash is written when the card expands, not after the refresh', async () => {
+      document.body.innerHTML = `${cardHtml('run-x-hash', 'status-running')}<div data-role="stream-status"></div>`
+      const {refresh} = controllableRefresh()
+      const {runtime, select} = await mountLoader(refresh)
+
+      void select('run-x-hash')
+
+      expect(location.hash).toBe('#run-x-hash')
+      runtime.cleanup()
+    })
+
+    it('collapse does not wait for a refresh: it closes the stream and clears the hash synchronously', async () => {
+      document.body.innerHTML = `${cardHtml('run-x-col', 'status-running')}<div data-run-id="run-x-other"><span data-role="run-status" class="run-status status-running"></span></div><div data-role="stream-status"></div>`
+      const {runtime, handle, initOperatorStream, refreshOperatorRunIndex, select} = await mountLoader()
+      await select('run-x-col')
+      expect(initOperatorStream).toHaveBeenCalledTimes(1)
+      expect(location.hash).toBe('#run-x-col')
+      refreshOperatorRunIndex.mockClear()
+      refreshOperatorRunIndex.mockImplementation(() => new Promise<boolean>(() => {}))
+
+      select('run-x-col')
+
+      expect(handle.close).toHaveBeenCalledTimes(1)
+      expect(location.hash).toBe('')
+      expect(refreshOperatorRunIndex).not.toHaveBeenCalled()
+      runtime.cleanup()
+    })
+
+    it('collapsing a card whose expand is still waiting on the refresh cancels the attach', async () => {
+      document.body.innerHTML = `${cardHtml('run-x-cancel', 'status-running')}<div data-role="stream-status"></div>`
+      const {refresh, resolvers} = controllableRefresh()
+      const {runtime, initOperatorStream, select} = await mountLoader(refresh)
+
+      const expanding = select('run-x-cancel')
+      select('run-x-cancel')
+      resolvers[0]?.(true)
+      await expanding
+
+      expect(initOperatorStream).not.toHaveBeenCalled()
+      expect(location.hash).toBe('')
+      runtime.cleanup()
+    })
+
+    it('expanding another card closes the open stream at once and attaches only the newest expand', async () => {
+      document.body.innerHTML = `${cardHtml('run-x-a', 'status-running')}${cardHtml('run-x-b', 'status-running')}${cardHtml('run-x-c', 'status-running')}<div data-role="stream-status"></div>`
+      const {runtime, handle, initOperatorStream, refreshOperatorRunIndex, select} = await mountLoader()
+      await select('run-x-a')
+      expect(initOperatorStream).toHaveBeenCalledTimes(1)
+      const {refresh, resolvers} = controllableRefresh()
+      refreshOperatorRunIndex.mockImplementation(refresh)
+
+      const expandB = select('run-x-b')
+      expect(handle.close).toHaveBeenCalledTimes(1)
+      const expandC = select('run-x-c')
+      expect(location.hash).toBe('#run-x-c')
+      resolvers[0]?.(true)
+      resolvers[1]?.(true)
+      await Promise.all([expandB, expandC])
+
+      expect(initOperatorStream).toHaveBeenCalledTimes(2)
+      expect(initOperatorStream.mock.calls[1]?.[0].runId).toBe('run-x-c')
+      runtime.cleanup()
+    })
+
+    it('a card the refresh removed is not attached, and the hash it wrote is cleared', async () => {
+      document.body.innerHTML = `${cardHtml('run-x-gone', 'status-running')}<div data-role="stream-status"></div>`
+      const {runtime, initOperatorStream, select} = await mountLoader(async () => {
+        document.querySelector('[data-run-id="run-x-gone"]')?.remove()
+        return true
+      })
+
+      await select('run-x-gone')
+
+      expect(initOperatorStream).not.toHaveBeenCalled()
+      expect(location.hash).toBe('')
+      runtime.cleanup()
+    })
+
+    it('cleanup while an expand waits on the refresh attaches nothing afterwards', async () => {
+      document.body.innerHTML = `${cardHtml('run-x-unmount', 'status-running')}<div data-role="stream-status"></div>`
+      const {refresh, resolvers} = controllableRefresh()
+      const {runtime, initOperatorStream, select} = await mountLoader(refresh)
+
+      const expanding = select('run-x-unmount')
+      runtime.cleanup()
+      resolvers[0]?.(true)
+      await expanding
+
+      expect(initOperatorStream).not.toHaveBeenCalled()
+    })
+
+    it('the cap is 2 seconds', () => {
+      expect(EXPAND_REFRESH_CAP_MS).toBe(2000)
+    })
+
+    it('a refresh that never settles stops holding the expand at the cap: it attaches with the status already on the card', async () => {
+      document.body.innerHTML = `${cardHtml('run-x-cap', 'status-waiting-for-approval')}<div data-role="stream-status"></div>`
+      const {runtime, initOperatorStream, select} = await mountLoader(() => new Promise<boolean>(() => {}))
+
+      void select('run-x-cap')
+      await vi.advanceTimersByTimeAsync(EXPAND_REFRESH_CAP_MS - 1)
+      expect(initOperatorStream).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(1)
+
+      expect(initOperatorStream).toHaveBeenCalledTimes(1)
+      expect(initOperatorStream.mock.calls[0]?.[0].runId).toBe('run-x-cap')
+      expect(initOperatorStream.mock.calls[0]?.[0].summaryStatus).toBe('waiting_for_approval')
+      runtime.cleanup()
+    })
+
+    it('after the cap attached, the refresh still finishing in the background does not attach again', async () => {
+      document.body.innerHTML = `${cardHtml('run-x-late', 'status-running')}<div data-role="stream-status"></div>`
+      const {refresh, resolvers} = controllableRefresh()
+      const {runtime, initOperatorStream, select} = await mountLoader(refresh)
+
+      void select('run-x-late')
+      await vi.advanceTimersByTimeAsync(EXPAND_REFRESH_CAP_MS)
+      expect(initOperatorStream).toHaveBeenCalledTimes(1)
+
+      setStatusClass('run-x-late', 'status-succeeded')
+      resolvers[0]?.(true)
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(initOperatorStream).toHaveBeenCalledTimes(1)
+      expect(document.querySelector('[data-run-id="run-x-late"] [data-role="run-status"]')?.className).toContain('status-succeeded')
+      runtime.cleanup()
+    })
+
+    it('a refresh that settles before the cap wins the race and clears the cap timer', async () => {
+      document.body.innerHTML = `${cardHtml('run-x-fast', 'status-running')}<div data-role="stream-status"></div>`
+      const {refresh, resolvers} = controllableRefresh()
+      const {runtime, initOperatorStream, select} = await mountLoader(refresh)
+      expect(vi.getTimerCount()).toBe(1)
+
+      const expanding = select('run-x-fast')
+      await flushHashEvent()
+      expect(vi.getTimerCount()).toBe(2)
+      await vi.advanceTimersByTimeAsync(EXPAND_REFRESH_CAP_MS - 1)
+      setStatusClass('run-x-fast', 'status-succeeded')
+      resolvers[0]?.(true)
+      await expanding
+
+      expect(initOperatorStream).toHaveBeenCalledTimes(1)
+      expect(initOperatorStream.mock.calls[0]?.[0].summaryStatus).toBe('succeeded')
+      // Only the refresh interval is left.
+      expect(vi.getTimerCount()).toBe(1)
+      await vi.advanceTimersByTimeAsync(EXPAND_REFRESH_CAP_MS)
+      expect(initOperatorStream).toHaveBeenCalledTimes(1)
+      runtime.cleanup()
+    })
+
+    it('a cap that fires leaves no timer behind', async () => {
+      document.body.innerHTML = `${cardHtml('run-x-fired', 'status-running')}<div data-role="stream-status"></div>`
+      const {runtime, select} = await mountLoader(() => new Promise<boolean>(() => {}))
+
+      void select('run-x-fired')
+      await vi.advanceTimersByTimeAsync(EXPAND_REFRESH_CAP_MS)
+
+      expect(vi.getTimerCount()).toBe(1)
+      runtime.cleanup()
+      expect(vi.getTimerCount()).toBe(0)
+    })
+
+    it('collapsing a waiting expand clears the cap timer and attaches nothing at the cap', async () => {
+      document.body.innerHTML = `${cardHtml('run-x-capcancel', 'status-running')}<div data-role="stream-status"></div>`
+      const {runtime, initOperatorStream, select} = await mountLoader(() => new Promise<boolean>(() => {}))
+
+      void select('run-x-capcancel')
+      await flushHashEvent()
+      expect(vi.getTimerCount()).toBe(2)
+      select('run-x-capcancel')
+      expect(vi.getTimerCount()).toBe(1)
+      await vi.advanceTimersByTimeAsync(EXPAND_REFRESH_CAP_MS * 2)
+
+      expect(initOperatorStream).not.toHaveBeenCalled()
+      runtime.cleanup()
+    })
+
+    it('another expand supersedes the waiting one at the cap: only the newest attaches, with one cap timer left', async () => {
+      document.body.innerHTML = `${cardHtml('run-x-sup-a', 'status-running')}${cardHtml('run-x-sup-b', 'status-queued')}<div data-role="stream-status"></div>`
+      const {runtime, initOperatorStream, select} = await mountLoader(() => new Promise<boolean>(() => {}))
+
+      void select('run-x-sup-a')
+      void select('run-x-sup-b')
+      await flushHashEvent()
+      expect(vi.getTimerCount()).toBe(2)
+      await vi.advanceTimersByTimeAsync(EXPAND_REFRESH_CAP_MS)
+
+      expect(initOperatorStream).toHaveBeenCalledTimes(1)
+      expect(initOperatorStream.mock.calls[0]?.[0].runId).toBe('run-x-sup-b')
+      expect(initOperatorStream.mock.calls[0]?.[0].summaryStatus).toBe('queued')
+      runtime.cleanup()
+    })
+
+    it('a launch handoff clears the waiting expand\'s cap timer', async () => {
+      document.body.innerHTML = `${cardHtml('run-x-lw', 'status-running')}${cardHtml('run-x-ln', 'status-queued')}<div data-role="stream-status"></div>`
+      const {runtime, initOperatorStream, select, launched} = await mountLoader(() => new Promise<boolean>(() => {}))
+
+      void select('run-x-lw')
+      launched('run-x-ln', document.querySelector('[data-run-id="run-x-ln"]') as HTMLElement)
+      await flushHashEvent()
+      expect(vi.getTimerCount()).toBe(1)
+      await vi.advanceTimersByTimeAsync(EXPAND_REFRESH_CAP_MS)
+
+      expect(initOperatorStream).toHaveBeenCalledTimes(1)
+      expect(initOperatorStream.mock.calls[0]?.[0].runId).toBe('run-x-ln')
+      runtime.cleanup()
+    })
+
+    it('cleanup while an expand waits clears the cap timer too', async () => {
+      document.body.innerHTML = `${cardHtml('run-x-cleanup', 'status-running')}<div data-role="stream-status"></div>`
+      const {runtime, initOperatorStream, select} = await mountLoader(() => new Promise<boolean>(() => {}))
+
+      void select('run-x-cleanup')
+      await flushHashEvent()
+      expect(vi.getTimerCount()).toBe(2)
+      runtime.cleanup()
+
+      expect(vi.getTimerCount()).toBe(0)
+      await vi.advanceTimersByTimeAsync(EXPAND_REFRESH_CAP_MS)
+      expect(initOperatorStream).not.toHaveBeenCalled()
+    })
+
+    it('a launch handoff while an expand waits wins: the waiting expand does not replace the launched stream', async () => {
+      document.body.innerHTML = `${cardHtml('run-x-wait', 'status-running')}${cardHtml('run-x-new', 'status-queued')}<div data-role="stream-status"></div>`
+      const {refresh, resolvers} = controllableRefresh()
+      const {runtime, initOperatorStream, select, launched} = await mountLoader(refresh)
+
+      const expanding = select('run-x-wait')
+      launched('run-x-new', document.querySelector('[data-run-id="run-x-new"]') as HTMLElement)
+      resolvers[0]?.(true)
+      await expanding
+
+      expect(initOperatorStream).toHaveBeenCalledTimes(1)
+      expect(initOperatorStream.mock.calls[0]?.[0].runId).toBe('run-x-new')
+      runtime.cleanup()
+    })
   })
 })
 
