@@ -234,17 +234,28 @@ describe('sw.js build output', () => {
     expect(pushHandlerSource).not.toContain('cache.put')
   })
 
-  it('GUARD: notificationclick handler opens the literal / (open-redirect guard)', () => {
+  it('GUARD: notificationclick handler only delegates to the pure resolver (behavior is tested in push/notification-click.test.ts)', () => {
     const src = readFileSync(resolve(import.meta.dirname, 'sw.ts'), 'utf8')
+    expect(src).toContain("from './push/notification-click.ts'")
     const clickHandlerStart = src.indexOf("addEventListener('notificationclick'")
     const clickHandlerEnd = src.indexOf("addEventListener('pushsubscriptionchange'")
     expect(clickHandlerStart).toBeGreaterThan(-1)
     expect(clickHandlerEnd).toBeGreaterThan(clickHandlerStart)
     const clickHandlerSource = src.slice(clickHandlerStart, clickHandlerEnd)
-    expect(clickHandlerSource).toContain("openWindow('/')")
-    // Never reads notification.data (or any payload field) as a navigation target.
-    expect(clickHandlerSource).not.toContain('.data.route')
-    expect(clickHandlerSource).not.toContain('notification.data')
+    expect(clickHandlerSource).toContain('handleNotificationClick(clients, e.notification.data)')
+    // No navigation logic inline: the resolver owns window selection and opening.
+    expect(clickHandlerSource).not.toContain('openWindow')
+    expect(clickHandlerSource).not.toContain('matchAll')
+  })
+
+  it('GUARD: sw.ts never builds a navigation URL from a payload route (open-redirect guard)', () => {
+    const src = readFileSync(resolve(import.meta.dirname, 'sw.ts'), 'utf8')
+    // The wire `route` is never read in the worker entry; the resolver and
+    // buildNotification validate and discard it.
+    expect(src).not.toMatch(/\.route\b/)
+    expect(src).not.toContain('.data.route')
+    // The only data handed onward is the notification's stored data, to the resolver.
+    expect(src.match(/notification\.data/g)).toHaveLength(1)
   })
 
   it('GUARD: pushsubscriptionchange handler posts only {type: PUSH_SUBSCRIPTION_CHANGE} — no endpoint/keys/identity', () => {

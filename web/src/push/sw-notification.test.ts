@@ -1,8 +1,8 @@
 import {readFileSync} from 'node:fs'
 import {resolve} from 'node:path'
-import {describe, expect, it} from 'vitest'
+import {afterEach, describe, expect, it, vi} from 'vitest'
 import {FAILURE_REASON_LABELS} from '../../../public/operator-stream.js'
-import {buildNotification, KNOWN_FAILURE_LABELS} from './sw-notification.ts'
+import {buildNotification, KNOWN_FAILURE_LABELS, PUSH_NOTIFICATION_TYPES} from './sw-notification.ts'
 
 /**
  * Payloads exactly as the gateway serializes them: top-level `title`/`body`
@@ -238,6 +238,79 @@ describe('buildNotification (wire payload shape)', () => {
     const fallback = buildNotification(null)
     expect(Object.keys(fallback.data).sort()).toEqual(['route', 'type'])
     expect(fallback.data.route).toBe('/')
+  })
+})
+
+describe('question runId (discriminated data)', () => {
+  const RUN_ID = '3f2b9c1e-7a4d-4e8b-9c55-0d1e2f3a4b5c'
+  const questionWire = (data: Record<string, unknown>) => ({...WIRE.question, data: {type: 'question', ...data}})
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('exports the runtime tuple of notification types', () => {
+    expect([...PUSH_NOTIFICATION_TYPES].sort()).toEqual(['approval', 'question', 'run_failed'])
+  })
+
+  it('a question keeps a valid runId when route is exactly /operator#<runId>', () => {
+    expect(buildNotification(questionWire({route: `/operator#${RUN_ID}`, runId: RUN_ID}))).toEqual({
+      title: 'Answer needed',
+      body: 'A run is waiting for your answer.',
+      data: {type: 'question', route: '/', runId: RUN_ID},
+    })
+  })
+
+  it('a question drops runId when it fails the pattern', () => {
+    const bad = ['a'.repeat(129), '', '../x', 'a/b', '%2F', 'has space', 'javascript:alert(1)', 12345, null]
+    for (const runId of bad) {
+      const result = buildNotification(questionWire({route: `/operator#${String(runId)}`, runId}))
+      expect(result.data).toEqual({type: 'question', route: '/'})
+      expect(Object.hasOwn(result.data, 'runId')).toBe(false)
+    }
+  })
+
+  it('a question drops a valid runId when route is not exactly /operator#<runId>', () => {
+    const routes = [
+      '/',
+      '/operator',
+      '/operator#',
+      `/operator#${RUN_ID}x`,
+      `/operator#other`,
+      `/operator/#${RUN_ID}`,
+      `https://evil.example/operator#${RUN_ID}`,
+      `//evil.example/operator#${RUN_ID}`,
+      undefined,
+      42,
+    ]
+    for (const route of routes) {
+      const result = buildNotification(questionWire({route, runId: RUN_ID}))
+      expect(result.data).toEqual({type: 'question', route: '/'})
+    }
+    expect(buildNotification(questionWire({runId: RUN_ID})).data).toEqual({type: 'question', route: '/'})
+  })
+
+  it('approval and run_failed never carry a runId, even when the wire has a matching route', () => {
+    for (const type of ['approval', 'run_failed']) {
+      const result = buildNotification({data: {type, route: `/operator#${RUN_ID}`, runId: RUN_ID}})
+      expect(Object.hasOwn(result.data, 'runId')).toBe(false)
+      expect(JSON.stringify(result)).not.toContain(RUN_ID)
+    }
+  })
+
+  it('a top-level runId outside data is ignored', () => {
+    const result = buildNotification({runId: RUN_ID, data: {type: 'question', route: `/operator#${RUN_ID}`}})
+    expect(result.data).toEqual({type: 'question', route: '/'})
+  })
+
+  it('makes no console.* calls', () => {
+    const spies = (['debug', 'error', 'info', 'log', 'trace', 'warn'] as const).map(method =>
+      vi.spyOn(console, method).mockImplementation(() => {}),
+    )
+    buildNotification(questionWire({route: `/operator#${RUN_ID}`, runId: RUN_ID}))
+    buildNotification(questionWire({route: '/', runId: '../x'}))
+    buildNotification(null)
+    for (const spy of spies) expect(spy).not.toHaveBeenCalled()
   })
 })
 

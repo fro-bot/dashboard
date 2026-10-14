@@ -180,8 +180,9 @@ export const CLAIMS = {
     status: 'published',
     category: 'payload',
     value:
-      'Notification payloads use fixed, neutral copy plus a small set of allowlisted failure labels. They never include repository names, prompts, run identifiers, run output, endpoints, signing keys, tokens, cookies, or session data.',
-    sourceNote: 'Gateway payload construction, per the fro-bot/agent survey.',
+      'Notification payloads use fixed, neutral copy plus a small set of allowlisted failure labels. They never include repository names, prompts, run output, endpoints, signing keys, tokens, cookies, or session data. A question notification carries the ID of the run that asked, used only to open that run.',
+    sourceNote:
+      'Gateway payload construction, per the fro-bot/agent survey. The one dynamic value is the run ID of a question push (`buildQuestionPayload`).',
   },
   exportSurface: {
     status: 'published',

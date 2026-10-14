@@ -7,10 +7,14 @@
  * payloads are network-delivered) `unknown` payload to a fixed,
  * dashboard-owned notification descriptor.
  *
- * Wire shape: the gateway sends `{title, body, data: {type, route, failureLabel?}}`.
+ * Wire shape: the gateway sends `{title, body, data: {type, route, runId?, failureLabel?}}`.
  * Top-level `title` and `body` are i18n keys, not display text, and are never
- * rendered. Only `data.type` and `data.failureLabel` are read; `data.route`
- * and any other field are ignored (the notification always routes to `/`).
+ * rendered. Only `data.type`, `data.failureLabel`, and (for `question` only)
+ * `data.runId` with `data.route` are read; any other field is ignored. The
+ * output `route` is always the literal `/`: the notification never carries a
+ * URL built from wire text. A `question` keeps its `runId` only when the ID
+ * matches `RUN_ID_PATTERN` and the wire `route` is exactly `/operator#<runId>`;
+ * the click handler turns that ID into a target and nothing else reads it.
  *
  * Safe-copy notification rendering: copy is a fixed map keyed by
  * `data.type`, plus an optional `data.failureLabel` that must be a member of
@@ -19,7 +23,13 @@
  * label is NEVER rendered.
  */
 
-export type PushNotificationType = 'approval' | 'run_failed' | 'question'
+/** Notification types the gateway sends. Mirrors the vendored `OPERATOR_PUSH_TRIGGER_KINDS`; a root test pins the two together. */
+export const PUSH_NOTIFICATION_TYPES = ['approval', 'run_failed', 'question'] as const
+
+export type PushNotificationType = (typeof PUSH_NOTIFICATION_TYPES)[number]
+
+/** Run IDs admitted into a notification: URL-safe ASCII identifiers (gateway run IDs are UUIDs). */
+export const RUN_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
 
 /**
  * Reason text for each failure kind the gateway may put in `data.failureLabel`.
@@ -46,10 +56,26 @@ const FAILURE_REASONS: ReadonlyMap<string, string> = new Map([
  */
 export const KNOWN_FAILURE_LABELS: ReadonlySet<string> = new Set([...FAILURE_REASONS.keys(), 'unknown'])
 
+/** A question that asked from a known run. The only shape that carries a `runId`. */
+export interface QuestionRunNotificationData {
+  readonly type: 'question'
+  readonly route: '/'
+  readonly runId: string
+}
+
+/** Every other notification: no `runId`. */
+export interface PlainNotificationData {
+  readonly type: PushNotificationType | 'unknown'
+  readonly route: '/'
+  readonly runId?: never
+}
+
+export type SafeNotificationData = QuestionRunNotificationData | PlainNotificationData
+
 export interface SafeNotification {
   readonly title: string
   readonly body: string
-  readonly data: {readonly type: string; readonly route: '/'}
+  readonly data: SafeNotificationData
 }
 
 const GENERIC_FALLBACK: SafeNotification = {
@@ -85,7 +111,18 @@ const COPY_MAP: Record<PushNotificationType, (failureLabel: string | undefined) 
 }
 
 function isKnownType(value: unknown): value is PushNotificationType {
-  return value === 'approval' || value === 'run_failed' || value === 'question'
+  return PUSH_NOTIFICATION_TYPES.some(known => known === value)
+}
+
+/**
+ * A question's `runId`, or `undefined`. Admitted only when the ID matches
+ * `RUN_ID_PATTERN` and the wire `route` equals exactly `/operator#<runId>`, the
+ * only shape the gateway emits for it.
+ */
+function readQuestionRunId(candidate: Record<string, unknown>): string | undefined {
+  const {runId, route} = candidate
+  if (typeof runId !== 'string' || RUN_ID_PATTERN.test(runId) === false) return undefined
+  return route === `/operator#${runId}` ? runId : undefined
 }
 
 /**
@@ -124,8 +161,11 @@ export function buildNotification(rawPayload: unknown): SafeNotification {
       return COPY_MAP.approval(failureLabel)
     case 'run_failed':
       return COPY_MAP.run_failed(failureLabel)
-    case 'question':
-      return COPY_MAP.question(failureLabel)
+    case 'question': {
+      const notification = COPY_MAP.question(failureLabel)
+      const runId = readQuestionRunId(candidate)
+      return runId === undefined ? notification : {...notification, data: {type: 'question', route: '/', runId}}
+    }
     default: {
       const exhaustiveType: never = type
       return exhaustiveType

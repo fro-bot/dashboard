@@ -34,9 +34,11 @@ import {cleanupOutdatedCaches, createHandlerBoundToURL, precacheAndRoute} from '
 import {NavigationRoute, registerRoute} from 'workbox-routing'
 import {NetworkOnly} from 'workbox-strategies'
 import {OPERATOR_RUNTIME_CACHE} from './pwa/cache-names.ts'
-// The only non-Workbox import in this file: a pure payload→safe-notification
-// mapping module. Any future non-Workbox import here should be a conscious
-// decision (the no-server-imports guard does not cover new web-side imports).
+// The only non-Workbox imports in this file: pure modules for the
+// payload→safe-notification mapping and the notification-click resolver. Any
+// future non-Workbox import here should be a conscious decision (the
+// no-server-imports guard does not cover new web-side imports).
+import {handleNotificationClick} from './push/notification-click.ts'
 import {buildNotification} from './push/sw-notification.ts'
 
 declare const self: ServiceWorkerGlobalScope
@@ -145,6 +147,7 @@ interface SWPushEvent extends Event {
 }
 
 interface SWWindowClient {
+  readonly url: string
   readonly focused: boolean
   readonly visibilityState: string
   focus(): Promise<unknown>
@@ -157,6 +160,7 @@ interface SWClients {
 }
 
 interface SWNotification {
+  readonly data: unknown
   close(): void
 }
 
@@ -195,25 +199,15 @@ addEventListener('push', (event: Event) => {
 })
 
 /**
- * `notificationclick`: neutral click routing. Always opens/focuses the
- * literal `/` — never reads `notification.data.route` or any payload field
- * as a navigation target (open-redirect guard). Prefers an existing
- * focused window, then any visible window, before opening a new one.
+ * `notificationclick`: delegates to the pure resolver in
+ * `push/notification-click.ts`. It never builds a URL from `route` or any wire
+ * text (open-redirect guard); a question click targets only a validated
+ * `runId`. Everything else focuses an existing window or opens `/`.
  */
 addEventListener('notificationclick', (event: Event) => {
   const e = event as SWNotificationEvent
   e.notification.close()
-  e.waitUntil(
-    clients.matchAll({type: 'window', includeUncontrolled: true}).then(windowClients => {
-      const focused = windowClients.find(client => client.focused)
-      const visible = windowClients.find(client => client.visibilityState === 'visible')
-      const target = focused ?? visible
-      if (target !== undefined) {
-        return target.focus()
-      }
-      return clients.openWindow('/')
-    }),
-  )
+  e.waitUntil(handleNotificationClick(clients, e.notification.data))
 })
 
 /**
