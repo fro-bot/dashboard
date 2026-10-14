@@ -2417,6 +2417,7 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
       expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
       cardEl('run-j-b').focus()
       scrolled.length = 0
+      announcerEl().textContent = ''
       streamStatus = status
 
       requestRunJump('run-j-a')
@@ -2425,6 +2426,9 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
       expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
       expect(mounted.handles[0]?.handle.close).not.toHaveBeenCalled()
       expect(mounted.markCardExpandedForLaunch).toHaveBeenCalledTimes(1)
+      // An already-open card is announced too, with the status label and never the run ID.
+      expect(announcerEl().textContent).toBe('Opened run, Running')
+      expect(announcerEl().textContent).not.toContain('run-j-a')
       expect(cardEl('run-j-a').dataset.expanded).toBe('true')
       expect(location.hash).toBe('#run-j-a')
       expect(document.activeElement).toBe(cardEl('run-j-a'))
@@ -2439,10 +2443,13 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
       requestRunJump('run-j-a')
       await tick()
       streamStatus = 'inactive'
+      announcerEl().textContent = ''
 
       requestRunJump('run-j-a')
       await tick()
 
+      expect(announcerEl().textContent).toBe('Opened run, Running')
+      expect(announcerEl().textContent).not.toContain('run-j-a')
       expect(mounted.attachedRunIds()).toEqual(['run-j-a', 'run-j-a'])
       expect(mounted.handles[0]?.handle.close).toHaveBeenCalledTimes(1)
       expect(mounted.handles[1]?.handle.close).not.toHaveBeenCalled()
@@ -2461,6 +2468,7 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
 
       expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
       expect(cardEl('run-j-a').dataset.expanded).toBe('true')
+      expect(announcerEl().textContent).toBe('Opened run, Running')
     })
 
     it('a stream handle with no connection accessor is treated as live (never re-attached on a guess)', async () => {

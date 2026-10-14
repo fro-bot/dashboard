@@ -60,7 +60,7 @@ export const RUN_STATUS_CLASS_TOKENS = Object.freeze({
 const STATUS_BY_CLASS_TOKEN = new Map(Object.entries(RUN_STATUS_CLASS_TOKENS).map(([status, token]) => [token, status]))
 
 /** The summary status a class token stands for, or undefined for any token the map does not own. */
-export function summaryStatusFromClassToken(token) {
+function summaryStatusFromClassToken(token) {
   return typeof token === 'string' ? STATUS_BY_CLASS_TOKEN.get(token) : undefined
 }
 
@@ -262,20 +262,36 @@ export async function fetchRunIndex(opts) {
     ? `${endpointBase}/runs`
     : `${endpointBase}/runs?fixtureSessionId=${encodeURIComponent(fixtureSessionId)}`
 
+  // One timer bounds the whole request: the headers AND the body read. It aborts the fetch and also
+  // wins a race against the request, so a body that never settles (stalled, or ignoring the abort)
+  // still resolves as unavailable and cannot wedge the single-flight refresh.
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+  let timeoutId
+  const timedOut = new Promise(resolve => {
+    timeoutId = setTimeout(() => {
+      controller.abort()
+      resolve({kind: 'unavailable'})
+    }, FETCH_TIMEOUT_MS)
+  })
 
+  try {
+    return await Promise.race([requestRunIndex(url, controller.signal), timedOut])
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
+/** The request half of fetchRunIndex: fetch, status check, body read, parse. Never rejects. */
+async function requestRunIndex(url, signal) {
   let res
   try {
     res = await globalThis.fetch(url, {
       credentials: 'include',
       redirect: 'error',
-      signal: controller.signal,
+      signal,
     })
   } catch {
     return {kind: 'unavailable'}
-  } finally {
-    clearTimeout(timeoutId)
   }
 
   if (!res.ok) {

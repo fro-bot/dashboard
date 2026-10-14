@@ -19,9 +19,6 @@ export type RunSummaryStatus =
  */
 export declare const RUN_STATUS_CLASS_TOKENS: Readonly<Record<RunSummaryStatus, string>>
 
-/** The summary status a class token stands for, or undefined for a token the map does not own. */
-export declare function summaryStatusFromClassToken(token: unknown): RunSummaryStatus | undefined
-
 /** Operator-safe failure-reason code. */
 export type FailureKind =
   | 'inactivity-timeout'
@@ -94,6 +91,13 @@ export declare function resetRunIndexState(): void
  * runtime seam's onSelectRun callback decides attach vs collapse.
  */
 export declare function markRunStreamAttached(runId: string): void
+
+/**
+ * Mark a run's card expanded without toggling it (single-open: any other expanded card collapses).
+ * Used by the launch handoff and by a notification jump. Idempotent; does nothing when the card is
+ * absent or already expanded.
+ */
+export declare function markCardExpandedForLaunch(runId: string): void
 
 /**
  * Refresh the run list in place: fetch, then diff without the loading toggle. Single-flight — a

@@ -3,6 +3,12 @@ import {resolve} from 'node:path'
 import {afterEach, describe, expect, it, vi} from 'vitest'
 import {FAILURE_REASON_LABELS} from '../../../public/operator-stream.js'
 import {buildNotification, KNOWN_FAILURE_LABELS, PUSH_NOTIFICATION_TYPES} from './sw-notification.ts'
+import type {
+  PlainNotificationData,
+  QuestionNoRunNotificationData,
+  QuestionRunNotificationData,
+  SafeNotificationData,
+} from './sw-notification.ts'
 
 /**
  * Payloads exactly as the gateway serializes them: top-level `title`/`body`
@@ -296,6 +302,28 @@ describe('question runId (discriminated data)', () => {
       expect(Object.hasOwn(result.data, 'runId')).toBe(false)
       expect(JSON.stringify(result)).not.toContain(RUN_ID)
     }
+  })
+
+  it('narrows SafeNotificationData: runId is a string only on the run-bearing question variant', () => {
+    // Compile-time contract (pnpm check-types): each branch assigns to exactly one variant.
+    const classify = (data: SafeNotificationData): string => {
+      if (data.runId !== undefined) {
+        const withRun: QuestionRunNotificationData = data
+        const runId: string = withRun.runId
+        return runId === '' ? 'empty' : 'question-run'
+      }
+      if (data.type === 'question') {
+        const withoutRun: QuestionNoRunNotificationData = data
+        return `${withoutRun.type}-no-run`
+      }
+      const plain: PlainNotificationData = data
+      return plain.type
+    }
+
+    expect(classify(buildNotification(questionWire({route: `/operator#${RUN_ID}`, runId: RUN_ID})).data)).toBe('question-run')
+    expect(classify(buildNotification(questionWire({route: '/', runId: '../x'})).data)).toBe('question-no-run')
+    expect(classify(buildNotification(WIRE.approval).data)).toBe('approval')
+    expect(classify(buildNotification(null).data)).toBe('unknown')
   })
 
   it('a top-level runId outside data is ignored', () => {

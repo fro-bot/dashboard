@@ -5,7 +5,7 @@
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 
-import {buildRunSafeView, FETCH_TIMEOUT_MS, fetchRunIndex, formatRelativeTime, initOperatorRunIndex, markCardExpandedForLaunch, markRunStreamAttached, parseRunSummaryItem, parseRunSummaryList, refreshOperatorRunIndex, resetRunIndexState, RUN_INDEX_CAP, FAILURE_REASON_LABELS as RUN_INDEX_FAILURE_REASON_LABELS, RUN_STATUS_CLASS_TOKENS, summaryStatusFromClassToken, VALID_RUN_SUMMARY_STATUSES} from '../public/operator-run-index.js'
+import {buildRunSafeView, FETCH_TIMEOUT_MS, fetchRunIndex, formatRelativeTime, initOperatorRunIndex, markCardExpandedForLaunch, markRunStreamAttached, parseRunSummaryItem, parseRunSummaryList, refreshOperatorRunIndex, resetRunIndexState, RUN_INDEX_CAP, FAILURE_REASON_LABELS as RUN_INDEX_FAILURE_REASON_LABELS, RUN_STATUS_CLASS_TOKENS, VALID_RUN_SUMMARY_STATUSES} from '../public/operator-run-index.js'
 import {FAILURE_REASON_LABELS as STREAM_FAILURE_REASON_LABELS} from '../public/operator-stream.js'
 import {isOperatorFailureKind, OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
 import {parseRunSummary as parseServerRunSummary} from '../src/gateway/operator-contract/run-summary.ts'
@@ -1351,6 +1351,43 @@ describe('fetchRunIndex — passes AbortSignal to fetch', () => {
     expect(result.kind).toBe('unavailable')
   })
 
+  it('a stalled response body is aborted by the timeout and collapses to unavailable', async () => {
+    vi.useFakeTimers()
+    let bodySignal
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((_url, opts) => {
+      bodySignal = opts.signal
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        // Headers arrived; the body never settles unless the request is aborted.
+        json: () => new Promise((_resolve, reject) => {
+          opts.signal.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'))
+          })
+        }),
+      })
+    }))
+
+    const fetchPromise = fetchRunIndex({endpointBase: '/operator'})
+    await vi.advanceTimersByTimeAsync(FETCH_TIMEOUT_MS + 1)
+    const result = await fetchPromise
+    expect(result.kind).toBe('unavailable')
+    expect(bodySignal.aborted).toBe(true)
+  })
+
+  it('a body that never settles even on abort still resolves unavailable at the timeout', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => new Promise(() => {}),
+    }))
+
+    const fetchPromise = fetchRunIndex({endpointBase: '/operator'})
+    await vi.advanceTimersByTimeAsync(FETCH_TIMEOUT_MS + 1)
+    await expect(fetchPromise).resolves.toEqual({kind: 'unavailable'})
+  })
+
   it('does not log on timeout/AbortError', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -2315,30 +2352,49 @@ describe('status class token map — summary status ↔ hyphenated class token',
     expect(RUN_STATUS_CLASS_TOKENS.waiting_for_approval).toBe('status-waiting-for-approval')
   })
 
-  it('round-trips every status: summary → token → summary', () => {
-    for (const status of STATUSES) {
-      expect(summaryStatusFromClassToken(RUN_STATUS_CLASS_TOKENS[status]), status).toBe(status)
+  it('every terminal status token on a card reads back as terminal (sticky against a non-terminal view)', async () => {
+    for (const shown of ['succeeded', 'failed', 'cancelled']) {
+      const runId = `run-tok-readback-${shown}`
+      const cards = []
+      stubDOMWithSubstructureCards(cards)
+      const optimisticCard = makeStatusOnlyOptimisticCard(cards, runId)
+      const statusEl = statusElOf(optimisticCard)
+      statusEl.className = `run-status ${RUN_STATUS_CLASS_TOKENS[shown]}`
+      statusEl.textContent = 'Shown'
+
+      stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+      await initOperatorRunIndex({endpointBase: '/operator'})
+
+      expect(statusEl.className, shown).toBe(`run-status ${RUN_STATUS_CLASS_TOKENS[shown]}`)
+      expect(statusEl.textContent, shown).toBe('Shown')
     }
   })
 
-  it('rejects underscore, unknown, stream-only and prototype-key tokens', () => {
-    for (const token of [
+  it('underscore, unknown, stream-only and prototype-key class tokens do not read back as terminal', async () => {
+    const tokens = [
+      'status-succeeded_x',
       'status-waiting_for_question',
-      'status-waiting_for_approval',
-      'waiting-for-question',
-      'status-pending',
-      'status-blocked',
+      'succeeded',
       'status-unavailable',
       'status-evil',
       'status-',
       'status-constructor',
       '__proto__',
-      '',
-    ]) {
-      expect(summaryStatusFromClassToken(token), token).toBeUndefined()
+    ]
+    for (const [index, token] of tokens.entries()) {
+      const runId = `run-tok-noreadback-${index}`
+      const cards = []
+      stubDOMWithSubstructureCards(cards)
+      const optimisticCard = makeStatusOnlyOptimisticCard(cards, runId)
+      const statusEl = statusElOf(optimisticCard)
+      statusEl.className = `run-status ${token}`
+      statusEl.textContent = 'Shown'
+
+      stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+      await initOperatorRunIndex({endpointBase: '/operator'})
+
+      expect(statusEl.className, token).toBe('run-status status-running')
     }
-    expect(summaryStatusFromClassToken(undefined)).toBeUndefined()
-    expect(summaryStatusFromClassToken(42)).toBeUndefined()
   })
 
   it('a collapsed card renders every status with its hyphenated class and its label', async () => {
@@ -3664,6 +3720,9 @@ function stubControlledFetch() {
     respond(index, runs) {
       resolvers[index].resolve({ok: true, status: 200, json: async () => ({runs})})
     },
+    respondRaw(index, response) {
+      resolvers[index].resolve(response)
+    },
     respondStatus(index, status) {
       resolvers[index].resolve({ok: false, status, json: async () => ({})})
     },
@@ -3703,6 +3762,39 @@ describe('refreshOperatorRunIndex — single-flight in-place refresh', () => {
     await expect(refreshOperatorRunIndex()).resolves.toBe(false)
 
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('a stalled response body settles the refresh false after the timeout, and a later refresh fetches again', async () => {
+    const net = stubControlledFetch()
+    stubDOMForRefresh()
+    const init = initOperatorRunIndex({endpointBase: '/operator'})
+    net.respond(0, [makeValidSummary({runId: 'run-rf-stall-001'})])
+    await init
+
+    vi.useFakeTimers()
+    try {
+      // Headers arrive, but the body never settles.
+      const stalled = refreshOperatorRunIndex()
+      expect(net.fn).toHaveBeenCalledTimes(2)
+      net.respondRaw(1, {ok: true, status: 200, json: () => new Promise(() => {})})
+      let settled
+      stalled.then(value => {
+        settled = value
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(settled).toBeUndefined()
+
+      await vi.advanceTimersByTimeAsync(FETCH_TIMEOUT_MS + 1)
+      expect(settled).toBe(false)
+
+      // The single-flight latch cleared: the next refresh starts a new fetch instead of joining.
+      const next = refreshOperatorRunIndex()
+      expect(net.fn).toHaveBeenCalledTimes(3)
+      net.respond(2, [makeValidSummary({runId: 'run-rf-stall-001', status: 'succeeded'})])
+      await expect(next).resolves.toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('a refresh requested while init is still in flight is a no-op and does not kill the init', async () => {

@@ -7,7 +7,7 @@
  * `console.*` calls: a run ID must never be logged.
  */
 
-import {RUN_ID_PATTERN} from './sw-notification.ts'
+import {RUN_ID_PATTERN} from '../operator/run-id.ts'
 
 export const OPEN_RUN_MESSAGE_TYPE = 'OPEN_RUN'
 

@@ -19,7 +19,7 @@
  *     window, open `/`.
  */
 
-import {RUN_ID_PATTERN} from './sw-notification.ts'
+import {RUN_ID_PATTERN} from '../operator/run-id.ts'
 
 /** The slice of `WindowClient` the resolver uses. */
 export interface ClickWindowClient {
@@ -37,7 +37,7 @@ export interface ClickClients {
 }
 
 /** The `runId` of a question notification's stored data, or `undefined` for anything else. */
-function readQuestionRunId(data: unknown): string | undefined {
+function readStoredQuestionRunId(data: unknown): string | undefined {
   if (typeof data !== 'object' || data === null || Array.isArray(data)) return undefined
   const {type, runId} = data as Record<string, unknown>
   if (type !== 'question' || typeof runId !== 'string') return undefined
@@ -68,7 +68,7 @@ function pickAppWindow(windowClients: readonly ClickWindowClient[]): ClickWindow
  */
 export async function handleNotificationClick(clients: ClickClients, data: unknown): Promise<void> {
   const windowClients = await clients.matchAll({type: 'window', includeUncontrolled: true})
-  const runId = readQuestionRunId(data)
+  const runId = readStoredQuestionRunId(data)
   const target = pickAppWindow(windowClients)
 
   if (target === undefined) {

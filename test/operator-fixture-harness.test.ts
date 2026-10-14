@@ -3187,7 +3187,7 @@ describe('question fixture routes — gating and ownership', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Waiting summaries (operator contract 1.11.0)
+// Waiting summaries (operator contract waiting overlays)
 //
 // The gateway's runs route overlays waiting_for_approval / waiting_for_question on a running base only
 // (approval beats question). The fixture rows mirror that so collapsed cards show the waiting badges.

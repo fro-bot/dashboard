@@ -23,13 +23,12 @@
  * label is NEVER rendered.
  */
 
+import {RUN_ID_PATTERN} from '../operator/run-id.ts'
+
 /** Notification types the gateway sends. Mirrors the vendored `OPERATOR_PUSH_TRIGGER_KINDS`; a root test pins the two together. */
 export const PUSH_NOTIFICATION_TYPES = ['approval', 'run_failed', 'question'] as const
 
 export type PushNotificationType = (typeof PUSH_NOTIFICATION_TYPES)[number]
-
-/** Run IDs admitted into a notification: URL-safe ASCII identifiers (gateway run IDs are UUIDs). */
-export const RUN_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
 
 /**
  * Reason text for each failure kind the gateway may put in `data.failureLabel`.
@@ -63,14 +62,25 @@ export interface QuestionRunNotificationData {
   readonly runId: string
 }
 
-/** Every other notification: no `runId`. */
-export interface PlainNotificationData {
-  readonly type: PushNotificationType | 'unknown'
+/** A question whose payload had no admissible `runId` (absent, malformed, or a mismatched route). */
+export interface QuestionNoRunNotificationData {
+  readonly type: 'question'
   readonly route: '/'
   readonly runId?: never
 }
 
-export type SafeNotificationData = QuestionRunNotificationData | PlainNotificationData
+/** Every other notification: no `runId`. `question` is excluded, so each question shape is one of the two above. */
+export interface PlainNotificationData {
+  readonly type: Exclude<PushNotificationType, 'question'> | 'unknown'
+  readonly route: '/'
+  readonly runId?: never
+}
+
+/**
+ * Narrow on `runId`: `data.runId !== undefined` selects `QuestionRunNotificationData` and gives
+ * `runId: string`; `data.type === 'question'` alone leaves the run and no-run question shapes.
+ */
+export type SafeNotificationData = QuestionRunNotificationData | QuestionNoRunNotificationData | PlainNotificationData
 
 export interface SafeNotification {
   readonly title: string
@@ -119,7 +129,7 @@ function isKnownType(value: unknown): value is PushNotificationType {
  * `RUN_ID_PATTERN` and the wire `route` equals exactly `/operator#<runId>`, the
  * only shape the gateway emits for it.
  */
-function readQuestionRunId(candidate: Record<string, unknown>): string | undefined {
+function readWireQuestionRunId(candidate: Record<string, unknown>): string | undefined {
   const {runId, route} = candidate
   if (typeof runId !== 'string' || RUN_ID_PATTERN.test(runId) === false) return undefined
   return route === `/operator#${runId}` ? runId : undefined
@@ -163,7 +173,7 @@ export function buildNotification(rawPayload: unknown): SafeNotification {
       return COPY_MAP.run_failed(failureLabel)
     case 'question': {
       const notification = COPY_MAP.question(failureLabel)
-      const runId = readQuestionRunId(candidate)
+      const runId = readWireQuestionRunId(candidate)
       return runId === undefined ? notification : {...notification, data: {type: 'question', route: '/', runId}}
     }
     default: {

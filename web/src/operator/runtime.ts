@@ -24,9 +24,12 @@
  *   A hash value over MAX_HASH_ID_LENGTH is rejected before any further processing.
  */
 
-import {RUN_ID_PATTERN} from '../push/sw-notification.ts'
+import {RUN_ID_PATTERN} from './run-id.ts'
 import {validateDynamicId} from './validate-dynamic-id.ts'
-import type {RunSummaryStatus, StreamConnectionStatus} from '../../../public/operator-stream.js'
+import type * as LaunchModule from '../../../public/operator-launch.js'
+import type * as RunIndexModule from '../../../public/operator-run-index.js'
+import type * as StreamModule from '../../../public/operator-stream.js'
+import type {RunSummaryStatus, StreamHandle} from '../../../public/operator-stream.js'
 import type {OperatorState} from './state.ts'
 
 /**
@@ -36,6 +39,12 @@ import type {OperatorState} from './state.ts'
  * decode/encode call — a megabyte-long hash must not reach those paths.
  */
 export const MAX_HASH_ID_LENGTH = 512
+
+/**
+ * The element shape the stream sidecar's InitOptions declares for a render target. DOM lib types
+ * `hidden` as `boolean | string`, so a plain HTMLElement does not satisfy the sidecar's boolean.
+ */
+type StreamTargetEl = HTMLElement & {hidden: boolean}
 
 /**
  * Discover the per-card render targets for a run's stream (output, coalesced
@@ -48,27 +57,27 @@ export const MAX_HASH_ID_LENGTH = 512
  * about whether production actually wires the elements.
  */
 export function discoverCardStreamTargets(runId: string): {
-  outputEl: Element | null
-  coalescedEl: Element | null
-  approvalsEl: Element | null
-  badgeEl: Element | null
-  reasonEl: Element | null
-  cancelEl: Element | null
-  checkoutEl: Element | null
-  questionsEl: Element | null
+  outputEl: StreamTargetEl | null
+  coalescedEl: StreamTargetEl | null
+  approvalsEl: StreamTargetEl | null
+  badgeEl: StreamTargetEl | null
+  reasonEl: StreamTargetEl | null
+  cancelEl: StreamTargetEl | null
+  checkoutEl: StreamTargetEl | null
+  questionsEl: StreamTargetEl | null
 } {
   const card = typeof document !== 'undefined'
     ? document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
     : null
   return {
-    outputEl: card?.querySelector('[data-role="run-output"]') ?? null,
-    coalescedEl: card?.querySelector('[data-role="run-output-coalesced"]') ?? null,
-    approvalsEl: card?.querySelector('[data-role="run-approvals"]') ?? null,
-    badgeEl: card?.querySelector('[data-role="approval-badge"]') ?? null,
-    reasonEl: card?.querySelector('[data-role="run-reason"]') ?? null,
-    cancelEl: card?.querySelector('[data-role="run-cancel"]') ?? null,
-    checkoutEl: card?.querySelector('[data-role="run-checkout-detail"]') ?? null,
-    questionsEl: card?.querySelector('[data-role="run-questions"]') ?? null,
+    outputEl: card?.querySelector<StreamTargetEl>('[data-role="run-output"]') ?? null,
+    coalescedEl: card?.querySelector<StreamTargetEl>('[data-role="run-output-coalesced"]') ?? null,
+    approvalsEl: card?.querySelector<StreamTargetEl>('[data-role="run-approvals"]') ?? null,
+    badgeEl: card?.querySelector<StreamTargetEl>('[data-role="approval-badge"]') ?? null,
+    reasonEl: card?.querySelector<StreamTargetEl>('[data-role="run-reason"]') ?? null,
+    cancelEl: card?.querySelector<StreamTargetEl>('[data-role="run-cancel"]') ?? null,
+    checkoutEl: card?.querySelector<StreamTargetEl>('[data-role="run-checkout-detail"]') ?? null,
+    questionsEl: card?.querySelector<StreamTargetEl>('[data-role="run-questions"]') ?? null,
   }
 }
 
@@ -245,7 +254,10 @@ const _runIndexSpecifier = '/static/operator-run-index.js' + '?manual=1'
 
 // Active-stream state owned by the runtime seam.
 // Only one stream is active at a time; switching cards closes the prior handle first.
-let _activeStreamHandle: {close(): void; getConnectionStatus?: () => StreamConnectionStatus} | null = null
+//
+// getConnectionStatus is declared required by the stream sidecar; it is typed optional here only
+// because a handle without it is treated as live (see _activeStreamServes), a deliberate tolerance.
+let _activeStreamHandle: (Pick<StreamHandle, 'close'> & Partial<Pick<StreamHandle, 'getConnectionStatus'>>) | null = null
 
 // The runId whose stream is currently attached (mirrors _activeStreamHandle's target).
 // Used by onSelectRun to distinguish "expand a new run" (attach) from "select the
@@ -423,63 +435,32 @@ async function defaultRuntimeLoader(opts?: {
   _runJumpMode = 'queue'
   _applyRunJump = null
 
-  const streamMod = await import(/* @vite-ignore */ _streamSpecifier) as {
-    bootstrapOperatorStreams?: (opts?: {endpointBase?: string; fixtureSessionId?: string}) => void
-    resetBootstrapState?: () => void
-    initOperatorStream?: (opts: {
-      runId: string
-      statusEl?: Element | null
-      noticeEl?: Element | null
-      outputEl?: Element | null
-      coalescedEl?: Element | null
-      approvalsEl?: Element | null
-      badgeEl?: Element | null
-      reasonEl?: Element | null
-      cancelEl?: Element | null
-      checkoutEl?: Element | null
-      questionsEl?: Element | null
-      summaryStatus?: RunSummaryStatus
-      endpointBase?: string
-      fixtureSessionId?: string
-    }) => {close(): void; getConnectionStatus?: () => StreamConnectionStatus}
-  }
-  if (typeof streamMod.resetBootstrapState === 'function') {
-    streamMod.resetBootstrapState()
-  }
-  if (typeof streamMod.bootstrapOperatorStreams === 'function') {
-    const streamOpts = opts?.endpointBase !== undefined || opts?.fixtureSessionId !== undefined
-      ? {endpointBase: opts.endpointBase, fixtureSessionId: opts.fixtureSessionId}
-      : undefined
-    streamMod.bootstrapOperatorStreams(streamOpts)
-  }
+  // The casts name the sidecar types, so renaming or retyping a member the runtime uses fails
+  // check-types instead of surfacing as a silently skipped call. Only the members listed are read.
+  const streamMod = await import(/* @vite-ignore */ _streamSpecifier) as Pick<
+    typeof StreamModule,
+    'bootstrapOperatorStreams' | 'resetBootstrapState' | 'initOperatorStream'
+  >
+  streamMod.resetBootstrapState()
+  const streamOpts = opts?.endpointBase !== undefined || opts?.fixtureSessionId !== undefined
+    ? {endpointBase: opts.endpointBase, fixtureSessionId: opts.fixtureSessionId}
+    : undefined
+  streamMod.bootstrapOperatorStreams(streamOpts)
 
-  const runIndexMod = await import(/* @vite-ignore */ _runIndexSpecifier) as {
-    initOperatorRunIndex?: (opts?: {
-      endpointBase?: string
-      fixtureSessionId?: string
-      onSelectRun?: (runId: string) => void
-      restoreRunId?: string
-      onRestoreRun?: (runId: string, card: Element, status: string) => void
-      onRestoreMiss?: () => void
-      onAuthRequired?: () => void
-    }) => Promise<void>
-    refreshOperatorRunIndex?: () => Promise<boolean>
-    resetRunIndexState?: () => void
-    markRunStreamAttached?: (runId: string) => void
-    markCardExpandedForLaunch?: (runId: string) => void
-  }
+  const runIndexMod = await import(/* @vite-ignore */ _runIndexSpecifier) as Pick<
+    typeof RunIndexModule,
+    'initOperatorRunIndex' | 'refreshOperatorRunIndex' | 'resetRunIndexState' | 'markRunStreamAttached' | 'markCardExpandedForLaunch'
+  >
 
-  const launchMod = await import(/* @vite-ignore */ _launchSpecifier) as {
-    initOperatorLaunch?: (opts?: {endpointBase?: string; getScenario?: () => string; fixtureSessionId?: string; onRunLaunched?: (runId: string, card: HTMLElement) => void}) => Promise<void>
-    resetLaunchState?: () => void
-  }
+  const launchMod = await import(/* @vite-ignore */ _launchSpecifier) as Pick<
+    typeof LaunchModule,
+    'initOperatorLaunch' | 'resetLaunchState'
+  >
 
   function _attachStream(runId: string, statusEl: Element | null, noticeEl: Element | null): void {
     // Any attach supersedes an expand still waiting on the refresh.
     _cancelPendingExpand()
     _closeActiveStream()
-
-    if (typeof streamMod.initOperatorStream !== 'function') return
 
     // Discover the per-card render targets so live output, coalescing hints,
     // approval prompts, and the approval badge all render — not just status.
@@ -509,9 +490,7 @@ async function defaultRuntimeLoader(opts?: {
       })
       _activeStreamHandle = handle
       _activeStreamRunId = runId
-      if (typeof runIndexMod.markRunStreamAttached === 'function') {
-        runIndexMod.markRunStreamAttached(runId)
-      }
+      runIndexMod.markRunStreamAttached(runId)
     } catch {
       if (statusEl !== null) {
         statusEl.textContent = 'Unavailable'
@@ -523,7 +502,6 @@ async function defaultRuntimeLoader(opts?: {
   // Refresh the run list in place (single-flight inside the run index). Triggers: the visible-window
   // interval, becoming visible, and expand. Never rejects: a failed refresh just keeps the list.
   const refreshRunList = (): Promise<boolean> => {
-    if (typeof runIndexMod.refreshOperatorRunIndex !== 'function') return Promise.resolve(false)
     // Never rejects: a failed refresh is just "keep the list as it is". A refresh that brings in the
     // run a jump could not find clears that jump's notice.
     return runIndexMod.refreshOperatorRunIndex().catch(() => false).then(applied => {
@@ -605,13 +583,6 @@ async function defaultRuntimeLoader(opts?: {
         ? document.querySelector('[data-role="stream-status"]')
         : null
       _attachStream(runId, statusEl, noticeEl)
-    }
-
-    // No refresh seam (a runtime module without it): expand exactly as before, synchronously.
-    if (typeof runIndexMod.refreshOperatorRunIndex !== 'function') {
-      attachExpanded()
-      _writeRunHash(runId)
-      return
     }
 
     // Expanding another card ends the open stream now; only the new attach waits, for the refresh
@@ -723,9 +694,7 @@ async function defaultRuntimeLoader(opts?: {
     // A launched run's card must present as already-expanded/observed the moment
     // its stream attaches — otherwise the operator's first click on it is
     // misread by onSelectRun as "collapse the active stream" instead of "expand."
-    if (typeof runIndexMod.markCardExpandedForLaunch === 'function') {
-      runIndexMod.markCardExpandedForLaunch(runId)
-    }
+    runIndexMod.markCardExpandedForLaunch(runId)
   }
 
   // Open a run on request (a notification tap). Like onRunLaunched it lives here because it needs
@@ -761,9 +730,7 @@ async function defaultRuntimeLoader(opts?: {
     const wasExpanded = card.dataset.expanded === 'true'
 
     if (!wasExpanded) {
-      if (typeof runIndexMod.markCardExpandedForLaunch === 'function') {
-        runIndexMod.markCardExpandedForLaunch(runId)
-      }
+      runIndexMod.markCardExpandedForLaunch(runId)
       _attachStream(runId, statusEl, noticeEl)
       _writeRunHash(runId)
     } else if (!_activeStreamServes(runId)) {
@@ -773,17 +740,15 @@ async function defaultRuntimeLoader(opts?: {
     if (typeof card.scrollIntoView === 'function') card.scrollIntoView({block: 'nearest'})
     if (typeof card.focus === 'function') card.focus({preventScroll: true})
 
-    if (!wasExpanded) {
-      // The label comes from the run index's own status element (an allowlisted label), never the ID.
-      const label = statusEl?.textContent?.trim() ?? ''
-      const announcer = document.querySelector('[data-role="run-jump-announcer"]')
-      if (announcer !== null) announcer.textContent = label === '' ? 'Opened run' : `Opened run, ${label}`
-    }
+    // Every successful jump announces, whether it expanded the card, only revealed an open one, or
+    // re-attached its stream. The label comes from the run index's own status element (an
+    // allowlisted label), never the ID.
+    const label = statusEl?.textContent?.trim() ?? ''
+    const announcer = document.querySelector('[data-role="run-jump-announcer"]')
+    if (announcer !== null) announcer.textContent = label === '' ? 'Opened run' : `Opened run, ${label}`
   }
 
-  if (typeof runIndexMod.resetRunIndexState === 'function') {
-    runIndexMod.resetRunIndexState()
-  }
+  runIndexMod.resetRunIndexState()
   // The mount-time restore target: sanitized once, handed to the run index below, and compared with
   // a jump that was waiting for this mount (the restore opens that run, so it attaches once).
   const restoreRunId = typeof location !== 'undefined'
@@ -793,34 +758,28 @@ async function defaultRuntimeLoader(opts?: {
   // section: `loaded` or `empty`. Left at `loading` (a reset or a newer init replaced this one,
   // or auth failed) or set to `unavailable`, the pending jump has nowhere to go.
   let runIndexLoaded = false
-  if (typeof runIndexMod.initOperatorRunIndex === 'function') {
-    // The hash is actually read HERE, synchronously, before initOperatorRunIndex is
-    // called — it is only consulted (as restoreRunId) after that function's internal
-    // /operator/runs fetch resolves. So a user click that attaches a stream during
-    // the await window can race this pre-captured value; the run-index module
-    // guards against that by checking for an already-attached stream for a
-    // different run before honoring the restore (see initOperatorRunIndex). The
-    // raw hash is sanitized above — length cap before validateDynamicId — before it
-    // crosses into the run-index module at all.
-    const runIndexOpts = opts?.endpointBase !== undefined
-      ? {endpointBase: opts.endpointBase, fixtureSessionId: opts.fixtureSessionId, onSelectRun, restoreRunId, onRestoreRun, onRestoreMiss, onAuthRequired}
-      : {onSelectRun, restoreRunId, onRestoreRun, onRestoreMiss, onAuthRequired}
-    await runIndexMod.initOperatorRunIndex(runIndexOpts)
-    const listState = typeof document === 'undefined'
-      ? undefined
-      : document.querySelector<HTMLElement>('[data-role="run-index"]')?.dataset.state
-    runIndexLoaded = listState === 'loaded' || listState === 'empty'
-  }
+  // The hash is actually read HERE, synchronously, before initOperatorRunIndex is
+  // called — it is only consulted (as restoreRunId) after that function's internal
+  // /operator/runs fetch resolves. So a user click that attaches a stream during
+  // the await window can race this pre-captured value; the run-index module
+  // guards against that by checking for an already-attached stream for a
+  // different run before honoring the restore (see initOperatorRunIndex). The
+  // raw hash is sanitized above — length cap before validateDynamicId — before it
+  // crosses into the run-index module at all.
+  const runIndexOpts = opts?.endpointBase !== undefined
+    ? {endpointBase: opts.endpointBase, fixtureSessionId: opts.fixtureSessionId, onSelectRun, restoreRunId, onRestoreRun, onRestoreMiss, onAuthRequired}
+    : {onSelectRun, restoreRunId, onRestoreRun, onRestoreMiss, onAuthRequired}
+  await runIndexMod.initOperatorRunIndex(runIndexOpts)
+  const listState = typeof document === 'undefined'
+    ? undefined
+    : document.querySelector<HTMLElement>('[data-role="run-index"]')?.dataset.state
+  runIndexLoaded = listState === 'loaded' || listState === 'empty'
 
-  if (typeof launchMod.resetLaunchState === 'function') {
-    launchMod.resetLaunchState()
-  }
-  if (typeof launchMod.initOperatorLaunch === 'function') {
-    const launchOpts = opts?.endpointBase !== undefined
-      ? {endpointBase: opts.endpointBase, getScenario: opts.getScenario, fixtureSessionId: opts.fixtureSessionId, onRunLaunched}
-      : {onRunLaunched}
-    await launchMod.initOperatorLaunch(launchOpts)
-  }
+  launchMod.resetLaunchState()
+  const launchOpts = opts?.endpointBase !== undefined
+    ? {endpointBase: opts.endpointBase, getScenario: opts.getScenario, fixtureSessionId: opts.fixtureSessionId, onRunLaunched}
+    : {onRunLaunched}
+  await launchMod.initOperatorLaunch(launchOpts)
 
   // Start refreshing once init has loaded the list. Init just fetched it, so no refresh is due yet.
   if (typeof document !== 'undefined' && !authRequired) {
@@ -860,15 +819,9 @@ async function defaultRuntimeLoader(opts?: {
     _cancelPendingExpand()
     // Close the active stream handle on cleanup.
     _closeActiveStream()
-    if (typeof streamMod.resetBootstrapState === 'function') {
-      streamMod.resetBootstrapState()
-    }
-    if (typeof launchMod.resetLaunchState === 'function') {
-      launchMod.resetLaunchState()
-    }
-    if (typeof runIndexMod.resetRunIndexState === 'function') {
-      runIndexMod.resetRunIndexState()
-    }
+    streamMod.resetBootstrapState()
+    launchMod.resetLaunchState()
+    runIndexMod.resetRunIndexState()
   }
 }
 
