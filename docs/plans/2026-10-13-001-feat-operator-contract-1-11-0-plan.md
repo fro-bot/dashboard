@@ -268,7 +268,7 @@ sequenceDiagram
 
 ## Implementation Units
 
-- [ ] **Unit 1: Vendor contract 1.11.0 and accept waiting summaries**
+- [x] **Unit 1: Vendor contract 1.11.0 and accept waiting summaries**
 
 **Goal:** Pin 1.11.0, vendor the 1.10.0 and 1.11.0 additions, and make every summary parser accept and label the waiting statuses.
 
@@ -317,7 +317,7 @@ sequenceDiagram
 
 **Verification:** every pin and parity test passes at 1.11.0. Waiting summaries reach the run list with labels.
 
-- [ ] **Unit 2: Waiting badge on collapsed cards and terminal stickiness**
+- [x] **Unit 2: Waiting badge on collapsed cards and terminal stickiness**
 
 **Goal:** Collapsed cards show the waiting status with the right class. A finished card never regresses.
 
@@ -344,7 +344,7 @@ sequenceDiagram
 
 **Verification:** collapsed waiting badges render styled. No test path shows a finished card moving back to a non-terminal status.
 
-- [ ] **Unit 3: Run-list refresh**
+- [x] **Unit 3: Run-list refresh**
 
 **Goal:** Keep collapsed badges and the run set current while the operator is looking.
 
@@ -375,7 +375,7 @@ sequenceDiagram
 
 **Verification:** on the fixture server, a collapsed run's badge changes within about 30 seconds without any interaction.
 
-- [ ] **Unit 4: Align the client waiting fallback**
+- [x] **Unit 4: Align the client waiting fallback**
 
 **Goal:** `getEffectiveStatus` matches the gateway's overlay rules.
 
@@ -398,7 +398,7 @@ sequenceDiagram
 
 **Verification:** the truth-table test passes. Other existing approval and question status tests still pass.
 
-- [ ] **Unit 5: Service worker deep link**
+- [x] **Unit 5: Service worker deep link**
 
 **Goal:** A question notification click targets the asking run safely.
 
@@ -433,7 +433,7 @@ sequenceDiagram
 
 **Verification:** the resolver tests pass, and `sw.ts` only wires them. The notification never carries a URL built from wire text.
 
-- [ ] **Unit 6: In-page jump to a run**
+- [x] **Unit 6: In-page jump to a run**
 
 **Goal:** An open window jumps to the run on an `OPEN_RUN` message, without reloading.
 
@@ -466,7 +466,7 @@ sequenceDiagram
 
 **Verification:** on the fixture server, posting the message to an open window expands the target run with no reload. Navigation timing and the absence of a document reload both confirm this.
 
-- [ ] **Unit 7: Fixtures and browser verification**
+- [x] **Unit 7: Fixtures and browser verification**
 
 **Goal:** Fixture parity for waiting summaries, and an assembled-surface check.
 
