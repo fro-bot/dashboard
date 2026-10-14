@@ -665,9 +665,11 @@ const CHECKOUT_SCENARIO_BUILDERS = Object.fromEntries(
 // Question and expired-snapshot scenarios
 //
 // Wire shapes follow fro-bot/agent v0.119.1: open frames `{runId, requestID, settled:false, questions}`,
-// settle frames `{runId, requestID, settled:true}`, no settle frame at terminal. Status frames stay
-// `running` while a question is pending: `waiting_for_question` is overlaid only at lifecycle
-// transitions and the fixtures do not model one. Every request ID is `req-fixture-` prefixed and every
+// settle frames `{runId, requestID, settled:true}`, no settle frame at terminal. Stream status frames stay
+// `running` while a question is pending, as upstream's do. The waiting overlay lives on the runs list: the
+// gateway's runs route reports `waiting_for_question` for a running run with an open request, so a scenario
+// whose stream ends with a request open carries that as its `summaryStatus` (the row's collapsed badge).
+// Every request ID is `req-fixture-` prefixed and every
 // free-form string starts with `fixture`, ignoring the deliberate bidi/control characters in the
 // sentinel scenario.
 // ---------------------------------------------------------------------------
@@ -856,9 +858,12 @@ export interface FixtureQuestionScript {
   readonly decisions?: readonly FixtureQuestionDecisionOutcome[]
 }
 
+/** Summary statuses a question or expired-snapshot row can show. */
+type QuestionSummaryStatus = 'running' | 'succeeded' | 'waiting_for_question'
+
 interface QuestionScenarioSpec {
   /** Status the recent-runs row shows before the stream is opened (the card's summary status). */
-  readonly summaryStatus: 'running' | 'succeeded'
+  readonly summaryStatus: QuestionSummaryStatus
   /** The stream ends open, as the gateway's does for a run that is not finished. */
   readonly holdOpen: boolean
   readonly script: FixtureQuestionScript
@@ -877,13 +882,13 @@ function runningWithProgress(runId: string): string {
 
 const QUESTION_SCENARIO_SPECS: Readonly<Record<QuestionScenarioName, QuestionScenarioSpec>> = {
   question_single: {
-    summaryStatus: 'running',
+    summaryStatus: 'waiting_for_question',
     holdOpen: true,
     script: {openRequests: [QUESTION_SINGLE]},
     build: runId => runningWithProgress(runId) + questionOpenFrame(runId, QUESTION_SINGLE),
   },
   question_multi_shapes: {
-    summaryStatus: 'running',
+    summaryStatus: 'waiting_for_question',
     holdOpen: true,
     script: {openRequests: [QUESTION_MULTI]},
     build: runId => runningWithProgress(runId) + questionOpenFrame(runId, QUESTION_MULTI),
@@ -911,7 +916,7 @@ const QUESTION_SCENARIO_SPECS: Readonly<Record<QuestionScenarioName, QuestionSce
       statusFrame(runId, 'failed', 'FAILED', QUESTION_STARTED_AT),
   },
   question_already_claimed_reopens: {
-    summaryStatus: 'running',
+    summaryStatus: 'waiting_for_question',
     holdOpen: true,
     script: {
       openRequests: [QUESTION_CLAIMED],
@@ -922,7 +927,7 @@ const QUESTION_SCENARIO_SPECS: Readonly<Record<QuestionScenarioName, QuestionSce
     build: runId => runningWithProgress(runId) + questionOpenFrame(runId, QUESTION_CLAIMED),
   },
   question_failed_to_settle: {
-    summaryStatus: 'running',
+    summaryStatus: 'waiting_for_question',
     holdOpen: true,
     script: {
       openRequests: [QUESTION_FAILED_TO_SETTLE],
@@ -931,7 +936,7 @@ const QUESTION_SCENARIO_SPECS: Readonly<Record<QuestionScenarioName, QuestionSce
     build: runId => runningWithProgress(runId) + questionOpenFrame(runId, QUESTION_FAILED_TO_SETTLE),
   },
   question_invalid_answer: {
-    summaryStatus: 'running',
+    summaryStatus: 'waiting_for_question',
     holdOpen: true,
     script: {
       openRequests: [QUESTION_INVALID],
@@ -940,13 +945,13 @@ const QUESTION_SCENARIO_SPECS: Readonly<Record<QuestionScenarioName, QuestionSce
     build: runId => runningWithProgress(runId) + questionOpenFrame(runId, QUESTION_INVALID),
   },
   question_masked_404: {
-    summaryStatus: 'running',
+    summaryStatus: 'waiting_for_question',
     holdOpen: true,
     script: {openRequests: [QUESTION_MASKED], decisions: [{status: 404}]},
     build: runId => runningWithProgress(runId) + questionOpenFrame(runId, QUESTION_MASKED),
   },
   question_text_sentinels: {
-    summaryStatus: 'running',
+    summaryStatus: 'waiting_for_question',
     holdOpen: true,
     script: {openRequests: [QUESTION_SENTINELS]},
     build: runId => runningWithProgress(runId) + questionOpenFrame(runId, QUESTION_SENTINELS),
@@ -986,11 +991,21 @@ const QUESTION_SCENARIO_SPECS: Readonly<Record<QuestionScenarioName, QuestionSce
 /** Rows for the recent-runs list: one per question or expired-snapshot scenario. Order follows FIXTURE_SCENARIO_NAMES. */
 export const FIXTURE_QUESTION_SCENARIO_ROWS: readonly {
   readonly scenario: QuestionScenarioName
-  readonly summaryStatus: 'running' | 'succeeded'
+  readonly summaryStatus: QuestionSummaryStatus
 }[] = (Object.keys(QUESTION_SCENARIO_SPECS) as QuestionScenarioName[]).map(scenario => ({
   scenario,
   summaryStatus: QUESTION_SCENARIO_SPECS[scenario].summaryStatus,
 }))
+
+/**
+ * The approval scenario's recent-runs row. The gateway reports `waiting_for_approval` while an approval is
+ * open on a running run (and it wins over a question), so the row carries that status; opening it replays the
+ * existing approval round trip unchanged.
+ */
+export const FIXTURE_APPROVAL_SCENARIO_ROWS: readonly {
+  readonly scenario: 'approval_flow'
+  readonly summaryStatus: 'waiting_for_approval'
+}[] = [{scenario: 'approval_flow', summaryStatus: 'waiting_for_approval'}]
 
 function isQuestionScenarioName(name: string): name is QuestionScenarioName {
   return Object.hasOwn(QUESTION_SCENARIO_SPECS, name)

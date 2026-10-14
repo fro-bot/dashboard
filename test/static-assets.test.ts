@@ -633,6 +633,29 @@ describe('production build artifacts — no fixture strings in web/dist JS', () 
   })
 })
 
+describe('waiting-summary fixture rows stay out of production artifacts', () => {
+  it('no waiting-row, transition-row or missing-run fixture ID reaches web/dist or the shipped browser modules', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const files = [
+      'web/dist/sw.js',
+      'web/dist/index.html',
+      'public/operator-stream.js',
+      'public/operator-launch.js',
+      'public/operator-run-index.js',
+    ]
+    for (const file of await fs.readdir('web/dist/assets')) {
+      if (file.endsWith('.js') || file.endsWith('.css')) files.push(path.join('web/dist/assets', file))
+    }
+    for (const file of files) {
+      const src = await fs.readFile(file, 'utf8')
+      for (const id of ['run-fixture-index-approval-flow', 'run-fixture-index-transition-question', 'run-fixture-missing-001', 'req-fixture-approval-001']) {
+        expect(src, `${file} must not contain ${id}`).not.toContain(id)
+      }
+    }
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Service worker cache boundary — fixture routes are not intercepted
 //
