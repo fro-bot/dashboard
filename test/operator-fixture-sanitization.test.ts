@@ -448,7 +448,11 @@ describe('fixture no-leak guard — waiting summary rows', () => {
 
   it('rows exist for both waiting statuses, each on a scenario that can stream it', () => {
     expect(rows.map(row => row.summaryStatus).filter(status => status === 'waiting_for_approval')).toHaveLength(1)
-    expect(rows.map(row => row.summaryStatus).filter(status => status === 'waiting_for_question')).toHaveLength(7)
+    const questionRows = rows.filter(row => row.summaryStatus === 'waiting_for_question')
+    expect(questionRows.map(row => row.scenario)).toEqual(
+      FIXTURE_QUESTION_SCENARIO_ROWS.filter(row => row.summaryStatus === 'waiting_for_question').map(row => row.scenario),
+    )
+    expect(questionRows.map(row => row.scenario)).toContain('question_no_approval')
     for (const row of rows) {
       expect(row.scenario, row.scenario).not.toBe(FIXTURE_SCENARIO_NAMES.success)
       const sse = serializeScenarioToSse(row.scenario, `run-fixture-index-${row.scenario.replaceAll('_', '-')}`)

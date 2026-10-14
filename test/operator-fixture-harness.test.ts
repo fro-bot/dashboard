@@ -2965,6 +2965,7 @@ describe('question fixture routes — recent-runs rows and streams', () => {
       question_invalid_answer: 'waiting_for_question',
       question_masked_404: 'waiting_for_question',
       question_text_sentinels: 'waiting_for_question',
+      question_no_approval: 'waiting_for_question',
       expired_completed_silent: 'succeeded',
     }
     for (const key of QUESTION_SCENARIO_KEYS) {
@@ -3260,15 +3261,11 @@ describe('waiting summary fixtures — rows map to their matching scenarios', ()
     const approval = runs.filter(run => run.status === 'waiting_for_approval')
     const question = runs.filter(run => run.status === 'waiting_for_question')
     expect(approval.map(run => run.runId)).toEqual(['run-fixture-index-approval-flow'])
-    expect(question.map(run => run.runId)).toEqual([
-      'run-fixture-index-question-single',
-      'run-fixture-index-question-multi-shapes',
-      'run-fixture-index-question-already-claimed-reopens',
-      'run-fixture-index-question-failed-to-settle',
-      'run-fixture-index-question-invalid-answer',
-      'run-fixture-index-question-masked-404',
-      'run-fixture-index-question-text-sentinels',
-    ])
+    // Derived from the scenario specs so a new held-open question scenario is covered without editing this list.
+    const expected = FIXTURE_QUESTION_SCENARIO_ROWS.filter(row => row.summaryStatus === 'waiting_for_question').map(row => questionRunId(row.scenario))
+    expect(expected.length).toBeGreaterThan(0)
+    expect(expected).toContain('run-fixture-index-question-no-approval')
+    expect(question.map(run => run.runId)).toEqual(expected)
   })
 
   it('the waiting_for_approval row streams the approval scenario, not the default success stream', async () => {
@@ -3286,7 +3283,7 @@ describe('waiting summary fixtures — rows map to their matching scenarios', ()
   it('every waiting_for_question row streams its own question scenario, and none is the default success stream', async () => {
     const {app, fixtureSessionId, fetchRuns} = await harnessRuns()
     const rows = (await fetchRuns()).filter(run => run.status === 'waiting_for_question' && !run.runId.includes('transition'))
-    expect(rows).toHaveLength(7)
+    expect(rows).toHaveLength(FIXTURE_QUESTION_SCENARIO_ROWS.filter(row => row.summaryStatus === 'waiting_for_question').length)
     for (const row of rows) {
       const scenario = row.runId.replace('run-fixture-index-', '').replaceAll('-', '_')
       expect(QUESTION_SCENARIO_KEYS, row.runId).toContain(scenario)

@@ -975,7 +975,7 @@ const QUESTION_SCENARIO_SPECS: Readonly<Record<QuestionScenarioName, QuestionSce
     build: runId => runningWithProgress(runId) + questionOpenFrame(runId, QUESTION_SENTINELS),
   },
   question_no_approval: {
-    summaryStatus: 'running',
+    summaryStatus: 'waiting_for_question',
     holdOpen: true,
     noApproval: true,
     script: {openRequests: [QUESTION_NO_APPROVAL]},
