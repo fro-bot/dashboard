@@ -687,7 +687,11 @@ describe('Notifications Component', () => {
     fireEvent.click(syncBtn)
     expect(postMessage).toHaveBeenCalledWith({
       type: 'MOCK_SYNTHETIC_PUSH',
-      payload: {type: 'approval'},
+      payload: {
+        title: 'operator.approval_needed.title',
+        body: 'operator.approval_needed.body',
+        data: {type: 'approval', route: '/'},
+      },
     })
   })
 })

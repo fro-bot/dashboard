@@ -117,8 +117,10 @@ addEventListener('message', (event: Event) => {
   }
   // Dev-only synthetic push: the notifications consent surface posts
   // {type:'MOCK_SYNTHETIC_PUSH', payload} to the SW for visual verification
-  // without a real push subscription/relay round-trip. Routed through the
-  // same safe-copy mapping as a real push — never renders raw payload text.
+  // without a real push subscription/relay round-trip. `payload` has the wire
+  // shape {title, body, data: {type, route, failureLabel?}} and is routed
+  // through the same safe-copy mapping as a real push — never renders raw
+  // payload text.
   if (messageType === 'MOCK_SYNTHETIC_PUSH') {
     const {title, body, data} = buildNotification((e.data as {payload?: unknown} | null)?.payload)
     e.waitUntil(registration.showNotification(title, {body, data}))

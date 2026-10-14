@@ -57,9 +57,9 @@ describe('public privacy policy content', () => {
     expect(pageText).not.toMatch(/never record.{0,120}run detail/i)
   })
 
-  // UNGUARDED, deliberately: "They cover two events: a run is waiting for
-  // your approval, and a run failed." The dispatch trigger set
-  // ('approval' | 'run_failed') is Gateway-internal — not in the vendored
+  // UNGUARDED, deliberately: "They cover three events: a run is waiting for
+  // your approval, a run is waiting for your answer, and a run failed." The
+  // dispatch trigger set ('approval' | 'question' | 'run_failed') is Gateway-internal — not in the vendored
   // contract (src/gateway/operator-contract/push.ts covers only the read
   // surface: VAPID key, handoff state, subscription metadata). A test here
   // could only assert the page says what the page says. Guardable once the

@@ -424,7 +424,11 @@ export function Notifications({
                 if (navigator.serviceWorker && navigator.serviceWorker.controller) {
                   navigator.serviceWorker.controller.postMessage({
                     type: 'MOCK_SYNTHETIC_PUSH',
-                    payload: {type: 'approval'},
+                    payload: {
+                      title: 'operator.approval_needed.title',
+                      body: 'operator.approval_needed.body',
+                      data: {type: 'approval', route: '/'},
+                    },
                   })
                 }
               }}
