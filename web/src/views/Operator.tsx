@@ -41,6 +41,7 @@ const QUESTION_FIXTURE_SCENARIOS: readonly {readonly value: string; readonly lab
       {value: 'question_invalid_answer', label: 'Question: invalid answer'},
       {value: 'question_masked_404', label: 'Question: masked 404'},
       {value: 'question_text_sentinels', label: 'Question: text sentinels'},
+      {value: 'question_no_approval', label: 'Question: no approval prompt'},
       {value: 'expired_completed_terminal_frame', label: 'Expired run: terminal frame after reset'},
       {value: 'expired_completed_silent', label: 'Expired run: silent after reset'},
       {value: 'running_after_no_snapshot', label: 'Running run after reset'},

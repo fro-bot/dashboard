@@ -321,6 +321,7 @@ describe('Operator — fixture scenario selector', () => {
         'question_invalid_answer',
         'question_masked_404',
         'question_text_sentinels',
+        'question_no_approval',
         'expired_completed_terminal_frame',
         'expired_completed_silent',
         'running_after_no_snapshot',
