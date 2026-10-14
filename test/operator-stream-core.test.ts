@@ -11576,3 +11576,67 @@ describe('approval client — unchanged by the question client', () => {
     expect(listed).toEqual([Q_RUN])
   })
 })
+
+describe('stream handle — getConnectionStatus (what a re-open from a notification needs to know)', () => {
+  afterEach(u4Cleanup)
+
+  it('is active while connecting, once live, and while reconnecting', async () => {
+    const h = u4Start({initial: [[U4_READY, u4Status('running')]]})
+    expect(h.handle.getConnectionStatus()).toBe('active') // connecting: nothing has arrived yet
+    await h.flush()
+    expect(h.handle.getConnectionStatus()).toBe('active') // live
+    h.push(0, U4_RESET_SHUTDOWN)
+    await h.flush(0)
+    expect(h.handle.getConnectionStatus()).toBe('active') // reconnecting, not given up
+  })
+
+  it('is inactive when the stream closed cleanly without a terminal status', async () => {
+    const h = u4Start({initial: [[U4_READY, u4Status('running')]]})
+    await h.flush()
+    h.end(0)
+    await h.flush(5000)
+    expect(h.handle.getConnectionStatus()).toBe('inactive')
+  })
+
+  it('is terminal once the run reached a terminal status, even after the connection closes', async () => {
+    const h = u4Start({initial: [[U4_READY, u4Status('succeeded')]]})
+    await h.flush()
+    expect(h.handle.getConnectionStatus()).toBe('terminal')
+    h.end(0)
+    await h.flush(5000)
+    expect(h.handle.getConnectionStatus()).toBe('terminal')
+  })
+
+  it('is inactive after close()', async () => {
+    const h = u4Start({initial: [[U4_READY, u4Status('running')]]})
+    await h.flush()
+    h.handle.close()
+    expect(h.handle.getConnectionStatus()).toBe('inactive')
+  })
+
+  it('is inactive when the gateway has no such stream (404) and does not reconnect', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('document', {createElement: (tag: string) => makeFakeEl(tag)})
+    vi.stubGlobal('addEventListener', () => {})
+    const fetchMock = vi.fn(async () => ({ok: false, status: 404, headers: {get: () => null}, body: null}))
+    vi.stubGlobal('fetch', fetchMock)
+    const handle = initOperatorStream({
+      runId: Q_RUN,
+      statusEl: makeFakeEl('span') as never,
+      noticeEl: makeFakeEl('div') as never,
+    })
+    u4Handles.push(handle)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(handle.getConnectionStatus()).toBe('inactive')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads state only: calling it neither writes the DOM nor changes the connection', async () => {
+    const h = u4Start({initial: [[U4_READY, u4Status('running')]]})
+    await h.flush()
+    const before = h.statusEl.textContent
+    for (let i = 0; i < 3; i++) h.handle.getConnectionStatus()
+    expect(h.statusEl.textContent).toBe(before)
+    expect(h.listCalls).toHaveLength(1)
+  })
+})

@@ -900,4 +900,27 @@ describe('Operator — stream and status announcement hooks', () => {
     expect(noticeEl).toHaveAttribute('aria-live', 'polite')
     expect(noticeEl).toHaveClass('operator-stream-status')
   })
+
+  it('renders a dedicated, hidden miss notice for the jump to a run, separate from stream-status', () => {
+    render(<Operator state="ready" />)
+    const missEl = document.querySelector('[data-role="run-jump-miss"]')
+    expect(missEl).not.toBeNull()
+    expect(missEl).not.toBe(document.querySelector('[data-role="stream-status"]'))
+    expect(missEl).toHaveAttribute('role', 'status')
+    expect(missEl).toHaveAttribute('aria-live', 'polite')
+    expect(missEl).toBeEmptyDOMElement()
+    expect((missEl as HTMLElement).hidden).toBe(true)
+    expect(document.querySelector('[data-role="run-index"]')?.contains(missEl)).toBe(true)
+  })
+
+  it('renders a visually-hidden polite live region for the jump announcement', () => {
+    render(<Operator state="ready" />)
+    const announcer = document.querySelector('[data-role="run-jump-announcer"]')
+    expect(announcer).not.toBeNull()
+    expect(announcer).toHaveAttribute('aria-live', 'polite')
+    expect(announcer).toHaveAttribute('aria-atomic', 'true')
+    expect(announcer).toHaveClass('sr-only')
+    expect(announcer).toBeEmptyDOMElement()
+    expect(document.querySelector('[data-role="run-index"]')?.contains(announcer)).toBe(true)
+  })
 })

@@ -4636,11 +4636,27 @@ export function initOperatorStream(opts) {
     reconnectTimer = setTimeout(connect, delay)
   }
 
+  /**
+   * Whether this handle still serves its card, as a three-way read of the lifecycle state:
+   *   'terminal' — the run reached a terminal status (its card is complete; nothing more to stream);
+   *   'active'   — connecting, live, or reconnecting (it is, or will be, receiving frames);
+   *   'inactive' — closed without a terminal status, failed, not found, rate-limited, drifted, or
+   *                close()d: nothing will arrive without a new attach.
+   * Read-only: it never writes the DOM or the state.
+   */
+  function getConnectionStatus() {
+    if (aborted) return 'inactive'
+    if (state.runs[runId]?.terminal === true) return 'terminal'
+    const {connection} = state
+    return connection === 'connecting' || connection === 'live' || connection === 'reconnecting' ? 'active' : 'inactive'
+  }
+
   // Start the connection
   connect()
 
   // Return a handle to allow external abort (e.g. page unload)
   return {
+    getConnectionStatus,
     decideQuestion,
     checkQuestions,
     getQuestions,

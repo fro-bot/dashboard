@@ -1,5 +1,5 @@
-import {render, screen, waitFor} from '@testing-library/react'
-import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
+import {act, fireEvent, render, screen, waitFor} from '@testing-library/react'
+import {afterEach, beforeEach, describe, expect, it, vi, type MockInstance} from 'vitest'
 import App from './App.tsx'
 
 // jsdom doesn't implement matchMedia — stub it (same pattern as AppShell.test.tsx)
@@ -361,5 +361,213 @@ describe('App — fixture detection race: runtime must not mount before detectio
 
     fetchSpy.mockRestore()
     createSpy.mockRestore()
+  })
+})
+
+// ── Notification click: in-page jump ───────────────────────────────────────
+// The service worker posts {type: 'OPEN_RUN', runId} to an open window. App is the only listener; it
+// switches to the operator view and hands the run ID to the runtime module's jump slot.
+
+describe('App — OPEN_RUN service-worker message', () => {
+  type Listener = (event: unknown) => void
+
+  const controller = {postMessage: vi.fn()}
+  let listeners: Set<Listener>
+  let addEventListener: ReturnType<typeof vi.fn>
+  let removeEventListener: ReturnType<typeof vi.fn>
+  let jump: MockInstance<typeof import('./operator/runtime.ts').requestRunJump>
+  let originalDescriptor: PropertyDescriptor | undefined
+
+  function installServiceWorker(activeController: unknown = controller) {
+    listeners = new Set()
+    addEventListener = vi.fn((type: string, listener: Listener) => {
+      if (type === 'message') listeners.add(listener)
+    })
+    removeEventListener = vi.fn((type: string, listener: Listener) => {
+      if (type === 'message') listeners.delete(listener)
+    })
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: {
+        controller: activeController,
+        ready: new Promise(() => {}),
+        addEventListener,
+        removeEventListener,
+      },
+    })
+  }
+
+  /** What the browser hands the page: the posting worker as `source`, the cloned message as `data`. */
+  function deliver(data: unknown, source: unknown = controller) {
+    act(() => {
+      for (const listener of [...listeners]) listener({data, source})
+    })
+  }
+
+  const operatorWrapper = () => screen.getByTestId('operator-shell').parentElement as HTMLElement
+
+  beforeEach(async () => {
+    stubMatchMedia()
+    window.localStorage.clear()
+    document.documentElement.removeAttribute('data-theme')
+    originalDescriptor = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker')
+    installServiceWorker()
+    const fixtureLoader = await import('./operator/fixture-runtime-loader.ts')
+    vi.spyOn(fixtureLoader, 'fetchFixtureSession').mockResolvedValue(null)
+    const listenerApi = await import('./api/listener.ts')
+    vi.spyOn(listenerApi, 'fetchListenerMessages').mockResolvedValue({ok: true, data: {messages: [], unreadCount: 0}})
+    const runtimeModule = await import('./operator/runtime.ts')
+    vi.spyOn(runtimeModule, 'createOperatorRuntime').mockImplementation(() => ({isMounted: true, cleanup: vi.fn()}))
+    jump = vi.spyOn(runtimeModule, 'requestRunJump').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    if (originalDescriptor === undefined) Reflect.deleteProperty(navigator, 'serviceWorker')
+    else Object.defineProperty(navigator, 'serviceWorker', originalDescriptor)
+  })
+
+  async function renderOnListenerView() {
+    const view = render(<App />)
+    await act(async () => {})
+    fireEvent.click(screen.getByRole('button', {name: 'Inbox'}))
+    // Let the inbox's own fetch settle so its state update is not mistaken for a console warning later.
+    await act(async () => {})
+    expect(operatorWrapper().style.display).toBe('none')
+    return view
+  }
+
+  it('registers one message listener at mount and removes that same listener on unmount', async () => {
+    const {unmount} = render(<App />)
+    await act(async () => {})
+
+    expect(addEventListener.mock.calls.filter(([type]) => type === 'message')).toHaveLength(1)
+    const registered = addEventListener.mock.calls.find(([type]) => type === 'message')?.[1]
+
+    unmount()
+
+    expect(removeEventListener).toHaveBeenCalledWith('message', registered)
+    expect(listeners.size).toBe(0)
+  })
+
+  it('does not re-register when the view changes', async () => {
+    render(<App />)
+    await act(async () => {})
+    fireEvent.click(screen.getByRole('button', {name: 'Inbox'}))
+    fireEvent.click(screen.getByRole('button', {name: 'Runs'}))
+
+    expect(addEventListener.mock.calls.filter(([type]) => type === 'message')).toHaveLength(1)
+    expect(removeEventListener).not.toHaveBeenCalled()
+  })
+
+  it('a valid message from the active worker switches to the operator view, then requests the jump', async () => {
+    await renderOnListenerView()
+    let displayAtRequest: string | undefined
+    jump.mockImplementation(() => {
+      displayAtRequest = operatorWrapper().style.display
+    })
+
+    deliver({type: 'OPEN_RUN', runId: 'run-from-sw_1'})
+
+    expect(jump).toHaveBeenCalledTimes(1)
+    expect(jump).toHaveBeenCalledWith('run-from-sw_1')
+    // The view is already visible when the runtime hears about the run, so focus can land.
+    expect(displayAtRequest).toBe('block')
+    expect(operatorWrapper().style.display).toBe('block')
+    expect(screen.queryByTestId('listener-loading')).toBeNull()
+  })
+
+  it('a valid message while the operator view is already showing just requests the jump', async () => {
+    render(<App />)
+    await act(async () => {})
+
+    deliver({type: 'OPEN_RUN', runId: 'run-already-here'})
+
+    expect(operatorWrapper().style.display).toBe('block')
+    expect(jump).toHaveBeenCalledWith('run-already-here')
+  })
+
+  it('two valid messages in a row each reach the runtime, in order (the runtime keeps the last)', async () => {
+    render(<App />)
+    await act(async () => {})
+
+    deliver({type: 'OPEN_RUN', runId: 'run-first'})
+    deliver({type: 'OPEN_RUN', runId: 'run-second'})
+
+    expect(jump.mock.calls.map(([runId]) => runId)).toEqual(['run-first', 'run-second'])
+  })
+
+  const rejected: [string, unknown, unknown?][] = [
+    ['a source that is not the active worker', {type: 'OPEN_RUN', runId: 'run-1'}, {postMessage: vi.fn()}],
+    ['no source', {type: 'OPEN_RUN', runId: 'run-1'}, null],
+    ['the window as source', {type: 'OPEN_RUN', runId: 'run-1'}, window],
+    ['a wrong type', {type: 'PUSH_SUBSCRIPTION_CHANGE', runId: 'run-1'}],
+    ['an extra key', {type: 'OPEN_RUN', runId: 'run-1', route: '/operator'}],
+    ['a missing runId', {type: 'OPEN_RUN'}],
+    ['a runId that is not a string', {type: 'OPEN_RUN', runId: 42}],
+    ['a runId that fails the run ID pattern', {type: 'OPEN_RUN', runId: '../etc'}],
+    ['an over-long runId', {type: 'OPEN_RUN', runId: 'a'.repeat(129)}],
+    ['a null body', null],
+    ['a string body', 'OPEN_RUN'],
+    ['an array body', ['OPEN_RUN', 'run-1']],
+  ]
+  it.each(rejected)('ignores %s: no view switch, no jump', async (_label, data, source) => {
+    await renderOnListenerView()
+
+    deliver(data, source === undefined ? controller : source)
+
+    expect(jump).not.toHaveBeenCalled()
+    expect(operatorWrapper().style.display).toBe('none')
+  })
+
+  it('ignores a well-formed message when the page has no controlling worker', async () => {
+    installServiceWorker(null)
+    await renderOnListenerView()
+
+    deliver({type: 'OPEN_RUN', runId: 'run-1'}, null)
+    deliver({type: 'OPEN_RUN', runId: 'run-1'}, undefined)
+
+    expect(jump).not.toHaveBeenCalled()
+    expect(operatorWrapper().style.display).toBe('none')
+  })
+
+  it('judges the source against the controller at delivery time', async () => {
+    const replacement = {postMessage: vi.fn()}
+    await renderOnListenerView()
+    Object.defineProperty(navigator.serviceWorker, 'controller', {configurable: true, value: replacement})
+
+    deliver({type: 'OPEN_RUN', runId: 'run-1'}, controller)
+    expect(jump).not.toHaveBeenCalled()
+
+    deliver({type: 'OPEN_RUN', runId: 'run-1'}, replacement)
+    expect(jump).toHaveBeenCalledWith('run-1')
+  })
+
+  it('mounts without throwing in a browser with no service worker support', async () => {
+    Reflect.deleteProperty(navigator, 'serviceWorker')
+    expect('serviceWorker' in navigator).toBe(false)
+
+    expect(() => render(<App />)).not.toThrow()
+    await act(async () => {})
+  })
+
+  it('makes no console calls, accepted or ignored (a run ID must never be logged)', async () => {
+    const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map(method => vi.spyOn(console, method).mockImplementation(() => {}))
+    await renderOnListenerView()
+
+    deliver({type: 'OPEN_RUN', runId: 'run-secret-id'})
+    deliver({type: 'OPEN_RUN', runId: 'run-secret-id', extra: 1})
+    deliver({type: 'OPEN_RUN', runId: 'run-secret-id'}, {postMessage: vi.fn()})
+
+    for (const spy of spies) expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('App.tsx has no console call and no hashchange listener', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const url = await import('node:url')
+    const src = await fs.readFile(path.join(path.dirname(url.fileURLToPath(import.meta.url)), 'App.tsx'), 'utf8')
+    expect(src).not.toMatch(/console\./)
+    expect(src).not.toMatch(/hashchange/)
   })
 })

@@ -761,8 +761,13 @@ export interface QuestionNote {
   readonly status: QuestionRequestStatus
 }
 
+/** `terminal`: the run finished; `active`: connecting, live or reconnecting; `inactive`: closed early, failed, unavailable or close()d. */
+export type StreamConnectionStatus = 'active' | 'terminal' | 'inactive'
+
 export interface StreamHandle {
   close: () => void
+  /** Whether the stream still serves its card. Read-only; see StreamConnectionStatus. */
+  getConnectionStatus: () => StreamConnectionStatus
   /**
    * Submit a decision for one open request. Sends nothing (returns the current status) while the request
    * is in flight, being checked or claimed elsewhere, or once the run's questions are known unanswerable.

@@ -25,13 +25,14 @@
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {RUN_STATUS_CLASS_TOKENS, VALID_RUN_SUMMARY_STATUSES} from '../../../public/operator-run-index.js'
-import {PINNED_CONTRACT_VERSION} from '../../../public/operator-stream.js'
+import {getQuestionPageStore, PINNED_CONTRACT_VERSION, resetQuestionPageStore} from '../../../public/operator-stream.js'
 import {
   createOperatorRuntime,
   discoverCardStreamTargets,
   discoverCardSummaryStatus,
   EXPAND_REFRESH_CAP_MS,
   MAX_HASH_ID_LENGTH,
+  requestRunJump,
   sanitizeRunIdFromHash,
   STATUS_CLASS_TOKENS,
   type OperatorRuntimeHandle,
@@ -1944,5 +1945,862 @@ describe('URL-hash restore — expand sets hash, remount restores', () => {
     expect(window.location.hash).toBe('#run-hash-2')
     card.click()
     expect(window.location.hash).toBe('')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// In-page jump to a run (a question notification tapped with the dashboard open)
+// ---------------------------------------------------------------------------
+
+describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
+  type StreamStatus = 'active' | 'terminal' | 'inactive'
+  /** What the (mocked) run index leaves behind: `loaded`, `unavailable`, or `unsettled` (reset, replaced or auth: the section never leaves `loading`). */
+  type InitOutcome = 'loaded' | 'unavailable' | 'unsettled'
+  type InitOpts = {
+    onSelectRun: (runId: string) => void | Promise<void>
+    onAuthRequired: () => void
+    restoreRunId?: string
+    onRestoreRun?: (runId: string, card: Element, status: string) => void
+  }
+  type StreamOpts = {runId: string; questionsEl?: Element | null}
+
+  const MISS_COPY = "That run isn't in your recent runs."
+
+  let scrolled: string[]
+  let streamStatus: StreamStatus
+  let visibility: DocumentVisibilityState
+  const runtimes: OperatorRuntimeHandle[] = []
+
+  beforeEach(() => {
+    scrolled = []
+    streamStatus = 'active'
+    visibility = 'visible'
+    Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => visibility})
+    // jsdom has no scrollIntoView; record which card was scrolled to.
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      writable: true,
+      value(this: HTMLElement) {
+        scrolled.push(this.dataset.runId ?? '')
+      },
+    })
+  })
+
+  afterEach(() => {
+    // Drop whatever a test left in the module-level jump slot, and every runtime it mounted.
+    createOperatorRuntime({container: makeContainer(), onStateChange: vi.fn(), _runtimeLoader: async () => {}}).cleanup()
+    for (const runtime of runtimes.splice(0)) runtime.cleanup()
+    Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView')
+    Reflect.deleteProperty(document, 'visibilityState')
+    document.body.innerHTML = ''
+    if (location.hash !== '') history.replaceState(null, '', location.pathname + location.search)
+    vi.doUnmock('/static/operator-stream.js?manual=1')
+    vi.doUnmock('/static/operator-run-index.js?manual=1')
+    vi.doUnmock('/static/operator-launch.js?manual=1')
+    vi.restoreAllMocks()
+    resetQuestionPageStore()
+  })
+
+  const tick = () => new Promise<void>(resolve => realSetTimeout(resolve, 0))
+
+  function deferred() {
+    let resolve = () => {}
+    const promise = new Promise<void>(res => {
+      resolve = res
+    })
+    return {promise, resolve}
+  }
+
+  function controllableRefresh() {
+    const resolvers: ((applied: boolean) => void)[] = []
+    const refresh = () => new Promise<boolean>(resolve => {
+      resolvers.push(resolve)
+    })
+    return {refresh, resolvers}
+  }
+
+  function cardHtml(runId: string, opts: {expanded?: boolean; status?: keyof typeof STATUS_CLASS_TOKENS; label?: string} = {}): string {
+    const {expanded = false, status = 'running', label = 'Running'} = opts
+    return `<div data-run-id="${runId}" data-expanded="${expanded}" role="button" tabindex="0"><span data-role="run-status" class="run-status ${STATUS_CLASS_TOKENS[status]}">${label}</span><div data-role="run-questions"></div></div>`
+  }
+
+  function renderPage(...cards: string[]): void {
+    document.body.innerHTML = `<section data-role="run-index" data-state="loading"><div data-role="run-index-list">${cards.join('')}</div><div data-role="stream-status" hidden></div><div data-role="run-jump-miss" role="status" hidden></div><div data-role="run-jump-announcer" role="status" aria-live="polite"></div></section>`
+  }
+
+  const cardEl = (runId: string) => document.querySelector(`[data-run-id="${runId}"]`) as HTMLElement
+  const missEl = () => document.querySelector('[data-role="run-jump-miss"]') as HTMLElement
+  const announcerEl = () => document.querySelector('[data-role="run-jump-announcer"]') as HTMLElement
+  const streamStatusEl = () => document.querySelector('[data-role="stream-status"]') as HTMLElement
+
+  async function mountJump(options: {
+    outcome?: InitOutcome
+    gate?: Promise<void>
+    refresh?: () => Promise<boolean>
+    onInit?: (initOpts: InitOpts) => void
+  } = {}) {
+    const {outcome = 'loaded'} = options
+    const handles: {runId: string; handle: {close: ReturnType<typeof vi.fn>; getConnectionStatus: ReturnType<typeof vi.fn>}}[] = []
+    const questionChildrenAtAttach: Record<string, number[]> = {}
+    const initOperatorStream = vi.fn((streamOpts: StreamOpts) => {
+      const handle = {close: vi.fn(), getConnectionStatus: vi.fn(() => streamStatus)}
+      handles.push({runId: streamOpts.runId, handle})
+      ;(questionChildrenAtAttach[streamOpts.runId] ??= []).push(streamOpts.questionsEl?.childNodes.length ?? -1)
+      return handle
+    })
+    const refreshOperatorRunIndex = vi.fn(options.refresh ?? (async () => true))
+    // Same bookkeeping as the real run index: expanding one card collapses whichever other was open.
+    const markCardExpandedForLaunch = vi.fn((runId: string) => {
+      for (const card of Array.from(document.querySelectorAll<HTMLElement>('[data-run-id]'))) {
+        card.dataset.expanded = card.dataset.runId === runId ? 'true' : 'false'
+      }
+    })
+    const initOperatorLaunch = vi.fn(async () => {})
+    let captured: InitOpts | undefined
+    vi.doMock('/static/operator-stream.js?manual=1', () => ({
+      initOperatorStream,
+      bootstrapOperatorStreams: vi.fn(),
+      resetBootstrapState: vi.fn(),
+    }))
+    vi.doMock('/static/operator-run-index.js?manual=1', () => ({
+      initOperatorRunIndex: async (initOpts: InitOpts) => {
+        captured = initOpts
+        await options.gate
+        options.onInit?.(initOpts)
+        const section = document.querySelector<HTMLElement>('[data-role="run-index"]')
+        if (section !== null && outcome !== 'unsettled') section.dataset.state = outcome
+      },
+      refreshOperatorRunIndex,
+      resetRunIndexState: vi.fn(),
+      markRunStreamAttached: vi.fn(),
+      markCardExpandedForLaunch,
+    }))
+    vi.doMock('/static/operator-launch.js?manual=1', () => ({
+      initOperatorLaunch,
+      resetLaunchState: vi.fn(),
+    }))
+    const onStateChange = vi.fn()
+    const runtime = createOperatorRuntime({container: makeContainer(), onStateChange})
+    runtimes.push(runtime)
+    return {
+      runtime,
+      handles,
+      questionChildrenAtAttach,
+      initOperatorStream,
+      refreshOperatorRunIndex,
+      markCardExpandedForLaunch,
+      onStateChange,
+      /** The loader has finished its setup (and consumed the jump slot, if it was going to). */
+      ready: async () => {
+        await vi.waitFor(() => expect(initOperatorLaunch).toHaveBeenCalled())
+        await tick()
+      },
+      select: (runId: string) => captured?.onSelectRun(runId),
+      authRequired: () => captured?.onAuthRequired(),
+      attachedRunIds: () => initOperatorStream.mock.calls.map(([streamOpts]) => streamOpts.runId),
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Intent ordering: the message can land before, during or after run-index init
+  // -------------------------------------------------------------------------
+
+  describe('intent ordering', () => {
+    it('a message that arrives before init resolves is applied once init has loaded', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const gate = deferred()
+      const mounted = await mountJump({gate: gate.promise})
+
+      requestRunJump('run-j-a')
+      await tick()
+      expect(mounted.refreshOperatorRunIndex).not.toHaveBeenCalled()
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+
+      gate.resolve()
+      await mounted.ready()
+
+      expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+      expect(location.hash).toBe('#run-j-a')
+      expect(cardEl('run-j-a').dataset.expanded).toBe('true')
+    })
+
+    it('a message that arrives before the runtime is mounted at all is applied once the mounted runtime has loaded', async () => {
+      renderPage(cardHtml('run-j-a'))
+      requestRunJump('run-j-a')
+
+      const mounted = await mountJump()
+      await mounted.ready()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+    })
+
+    it('a message that arrives after init has loaded is applied at once, not held', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountJump()
+      await mounted.ready()
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+
+      requestRunJump('run-j-a')
+      await tick()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+    })
+
+    it('a pending message is applied exactly once: a later mount does not replay it', async () => {
+      renderPage(cardHtml('run-j-a'))
+      requestRunJump('run-j-a')
+      const first = await mountJump()
+      await first.ready()
+      expect(first.attachedRunIds()).toEqual(['run-j-a'])
+      first.runtime.cleanup()
+
+      const second = await mountJump()
+      await second.ready()
+
+      expect(second.initOperatorStream).not.toHaveBeenCalled()
+      expect(second.refreshOperatorRunIndex).not.toHaveBeenCalled()
+    })
+
+    const droppedOutcomes: [string, InitOutcome][] = [
+      ['init ends unavailable', 'unavailable'],
+      ['init is stale (reset or replaced while it fetched)', 'unsettled'],
+    ]
+    it.each(droppedOutcomes)('%s: the pending jump is dropped, a later message is refused, and neither resurfaces on a later mount', async (_label, outcome) => {
+      renderPage(cardHtml('run-j-a'), cardHtml('run-j-b'))
+      requestRunJump('run-j-a')
+      const first = await mountJump({outcome})
+      await first.ready()
+      expect(first.refreshOperatorRunIndex).not.toHaveBeenCalled()
+      expect(first.initOperatorStream).not.toHaveBeenCalled()
+
+      // A tap is an immediate intent: with no loaded run index it is not held for some later mount.
+      requestRunJump('run-j-b')
+      await tick()
+      expect(first.refreshOperatorRunIndex).not.toHaveBeenCalled()
+
+      // A healthy mount afterwards must not inherit the dropped intent.
+      const second = await mountJump()
+      await second.ready()
+
+      expect(second.refreshOperatorRunIndex).not.toHaveBeenCalled()
+      expect(second.initOperatorStream).not.toHaveBeenCalled()
+      expect(cardEl('run-j-a').dataset.expanded).toBe('false')
+      expect(cardEl('run-j-b').dataset.expanded).toBe('false')
+    })
+
+    it('auth-required during init drops the pending jump', async () => {
+      renderPage(cardHtml('run-j-a'))
+      requestRunJump('run-j-a')
+      const first = await mountJump({outcome: 'unsettled', onInit: initOpts => initOpts.onAuthRequired()})
+      await first.ready()
+      expect(first.onStateChange).toHaveBeenCalledWith('auth-required')
+      expect(first.refreshOperatorRunIndex).not.toHaveBeenCalled()
+      expect(first.initOperatorStream).not.toHaveBeenCalled()
+
+      const second = await mountJump()
+      await second.ready()
+      expect(second.initOperatorStream).not.toHaveBeenCalled()
+    })
+
+    it('auth-required after init stops a jump already waiting on its refresh, and later messages are not applied', async () => {
+      renderPage(cardHtml('run-j-a'), cardHtml('run-j-b'))
+      const {refresh, resolvers} = controllableRefresh()
+      const mounted = await mountJump({refresh})
+      await mounted.ready()
+
+      requestRunJump('run-j-a')
+      await tick()
+      expect(resolvers).toHaveLength(1)
+
+      mounted.authRequired()
+      resolvers[0]?.(false)
+      await tick()
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+
+      requestRunJump('run-j-b')
+      await tick()
+      expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+    })
+
+    it('two rapid messages before init: the last one wins and the first is never attached', async () => {
+      renderPage(cardHtml('run-j-a'), cardHtml('run-j-b'))
+      const gate = deferred()
+      const mounted = await mountJump({gate: gate.promise})
+
+      requestRunJump('run-j-a')
+      requestRunJump('run-j-b')
+      gate.resolve()
+      await mounted.ready()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-b'])
+      expect(location.hash).toBe('#run-j-b')
+      expect(cardEl('run-j-a').dataset.expanded).toBe('false')
+      expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+    })
+
+    it('two rapid messages after init: the last one wins even when the first refresh lands last', async () => {
+      renderPage(cardHtml('run-j-a'), cardHtml('run-j-b'))
+      const {refresh, resolvers} = controllableRefresh()
+      const mounted = await mountJump({refresh})
+      await mounted.ready()
+
+      requestRunJump('run-j-a')
+      requestRunJump('run-j-b')
+      await tick()
+      expect(resolvers).toHaveLength(2)
+      resolvers[1]?.(true)
+      resolvers[0]?.(true)
+      await tick()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-b'])
+      expect(location.hash).toBe('#run-j-b')
+      expect(cardEl('run-j-a').dataset.expanded).toBe('false')
+    })
+
+    it('a message equal to the mount-time restore target attaches once (the restore owns it)', async () => {
+      history.replaceState(null, '', '#run-j-r')
+      renderPage(cardHtml('run-j-r'), cardHtml('run-j-s'))
+      requestRunJump('run-j-r')
+      const mounted = await mountJump({
+        onInit: initOpts => {
+          expect(initOpts.restoreRunId).toBe('run-j-r')
+          const card = cardEl('run-j-r')
+          card.dataset.expanded = 'true'
+          initOpts.onRestoreRun?.('run-j-r', card, 'running')
+        },
+      })
+      await mounted.ready()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-r'])
+      expect(mounted.refreshOperatorRunIndex).not.toHaveBeenCalled()
+      expect(location.hash).toBe('#run-j-r')
+    })
+
+    it('a message for a different run than the restore target is still applied, after the restore', async () => {
+      history.replaceState(null, '', '#run-j-r')
+      renderPage(cardHtml('run-j-r'), cardHtml('run-j-s'))
+      requestRunJump('run-j-s')
+      const mounted = await mountJump({
+        onInit: initOpts => {
+          const card = cardEl('run-j-r')
+          card.dataset.expanded = 'true'
+          initOpts.onRestoreRun?.('run-j-r', card, 'running')
+        },
+      })
+      await mounted.ready()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-r', 'run-j-s'])
+      expect(location.hash).toBe('#run-j-s')
+    })
+
+    it('a message equal to the restore target is applied normally once the runtime is loaded (the target only guards the mount-time handoff)', async () => {
+      history.replaceState(null, '', '#run-j-r')
+      renderPage(cardHtml('run-j-r'), cardHtml('run-j-s'))
+      const mounted = await mountJump()
+      await mounted.ready()
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+
+      requestRunJump('run-j-r')
+      await tick()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-r'])
+    })
+
+    it('cleanup drops a pending jump, including one whose loader had not finished', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const gate = deferred()
+      const first = await mountJump({gate: gate.promise})
+      requestRunJump('run-j-a')
+      first.runtime.cleanup()
+      gate.resolve()
+      await first.ready()
+      expect(first.refreshOperatorRunIndex).not.toHaveBeenCalled()
+      expect(first.initOperatorStream).not.toHaveBeenCalled()
+
+      const second = await mountJump()
+      await second.ready()
+      expect(second.initOperatorStream).not.toHaveBeenCalled()
+    })
+
+    it('cleanup stops a jump waiting on its refresh and nothing is requested of a cleaned-up runtime', async () => {
+      renderPage(cardHtml('run-j-a'), cardHtml('run-j-b'))
+      const {refresh, resolvers} = controllableRefresh()
+      const mounted = await mountJump({refresh})
+      await mounted.ready()
+      requestRunJump('run-j-a')
+      await tick()
+
+      mounted.runtime.cleanup()
+      resolvers[0]?.(true)
+      await tick()
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+
+      requestRunJump('run-j-b')
+      await tick()
+      expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Jump semantics
+  // -------------------------------------------------------------------------
+
+  describe('jump semantics', () => {
+    async function mountLoaded(options: Parameters<typeof mountJump>[0] = {}) {
+      const mounted = await mountJump(options)
+      await mounted.ready()
+      return mounted
+    }
+
+    it('collapsed card: refreshes first, then expands without toggling, attaches once, writes the hash, focuses and scrolls, and announces the status label', async () => {
+      renderPage(cardHtml('run-j-a', {status: 'waiting_for_question', label: 'Waiting for question'}))
+      const mounted = await mountLoaded()
+
+      requestRunJump('run-j-a')
+      await tick()
+
+      const [refreshAt] = mounted.refreshOperatorRunIndex.mock.invocationCallOrder
+      const [expandAt] = mounted.markCardExpandedForLaunch.mock.invocationCallOrder
+      const [attachAt] = mounted.initOperatorStream.mock.invocationCallOrder
+      expect(refreshAt).toBeLessThan(expandAt as number)
+      expect(expandAt).toBeLessThan(attachAt as number)
+      expect(mounted.markCardExpandedForLaunch).toHaveBeenCalledWith('run-j-a')
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+      expect(mounted.handles[0]?.handle.close).not.toHaveBeenCalled()
+      expect(cardEl('run-j-a').dataset.expanded).toBe('true')
+      expect(location.hash).toBe('#run-j-a')
+      expect(document.activeElement).toBe(cardEl('run-j-a'))
+      expect(scrolled).toEqual(['run-j-a'])
+      expect(announcerEl().textContent).toBe('Opened run, Waiting for question')
+      expect(announcerEl().textContent).not.toContain('run-j-a')
+    })
+
+    it('seeds the attached stream from the refreshed card status', async () => {
+      renderPage(cardHtml('run-j-a', {status: 'running'}))
+      const mounted = await mountLoaded({
+        refresh: async () => {
+          const statusEl = cardEl('run-j-a').querySelector('[data-role="run-status"]') as HTMLElement
+          statusEl.className = `run-status ${STATUS_CLASS_TOKENS.succeeded}`
+          return true
+        },
+      })
+
+      requestRunJump('run-j-a')
+      await tick()
+
+      expect((mounted.initOperatorStream.mock.calls[0]?.[0] as {summaryStatus?: string}).summaryStatus).toBe('succeeded')
+    })
+
+    it('announces just "Opened run" when the card shows no status text', async () => {
+      renderPage(cardHtml('run-j-a', {label: ''}))
+      const mounted = await mountLoaded()
+
+      requestRunJump('run-j-a')
+      await tick()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+      expect(announcerEl().textContent).toBe('Opened run')
+    })
+
+    const keepers: [string, StreamStatus][] = [
+      ['live', 'active'],
+      ['terminal', 'terminal'],
+    ]
+    it.each(keepers)('expanded card with a %s stream: scroll and focus only (no re-attach, no close, no hash change)', async (_label, status) => {
+      renderPage(cardHtml('run-j-a'), cardHtml('run-j-b'))
+      const mounted = await mountLoaded()
+      requestRunJump('run-j-a')
+      await tick()
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+      cardEl('run-j-b').focus()
+      scrolled.length = 0
+      streamStatus = status
+
+      requestRunJump('run-j-a')
+      await tick()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+      expect(mounted.handles[0]?.handle.close).not.toHaveBeenCalled()
+      expect(mounted.markCardExpandedForLaunch).toHaveBeenCalledTimes(1)
+      expect(cardEl('run-j-a').dataset.expanded).toBe('true')
+      expect(location.hash).toBe('#run-j-a')
+      expect(document.activeElement).toBe(cardEl('run-j-a'))
+      expect(scrolled).toEqual(['run-j-a'])
+      // Every jump refreshes first, even one that only scrolls.
+      expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(2)
+    })
+
+    it('expanded card whose stream is closed, failed or unavailable: re-attaches directly (the old handle closes) and never collapses', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountLoaded()
+      requestRunJump('run-j-a')
+      await tick()
+      streamStatus = 'inactive'
+
+      requestRunJump('run-j-a')
+      await tick()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a', 'run-j-a'])
+      expect(mounted.handles[0]?.handle.close).toHaveBeenCalledTimes(1)
+      expect(mounted.handles[1]?.handle.close).not.toHaveBeenCalled()
+      expect(cardEl('run-j-a').dataset.expanded).toBe('true')
+      expect(location.hash).toBe('#run-j-a')
+      expect(document.activeElement).toBe(cardEl('run-j-a'))
+      expect(scrolled).toEqual(['run-j-a', 'run-j-a'])
+    })
+
+    it('expanded card with no attached stream at all (the earlier attach failed) gets one', async () => {
+      renderPage(cardHtml('run-j-a', {expanded: true}))
+      const mounted = await mountLoaded()
+
+      requestRunJump('run-j-a')
+      await tick()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+      expect(cardEl('run-j-a').dataset.expanded).toBe('true')
+    })
+
+    it('a stream handle with no connection accessor is treated as live (never re-attached on a guess)', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountLoaded()
+      requestRunJump('run-j-a')
+      await tick()
+      Reflect.deleteProperty(mounted.handles[0]?.handle ?? {}, 'getConnectionStatus')
+
+      requestRunJump('run-j-a')
+      await tick()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+    })
+
+    it('switching runs closes the old stream, expands the new card, and leaves the other card\'s question draft in the page store for the return trip', async () => {
+      renderPage(cardHtml('run-j-a'), cardHtml('run-j-b'))
+      const mounted = await mountLoaded()
+      requestRunJump('run-j-a')
+      await tick()
+      const draft = {options: [], text: 'half-typed answer'}
+      getQuestionPageStore('run-j-a').drafts.set('req-1', draft)
+      ;(cardEl('run-j-a').querySelector('[data-role="run-questions"]') as HTMLElement).append(document.createElement('p'))
+
+      requestRunJump('run-j-b')
+      await tick()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a', 'run-j-b'])
+      expect(mounted.handles[0]?.handle.close).toHaveBeenCalledTimes(1)
+      expect(cardEl('run-j-a').dataset.expanded).toBe('false')
+      expect(cardEl('run-j-b').dataset.expanded).toBe('true')
+      expect(location.hash).toBe('#run-j-b')
+      expect(getQuestionPageStore('run-j-a').drafts.get('req-1')).toBe(draft)
+
+      // Returning re-attaches over an emptied question region, and the draft is still there for the stream to restore.
+      requestRunJump('run-j-a')
+      await tick()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a', 'run-j-b', 'run-j-a'])
+      expect(mounted.questionChildrenAtAttach['run-j-a']).toEqual([0, 0])
+      expect(getQuestionPageStore('run-j-a').drafts.get('req-1')).toBe(draft)
+      expect(cardEl('run-j-a').dataset.expanded).toBe('true')
+    })
+
+    it('a jump supersedes an expand that is still waiting on its refresh', async () => {
+      renderPage(cardHtml('run-j-a'), cardHtml('run-j-c'))
+      const {refresh, resolvers} = controllableRefresh()
+      const mounted = await mountLoaded({refresh})
+
+      const expanding = mounted.select('run-j-c')
+      expect(resolvers).toHaveLength(1)
+      requestRunJump('run-j-a')
+      await tick()
+      for (const resolve of resolvers) resolve(true)
+      await expanding
+      await tick()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+      expect(location.hash).toBe('#run-j-a')
+    })
+
+    it('a jump supersedes an expand that starts while the jump waits on its refresh', async () => {
+      renderPage(cardHtml('run-j-a'), cardHtml('run-j-c'))
+      const {refresh, resolvers} = controllableRefresh()
+      const mounted = await mountLoaded({refresh})
+
+      requestRunJump('run-j-a')
+      await tick()
+      const expanding = mounted.select('run-j-c')
+      for (const resolve of resolvers) resolve(true)
+      await expanding
+      await tick()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+      expect(cardEl('run-j-a').dataset.expanded).toBe('true')
+    })
+
+    const invalidIds: [string, string][] = [
+      ['an empty string', ''],
+      ['a path segment', 'a/b'],
+      ['a dot-dot', '..'],
+      ['a dot', 'a.b'],
+      ['a percent escape', '%41'],
+      ['whitespace', 'run 1'],
+      ['a trailing newline', 'run-1\n'],
+      ['129 characters', 'a'.repeat(129)],
+    ]
+    it.each(invalidIds)('refuses %s (the strict run ID pattern applies to a jump)', async (_label, runId) => {
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountLoaded()
+
+      requestRunJump(runId)
+      await tick()
+
+      expect(mounted.refreshOperatorRunIndex).not.toHaveBeenCalled()
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+      expect(missEl().hidden).toBe(true)
+    })
+
+    it('a refused ID leaves a previously requested valid one alone, and is never stored for a later mount', async () => {
+      renderPage(cardHtml('run-j-a'))
+      requestRunJump('run-j-a')
+      requestRunJump('not valid!')
+      const mounted = await mountLoaded()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+    })
+
+    it('accepts a 128-character run ID', async () => {
+      const longId = 'r'.repeat(128)
+      renderPage(cardHtml(longId))
+      const mounted = await mountLoaded()
+
+      requestRunJump(longId)
+      await tick()
+
+      expect(mounted.attachedRunIds()).toEqual([longId])
+    })
+
+    it('restoring from a hash keeps the permissive hash validation: sanitizeRunIdFromHash is unchanged', () => {
+      expect(sanitizeRunIdFromHash('#run.with.dots')).toBe('run.with.dots')
+      expect(sanitizeRunIdFromHash('#a/b')).toBeNull()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // A run that is not in the list
+  // -------------------------------------------------------------------------
+
+  describe('a run missing from the list', () => {
+    async function mountOnExpandedA(options: Parameters<typeof mountJump>[0] = {}) {
+      renderPage(cardHtml('run-j-a'), cardHtml('run-j-b'))
+      const mounted = await mountJump(options)
+      await mounted.ready()
+      requestRunJump('run-j-a')
+      await tick()
+      expect(location.hash).toBe('#run-j-a')
+      return mounted
+    }
+
+    it('shows the dedicated notice with fixed copy, leaves the hash, the expansion and the stream alone, and never echoes the ID', async () => {
+      const mounted = await mountOnExpandedA()
+      const announcedBefore = announcerEl().textContent
+
+      requestRunJump('run-j-gone')
+      await tick()
+
+      expect(missEl().hidden).toBe(false)
+      expect(missEl().textContent).toBe(MISS_COPY)
+      expect(missEl()).not.toBe(streamStatusEl())
+      expect(streamStatusEl().hidden).toBe(true)
+      expect(streamStatusEl().textContent).toBe('')
+      expect(location.hash).toBe('#run-j-a')
+      expect(cardEl('run-j-a').dataset.expanded).toBe('true')
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+      expect(mounted.handles[0]?.handle.close).not.toHaveBeenCalled()
+      expect(announcerEl().textContent).toBe(announcedBefore)
+      expect(document.body.innerHTML).not.toContain('run-j-gone')
+    })
+
+    it('a miss with nothing expanded and no hash writes neither', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountJump()
+      await mounted.ready()
+
+      requestRunJump('run-j-gone')
+      await tick()
+
+      expect(missEl().textContent).toBe(MISS_COPY)
+      expect(location.hash).toBe('')
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+      expect(mounted.markCardExpandedForLaunch).not.toHaveBeenCalled()
+    })
+
+    it('a miss is decided after the refresh, so a run that only the refresh brings in is found', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountJump({
+        refresh: async () => {
+          document.querySelector('[data-role="run-index-list"]')?.insertAdjacentHTML('beforeend', cardHtml('run-j-new'))
+          return true
+        },
+      })
+      await mounted.ready()
+
+      requestRunJump('run-j-new')
+      await tick()
+
+      expect(missEl().hidden).toBe(true)
+      expect(mounted.attachedRunIds()).toEqual(['run-j-new'])
+    })
+
+    it('the notice clears on the next jump (a hit)', async () => {
+      await mountOnExpandedA()
+      requestRunJump('run-j-gone')
+      await tick()
+      expect(missEl().hidden).toBe(false)
+
+      requestRunJump('run-j-b')
+      await tick()
+
+      expect(missEl().hidden).toBe(true)
+      expect(missEl().textContent).toBe('')
+    })
+
+    it('the notice clears on the next jump even when that jump misses too (it shows afresh, not stacked)', async () => {
+      await mountOnExpandedA()
+      requestRunJump('run-j-gone')
+      await tick()
+
+      requestRunJump('run-j-gone-too')
+      await tick()
+
+      expect(missEl().hidden).toBe(false)
+      expect(missEl().textContent).toBe(MISS_COPY)
+    })
+
+    it('the notice clears when a card expands', async () => {
+      const mounted = await mountOnExpandedA()
+      requestRunJump('run-j-gone')
+      await tick()
+      expect(missEl().hidden).toBe(false)
+
+      await mounted.select('run-j-b')
+
+      expect(missEl().hidden).toBe(true)
+      expect(missEl().textContent).toBe('')
+    })
+
+    it('the notice stays through a collapse', async () => {
+      const mounted = await mountOnExpandedA()
+      requestRunJump('run-j-gone')
+      await tick()
+
+      await mounted.select('run-j-a') // run-j-a is the active stream: this is a collapse
+
+      expect(missEl().hidden).toBe(false)
+    })
+
+    it('the notice clears on a refresh that finds the run, and stays through refreshes that do not', async () => {
+      let runArrives = false
+      const mounted = await mountOnExpandedA({
+        refresh: async () => {
+          if (runArrives && document.querySelector('[data-run-id="run-j-late"]') === null) {
+            document.querySelector('[data-role="run-index-list"]')?.insertAdjacentHTML('beforeend', cardHtml('run-j-late'))
+          }
+          return true
+        },
+      })
+      requestRunJump('run-j-late')
+      await tick()
+      expect(missEl().hidden).toBe(false)
+      const refreshesSoFar = mounted.refreshOperatorRunIndex.mock.calls.length
+
+      document.dispatchEvent(new Event('visibilitychange'))
+      await tick()
+      expect(mounted.refreshOperatorRunIndex.mock.calls.length).toBe(refreshesSoFar + 1)
+      expect(missEl().hidden).toBe(false)
+
+      runArrives = true
+      document.dispatchEvent(new Event('visibilitychange'))
+      await tick()
+
+      expect(missEl().hidden).toBe(true)
+      expect(missEl().textContent).toBe('')
+      // Finding the run in the list is not a jump: nothing was expanded or attached for it.
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+    })
+
+    it('a miss when the refresh itself failed is still a miss (the list could not confirm the run)', async () => {
+      const mounted = await mountOnExpandedA({refresh: async () => Promise.reject(new Error('boom'))})
+
+      requestRunJump('run-j-gone')
+      await tick()
+
+      expect(missEl().textContent).toBe(MISS_COPY)
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+    })
+
+    it('without a miss element on the page a miss is silent and harmless', async () => {
+      renderPage(cardHtml('run-j-a'))
+      missEl().remove()
+      const mounted = await mountJump()
+      await mounted.ready()
+
+      requestRunJump('run-j-gone')
+      await tick()
+
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Safety
+  // -------------------------------------------------------------------------
+
+  describe('safety', () => {
+    it('the hash write does not trigger another jump, and nothing listens for hashchange', async () => {
+      const added = vi.spyOn(window, 'addEventListener')
+      const addedDoc = vi.spyOn(document, 'addEventListener')
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountJump()
+      await mounted.ready()
+
+      requestRunJump('run-j-a')
+      await tick()
+      expect(location.hash).toBe('#run-j-a')
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+      await tick()
+
+      expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      expect(mounted.attachedRunIds()).toEqual(['run-j-a'])
+      expect([...added.mock.calls, ...addedDoc.mock.calls].map(([type]) => type)).not.toContain('hashchange')
+    })
+
+    it('runtime.ts never mentions hashchange', async () => {
+      const fs = await import('node:fs/promises')
+      const path = await import('node:path')
+      const url = await import('node:url')
+      const src = await fs.readFile(path.join(path.dirname(url.fileURLToPath(import.meta.url)), 'runtime.ts'), 'utf8')
+      expect(src).not.toMatch(/hashchange/)
+    })
+
+    it('makes no console call on any jump path: hit, repeat, re-attach, miss, refused, dropped', async () => {
+      const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map(method => vi.spyOn(console, method).mockImplementation(() => {}))
+      renderPage(cardHtml('run-j-a'), cardHtml('run-j-b'))
+      requestRunJump('run-j-a')
+      const mounted = await mountJump()
+      await mounted.ready()
+
+      requestRunJump('run-j-a')
+      streamStatus = 'inactive'
+      requestRunJump('run-j-a')
+      await tick()
+      requestRunJump('run-j-b')
+      requestRunJump('run-j-gone')
+      requestRunJump('not valid!')
+      await tick()
+      mounted.runtime.cleanup()
+
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled()
+    })
   })
 })

@@ -345,6 +345,25 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
               hidden
               className="operator-stream-status"
             />
+
+            {/* Written by the runtime's jump to a run (notification tap). Separate from stream-status,
+                which the stream rewrites on every frame: a jump's miss notice must not be overwritten,
+                and its announcement must not be spoken as stream progress. Both carry fixed copy or an
+                allowlisted status label, never a run ID. */}
+            <div
+              data-role="run-jump-miss"
+              role="status"
+              aria-live="polite"
+              hidden
+              className="operator-stream-status"
+            />
+            <div
+              data-role="run-jump-announcer"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+              className="sr-only"
+            />
           </section>
 
           {/* Persistent Launch Drawer */}
