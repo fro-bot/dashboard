@@ -2594,6 +2594,13 @@ export function renderApprovalPrompt(prompt, runId, approvalClient, _onSettle) {
   el.className = 'approval-prompt'
   el.setAttribute('role', 'region')
   el.setAttribute('aria-label', 'Approval prompt')
+  // The prompt lives inside an expandable run card whose click listener toggles the card. A click
+  // anywhere in the prompt (a button, or the command text) must not reach it: collapsing the card
+  // closes the stream and hides the prompt, so "Confirm always" would render into a collapsed card.
+  // Keyboard activation of a button is a click too, so this covers Enter and Space.
+  el.addEventListener('click', event => {
+    event.stopPropagation()
+  })
 
   // Permission label
   const permEl = document.createElement('div')
@@ -2870,6 +2877,12 @@ export function renderCancelControl(runId, cancelClient, onCancelDispatch) {
   el.className = 'run-cancel-control'
   el.setAttribute('role', 'group')
   el.setAttribute('aria-label', 'Cancel run')
+  // Same containment as the approval prompt: nothing inside the Cancel control toggles the run card.
+  // Each button already stops its own click; this also covers the status text and padding, which
+  // used to bubble and collapse the card (and close the stream) mid-cancel.
+  el.addEventListener('click', event => {
+    event.stopPropagation()
+  })
 
   const statusEl = document.createElement('div')
   statusEl.className = 'run-cancel-status'
