@@ -1793,16 +1793,35 @@ describe('renderRunCard — unified per-card substructure', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Expansion toggles data-expanded and reveals per-card substructure
+// Expansion toggles data-expanded; the stream, not expand, reveals regions
 // ---------------------------------------------------------------------------
 
-describe('renderRunCard — expand/collapse toggles data-expanded and substructure visibility', () => {
+const ALL_STREAM_REGION_ROLES = [
+  'run-checkout-detail',
+  'run-output',
+  'run-output-coalesced',
+  'run-approvals',
+  'run-questions',
+  'approval-badge',
+  'run-cancel',
+]
+
+/** Stand in for the stream's updateDOM, the only unhider: show every region on a card. */
+function streamRevealsRegions(card) {
+  for (const role of ALL_STREAM_REGION_ROLES) card.querySelector(`[data-role="${role}"]`).hidden = false
+}
+
+const regionsHidden = card => ALL_STREAM_REGION_ROLES.map(role => card.querySelector(`[data-role="${role}"]`).hidden)
+const ALL_HIDDEN = ALL_STREAM_REGION_ROLES.map(() => true)
+const ALL_SHOWN = ALL_STREAM_REGION_ROLES.map(() => false)
+
+describe('renderRunCard — expand/collapse toggles data-expanded; collapse hides the substructure', () => {
   afterEach(() => {
     resetRunIndexState()
     vi.restoreAllMocks()
   })
 
-  it('clicking a collapsed card sets data-expanded="true", reveals substructure, and calls onSelectRun', async () => {
+  it('clicking a collapsed card sets data-expanded="true" and calls onSelectRun, revealing no region itself', async () => {
     const onSelectRun = vi.fn()
     const runId = 'run-expand-001'
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
@@ -1820,10 +1839,8 @@ describe('renderRunCard — expand/collapse toggles data-expanded and substructu
     expect(card.dataset.expanded).toBe('true')
     expect(onSelectRun).toHaveBeenCalledTimes(1)
     expect(onSelectRun).toHaveBeenCalledWith(runId)
-    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
-      const el = card.querySelector(`[data-role="${role}"]`)
-      expect(el.hidden).toBe(false)
-    }
+    // The stream's first paint is the only thing that shows a region.
+    expect(regionsHidden(card)).toEqual(ALL_HIDDEN)
   })
 
   it('clicking an already-expanded card collapses it, hides substructure, and calls onSelectRun again (caller closes the stream)', async () => {
@@ -1840,16 +1857,15 @@ describe('renderRunCard — expand/collapse toggles data-expanded and substructu
 
     card.dispatchEvent({type: 'click'})
     expect(card.dataset.expanded).toBe('true')
+    streamRevealsRegions(card)
+    expect(regionsHidden(card)).toEqual(ALL_SHOWN)
 
     card.dispatchEvent({type: 'click'})
 
     expect(card.dataset.expanded).toBe('false')
     expect(onSelectRun).toHaveBeenCalledTimes(2)
     expect(onSelectRun).toHaveBeenNthCalledWith(2, runId)
-    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
-      const el = card.querySelector(`[data-role="${role}"]`)
-      expect(el.hidden).toBe(true)
-    }
+    expect(regionsHidden(card)).toEqual(ALL_HIDDEN)
   })
 
   it('expanding run A then run B collapses A (hides its substructure) and expands B', async () => {
@@ -1869,15 +1885,14 @@ describe('renderRunCard — expand/collapse toggles data-expanded and substructu
 
     cardA.dispatchEvent({type: 'click'})
     expect(cardA.dataset.expanded).toBe('true')
+    streamRevealsRegions(cardA)
 
     cardB.dispatchEvent({type: 'click'})
 
     expect(cardA.dataset.expanded).toBe('false')
     expect(cardB.dataset.expanded).toBe('true')
-    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
-      expect(cardA.querySelector(`[data-role="${role}"]`).hidden).toBe(true)
-      expect(cardB.querySelector(`[data-role="${role}"]`).hidden).toBe(false)
-    }
+    expect(regionsHidden(cardA)).toEqual(ALL_HIDDEN)
+    expect(regionsHidden(cardB)).toEqual(ALL_HIDDEN)
     expect(onSelectRun).toHaveBeenCalledTimes(2)
     expect(onSelectRun).toHaveBeenNthCalledWith(1, runIdA)
     expect(onSelectRun).toHaveBeenNthCalledWith(2, runIdB)
@@ -1912,7 +1927,7 @@ describe('markCardExpandedForLaunch — launch handoff marks a card expanded (no
     vi.restoreAllMocks()
   })
 
-  it('marks a launch-created card expanded and reveals its substructure, and the FIRST subsequent click collapses it (not a silent double-close)', async () => {
+  it('marks a launch-created card expanded without revealing a region, and the FIRST subsequent click collapses it (not a silent double-close)', async () => {
     const onSelectRun = vi.fn()
     const runId = 'run-launch-expand-001'
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
@@ -1935,9 +1950,8 @@ describe('markCardExpandedForLaunch — launch handoff marks a card expanded (no
     markCardExpandedForLaunch(runId)
 
     expect(card.dataset.expanded).toBe('true')
-    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
-      expect(card.querySelector(`[data-role="${role}"]`).hidden).toBe(false)
-    }
+    expect(regionsHidden(card)).toEqual(ALL_HIDDEN)
+    streamRevealsRegions(card)
     // markCardExpandedForLaunch itself never calls onSelectRun — it's not a click.
     expect(onSelectRun).not.toHaveBeenCalled()
 
@@ -1949,9 +1963,7 @@ describe('markCardExpandedForLaunch — launch handoff marks a card expanded (no
     expect(card.dataset.expanded).toBe('false')
     expect(onSelectRun).toHaveBeenCalledTimes(1)
     expect(onSelectRun).toHaveBeenCalledWith(runId)
-    for (const role of ['run-output', 'run-output-coalesced', 'run-approvals', 'approval-badge']) {
-      expect(card.querySelector(`[data-role="${role}"]`).hidden).toBe(true)
-    }
+    expect(regionsHidden(card)).toEqual(ALL_HIDDEN)
   })
 
   it('is idempotent — calling it twice on an already-expanded card is a no-op', async () => {
@@ -2102,6 +2114,83 @@ describe('initOperatorRunIndex — reload-restore does not override an in-flight
     const restoreCard = cards.find(c => c.dataset.runId === restoreRunId)
     expect(restoreCard?.dataset.expanded).toBe('true')
     expect(onRestoreRun).toHaveBeenCalledTimes(1)
+    // Restore expands the card but shows no region: the stream's first paint does.
+    expect(regionsHidden(restoreCard)).toEqual(ALL_HIDDEN)
+  })
+})
+
+async function setupExpandCards(runIds) {
+  const cards = []
+  stubDOMWithSubstructureCards(cards)
+  stubFetchRuns(runIds.map(runId => makeValidSummary({runId, status: 'running'})))
+  await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+  return cards
+}
+
+describe('expand paths reveal no stream-owned region (the stream is the only unhider)', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it.each([
+    ['click', cards => cards[0].dispatchEvent({type: 'click'})],
+    ['Enter', cards => cards[0].dispatchEvent({type: 'keydown', key: 'Enter', preventDefault: vi.fn()})],
+    ['launch handoff', () => markCardExpandedForLaunch('run-noreveal-001')],
+  ])('%s leaves every region hidden on a card that has never attached', async (_label, expand) => {
+    const cards = await setupExpandCards(['run-noreveal-001'])
+
+    expand(cards)
+
+    expect(cards[0].dataset.expanded).toBe('true')
+    expect(regionsHidden(cards[0])).toEqual(ALL_HIDDEN)
+  })
+
+  it('restore leaves every region hidden', async () => {
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([makeValidSummary({runId: 'run-noreveal-restore', status: 'running'})])
+    const onRestoreRun = vi.fn()
+
+    await initOperatorRunIndex({endpointBase: '/operator', restoreRunId: 'run-noreveal-restore', onRestoreRun})
+
+    expect(onRestoreRun).toHaveBeenCalledTimes(1)
+    expect(cards[0].dataset.expanded).toBe('true')
+    expect(regionsHidden(cards[0])).toEqual(ALL_HIDDEN)
+  })
+
+  it('switching cards hides what the stream showed on the first, and shows nothing on the second', async () => {
+    const cards = await setupExpandCards(['run-noreveal-a', 'run-noreveal-b'])
+    markCardExpandedForLaunch('run-noreveal-a')
+    streamRevealsRegions(cards[0])
+
+    markCardExpandedForLaunch('run-noreveal-b')
+
+    expect(regionsHidden(cards[0])).toEqual(ALL_HIDDEN)
+    expect(regionsHidden(cards[1])).toEqual(ALL_HIDDEN)
+  })
+
+  it('re-expanding a collapsed card starts hidden again until the stream paints', async () => {
+    const cards = await setupExpandCards(['run-noreveal-re'])
+    cards[0].dispatchEvent({type: 'click'})
+    streamRevealsRegions(cards[0])
+    cards[0].dispatchEvent({type: 'click'})
+    expect(regionsHidden(cards[0])).toEqual(ALL_HIDDEN)
+
+    cards[0].dispatchEvent({type: 'click'})
+
+    expect(cards[0].dataset.expanded).toBe('true')
+    expect(regionsHidden(cards[0])).toEqual(ALL_HIDDEN)
+  })
+
+  it('a refresh diff while expanded does not reveal a region either', async () => {
+    const cards = await setupExpandCards(['run-noreveal-diff'])
+    cards[0].dispatchEvent({type: 'click'})
+
+    stubFetchRuns([makeValidSummary({runId: 'run-noreveal-diff', status: 'running', updatedAt: '2026-06-26T13:00:00.000Z'})])
+    await refreshOperatorRunIndex()
+
+    expect(regionsHidden(cards[0])).toEqual(ALL_HIDDEN)
   })
 })
 
@@ -3647,7 +3736,7 @@ describe('checkout-detail region — fetched cards (renderRunCard)', () => {
     expectCheckoutSlot(cards[0])
   })
 
-  it('expanding reveals the region, collapsing hides it, and expanding another card hides the first one’s', async () => {
+  it('expanding leaves the region hidden, collapsing hides it, and expanding another card hides the first one’s', async () => {
     const onSelectRun = vi.fn()
     const cards = []
     stubDOMWithSubstructureCards(cards)
@@ -3657,18 +3746,20 @@ describe('checkout-detail region — fetched cards (renderRunCard)', () => {
     const region = card => card.querySelector(`[data-role="${CHECKOUT_ROLE}"]`)
 
     cardA.dispatchEvent({type: 'click'})
-    expect(region(cardA).hidden).toBe(false)
+    expect(region(cardA).hidden).toBe(true)
+    region(cardA).hidden = false // the stream's paint
     expect(region(cardB).hidden).toBe(true)
 
     cardB.dispatchEvent({type: 'click'})
     expect(region(cardA).hidden).toBe(true)
-    expect(region(cardB).hidden).toBe(false)
+    expect(region(cardB).hidden).toBe(true)
+    region(cardB).hidden = false
 
     cardB.dispatchEvent({type: 'click'})
     expect(region(cardB).hidden).toBe(true)
   })
 
-  it('a launch-marked card reveals its region on markCardExpandedForLaunch', async () => {
+  it('a launch-marked card leaves its region hidden on markCardExpandedForLaunch', async () => {
     const cards = []
     stubDOMWithSubstructureCards(cards)
     stubFetchRuns([makeValidSummary({runId: 'run-ck-launch-expand-001'})])
@@ -3676,7 +3767,8 @@ describe('checkout-detail region — fetched cards (renderRunCard)', () => {
 
     markCardExpandedForLaunch('run-ck-launch-expand-001')
 
-    expect(cards[0].querySelector(`[data-role="${CHECKOUT_ROLE}"]`).hidden).toBe(false)
+    expect(cards[0].dataset.expanded).toBe('true')
+    expect(cards[0].querySelector(`[data-role="${CHECKOUT_ROLE}"]`).hidden).toBe(true)
   })
 
   it('source: the region is created via createElement and never via innerHTML', async () => {
@@ -3761,7 +3853,8 @@ describe('checkout-detail region — adopted optimistic cards (ensureRunCardAnat
     const region = optimistic.querySelector(`[data-role="${CHECKOUT_ROLE}"]`)
 
     optimistic.dispatchEvent({type: 'click'})
-    expect(region.hidden).toBe(false)
+    expect(region.hidden).toBe(true)
+    region.hidden = false // the stream's paint
     optimistic.dispatchEvent({type: 'click'})
     expect(region.hidden).toBe(true)
   })
@@ -3821,7 +3914,7 @@ describe('question region — fetched cards (renderRunCard)', () => {
     }
   })
 
-  it('is part of the auto-hidden substructure: expand reveals it, collapse hides it, switching hides the first card’s', async () => {
+  it('is part of the auto-hidden substructure: expand leaves it hidden, collapse hides it, switching hides the first card’s', async () => {
     const cards = []
     stubDOMWithSubstructureCards(cards)
     stubFetchRuns([makeValidSummary({runId: 'run-q-accordion-a'}), makeValidSummary({runId: 'run-q-accordion-b'})])
@@ -3830,12 +3923,14 @@ describe('question region — fetched cards (renderRunCard)', () => {
     const region = card => card.querySelector(`[data-role="${QUESTIONS_ROLE}"]`)
 
     cardA.dispatchEvent({type: 'click'})
-    expect(region(cardA).hidden).toBe(false)
+    expect(region(cardA).hidden).toBe(true)
+    region(cardA).hidden = false // the stream's paint
     expect(region(cardB).hidden).toBe(true)
 
     cardB.dispatchEvent({type: 'click'})
     expect(region(cardA).hidden).toBe(true)
-    expect(region(cardB).hidden).toBe(false)
+    expect(region(cardB).hidden).toBe(true)
+    region(cardB).hidden = false
 
     cardB.dispatchEvent({type: 'click'})
     expect(region(cardB).hidden).toBe(true)

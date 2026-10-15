@@ -1783,6 +1783,8 @@ describe('initOperatorStream — close() teardown behavior', () => {
 
     const noticeEl = document.createElement('div')
     const handle = streamMod.initOperatorStream({runId: 'run-close', statusEl: null, noticeEl})
+    // The attach paint is the only write: the state never moves past 'connecting'.
+    expect(noticeEl.dataset.connectionState).toBe('connecting')
     expect(signals[0]?.aborted).toBe(false)
     expect(vi.getTimerCount()).toBeGreaterThan(0)
 
@@ -1794,7 +1796,8 @@ describe('initOperatorStream — close() teardown behavior', () => {
     await vi.advanceTimersByTimeAsync(120_000)
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(vi.getTimerCount()).toBe(0)
-    expect(noticeEl.dataset.connectionState).toBeUndefined()
+    expect(noticeEl.dataset.connectionState).toBe('connecting')
+    expect(noticeEl.textContent).toBe('Connecting to run stream\u2026')
   })
 
   it('close() clears a pending reconnect timer, so no further connection is opened', async () => {

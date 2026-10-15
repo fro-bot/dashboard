@@ -914,7 +914,7 @@ function renderRunCard(view, onSelectRun) {
   }
 
   // Hidden per-card substructure — targets for operator-stream.js's updateDOM().
-  // Revealed on expansion. Safe-DOM only: createElement + textContent/
+  // Shown only by the stream's paint, never by expand. Safe-DOM only: createElement + textContent/
   // hidden/dataset, never innerHTML. No run field beyond the closed safe-view
   // reaches these elements at creation time.
 
@@ -1073,14 +1073,14 @@ function ensureRunCardAnatomy(card, view, onSelectRun) {
 }
 
 /**
- * Toggle a card's expanded state and reveal/hide its per-card substructure.
+ * Toggle a card's expanded state, hiding its per-card substructure on collapse.
  *
  * Single-open accordion: expanding a card first collapses whichever other card
  * is currently expanded (hides its substructure, clears its data-expanded)
  * before expanding the clicked one. Selecting an already-expanded card
  * collapses it instead. In both cases onSelectRun(runId) is called — the
  * runtime seam owns the actual stream attach/close; this DOM shell only owns
- * data-expanded and per-card substructure visibility.
+ * data-expanded and collapsing the substructure; the stream reveals regions.
  *
  * Safe-DOM only: toggles `hidden` and `dataset.expanded`, never innerHTML.
  */
@@ -1096,7 +1096,8 @@ function toggleCardExpansion(card, runId, onSelectRun) {
   }
 
   card.dataset.expanded = isExpanded ? 'false' : 'true'
-  setSubstructureHidden(card, isExpanded)
+  // Collapse hides; expand shows nothing, since the stream's paint is the only thing that reveals a region.
+  if (isExpanded) setSubstructureHidden(card, true)
   _expandedRunId = isExpanded ? null : runId
 
   onSelectRun(runId)
@@ -1112,7 +1113,7 @@ function toggleCardExpansion(card, runId, onSelectRun) {
  * already live, and the operator's first click on it would be misread by
  * onSelectRun as "collapse the active stream" instead of "expand." Calling this
  * right after the stream attaches keeps the DOM shell's _expandedRunId bookkeeping
- * and the card's revealed substructure consistent with the runtime seam's active
+ * and the card's expansion state consistent with the runtime seam's active
  * stream state, so the first real click correctly collapses instead of the stream
  * silently closing on attach.
  *
@@ -1143,7 +1144,6 @@ export function markCardExpandedForLaunch(runId) {
   }
 
   card.dataset.expanded = 'true'
-  setSubstructureHidden(card, false)
   _expandedRunId = runId
 }
 
@@ -1177,13 +1177,12 @@ function expandCardForRestore(runId, onExpand) {
   }
 
   card.dataset.expanded = 'true'
-  setSubstructureHidden(card, false)
   _expandedRunId = runId
 
   onExpand(runId, card)
 }
 
-/** Show/hide a card's per-card substructure regions in one place. */
+/** Set the `hidden` state of a card's per-card substructure regions; callers only hide. */
 function setSubstructureHidden(card, hidden) {
   if (typeof card.querySelector !== 'function') return
   for (const role of SUBSTRUCTURE_ROLES) {

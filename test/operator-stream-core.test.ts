@@ -1623,7 +1623,7 @@ async function withFakeBrowser(
     querySelectorAll: () => cards,
   }
 
-  const noticeEl = {textContent: '', hidden: false}
+  const noticeEl = {textContent: '', hidden: false, dataset: {}}
 
   const fakeDocument: FakeDocument = {
     querySelector: (sel: string) => {
@@ -2653,7 +2653,7 @@ describe('bootstrapOperatorStreams — discovers approvalsEl and badgeEl', () =>
     const section = {
       querySelectorAll: () => cards,
     }
-    const noticeEl = {textContent: '', hidden: false}
+    const noticeEl = {textContent: '', hidden: false, dataset: {}}
 
     vi.stubGlobal('document', {
       querySelector: (sel: string) => {
@@ -4957,7 +4957,7 @@ describe('resetBootstrapState — handle cleanup and pagehide listener removal',
     const section = {
       querySelectorAll: () => cards,
     }
-    const noticeEl = {textContent: '', hidden: false}
+    const noticeEl = {textContent: '', hidden: false, dataset: {}}
     const fakeDocument = {
       querySelector: (sel: string) => {
         if (sel === '[data-role="run-index-list"]') return section
@@ -4988,7 +4988,7 @@ describe('resetBootstrapState — handle cleanup and pagehide listener removal',
     const section = {
       querySelectorAll: () => cards,
     }
-    const noticeEl = {textContent: '', hidden: false}
+    const noticeEl = {textContent: '', hidden: false, dataset: {}}
     const fakeDocument = {
       querySelector: (sel: string) => {
         if (sel === '[data-role="run-index-list"]') return section
@@ -5039,7 +5039,7 @@ describe('resetBootstrapState — handle cleanup and pagehide listener removal',
     const section = {
       querySelectorAll: () => cards,
     }
-    const noticeEl = {textContent: '', hidden: false}
+    const noticeEl = {textContent: '', hidden: false, dataset: {}}
     const fakeDocument = {
       querySelector: (sel: string) => {
         if (sel === '[data-role="run-index-list"]') return section
@@ -5995,8 +5995,9 @@ describe('initOperatorStream — late-frame guard: closed stream does not mutate
       endpointBase: '/operator',
     })
 
-    // Close the stream (simulating card switch to card B)
+    // Close the stream (simulating card switch to card B), which then owns the shared notice.
     handle.close()
+    noticeEl.textContent = 'Card B stream active'
 
     // Resolve the stream reader with done=true (simulating stream end after close)
     resolveStream?.({done: true})
@@ -7331,6 +7332,18 @@ describe('CSS selector ↔ cancel-control state emitter agreement', () => {
       expect(cssContent).toContain(`[data-state="${state}"]`)
     }
   })
+})
+
+describe('CSS: a hidden stream-owned region takes no space', () => {
+  it.each(['run-cancel', 'run-questions', 'run-checkout-detail', 'run-output-coalesced', 'approval-badge'])(
+    '[data-role="%s"][hidden] is display: none',
+    async role => {
+      const fs = await import('node:fs/promises')
+      const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
+      const rule = new RegExp(String.raw`\[data-role="${role}"\]\[hidden\]\s*\{[^}]*display:\s*none`)
+      expect(css).toMatch(rule)
+    },
+  )
 })
 
 describe('CSS selector ↔ checkout-detail emitter agreement', () => {

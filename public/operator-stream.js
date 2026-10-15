@@ -2836,6 +2836,13 @@ export const CANCEL_RETRY_MAX_ATTEMPTS = 3
  *   'transport-failure' — network error: retryable, "didn't go through"
  */
 
+/** Whether a Cancel region holds a Cancel button or a non-empty status message; an emptied control does not count. */
+function cancelRegionHasContent(el) {
+  if (el.querySelector('.run-cancel-btn-cancel') !== null) return true
+  const message = el.querySelector('.run-cancel-status')
+  return message !== null && message.textContent !== ''
+}
+
 /**
  * Render a Cancel control with an inline two-step confirm for a single run.
  *
@@ -3324,9 +3331,21 @@ export function initOperatorStream(opts) {
     ? opts.summaryStatus
     : undefined
 
+  // Every stream-owned region starts each attachment empty and hidden; updateDOM alone shows one.
   if (checkoutEl) {
     checkoutEl.textContent = ''
     checkoutEl.hidden = true
+  }
+
+  if (outputEl) {
+    outputEl.textContent = ''
+    outputEl.classList?.remove('run-output-unavailable')
+    outputEl.hidden = true
+  }
+  if (coalescedEl) coalescedEl.hidden = true
+  if (badgeEl) {
+    badgeEl.textContent = ''
+    badgeEl.hidden = true
   }
 
   if (questionsEl !== undefined && questionsEl !== null) {
@@ -3972,7 +3991,8 @@ export function initOperatorStream(opts) {
         if (cancelControl !== null) {
           cancelControl.notifyTerminal()
         }
-        cancelEl.hidden = false
+        // Only a Cancel button or a cancelled message is worth showing; an emptied control is not.
+        cancelEl.hidden = !cancelRegionHasContent(cancelEl)
       } else if (state.connection === 'live' && runEntry !== undefined) {
         if (cancelControl === null) {
           cancelControl = renderCancelControl(runId, cancelClient, targetRunId => {
@@ -4663,6 +4683,9 @@ export function initOperatorStream(opts) {
     const {connection} = state
     return connection === 'connecting' || connection === 'live' || connection === 'reconnecting' ? 'active' : 'inactive'
   }
+
+  // One paint before connecting, so the card shows "Connecting to run stream…" and no stale region.
+  updateDOM()
 
   // Start the connection
   connect()
