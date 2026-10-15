@@ -875,6 +875,42 @@ describe('runReconcileSweep', () => {
     expect(pushClient.unsubscribePush).not.toHaveBeenCalled()
   })
 
+  it('a list holding only another device\'s record leaves a live local subscription alone', async () => {
+    const subscription = fakeSubscription('https://push.example/mine')
+    const otherDevice = {
+      endpointHash: 'f'.repeat(64),
+      createdAt: 1_760_000_000_000,
+      updatedAt: 1_760_000_000_000,
+      keyVersion: 'v1',
+      active: true,
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({subscriptions: [otherDevice]}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+      ),
+    )
+
+    const result = await runReconcileSweep(
+      {
+        getLocalSubscription: () => Promise.resolve(subscription),
+        getPermission: () => 'granted',
+        pushClient: buildPushClient(),
+        getCurrentKeyVersion: () => 'v1',
+        now: () => 1,
+      },
+      cache,
+    )
+
+    expect(result.skipped).toBe(false)
+    expect(result.action).toBe('none')
+    expect(result.uiState).toBeUndefined()
+    expect(subscription.unsubscribeMock).not.toHaveBeenCalled()
+  })
+
   it('regression: metadata read failure (transport error) with a live local subscription does NOT cleanup or register', async () => {
     // The scenario from the incident: the Gateway GET fails/races, but the
     // browser still has a real, live subscription. Losing it here is what

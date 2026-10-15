@@ -666,13 +666,7 @@ export async function runReconcileSweep(
   const handoffState = derivePushHandoffState(localHash, currentKeyVersion, metadataResult.data)
 
   const permissionForReconcile: NotificationPermission = permission === 'unsupported' ? 'denied' : permission
-  // Only a genuinely confirmed mismatch (metadata actually read AND local
-  // hash actually computed) may license a destructive cleanup — see
-  // reconcile()'s ReconcileOptions doc.
-  const notSubscribedConfirmed = metadataResult.data.metadata !== undefined && localHash !== undefined
-  const {uiState, action} = reconcile(permissionForReconcile, subscriptionPresent, handoffState, {
-    notSubscribedConfirmed,
-  })
+  const {uiState, action} = reconcile(permissionForReconcile, subscriptionPresent, handoffState)
 
   const nextCache: ReconcileSweepCache = {
     permission,

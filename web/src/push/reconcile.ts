@@ -88,22 +88,6 @@ export interface ReconcileResult {
   readonly action: ReconcileAction
 }
 
-export interface ReconcileOptions {
-  /**
-   * Whether a `not_subscribed` handoffState reflects a *confirmed*
-   * divergence — Gateway metadata was actually read (not just absent/
-   * unparseable) AND the local subscription's endpoint hash was actually
-   * computed AND the two genuinely disagree — as opposed to merely
-   * inconclusive input. `derivePushHandoffState` collapses "no metadata",
-   * "no local hash", and "confirmed mismatch" into the same `not_subscribed`
-   * value; only the caller (which holds the raw metadata/hash) can tell
-   * them apart. Defaults to `false` (never treat as confirmed) when
-   * omitted, so a caller that forgets to pass it fails safe rather than
-   * destructive.
-   */
-  readonly notSubscribedConfirmed?: boolean
-}
-
 /**
  * Pure drift decision. Implements every row of the drift matrix in the
  * plan's High-Level Technical Design.
@@ -116,7 +100,6 @@ export function reconcile(
   permission: NotificationPermission,
   localSubscriptionPresent: boolean,
   handoffState: HandoffState,
-  options?: ReconcileOptions,
 ): ReconcileResult {
   // push_disabled wins regardless of permission/local state.
   if (handoffState === 'push_disabled') {
@@ -152,14 +135,11 @@ export function reconcile(
 
   // not_subscribed / inactive
 
-  // `not_subscribed` while a local subscription is present is only safe to
-  // act on (`cleanup`) when the divergence is confirmed. An inconclusive
-  // read here (e.g. a Gateway metadata GET that raced the subscribe POST
-  // and came back empty) must not tear down a live local subscription —
-  // that's what orphaned a Gateway record on every focus cycle. `inactive`
-  // is never reached without a successfully-read, matching metadata record,
-  // so it's always confirmed by construction and isn't gated here.
-  if (handoffState === 'not_subscribed' && localSubscriptionPresent && options?.notSubscribedConfirmed !== true) {
+  // `not_subscribed` while a local subscription is present never tears it
+  // down: the Gateway list can't confirm a mismatch, and an empty read that
+  // raced the subscribe POST orphaned a Gateway record on every focus cycle.
+  // `inactive` always comes from a matching record, so it isn't gated here.
+  if (handoffState === 'not_subscribed' && localSubscriptionPresent) {
     return {uiState: undefined, action: 'none'}
   }
 
