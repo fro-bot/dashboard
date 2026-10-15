@@ -9939,6 +9939,29 @@ describe('question status — label, wire acceptance and styling', () => {
     expect(css).toMatch(/\.run-status\s*\{[^}]*white-space:\s*nowrap;/)
   })
 
+  it('styles the waiting line quietly and pins its mobile rows', async () => {
+    const fs = await import('node:fs/promises')
+    const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
+    expect(css).toMatch(/\.run-card\s+\[data-role="run-waiting"\]:not\(\[hidden\]\)\s*\{[^}]*color:\s*var\(--color-text-muted\);/)
+    expect(css).toMatch(/\.run-card\s+\[data-role="run-waiting"\]:not\(\[hidden\]\)\s*\{[^}]*font-size:\s*var\(--text-body-sm\);/)
+    expect(css).toMatch(/\[data-role="run-output"\],\s*\[data-role="run-output-coalesced"\],\s*\[data-role="run-approvals"\],\s*\[data-role="run-waiting"\],\s*\[data-role="approval-badge"\]\s*\{\s*grid-column:\s*1\s*\/\s*-1;/)
+    expect(css).toMatch(/\[data-role="run-waiting"\]\s*\{[^}]*grid-row:\s*5;/)
+    expect(css).toMatch(/\.run-card:has\(\[data-role="run-waiting"\]:not\(\[hidden\]\)\)\s+\[data-role="run-output"\]\s*\{[^}]*grid-row:\s*6;/)
+  })
+
+  it('keeps cancel controls out of the status track and after the mobile waiting line', async () => {
+    const fs = await import('node:fs/promises')
+    const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
+    expect(css).toMatch(/\.run-card\s+\[data-role="run-cancel"\]\s*\{[^}]*grid-column:\s*1\s*\/\s*-1;/)
+    expect(css).toMatch(/\.run-card:has\(\[data-role="run-waiting"\]:not\(\[hidden\]\)\)\s+\[data-role="run-cancel"\]\s*\{[^}]*grid-row:\s*6;/)
+  })
+
+  it('keeps the expanded run time legible on the raised card surface', async () => {
+    const fs = await import('node:fs/promises')
+    const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
+    expect(css).toMatch(/\.run-card\[data-expanded="true"\]\s+\.run-updated-at\s*\{\s*color:\s*var\(--color-text-muted\);/)
+  })
+
   it('keeps jump notices visible while the run list is scrolled', async () => {
     const fs = await import('node:fs/promises')
     const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')

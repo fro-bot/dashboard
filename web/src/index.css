@@ -302,6 +302,10 @@
   color: var(--color-text-muted);
 }
 
+.run-card[data-expanded="true"] .run-updated-at {
+  color: var(--color-text-muted);
+}
+
 /* Expanded substructure */
 [data-role="run-output"],
 [data-role="run-output-coalesced"],
@@ -325,6 +329,10 @@
   width: 100%;
   min-width: 0;
   margin-top: var(--space-1);
+}
+
+.run-card [data-role="run-cancel"] {
+  grid-column: 1 / -1;
 }
 
 [data-role="run-output"] { grid-row: 4; }
@@ -640,6 +648,13 @@
 
 [data-role="run-waiting"][hidden] {
   display: none;
+}
+
+.run-card [data-role="run-waiting"]:not([hidden]) {
+  margin-top: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--text-body-sm);
+  line-height: 1.5;
 }
 
 @keyframes pulse {
@@ -1349,6 +1364,7 @@
 [data-role="run-output"],
 [data-role="run-output-coalesced"],
 [data-role="run-approvals"],
+[data-role="run-waiting"],
 [data-role="approval-badge"] {
   grid-column: 1 / -1;
 }
@@ -1411,8 +1427,20 @@
     grid-row: 4;
   }
 
+  [data-role="run-waiting"] {
+    grid-row: 5;
+  }
+
   .run-card:has([data-role="run-checkout-detail"]:not([hidden])) [data-role="run-output"] {
     grid-row: 5;
+  }
+
+  .run-card:has([data-role="run-waiting"]:not([hidden])) [data-role="run-output"] {
+    grid-row: 6;
+  }
+
+  .run-card:has([data-role="run-waiting"]:not([hidden])) [data-role="run-cancel"] {
+    grid-row: 6;
   }
 
   .run-card-skeleton {
