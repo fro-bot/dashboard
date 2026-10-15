@@ -79,6 +79,22 @@ describe('optimistic launch card', () => {
     const roles = Array.from(card.children).map(child => (child as HTMLElement).dataset.role)
     const at = roles.indexOf('run-checkout-detail')
     expect(roles[at - 1]).toBe('run-updated-at')
+    expect(roles[at + 1]).toBe('run-waiting')
+  })
+
+  it('the optimistic card has exactly one hidden, empty run-waiting region between checkout-detail and run-output', async () => {
+    const card = await launchOptimisticCard()
+
+    const regions = card.querySelectorAll<HTMLElement>('[data-role="run-waiting"]')
+    expect(regions).toHaveLength(1)
+    const region = regions[0]
+    expect(region?.hidden).toBe(true)
+    expect(region?.textContent).toBe('')
+    expect(region?.parentElement).toBe(card)
+
+    const roles = Array.from(card.children).map(child => (child as HTMLElement).dataset.role)
+    const at = roles.indexOf('run-waiting')
+    expect(roles[at - 1]).toBe('run-checkout-detail')
     expect(roles[at + 1]).toBe('run-output')
   })
 

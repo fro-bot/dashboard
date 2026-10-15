@@ -700,6 +700,12 @@ export async function initOperatorLaunch(opts) {
           checkoutEl.hidden = true
           card.append(checkoutEl)
 
+          // Waiting line — the stream shows it while nothing else is showing; same slot as a fetched card.
+          const waitingEl = document.createElement('div')
+          waitingEl.dataset.role = 'run-waiting'
+          waitingEl.hidden = true
+          card.append(waitingEl)
+
           const outputEl = document.createElement('div')
           outputEl.dataset.role = 'run-output'
           outputEl.hidden = true

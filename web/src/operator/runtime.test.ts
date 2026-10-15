@@ -781,7 +781,7 @@ describe('defaultRuntimeLoader — production stream wiring', () => {
 })
 
 describe('defaultRuntimeLoader — question region and summary status wiring', () => {
-  type InitOpts = {runId: string; questionsEl?: Element | null; timeEl?: Element | null; summaryStatus?: string}
+  type InitOpts = {runId: string; questionsEl?: Element | null; timeEl?: Element | null; waitingEl?: Element | null; summaryStatus?: string}
 
   afterEach(() => {
     document.body.innerHTML = ''
@@ -995,6 +995,23 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
       expect(initCalls[0]?.opts.timeEl ?? null).toBeNull()
       runtime.cleanup()
     })
+  })
+
+  it('hands the discovered waiting-line region to initOperatorStream, and null when the card has none', async () => {
+    document.body.innerHTML = `
+      <div data-run-id="run-w-a"><span data-role="run-status" class="run-status status-running"></span><div data-role="run-waiting" hidden></div></div>
+      ${cardHtml('run-w-b', 'status-running')}
+      <div data-role="stream-status"></div>`
+    const waitingA = document.querySelector('[data-run-id="run-w-a"] [data-role="run-waiting"]')
+    const {runtime, initCalls, select} = await mountLoader()
+
+    await select('run-w-a')
+    await select('run-w-b')
+
+    expect(initCalls[0]?.opts.waitingEl).toBe(waitingA)
+    expect(initCalls[0]?.opts.waitingEl).not.toBeNull()
+    expect(initCalls[1]?.opts.waitingEl ?? null).toBeNull()
+    runtime.cleanup()
   })
 
   it('hands the discovered questionsEl and the card summary status to initOperatorStream', async () => {
@@ -1643,6 +1660,21 @@ describe('discoverCardStreamTargets', () => {
     expect(discoverCardStreamTargets('run-with-questions').questionsEl).toBe(questionsEl)
     expect(discoverCardStreamTargets('run-no-questions').questionsEl).toBeNull()
     expect(discoverCardStreamTargets('no-such-run').questionsEl).toBeNull()
+  })
+
+  it('returns the waiting-line region when present, and null when absent', () => {
+    const withRegion = document.createElement('div')
+    withRegion.dataset.runId = 'run-with-waiting'
+    const waitingEl = document.createElement('div')
+    waitingEl.dataset.role = 'run-waiting'
+    withRegion.append(waitingEl)
+    const without = document.createElement('div')
+    without.dataset.runId = 'run-no-waiting'
+    document.body.append(withRegion, without)
+
+    expect(discoverCardStreamTargets('run-with-waiting').waitingEl).toBe(waitingEl)
+    expect(discoverCardStreamTargets('run-no-waiting').waitingEl).toBeNull()
+    expect(discoverCardStreamTargets('no-such-run').waitingEl).toBeNull()
   })
 
   it('returns the card time only while it carries the launch marker', () => {

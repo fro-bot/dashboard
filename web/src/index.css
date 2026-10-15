@@ -638,6 +638,10 @@
   display: none;
 }
 
+[data-role="run-waiting"][hidden] {
+  display: none;
+}
+
 @keyframes pulse {
   0% { opacity: 1; }
   50% { opacity: 0.6; }

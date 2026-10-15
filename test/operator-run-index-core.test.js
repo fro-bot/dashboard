@@ -1798,6 +1798,7 @@ describe('renderRunCard — unified per-card substructure', () => {
 
 const ALL_STREAM_REGION_ROLES = [
   'run-checkout-detail',
+  'run-waiting',
   'run-output',
   'run-output-coalesced',
   'run-approvals',
@@ -3645,6 +3646,18 @@ describe('late <time> — a card first shown without updatedAt gains it when a l
 
 const CHECKOUT_ROLE = 'run-checkout-detail'
 
+/** Every card shape's hidden regions, in DOM order: the waiting line sits right below checkout. */
+const ORDERED_REGION_ROLES = [
+  'run-checkout-detail',
+  'run-waiting',
+  'run-output',
+  'run-output-coalesced',
+  'run-approvals',
+  'run-questions',
+  'approval-badge',
+  'run-cancel',
+]
+
 /** The roles of a card's direct children, in DOM order. */
 function childRoles(card) {
   return card._children.map(child => child.dataset?.role)
@@ -3875,6 +3888,7 @@ describe('checkout-detail region — adopted optimistic cards (ensureRunCardAnat
     const hiddenRoles = card => childRoles(card).filter(role => role !== undefined && !['run-status-group', 'run-repo', 'run-updated-at'].includes(role))
     expect(hiddenRoles(optimistic)).toEqual(hiddenRoles(fetched))
     expect(hiddenRoles(fetched)[0]).toBe(CHECKOUT_ROLE)
+    expect(hiddenRoles(fetched)).toEqual(ORDERED_REGION_ROLES)
   })
 })
 
@@ -4017,6 +4031,117 @@ describe('question region — adopted optimistic cards (ensureRunCardAnatomy)', 
     const hiddenRoles = card => childRoles(card).filter(role => role !== undefined && !['run-status-group', 'run-repo', 'run-updated-at'].includes(role))
     expect(hiddenRoles(optimistic)).toEqual(hiddenRoles(fetched))
     expect(hiddenRoles(fetched)).toContain(QUESTIONS_ROLE)
+    expect(hiddenRoles(fetched)).toEqual(ORDERED_REGION_ROLES)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Waiting-line region — one hidden region per card, right below checkout, on every card shape
+// ---------------------------------------------------------------------------
+
+const WAITING_ROLE = 'run-waiting'
+
+describe('waiting-line region — every card shape', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('every fetched card has exactly one hidden, empty run-waiting div between checkout and output', async () => {
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([
+      makeValidSummary({runId: 'run-w-fetched-1', updatedAt: '2026-06-26T13:00:00.000Z'}),
+      makeValidSummary({runId: 'run-w-fetched-2'}),
+    ])
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(2)
+    for (const card of cards) {
+      expect(countRole(card, WAITING_ROLE)).toBe(1)
+      const region = card.querySelector(`[data-role="${WAITING_ROLE}"]`)
+      expect(region.hidden).toBe(true)
+      expect(region.textContent).toBe('')
+      expect(region._children).toHaveLength(0)
+      // Closed attribute set: only the role marker and hidden — nothing run-derived.
+      expect(Object.keys(region.dataset)).toEqual(['role'])
+      expect(Object.keys(region.attributes)).toEqual([])
+      const roles = childRoles(card)
+      expect(roles.indexOf(WAITING_ROLE)).toBe(roles.indexOf(CHECKOUT_ROLE) + 1)
+      expect(roles.indexOf(WAITING_ROLE)).toBe(roles.indexOf('run-output') - 1)
+    }
+  })
+
+  it('an adopted status-only card gains exactly one waiting region below checkout, however often it is re-adopted', async () => {
+    const runId = 'run-w-adopt-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+    expect(optimistic.querySelector(`[data-role="${WAITING_ROLE}"]`)).toBeNull()
+
+    for (let i = 0; i < 3; i++) {
+      stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+      await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    }
+
+    expect(countRole(optimistic, WAITING_ROLE)).toBe(1)
+    expect(optimistic.querySelector(`[data-role="${WAITING_ROLE}"]`).hidden).toBe(true)
+    const roles = childRoles(optimistic)
+    expect(roles.indexOf(WAITING_ROLE)).toBe(roles.indexOf(CHECKOUT_ROLE) + 1)
+  })
+
+  it('an optimistic card that already has a waiting region (launch anatomy) is not given a duplicate', async () => {
+    const runId = 'run-w-launch-anatomy-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+    const existing = document.createElement('div')
+    existing.dataset.role = WAITING_ROLE
+    existing.hidden = true
+    optimistic.querySelector('[data-role="run-output"]').before(existing)
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    expect(countRole(optimistic, WAITING_ROLE)).toBe(1)
+    expect(optimistic.querySelector(`[data-role="${WAITING_ROLE}"]`)).toBe(existing)
+    const roles = childRoles(optimistic)
+    expect(roles.indexOf(CHECKOUT_ROLE)).toBe(roles.indexOf(WAITING_ROLE) - 1)
+  })
+
+  it('a <time> added late still lands ahead of the checkout and waiting regions', async () => {
+    const runId = 'run-w-late-time-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+    stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    expect(optimistic.querySelector('[data-role="run-updated-at"]')).toBeNull()
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running', updatedAt: '2026-06-26T14:00:00.000Z'})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    const roles = childRoles(optimistic)
+    expect(roles.indexOf('run-updated-at')).toBeLessThan(roles.indexOf(CHECKOUT_ROLE))
+    expect(roles.indexOf(CHECKOUT_ROLE)).toBe(roles.indexOf(WAITING_ROLE) - 1)
+  })
+
+  it('source: SUBSTRUCTURE_ROLES lists the waiting role right after the checkout role', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    const list = src.match(/const SUBSTRUCTURE_ROLES = \[([\s\S]*?)\]/)?.[1] ?? ''
+    const roles = list.split(',').map(entry => entry.trim().replaceAll("'", '')).filter(Boolean)
+    expect(src).toMatch(/const WAITING_ROLE = 'run-waiting'/)
+    expect(roles.indexOf('WAITING_ROLE')).toBe(roles.indexOf('CHECKOUT_DETAIL_ROLE') + 1)
+  })
+
+  it('source: the waiting text is never written by the run index, and no innerHTML is used', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    expect(src).not.toContain('Waiting for output')
+    expect(src).not.toContain('Waiting to start')
+    expect(src).not.toMatch(/\.innerHTML\s*=/)
   })
 })
 

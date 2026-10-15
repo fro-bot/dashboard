@@ -359,6 +359,20 @@ describe('optimistic pending card anatomy — operable before a fetch adopts it'
     expect(src).toMatch(/cancelEl\.hidden\s*=\s*true/)
   })
 
+  it('gives the optimistic card a hidden run-waiting region right after the checkout region, before run-output', async () => {
+    const src = await readLaunchSource()
+    expect(src).toContain(`waitingEl.dataset.role = 'run-waiting'`)
+    expect(src).toMatch(/waitingEl\.hidden\s*=\s*true/)
+    const checkoutAt = src.indexOf('card.append(checkoutEl)')
+    const waitingAt = src.indexOf('card.append(waitingEl)')
+    const outputAt = src.indexOf('card.append(outputEl)')
+    expect(checkoutAt).toBeGreaterThan(-1)
+    expect(waitingAt).toBeGreaterThan(checkoutAt)
+    expect(outputAt).toBeGreaterThan(waitingAt)
+    expect(src).not.toContain('Waiting for output')
+    expect(src).not.toContain('Waiting to start')
+  })
+
   it('marks the optimistic card role=button and includes the run-repo span', async () => {
     const src = await readLaunchSource()
     expect(src).toContain(`card.setAttribute('role', 'button')`)

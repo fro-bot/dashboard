@@ -829,6 +829,11 @@ export interface InitOptions {
    * writes the run's start time into it (`datetime` and relative text), and never blanks it.
    */
   readonly timeEl?: Element | null
+  /**
+   * Waiting-line element (data-role="run-waiting"). The stream shows it, with fixed copy, only while
+   * it is live, the run is not terminal, and nothing else on the card is showing.
+   */
+  readonly waitingEl?: (HTMLElement & {hidden: boolean}) | null
   /** Cancel control container element (data-role="run-cancel"). */
   readonly cancelEl?: (HTMLElement & {hidden: boolean}) | null
   /**

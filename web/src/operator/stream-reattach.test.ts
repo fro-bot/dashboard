@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest'
-import {PINNED_CONTRACT_VERSION, initOperatorStream, resetQuestionPageStore} from '../../../public/operator-stream.js'
+import {FIRST_FRAME_TIMEOUT_MS, PINNED_CONTRACT_VERSION, initOperatorStream, resetQuestionPageStore} from '../../../public/operator-stream.js'
 
 const RUN_ID = 'run-reattach'
 
@@ -202,7 +202,7 @@ const OUTPUT = frame('output', {runId: RUN_ID, text: 'earlier output', final: fa
 const NO_SNAPSHOT = frame('reset', {runId: RUN_ID, reason: 'no-snapshot'})
 const FAILED = frame('status', {...RUNNING_STATUS, status: 'failed', phase: 'COMPLETED', completedAt: '2026-06-20T10:05:00Z'})
 
-const REGION_ROLES = ['run-checkout-detail', 'run-output', 'run-output-coalesced', 'run-approvals', 'run-questions', 'approval-badge', 'run-cancel'] as const
+const REGION_ROLES = ['run-checkout-detail', 'run-waiting', 'run-output', 'run-output-coalesced', 'run-approvals', 'run-questions', 'approval-badge', 'run-cancel'] as const
 
 function makeFullCard() {
   const card = document.createElement('div')
@@ -228,6 +228,7 @@ function attachFull(parts: ReturnType<typeof makeFullCard>, extra: Record<string
     statusEl: parts.statusEl,
     noticeEl: parts.noticeEl,
     checkoutEl: regions['run-checkout-detail'],
+    waitingEl: regions['run-waiting'],
     outputEl: regions['run-output'],
     coalescedEl: regions['run-output-coalesced'],
     approvalsEl: regions['run-approvals'],
@@ -434,6 +435,364 @@ describe('operator stream Cancel region at a terminal status', () => {
     const message = parts.regions['run-cancel'].querySelector('.run-cancel-status')
     expect(message?.textContent).not.toBe('')
     expect(parts.regions['run-cancel'].hidden).toBe(false)
+    handle.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Waiting line: shown only while the stream is live and nothing else on the card is showing
+// ---------------------------------------------------------------------------
+
+const WAITING_OUTPUT_COPY = 'Waiting for output\u2026'
+const WAITING_START_COPY = 'Waiting to start\u2026'
+
+const statusFrame = (status: string, phase = 'EXECUTING') =>
+  frame('status', {...RUNNING_STATUS, status, phase, ...(['succeeded', 'failed', 'cancelled'].includes(status) ? {completedAt: '2026-06-20T10:05:00Z'} : {})})
+const SETTLED_APPROVAL = frame('approval', {runId: RUN_ID, requestID: 'req-gone', permission: 'shell', command: 'echo done', settled: true})
+const QUESTION_PAYLOAD = {
+  runId: RUN_ID,
+  requestID: 'req-q',
+  questions: [{header: 'Pick one', text: 'Which way?', options: [{label: 'A', description: 'Go A'}, {label: 'B', description: 'Go B'}], multiple: false, custom: true}],
+}
+const OPEN_QUESTION = frame('question', {...QUESTION_PAYLOAD, settled: false})
+const SETTLED_QUESTION = frame('question', {runId: RUN_ID, requestID: 'req-q', settled: true})
+
+const waitingOf = (parts: ReturnType<typeof makeFullCard>) => parts.regions['run-waiting']
+
+describe('operator stream waiting line', () => {
+  it('is hidden and empty at attach, before any frame', () => {
+    stubStreamFetch()
+    const parts = makeFullCard()
+    waitingOf(parts).textContent = 'stale copy'
+    waitingOf(parts).hidden = false
+
+    const handle = attachFull(parts)
+
+    expect(waitingOf(parts).hidden).toBe(true)
+    expect(waitingOf(parts).textContent).toBe('')
+    handle.close()
+  })
+
+  it('shows "Waiting for output…" once the stream is live with no run entry yet', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+
+    pushToLatest(READY)
+
+    await vi.waitFor(() => expect(waitingOf(parts).hidden).toBe(false))
+    expect(waitingOf(parts).textContent).toBe(WAITING_OUTPUT_COPY)
+    handle.close()
+  })
+
+  it('shows "Waiting for output…" for a placeholder entry with no status yet', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+
+    pushToLatest(READY + SETTLED_APPROVAL)
+
+    await vi.waitFor(() => expect(waitingOf(parts).textContent).toBe(WAITING_OUTPUT_COPY))
+    expect(waitingOf(parts).hidden).toBe(false)
+    handle.close()
+  })
+
+  it('shows "Waiting for output…" for a live running run with nothing showing', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+
+    pushToLatest(READY + RUNNING)
+
+    await vi.waitFor(() => expect(parts.statusEl.textContent).toBe('Running'))
+    expect(waitingOf(parts).hidden).toBe(false)
+    expect(waitingOf(parts).textContent).toBe(WAITING_OUTPUT_COPY)
+    handle.close()
+  })
+
+  it('shows "Waiting to start…" for a live queued run', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+
+    pushToLatest(READY + statusFrame('queued'))
+
+    await vi.waitFor(() => expect(waitingOf(parts).textContent).toBe(WAITING_START_COPY))
+    expect(waitingOf(parts).hidden).toBe(false)
+    handle.close()
+  })
+
+  it('switches from "Waiting to start…" to "Waiting for output…" when the run starts', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+    pushToLatest(READY + statusFrame('queued'))
+    await vi.waitFor(() => expect(waitingOf(parts).textContent).toBe(WAITING_START_COPY))
+
+    pushToLatest(RUNNING)
+
+    await vi.waitFor(() => expect(waitingOf(parts).textContent).toBe(WAITING_OUTPUT_COPY))
+    handle.close()
+  })
+
+  it('a stale wire waiting_for_approval with no open prompt still shows the line', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+
+    pushToLatest(READY + statusFrame('waiting_for_approval'))
+
+    await vi.waitFor(() => expect(parts.statusEl.textContent).not.toBe(''))
+    expect(waitingOf(parts).hidden).toBe(false)
+    expect(waitingOf(parts).textContent).toBe(WAITING_OUTPUT_COPY)
+    handle.close()
+  })
+
+  it('an open approval hides the line, and it comes back when the approval settles', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+    pushToLatest(READY + RUNNING)
+    await vi.waitFor(() => expect(waitingOf(parts).hidden).toBe(false))
+
+    pushToLatest(APPROVAL)
+    await vi.waitFor(() => expect(parts.regions['run-approvals'].hidden).toBe(false))
+    expect(waitingOf(parts).hidden).toBe(true)
+
+    pushToLatest(frame('approval', {runId: RUN_ID, requestID: 'req-reattach', permission: 'shell', command: 'echo hello', settled: true}))
+    await vi.waitFor(() => expect(parts.regions['run-approvals'].hidden).toBe(true))
+    expect(waitingOf(parts).hidden).toBe(false)
+    expect(waitingOf(parts).textContent).toBe(WAITING_OUTPUT_COPY)
+    handle.close()
+  })
+
+  it('an open question hides the line, and it comes back when the question settles with nothing else showing', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+    pushToLatest(READY + RUNNING)
+    await vi.waitFor(() => expect(waitingOf(parts).hidden).toBe(false))
+
+    pushToLatest(OPEN_QUESTION)
+    await vi.waitFor(() => expect(parts.regions['run-questions'].hidden).toBe(false))
+    expect(waitingOf(parts).hidden).toBe(true)
+
+    pushToLatest(SETTLED_QUESTION)
+    await vi.waitFor(() => expect(waitingOf(parts).hidden).toBe(false))
+    handle.close()
+  })
+
+  it('an answered-question note alone does not hide the line', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts, {
+      questionClient: {listRunQuestions: vi.fn(() => new Promise<never>(() => {})), decideRunQuestion: vi.fn(async () => ({kind: 'decided', state: 'claimed'}))},
+    })
+    pushToLatest(READY + RUNNING + OPEN_QUESTION)
+    await vi.waitFor(() => expect(parts.regions['run-questions'].hidden).toBe(false))
+    expect(waitingOf(parts).hidden).toBe(true)
+
+    const textarea = parts.regions['run-questions'].querySelector('textarea') as HTMLTextAreaElement
+    textarea.value = 'Keep going'
+    textarea.dispatchEvent(new Event('input', {bubbles: true}))
+    ;(parts.regions['run-questions'].querySelector('.question-region__submit') as HTMLButtonElement).click()
+    await vi.waitFor(() => expect(parts.regions['run-questions'].textContent).toContain('This question is no longer open.'))
+
+    // The note is showing, but a note is not content: the line is back.
+    expect(handle.getQuestions()).toHaveLength(0)
+    expect(handle.getQuestionNotes()).toHaveLength(1)
+    expect(waitingOf(parts).hidden).toBe(false)
+    expect(waitingOf(parts).textContent).toBe(WAITING_OUTPUT_COPY)
+    handle.close()
+  })
+
+  it('output hides the line', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+    pushToLatest(READY + RUNNING)
+    await vi.waitFor(() => expect(waitingOf(parts).hidden).toBe(false))
+
+    pushToLatest(OUTPUT)
+    await vi.waitFor(() => expect(parts.regions['run-output'].hidden).toBe(false))
+    expect(waitingOf(parts).hidden).toBe(true)
+    handle.close()
+  })
+
+  it('checkout detail showing hides the line', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+    pushToLatest(READY + RUNNING)
+    await vi.waitFor(() => expect(waitingOf(parts).hidden).toBe(false))
+
+    pushToLatest(frame('status', {
+      ...RUNNING_STATUS,
+      checkoutProvenance: {
+        kind: 'observed',
+        observation: {
+          head: {kind: 'attached', branch: 'fixture-main', sha: 'a'.repeat(40)},
+          worktree: {kind: 'clean'},
+          operationInProgress: 'none',
+          observedAt: '2026-06-20T10:00:00Z',
+        },
+        remote: {kind: 'not-checked'},
+      },
+    }))
+
+    await vi.waitFor(() => expect(parts.regions['run-checkout-detail'].hidden).toBe(false))
+    expect(waitingOf(parts).hidden).toBe(true)
+    handle.close()
+  })
+
+  it('a Cancel control alone does not hide the line', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+
+    pushToLatest(READY + RUNNING)
+
+    await vi.waitFor(() => expect(parts.regions['run-cancel'].hidden).toBe(false))
+    expect(waitingOf(parts).hidden).toBe(false)
+    handle.close()
+  })
+
+  it.each(['succeeded', 'failed', 'cancelled', 'blocked'])('a %s run hides the line', async status => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+    pushToLatest(READY + RUNNING)
+    await vi.waitFor(() => expect(waitingOf(parts).hidden).toBe(false))
+
+    pushToLatest(statusFrame(status, status === 'blocked' ? 'EXECUTING' : 'COMPLETED'))
+
+    await vi.waitFor(() => expect(parts.statusEl.textContent).not.toBe('Running'))
+    expect(waitingOf(parts).hidden).toBe(true)
+    handle.close()
+  })
+
+  it('an expired terminal run shows "Output no longer available." and no waiting line', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts, {summaryStatus: 'succeeded'})
+
+    pushToLatest(READY + NO_SNAPSHOT)
+
+    await vi.waitFor(() => expect(parts.regions['run-output'].textContent).toBe('Output no longer available.'))
+    expect(waitingOf(parts).hidden).toBe(true)
+    handle.close()
+  })
+
+  it('hides on close(), next to the Cancel region', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+    pushToLatest(READY + RUNNING)
+    await vi.waitFor(() => expect(waitingOf(parts).hidden).toBe(false))
+
+    handle.close()
+
+    expect(waitingOf(parts).hidden).toBe(true)
+    expect(parts.regions['run-cancel'].hidden).toBe(true)
+  })
+
+  it('writes the copy through textContent only, as a single text node', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+
+    pushToLatest(READY + RUNNING)
+
+    await vi.waitFor(() => expect(waitingOf(parts).hidden).toBe(false))
+    expect(waitingOf(parts).childNodes).toHaveLength(1)
+    expect(waitingOf(parts).firstChild?.nodeType).toBe(Node.TEXT_NODE)
+    expect(waitingOf(parts).hasAttribute('aria-live')).toBe(false)
+    handle.close()
+  })
+
+  it('a card without a waiting region is unaffected', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts, {waitingEl: null})
+
+    pushToLatest(READY + RUNNING)
+
+    await vi.waitFor(() => expect(parts.statusEl.textContent).toBe('Running'))
+    expect(waitingOf(parts).hidden).toBe(true)
+    handle.close()
+  })
+})
+
+describe('operator stream waiting line by connection state', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('stays hidden while connecting, and for a drifted contract version', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+    expect(waitingOf(parts).hidden).toBe(true)
+
+    pushToLatest(frame('ready', {contractVersion: `${PINNED_CONTRACT_VERSION}-other`}) + RUNNING)
+
+    await vi.waitFor(() => expect(parts.noticeEl.textContent).toContain('Stream version mismatch'))
+    expect(waitingOf(parts).hidden).toBe(true)
+    handle.close()
+  })
+
+  it.each([
+    ['not-found', 404, 'Run stream unavailable.'],
+    ['backpressure', 429, 'Stream temporarily unavailable'],
+    ['reconnecting', 500, 'Connecting to run stream'],
+  ])('stays hidden when the connection is %s', async (_state, code, noticeText) => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({status: code, headers: {get: () => null}, body: null})))
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+
+    await vi.waitFor(() => expect(parts.noticeEl.textContent).toContain(noticeText))
+    expect(waitingOf(parts).hidden).toBe(true)
+    handle.close()
+  })
+
+  it('hides the line again when the stream closes after a terminal reset', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+    pushToLatest(READY + RUNNING)
+    await vi.waitFor(() => expect(waitingOf(parts).hidden).toBe(false))
+
+    pushToLatest(frame('reset', {runId: RUN_ID, reason: 'terminal'}))
+
+    await vi.waitFor(() => expect(parts.noticeEl.textContent).toContain('Run stream ended before a result was available.'))
+    expect(waitingOf(parts).hidden).toBe(true)
+    handle.close()
+  })
+
+  it('hides the line when the connection drops and the stream is reconnecting', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+    pushToLatest(READY + RUNNING)
+    await vi.waitFor(() => expect(waitingOf(parts).hidden).toBe(false))
+
+    pushToLatest(frame('reset', {runId: RUN_ID, reason: 'shutdown'}))
+
+    await vi.waitFor(() => expect(parts.noticeEl.textContent).toContain('Connecting to run stream'))
+    expect(waitingOf(parts).hidden).toBe(true)
+    handle.close()
+  })
+
+  it('stays hidden in the "not yet observable" state', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<never>(() => {})))
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+
+    await vi.advanceTimersByTimeAsync(FIRST_FRAME_TIMEOUT_MS + 1)
+
+    expect(parts.noticeEl.textContent).toContain('not yet observable')
+    expect(waitingOf(parts).hidden).toBe(true)
     handle.close()
   })
 })

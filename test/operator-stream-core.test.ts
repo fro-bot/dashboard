@@ -7335,7 +7335,7 @@ describe('CSS selector ↔ cancel-control state emitter agreement', () => {
 })
 
 describe('CSS: a hidden stream-owned region takes no space', () => {
-  it.each(['run-cancel', 'run-questions', 'run-checkout-detail', 'run-output-coalesced', 'approval-badge'])(
+  it.each(['run-cancel', 'run-questions', 'run-checkout-detail', 'run-output-coalesced', 'approval-badge', 'run-waiting'])(
     '[data-role="%s"][hidden] is display: none',
     async role => {
       const fs = await import('node:fs/promises')

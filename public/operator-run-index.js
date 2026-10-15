@@ -74,6 +74,7 @@ function summaryStatusFromClassToken(token) {
  * only: this module creates and shows/hides the region; operator-stream.js renders into it.
  */
 const CHECKOUT_DETAIL_ROLE = 'run-checkout-detail'
+const WAITING_ROLE = 'run-waiting'
 
 /**
  * data-role of the hidden question region. This module only creates it and shows/hides it with
@@ -88,6 +89,7 @@ const QUESTIONS_ROLE = 'run-questions'
  */
 const SUBSTRUCTURE_ROLES = [
   CHECKOUT_DETAIL_ROLE,
+  WAITING_ROLE,
   'run-output',
   'run-output-coalesced',
   'run-approvals',
@@ -928,6 +930,12 @@ function renderRunCard(view, onSelectRun) {
   checkoutEl.hidden = true
   card.append(checkoutEl)
 
+  // Waiting line — the stream shows it while nothing else is showing. SLOT: right below checkout.
+  const waitingEl = document.createElement('div')
+  waitingEl.dataset.role = WAITING_ROLE
+  waitingEl.hidden = true
+  card.append(waitingEl)
+
   const outputEl = document.createElement('div')
   outputEl.dataset.role = 'run-output'
   outputEl.hidden = true
@@ -1051,6 +1059,15 @@ function ensureRunCardAnatomy(card, view, onSelectRun) {
     checkoutEl.dataset.role = CHECKOUT_DETAIL_ROLE
     checkoutEl.hidden = true
     insertBeforeFirstRole(card, checkoutEl, SUBSTRUCTURE_ROLES)
+  }
+
+  // Waiting line: same slot renderRunCard gives it (below checkout, ahead of the output regions).
+  // The role list leaves out checkout so the line always lands after it.
+  if (card.querySelector(`[data-role="${WAITING_ROLE}"]`) === null) {
+    const waitingEl = document.createElement('div')
+    waitingEl.dataset.role = WAITING_ROLE
+    waitingEl.hidden = true
+    insertBeforeFirstRole(card, waitingEl, SUBSTRUCTURE_ROLES.filter(role => role !== CHECKOUT_DETAIL_ROLE && role !== WAITING_ROLE))
   }
 
   // Question region: same slot renderRunCard gives it (after run-approvals, ahead of the badge
