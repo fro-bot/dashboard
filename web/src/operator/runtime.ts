@@ -31,6 +31,7 @@ import type * as RunIndexModule from '../../../public/operator-run-index.js'
 import type * as StreamModule from '../../../public/operator-stream.js'
 import type {RunSummaryStatus, StreamHandle} from '../../../public/operator-stream.js'
 import type {OperatorState} from './state.ts'
+import {clearGatewaySignInRedirectGuard} from './sign-in-recovery.ts'
 
 /**
  * Hard cap on a location.hash-sourced runId, matching the run-summary parser's
@@ -822,6 +823,7 @@ async function defaultRuntimeLoader(opts?: {
   // replaced this one) have nowhere to open a run.
   const initOutcome = await runIndexMod.initOperatorRunIndex(runIndexOpts)
   const runIndexLoaded = initOutcome === 'loaded' || initOutcome === 'empty'
+  if (runIndexLoaded) clearGatewaySignInRedirectGuard()
 
   launchMod.resetLaunchState()
   const launchOpts = opts?.endpointBase !== undefined

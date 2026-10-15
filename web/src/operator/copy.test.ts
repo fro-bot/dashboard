@@ -87,8 +87,8 @@ describe('getStateRecoveryHint', () => {
     })
   }
 
-  it('returns a non-empty recovery hint for auth-required', () => {
-    expect(getStateRecoveryHint('auth-required').length).toBeGreaterThan(0)
+  it('does not repeat the auth-required sign-in action in a recovery hint', () => {
+    expect(getStateRecoveryHint('auth-required')).toBe('')
   })
 
   it('returns a non-empty recovery hint for offline', () => {

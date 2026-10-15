@@ -1,7 +1,13 @@
-import {render, screen} from '@testing-library/react'
-import {describe, expect, it} from 'vitest'
+import {fireEvent, render, screen} from '@testing-library/react'
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {Operator} from './Operator.tsx'
 import type {OperatorState} from '../operator/state.ts'
+import {maybeAutoRedirectToGatewaySignIn, navigateToGatewaySignIn} from '../operator/sign-in-recovery.ts'
+
+vi.mock('../operator/sign-in-recovery.ts', () => ({
+  maybeAutoRedirectToGatewaySignIn: vi.fn(),
+  navigateToGatewaySignIn: vi.fn(),
+}))
 
 describe('Operator', () => {
   it('renders without throwing', () => {
@@ -81,6 +87,15 @@ describe('Operator', () => {
 })
 
 describe('Operator — state prop rendering', () => {
+  beforeEach(() => {
+    sessionStorage.clear()
+    vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   it('renders loading state with connecting headline', () => {
     render(<Operator state="loading" />)
     expect(screen.getByRole('heading')).toBeInTheDocument()
@@ -91,6 +106,28 @@ describe('Operator — state prop rendering', () => {
   it('renders auth-required state with sign-in headline', () => {
     render(<Operator state="auth-required" />)
     expect(screen.getByText(/sign in required/i)).toBeInTheDocument()
+  })
+
+  it('renders a GitHub sign-in button that navigates in this window', () => {
+    render(<Operator state="auth-required" />)
+
+    fireEvent.click(screen.getByRole('button', {name: 'Sign in with GitHub'}))
+
+    expect(navigateToGatewaySignIn).toHaveBeenCalledTimes(1)
+  })
+
+  it('checks for an automatic sign-in redirect when auth is required', () => {
+    render(<Operator state="auth-required" />)
+
+    expect(maybeAutoRedirectToGatewaySignIn).toHaveBeenCalledWith('auth-required')
+  })
+
+  it('shows the button without redirecting when the tab guard is already set', () => {
+    sessionStorage.setItem('fro-bot.operator-sign-in-redirect', String(Date.now()))
+
+    render(<Operator state="auth-required" />)
+
+    expect(screen.getByRole('button', {name: 'Sign in with GitHub'})).toBeInTheDocument()
   })
 
   it('renders rate-limited state with rate-limit headline', () => {
@@ -143,7 +180,7 @@ describe('Operator — aria-live region', () => {
   it('aria-live region contains state detail text for auth-required', () => {
     render(<Operator state="auth-required" />)
     const liveRegion = document.querySelector('[aria-live="polite"]')
-    expect(liveRegion?.textContent).toMatch(/session/i)
+    expect(liveRegion?.textContent).toMatch(/signed out/i)
   })
 
   it('aria-live region contains state detail text for offline', () => {
