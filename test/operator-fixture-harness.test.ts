@@ -19,6 +19,7 @@
 import type {StreamFrame, StreamState} from '../public/operator-stream.js'
 import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
 import {Buffer} from 'node:buffer'
+import {createHash} from 'node:crypto'
 import process from 'node:process'
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {parseSseFrame as browserParseSseFrame, nextStreamState, PINNED_CONTRACT_VERSION} from '../public/operator-stream.js'
@@ -2176,7 +2177,7 @@ describe('fixture push routes — subscribe', () => {
 })
 
 describe('fixture push routes — subscriptions metadata + unsubscribe', () => {
-  it('GET /push/subscriptions returns not-subscribed shape with no active record', async () => {
+  it('GET /push/subscriptions returns an empty list when the session has no record', async () => {
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
     const fixtureSessionId = await mintFixtureSessionId(app)
     const res = await app.request(
@@ -2184,9 +2185,8 @@ describe('fixture push routes — subscriptions metadata + unsubscribe', () => {
     )
     expect(res.status).toBe(200)
     expect(res.headers.get('cache-control')).toBe('no-store')
-    const body = await res.json() as Record<string, unknown>
-    expect(body.active).toBeUndefined()
-    expect(body.endpointHash).toBeUndefined()
+    const body = await res.json()
+    expect(body).toEqual({subscriptions: []})
   })
 
   it('GET /push/subscriptions returns safe metadata after subscribe, never raw endpoint/keys', async () => {
@@ -2207,14 +2207,18 @@ describe('fixture push routes — subscriptions metadata + unsubscribe', () => {
       `${FIXTURE_OPERATOR_PREFIX}/push/subscriptions?fixtureSessionId=${fixtureSessionId}`,
     )
     expect(res.status).toBe(200)
-    const body = await res.json() as Record<string, unknown>
-    expect(body.active).toBe(true)
-    expect(typeof body.endpointHash).toBe('string')
-    expect((body.endpointHash as string)).not.toContain(PUSH_SUBSCRIPTION_BODY.endpoint)
-    expect(body.endpoint).toBeUndefined()
-    expect(body.keys).toBeUndefined()
-    expect(body.p256dh).toBeUndefined()
-    expect(body.auth).toBeUndefined()
+    const body = await res.json() as {subscriptions: Record<string, unknown>[]}
+    expect(body.subscriptions).toHaveLength(1)
+    const [record] = body.subscriptions
+    expect(record?.active).toBe(true)
+    expect(record?.endpointHash).toBe(createHash('sha256').update(PUSH_SUBSCRIPTION_BODY.endpoint).digest('hex'))
+    expect(typeof record?.createdAt).toBe('number')
+    expect(typeof record?.updatedAt).toBe('number')
+    expect(typeof record?.keyVersion).toBe('string')
+    expect(record?.endpoint).toBeUndefined()
+    expect(record?.keys).toBeUndefined()
+    expect(record?.p256dh).toBeUndefined()
+    expect(record?.auth).toBeUndefined()
     const rawText = JSON.stringify(body)
     expect(rawText).not.toContain(PUSH_SUBSCRIPTION_BODY.endpoint)
     expect(rawText).not.toContain(PUSH_SUBSCRIPTION_BODY.keys.p256dh)
@@ -2249,9 +2253,10 @@ describe('fixture push routes — subscriptions metadata + unsubscribe', () => {
     const metaRes = await app.request(
       `${FIXTURE_OPERATOR_PREFIX}/push/subscriptions?fixtureSessionId=${fixtureSessionId}`,
     )
-    const body = await metaRes.json() as Record<string, unknown>
-    expect(body.active).toBe(false)
-    expect(body.inactiveReason).toBe('unsubscribed')
+    const body = await metaRes.json() as {subscriptions: Record<string, unknown>[]}
+    expect(body.subscriptions).toHaveLength(1)
+    expect(body.subscriptions[0]?.active).toBe(false)
+    expect(body.subscriptions[0]?.inactiveReason).toBe('unsubscribed')
   })
 
   it('POST /push/subscriptions/unsubscribe requires a valid fixture session', async () => {

@@ -19,18 +19,28 @@ export interface VapidKeyResponse {
   readonly keyVersion: string
 }
 
+export type PushInactiveReason = 'unsubscribed' | 'dead' | 'revoked' | 'session-revoked'
+
+export const VALID_PUSH_INACTIVE_REASONS: ReadonlySet<string> = new Set([
+  'unsubscribed',
+  'dead',
+  'revoked',
+  'session-revoked',
+])
+
 /**
- * Safe subscription metadata, mirroring the Gateway's
- * `GET /operator/push/subscriptions` response. Opaque endpoint hash only —
- * NEVER the raw endpoint, p256dh, or auth subscription keys.
+ * Safe subscription metadata, mirroring one entry of the Gateway's
+ * `GET /operator/push/subscriptions` response (`{subscriptions: [...]}`).
+ * Opaque endpoint hash only — NEVER the raw endpoint, p256dh, or auth
+ * subscription keys. Timestamps are epoch-millisecond numbers.
  */
 export interface PushSubscriptionMetadata {
   readonly endpointHash: string
   readonly keyVersion: string
   readonly active: boolean
-  readonly createdAt: string
-  readonly updatedAt: string
-  readonly inactiveReason?: string
+  readonly createdAt: number
+  readonly updatedAt: number
+  readonly inactiveReason?: PushInactiveReason
 }
 
 /**

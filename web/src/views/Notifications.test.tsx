@@ -1,6 +1,7 @@
-import {render, screen, fireEvent, act} from '@testing-library/react'
+import {render, screen, fireEvent, act, waitFor} from '@testing-library/react'
 import {beforeEach, describe, expect, it, vi} from 'vitest'
 import {getNotificationPermission, getPushSupport} from '../push/capability.ts'
+import {endpointHash} from '../push/endpoint-hash.ts'
 import {
   buildPushClient,
   resubscribeStaleKey,
@@ -231,6 +232,61 @@ describe('Notifications Component', () => {
 
     expect(screen.getByTestId('notifications-headline')).toHaveTextContent('Push Alerts')
     expect(screen.getByTestId('notifications-cta')).toHaveTextContent('Enable notifications')
+  })
+
+  it('shows Disable notifications when the gateway list holds this browser\'s active record', async () => {
+    addMetaTag()
+    const actual = await vi.importActual<typeof import('../push/subscribe.ts')>('../push/subscribe.ts')
+    const endpoint = 'https://push.example/this-browser'
+    const localHash = await endpointHash(endpoint)
+    const wireRecord = (endpointHashValue: string) => ({
+      endpointHash: endpointHashValue,
+      createdAt: 1_760_000_000_000,
+      updatedAt: 1_760_000_100_000,
+      keyVersion: 'v1',
+      active: true,
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({subscriptions: [wireRecord('b'.repeat(64)), wireRecord(localHash)]}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+      ),
+    )
+    vi.mocked(getNotificationPermission).mockReturnValue('granted')
+    vi.mocked(buildPushClient).mockReturnValue(actual.buildPushClient())
+    vi.mocked(runReconcileSweep).mockImplementation(actual.runReconcileSweep)
+
+    const originalSw = Object.getOwnPropertyDescriptor(globalThis.navigator, 'serviceWorker')
+    Object.defineProperty(globalThis.navigator, 'serviceWorker', {
+      value: {
+        ready: Promise.resolve({pushManager: {getSubscription: async () => ({endpoint})}}),
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+      },
+      configurable: true,
+    })
+
+    try {
+      await act(async () => {
+        render(<Notifications />)
+      })
+
+      await waitFor(() => {
+        expect(screen.getByTestId('notifications-cta')).toHaveTextContent('Disable notifications')
+      })
+      expect(screen.getByTestId('notifications-cta')).not.toHaveTextContent('Enable notifications')
+    } finally {
+      vi.unstubAllGlobals()
+      vi.mocked(buildPushClient).mockReturnValue({} as ReturnType<typeof buildPushClient>)
+      if (originalSw) {
+        Object.defineProperty(globalThis.navigator, 'serviceWorker', originalSw)
+      } else {
+        Reflect.deleteProperty(globalThis.navigator, 'serviceWorker')
+      }
+    }
   })
 
   it('renders the privacy policy link before the consent CTA without requesting permission', async () => {

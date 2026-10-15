@@ -20,7 +20,7 @@ import type {Result} from '../result.ts'
 import type {PermissionReply} from './operator-contract/approval.ts'
 import type {OperatorCsrfToken, OperatorDecisionState, OperatorSessionInfo, OperatorWebStatus, PushSubscriptionMetadata, RepoSummary, RunStreamFrame, VapidKeyResponse} from './operator-contract/index.ts'
 import {err, ok} from '../result.ts'
-import {parseOperatorCsrfToken, parseOperatorSessionInfo, parsePushSubscriptionMetadata, parseRepoSummaryList, parseVapidKeyResponse} from './operator-contract/index.ts'
+import {parseOperatorCsrfToken, parseOperatorSessionInfo, parsePushSubscriptionListResponse, parseRepoSummaryList, parseVapidKeyResponse} from './operator-contract/index.ts'
 
 // ---------------------------------------------------------------------------
 // Run status union
@@ -130,9 +130,9 @@ export type VapidKeyResult =
   | {readonly pushDisabled: false; readonly vapidKey: VapidKeyResponse}
   | {readonly pushDisabled: true}
 
-/** Result of GET /operator/push/subscriptions: safe metadata or a push_disabled signal. */
+/** Result of GET /operator/push/subscriptions: the safe metadata list or a push_disabled signal. */
 export type PushSubscriptionMetadataResult =
-  | {readonly pushDisabled: false; readonly metadata: PushSubscriptionMetadata}
+  | {readonly pushDisabled: false; readonly subscriptions: readonly PushSubscriptionMetadata[]}
   | {readonly pushDisabled: true}
 
 /**
@@ -709,13 +709,13 @@ export function createOperatorClient(options: OperatorClientOptions): OperatorCl
       }
       return raw
     }
-    const parsed = parsePushSubscriptionMetadata(raw.data)
+    const parsed = parsePushSubscriptionListResponse(raw.data)
     if (!parsed.success) {
-      const protocolErr: GatewayProtocolError = {kind: 'protocol', message: 'Failed to parse push subscription metadata'}
-      logger?.error('operator-client: push subscription metadata parse error', {route: '/operator/push/subscriptions'})
+      const protocolErr: GatewayProtocolError = {kind: 'protocol', message: 'Failed to parse push subscription list'}
+      logger?.error('operator-client: push subscription list parse error', {route: '/operator/push/subscriptions'})
       return err(protocolErr)
     }
-    return ok({pushDisabled: false, metadata: parsed.data})
+    return ok({pushDisabled: false, subscriptions: parsed.data.subscriptions})
   }
 
   async function subscribePush(

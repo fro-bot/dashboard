@@ -25,8 +25,8 @@ describe('push-types web-local shape pins', () => {
       endpointHash: 'a'.repeat(64),
       keyVersion: 'b',
       active: true,
-      createdAt: '2026-07-08T00:00:00.000Z',
-      updatedAt: '2026-07-08T00:00:00.000Z',
+      createdAt: 1_760_000_000_000,
+      updatedAt: 1_760_000_000_000,
     }
     expect(Object.keys(value).sort()).toEqual(['active', 'createdAt', 'endpointHash', 'keyVersion', 'updatedAt'])
   })

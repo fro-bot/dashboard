@@ -2956,24 +2956,53 @@ describe('getPushSubscriptionMetadata', () => {
     endpointHash: 'a'.repeat(64),
     keyVersion: 'v1',
     active: true,
-    createdAt: '2026-07-01T10:00:00Z',
-    updatedAt: '2026-07-01T10:00:00Z',
+    createdAt: 1_760_000_000_000,
+    updatedAt: 1_760_000_100_000,
   }
+  const FIXTURE_LIST = {subscriptions: [FIXTURE_METADATA]}
 
-  it('returns only safe fields on success', async () => {
+  it('returns the listed safe records on success', async () => {
     const client = createOperatorClient({
-      fetch: makeOkFetch(FIXTURE_METADATA),
+      fetch: makeOkFetch(FIXTURE_LIST),
       createEventStream: makeEventStream([]),
     })
     const result = await client.getPushSubscriptionMetadata()
     expect(result.success).toBe(true)
     if (result.success && !result.data.pushDisabled) {
-      expect(result.data.metadata.endpointHash).toBe(FIXTURE_METADATA.endpointHash)
-      expect(result.data.metadata.keyVersion).toBe('v1')
-      expect(result.data.metadata.active).toBe(true)
-      expect(result.data.metadata).not.toHaveProperty('endpoint')
-      expect(result.data.metadata).not.toHaveProperty('p256dh')
-      expect(result.data.metadata).not.toHaveProperty('auth')
+      expect(result.data.subscriptions).toEqual([FIXTURE_METADATA])
+      expect(result.data.subscriptions[0]).not.toHaveProperty('endpoint')
+      expect(result.data.subscriptions[0]).not.toHaveProperty('p256dh')
+      expect(result.data.subscriptions[0]).not.toHaveProperty('auth')
+    }
+  })
+
+  it('returns an empty list when the gateway lists no subscriptions', async () => {
+    const client = createOperatorClient({
+      fetch: makeOkFetch({subscriptions: []}),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.getPushSubscriptionMetadata()
+    expect(result).toEqual({success: true, data: {pushDisabled: false, subscriptions: []}})
+  })
+
+  it('drops malformed entries and keeps the valid ones', async () => {
+    const client = createOperatorClient({
+      fetch: makeOkFetch({subscriptions: [{...FIXTURE_METADATA, createdAt: '2026-07-01T10:00:00Z'}, null, FIXTURE_METADATA]}),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.getPushSubscriptionMetadata()
+    expect(result).toEqual({success: true, data: {pushDisabled: false, subscriptions: [FIXTURE_METADATA]}})
+  })
+
+  it('reports a protocol error for the retired flat single-object shape', async () => {
+    const client = createOperatorClient({
+      fetch: makeOkFetch(FIXTURE_METADATA),
+      createEventStream: makeEventStream([]),
+    })
+    const result = await client.getPushSubscriptionMetadata()
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.kind).toBe('protocol')
     }
   })
 
@@ -2982,7 +3011,7 @@ describe('getPushSubscriptionMetadata', () => {
     const client = createOperatorClient({
       fetch: async input => {
         calls.push(typeof input === 'string' ? input : String(input))
-        return new Response(JSON.stringify(FIXTURE_METADATA), {
+        return new Response(JSON.stringify(FIXTURE_LIST), {
           status: 200,
           headers: {'content-type': 'application/json'},
         })

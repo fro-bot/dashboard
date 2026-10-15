@@ -5,10 +5,11 @@
  * response: `{publicKey, keyVersion}` only — there is NO `contractVersion`
  * field on this response.
  *
- * PushSubscriptionMetadata mirrors the Gateway's safe-metadata response from
- * `GET /operator/push/subscriptions`: an opaque endpoint hash, timestamps,
- * key version, active state, and an optional coarse inactive reason. The
- * real `endpoint`/`p256dh`/`auth` subscription keys are never included.
+ * PushSubscriptionMetadata mirrors one entry of the Gateway's
+ * `GET /operator/push/subscriptions` response (`{subscriptions: [...]}`): an
+ * opaque endpoint hash, numeric timestamps, key version, active state, and an
+ * optional coarse inactive reason. The real `endpoint`/`p256dh`/`auth`
+ * subscription keys are never included.
  *
  * PushHandoffState is NOT a wire field — it is derived client-side from
  * PushSubscriptionMetadata plus local browser state (permission, local
@@ -24,10 +25,8 @@ import type {Result} from '../../result.ts'
 
 import {err, ok} from '../../result.ts'
 
-// Practical caps: keyVersion strings and endpoint hashes are well under 512
-// chars; ISO 8601 dates are at most ~35 chars.
+// Practical cap: keyVersion strings are well under 512 chars.
 const MAX_ID_LENGTH = 512
-const MAX_DATE_LENGTH = 128
 const ENDPOINT_HASH_LENGTH = 64
 
 /**
@@ -97,76 +96,92 @@ export function parsePushHandoffState(input: unknown): Result<PushHandoffState, 
   return ok(input as PushHandoffState)
 }
 
+export type PushInactiveReason = 'unsubscribed' | 'dead' | 'revoked' | 'session-revoked'
+
+const VALID_PUSH_INACTIVE_REASONS: ReadonlySet<string> = new Set(['unsubscribed', 'dead', 'revoked', 'session-revoked'])
+
 /**
- * Safe subscription metadata, mirroring the Gateway's
+ * Safe subscription metadata, mirroring one entry of the Gateway's
  * `GET /operator/push/subscriptions` response. Opaque endpoint hash only —
- * NEVER the raw endpoint, p256dh, or auth subscription keys.
+ * NEVER the raw endpoint, p256dh, or auth subscription keys. Timestamps are
+ * epoch-millisecond numbers.
  */
 export interface PushSubscriptionMetadata {
   readonly endpointHash: string
   readonly keyVersion: string
   readonly active: boolean
-  readonly createdAt: string
-  readonly updatedAt: string
-  readonly inactiveReason?: string
+  readonly createdAt: number
+  readonly updatedAt: number
+  readonly inactiveReason?: PushInactiveReason
 }
 
-function hasValidPushSubscriptionMetadataShape(value: unknown): value is PushSubscriptionMetadata {
+/** Canonical response shape for GET /operator/push/subscriptions. */
+export interface PushSubscriptionListResponse {
+  readonly subscriptions: readonly PushSubscriptionMetadata[]
+}
+
+function isTimestamp(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+/** Parse one list entry field by field; undefined when any field is invalid. */
+function parsePushSubscriptionMetadataEntry(value: unknown): PushSubscriptionMetadata | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return false
+    return undefined
   }
 
   const candidate = value as Record<string, unknown>
 
-  if (
-    typeof candidate.endpointHash !== 'string' ||
-    candidate.endpointHash.length !== ENDPOINT_HASH_LENGTH
-  ) {
-    return false
+  if (typeof candidate.endpointHash !== 'string' || candidate.endpointHash.length !== ENDPOINT_HASH_LENGTH) {
+    return undefined
   }
 
   if (typeof candidate.keyVersion !== 'string' || candidate.keyVersion.length > MAX_ID_LENGTH) {
-    return false
+    return undefined
   }
 
   if (typeof candidate.active !== 'boolean') {
-    return false
+    return undefined
   }
 
-  if (typeof candidate.createdAt !== 'string' || candidate.createdAt.length > MAX_DATE_LENGTH) {
-    return false
+  if (!isTimestamp(candidate.createdAt) || !isTimestamp(candidate.updatedAt)) {
+    return undefined
   }
 
-  if (typeof candidate.updatedAt !== 'string' || candidate.updatedAt.length > MAX_DATE_LENGTH) {
-    return false
+  // Closed DTO — copy only declared fields; never spread input. An unknown
+  // inactiveReason is dropped rather than rejecting the entry.
+  return {
+    endpointHash: candidate.endpointHash,
+    keyVersion: candidate.keyVersion,
+    active: candidate.active,
+    createdAt: candidate.createdAt,
+    updatedAt: candidate.updatedAt,
+    ...(typeof candidate.inactiveReason === 'string' && VALID_PUSH_INACTIVE_REASONS.has(candidate.inactiveReason)
+      ? {inactiveReason: candidate.inactiveReason as PushInactiveReason}
+      : {}),
   }
-
-  // inactiveReason is optional — if present must be a length-capped string
-  if (
-    'inactiveReason' in candidate &&
-    (typeof candidate.inactiveReason !== 'string' || candidate.inactiveReason.length > MAX_ID_LENGTH)
-  ) {
-    return false
-  }
-
-  return true
 }
 
-/** Parse an unknown value as PushSubscriptionMetadata. Returns err with a fixed reason string on failure. */
-export function parsePushSubscriptionMetadata(input: unknown): Result<PushSubscriptionMetadata, Error> {
-  if (hasValidPushSubscriptionMetadataShape(input) === false) {
-    return err(new Error('invalid push subscription metadata shape'))
+/**
+ * Parse an unknown value as the Gateway's subscription list. Invalid entries
+ * are dropped; a value that is not `{subscriptions: [...]}` returns err with a
+ * fixed reason string.
+ */
+export function parsePushSubscriptionListResponse(input: unknown): Result<PushSubscriptionListResponse, Error> {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return err(new Error('invalid push subscription list shape'))
   }
 
-  // Closed DTO — copy only declared fields; never spread input.
-  const metadata: PushSubscriptionMetadata = {
-    endpointHash: input.endpointHash,
-    keyVersion: input.keyVersion,
-    active: input.active,
-    createdAt: input.createdAt,
-    updatedAt: input.updatedAt,
-    ...('inactiveReason' in input ? {inactiveReason: input.inactiveReason} : {}),
+  const {subscriptions} = input as Record<string, unknown>
+  if (!Array.isArray(subscriptions)) {
+    return err(new Error('invalid push subscription list shape'))
   }
 
-  return ok(metadata)
+  const valid: PushSubscriptionMetadata[] = []
+  for (const entry of subscriptions) {
+    const parsed = parsePushSubscriptionMetadataEntry(entry)
+    if (parsed !== undefined) valid.push(parsed)
+  }
+
+  return ok({subscriptions: valid})
 }

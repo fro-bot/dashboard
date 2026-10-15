@@ -82,9 +82,12 @@ inlined boundary types for RunPhase/Surface/RunState).
   `VapidKeyResponse` mirrors the Gateway's `GET /operator/push/vapid-key`
   response and deliberately omits any version field beyond `keyVersion` — the
   Gateway returns only `{publicKey, keyVersion}`, no `contractVersion`.
-  `PushSubscriptionMetadata` mirrors the Gateway's safe-metadata response from
-  `GET /operator/push/subscriptions` (opaque `endpointHash` only — never the
-  raw endpoint, `p256dh`, or `auth` keys). `PushHandoffState` is client-derived,
+  `PushSubscriptionListResponse` mirrors the Gateway's
+  `GET /operator/push/subscriptions` response, `{subscriptions: [...]}`, and
+  `PushSubscriptionMetadata` is one entry: opaque `endpointHash` only — never the
+  raw endpoint, `p256dh`, or `auth` keys — with epoch-millisecond numeric
+  `createdAt`/`updatedAt`. `parsePushSubscriptionListResponse` drops invalid
+  entries and an unknown `inactiveReason`. `PushHandoffState` is client-derived,
   not a wire field: the Gateway exposes no handoff-state route, so the
   dashboard computes it from subscription metadata plus local browser state.
   It is defined here so the vendored contract and the web-side duplicate

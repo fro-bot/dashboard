@@ -15,7 +15,8 @@ import type {Result} from '@bfra.me/es/result'
 import {err, ok} from '@bfra.me/es/result'
 import {getNotificationPermission, getPushSupport} from './capability.ts'
 import {endpointHash} from './endpoint-hash.ts'
-import type {HandoffState, PushSubscriptionMetadata, VapidKeyResponse} from './push-types.ts'
+import type {HandoffState, PushInactiveReason, PushSubscriptionMetadata, VapidKeyResponse} from './push-types.ts'
+import {VALID_PUSH_INACTIVE_REASONS} from './push-types.ts'
 import {derivePushHandoffState, reconcile} from './reconcile.ts'
 import {urlB64ToUint8Array} from './vapid-key.ts'
 
@@ -39,11 +40,15 @@ export interface PushClient {
     Result<{readonly pushDisabled: boolean; readonly vapidKey: VapidKeyResponse | undefined}, PushClientError>
   >
   /**
+   * Fetches the Gateway's subscription list and returns the record for the
+   * browser whose endpoint hash is `localEndpointHash` (an active record wins
+   * over an inactive one), or `undefined` when none matches.
+   *
    * `pushDisabled: true` is set only when the Gateway route returned HTTP
    * 404 — the synthetic push_disabled signal driven by status alone, never
    * response-body shape. A non-404 error stays a normal `PushClientError`.
    */
-  getPushSubscriptionMetadata(): Promise<
+  getPushSubscriptionMetadata(localEndpointHash: string | undefined): Promise<
     Result<{readonly pushDisabled: boolean; readonly metadata: PushSubscriptionMetadata | undefined}, PushClientError>
   >
   subscribePush(
@@ -60,16 +65,53 @@ export interface BuildPushClientOptions {
   readonly fixtureSessionId?: string
 }
 
-function hasValidSubscriptionMetadataShape(value: unknown): value is PushSubscriptionMetadata {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+function isTimestamp(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+/** Validate one list entry field by field; undefined when any field is invalid. */
+function parseSubscriptionMetadataEntry(value: unknown): PushSubscriptionMetadata | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const c = value as Record<string, unknown>
-  return (
-    typeof c.endpointHash === 'string' &&
-    typeof c.keyVersion === 'string' &&
-    typeof c.active === 'boolean' &&
-    typeof c.createdAt === 'string' &&
-    typeof c.updatedAt === 'string'
-  )
+  if (
+    typeof c.endpointHash !== 'string' ||
+    typeof c.keyVersion !== 'string' ||
+    typeof c.active !== 'boolean' ||
+    !isTimestamp(c.createdAt) ||
+    !isTimestamp(c.updatedAt)
+  ) {
+    return undefined
+  }
+  return {
+    endpointHash: c.endpointHash,
+    keyVersion: c.keyVersion,
+    active: c.active,
+    createdAt: c.createdAt,
+    updatedAt: c.updatedAt,
+    ...(typeof c.inactiveReason === 'string' && VALID_PUSH_INACTIVE_REASONS.has(c.inactiveReason)
+      ? {inactiveReason: c.inactiveReason as PushInactiveReason}
+      : {}),
+  }
+}
+
+/** Pick this browser's record from the list, preferring an active one. */
+function selectLocalMetadata(
+  data: unknown,
+  localEndpointHash: string | undefined,
+): PushSubscriptionMetadata | undefined {
+  if (localEndpointHash === undefined) return undefined
+  if (data === null || typeof data !== 'object') return undefined
+  const {subscriptions} = data as {subscriptions?: unknown}
+  if (!Array.isArray(subscriptions)) return undefined
+
+  let inactiveMatch: PushSubscriptionMetadata | undefined
+  for (const entry of subscriptions) {
+    const parsed = parseSubscriptionMetadataEntry(entry)
+    if (parsed === undefined || parsed.endpointHash !== localEndpointHash) continue
+    if (parsed.active) return parsed
+    inactiveMatch ??= parsed
+  }
+  return inactiveMatch
 }
 
 /**
@@ -142,7 +184,7 @@ export function buildPushClient(opts?: BuildPushClientOptions): PushClient {
       }
     },
 
-    async getPushSubscriptionMetadata() {
+    async getPushSubscriptionMetadata(localEndpointHash) {
       try {
         const res = await browserFetch(withFixtureSessionId(`${endpointBase}/subscriptions`), {
           headers: {'content-type': 'application/json'},
@@ -150,14 +192,7 @@ export function buildPushClient(opts?: BuildPushClientOptions): PushClient {
         if (res.status === 404) return ok({pushDisabled: true, metadata: undefined})
         if (!res.ok) return err({kind: 'http', status: res.status})
         const data = (await res.json()) as unknown
-        if (data === null || typeof data !== 'object') {
-          return ok({pushDisabled: false, metadata: undefined})
-        }
-        // Gateway returns either an empty object (no subscription) or the metadata shape.
-        if (hasValidSubscriptionMetadataShape(data) === false) {
-          return ok({pushDisabled: false, metadata: undefined})
-        }
-        return ok({pushDisabled: false, metadata: data})
+        return ok({pushDisabled: false, metadata: selectLocalMetadata(data, localEndpointHash)})
       } catch {
         return err({kind: 'network'})
       }
@@ -608,12 +643,6 @@ export async function runReconcileSweep(
     return {skipped: true, action: undefined, uiState: undefined, nextCache: cache}
   }
 
-  const metadataResult = await deps.pushClient.getPushSubscriptionMetadata()
-  if (!metadataResult.success) {
-    // Transport/protocol error — do not mutate state on an inconclusive read.
-    return {skipped: true, action: undefined, uiState: undefined, nextCache: cache}
-  }
-
   // A thrown/rejected hash computation (e.g. a transient crypto.subtle
   // failure) must be treated the same as "unavailable" — not silently
   // dropped into a false not_subscribed/cleanup. Never let it crash the
@@ -626,6 +655,12 @@ export async function runReconcileSweep(
       localHash = undefined
     }
   }
+  const metadataResult = await deps.pushClient.getPushSubscriptionMetadata(localHash)
+  if (!metadataResult.success) {
+    // Transport/protocol error — do not mutate state on an inconclusive read.
+    return {skipped: true, action: undefined, uiState: undefined, nextCache: cache}
+  }
+
   const currentKeyVersion = deps.getCurrentKeyVersion?.()
 
   const handoffState = derivePushHandoffState(localHash, currentKeyVersion, metadataResult.data)

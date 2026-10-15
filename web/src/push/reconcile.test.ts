@@ -10,8 +10,8 @@ function metadata(overrides: Partial<PushSubscriptionMetadata> = {}): PushSubscr
     endpointHash: HASH_A,
     keyVersion: 'v1',
     active: true,
-    createdAt: '2026-07-08T00:00:00.000Z',
-    updatedAt: '2026-07-08T00:00:00.000Z',
+    createdAt: 1_760_000_000_000,
+    updatedAt: 1_760_000_000_000,
     ...overrides,
   }
 }

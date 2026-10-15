@@ -145,6 +145,131 @@ describe('buildPushClient', () => {
     expect(result).toEqual(ok({pushDisabled: false, vapidKey: {publicKey: 'BNc3xVwB', keyVersion: 'v1'}}))
   })
 
+  describe('getPushSubscriptionMetadata: gateway list wire shape', () => {
+    const LOCAL_HASH = 'a'.repeat(64)
+    const OTHER_HASH = 'b'.repeat(64)
+
+    function wireRecord(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+      return {
+        endpointHash: LOCAL_HASH,
+        createdAt: 1_760_000_000_000,
+        updatedAt: 1_760_000_100_000,
+        keyVersion: 'v1',
+        active: true,
+        ...overrides,
+      }
+    }
+
+    async function fetchMetadata(body: unknown, localHash: string | null = LOCAL_HASH) {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, body)))
+      return buildPushClient().getPushSubscriptionMetadata(localHash ?? undefined)
+    }
+
+    it("returns this browser's active record from the real list response", async () => {
+      const record = wireRecord()
+
+      const result = await fetchMetadata({subscriptions: [record]})
+
+      expect(result).toEqual(ok({pushDisabled: false, metadata: record}))
+    })
+
+    it("picks this browser's record when another device's record is also listed", async () => {
+      const other = wireRecord({endpointHash: OTHER_HASH, keyVersion: 'other-key'})
+      const mine = wireRecord()
+
+      const result = await fetchMetadata({subscriptions: [other, mine]})
+
+      expect(result).toEqual(ok({pushDisabled: false, metadata: mine}))
+    })
+
+    it('prefers an active record over an inactive one with the same endpoint hash', async () => {
+      const inactive = wireRecord({active: false, inactiveReason: 'unsubscribed'})
+      const active = wireRecord({createdAt: 1_760_000_200_000})
+
+      const result = await fetchMetadata({subscriptions: [inactive, active]})
+
+      expect(result).toEqual(ok({pushDisabled: false, metadata: active}))
+    })
+
+    it('returns the inactive record, with its reason, when no active one matches', async () => {
+      const inactive = wireRecord({active: false, inactiveReason: 'revoked'})
+
+      const result = await fetchMetadata({subscriptions: [inactive]})
+
+      expect(result).toEqual(ok({pushDisabled: false, metadata: inactive}))
+    })
+
+    it('drops a malformed entry and still returns the valid one', async () => {
+      const malformed = wireRecord({createdAt: 'not-a-number'})
+      const mine = wireRecord({createdAt: 1_760_000_300_000})
+
+      const result = await fetchMetadata({subscriptions: [malformed, null, 'junk', mine]})
+
+      expect(result).toEqual(ok({pushDisabled: false, metadata: mine}))
+    })
+
+    it('treats a list whose only matching entry is malformed as no record', async () => {
+      const malformed = wireRecord({updatedAt: -1})
+
+      const result = await fetchMetadata({subscriptions: [malformed]})
+
+      expect(result).toEqual(ok({pushDisabled: false, metadata: undefined}))
+    })
+
+    it.each([
+      ['string timestamp', {createdAt: '1760000000000'}],
+      ['negative timestamp', {createdAt: -1}],
+      ['non-finite timestamp', {updatedAt: Number.POSITIVE_INFINITY}],
+      ['non-boolean active', {active: 'yes'}],
+      ['missing keyVersion', {keyVersion: undefined}],
+    ])('drops an entry with %s', async (_label, overrides) => {
+      const result = await fetchMetadata({subscriptions: [wireRecord(overrides)]})
+
+      expect(result).toEqual(ok({pushDisabled: false, metadata: undefined}))
+    })
+
+    it('keeps inactiveReason only when it is a known value', async () => {
+      const known = await fetchMetadata({subscriptions: [wireRecord({active: false, inactiveReason: 'dead'})]})
+      const unknown = await fetchMetadata({subscriptions: [wireRecord({active: false, inactiveReason: 'bogus'})]})
+
+      expect(known.success && known.data.metadata?.inactiveReason).toBe('dead')
+      expect(unknown.success && unknown.data.metadata).toBeDefined()
+      expect(unknown.success && unknown.data.metadata?.inactiveReason).toBeUndefined()
+    })
+
+    it('empty subscriptions means not subscribed', async () => {
+      const result = await fetchMetadata({subscriptions: []})
+
+      expect(result).toEqual(ok({pushDisabled: false, metadata: undefined}))
+    })
+
+    it('returns no record when no entry matches this browser', async () => {
+      const result = await fetchMetadata({subscriptions: [wireRecord({endpointHash: OTHER_HASH})]})
+
+      expect(result).toEqual(ok({pushDisabled: false, metadata: undefined}))
+    })
+
+    it('returns no record when the local endpoint hash is unknown', async () => {
+      const result = await fetchMetadata({subscriptions: [wireRecord()]}, null)
+
+      expect(result).toEqual(ok({pushDisabled: false, metadata: undefined}))
+    })
+
+    it('returns no record for the retired flat single-object shape', async () => {
+      const result = await fetchMetadata(wireRecord())
+
+      expect(result).toEqual(ok({pushDisabled: false, metadata: undefined}))
+    })
+
+    it('404 -> pushDisabled success shape', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, {status: 404})))
+
+      const result = await buildPushClient().getPushSubscriptionMetadata(LOCAL_HASH)
+
+      expect(result).toEqual(ok({pushDisabled: true, metadata: undefined}))
+    })
+  })
+
   describe('fixtureSessionId query-param parity', () => {
     it('getVapidKey: appends fixtureSessionId when provided', async () => {
       const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {publicKey: 'BNc3xVwB', keyVersion: 'v1'}))
@@ -165,7 +290,7 @@ describe('buildPushClient', () => {
         endpointBase: '/__fixture/operator/push',
         fixtureSessionId: 'fixture-session-0001',
       })
-      await client.getPushSubscriptionMetadata()
+      await client.getPushSubscriptionMetadata(undefined)
 
       const url = fetchMock.mock.calls[0]?.[0] as string
       expect(url).toBe('/__fixture/operator/push/subscriptions?fixtureSessionId=fixture-session-0001')
@@ -645,6 +770,24 @@ describe('runReconcileSweep', () => {
     expect(pushClient.getPushSubscriptionMetadata).toHaveBeenCalledTimes(1)
   })
 
+  it('asks the client for the record matching the local endpoint hash', async () => {
+    const subscription = fakeSubscription('https://push.example/known')
+    const hash = await import('./endpoint-hash.ts').then(m => m.endpointHash(subscription.endpoint))
+    const pushClient = fakePushClient()
+
+    await runReconcileSweep(
+      {
+        getLocalSubscription: () => Promise.resolve(subscription),
+        getPermission: () => 'granted',
+        pushClient,
+        now: () => 1,
+      },
+      cache,
+    )
+
+    expect(pushClient.getPushSubscriptionMetadata).toHaveBeenCalledWith(hash)
+  })
+
   it('derive-handoff-state match -> subscribed action none', async () => {
     const subscription = fakeSubscription('https://push.example/known')
     const hash = await import('./endpoint-hash.ts').then(m => m.endpointHash(subscription.endpoint))
@@ -652,8 +795,8 @@ describe('runReconcileSweep', () => {
       endpointHash: hash,
       keyVersion: 'v1',
       active: true,
-      createdAt: '2026-07-08T00:00:00.000Z',
-      updatedAt: '2026-07-08T00:00:00.000Z',
+      createdAt: 1_760_000_000_000,
+      updatedAt: 1_760_000_000_000,
     }
     const pushClient = fakePushClient({
       getPushSubscriptionMetadata: vi.fn().mockResolvedValue(ok({pushDisabled: false, metadata})),
@@ -681,8 +824,8 @@ describe('runReconcileSweep', () => {
       endpointHash: 'f'.repeat(64),
       keyVersion: 'v1',
       active: true,
-      createdAt: '2026-07-08T00:00:00.000Z',
-      updatedAt: '2026-07-08T00:00:00.000Z',
+      createdAt: 1_760_000_000_000,
+      updatedAt: 1_760_000_000_000,
     }
     const pushClient = fakePushClient({
       getPushSubscriptionMetadata: vi.fn().mockResolvedValue(ok({pushDisabled: false, metadata})),
@@ -711,8 +854,8 @@ describe('runReconcileSweep', () => {
       endpointHash: 'a'.repeat(64),
       keyVersion: 'v1',
       active: true,
-      createdAt: '2026-07-08T00:00:00.000Z',
-      updatedAt: '2026-07-08T00:00:00.000Z',
+      createdAt: 1_760_000_000_000,
+      updatedAt: 1_760_000_000_000,
     }
     const pushClient = fakePushClient({
       getPushSubscriptionMetadata: vi.fn().mockResolvedValue(ok({pushDisabled: false, metadata})),
@@ -766,8 +909,8 @@ describe('runReconcileSweep', () => {
       endpointHash: 'c'.repeat(64),
       keyVersion: 'v1',
       active: true,
-      createdAt: '2026-07-08T00:00:00.000Z',
-      updatedAt: '2026-07-08T00:00:00.000Z',
+      createdAt: 1_760_000_000_000,
+      updatedAt: 1_760_000_000_000,
     }
     const pushClient = fakePushClient({
       getPushSubscriptionMetadata: vi.fn().mockResolvedValue(ok({pushDisabled: false, metadata})),
@@ -900,8 +1043,8 @@ describe('runReconcileSweep', () => {
       endpointHash: 'a'.repeat(64),
       keyVersion: 'v1',
       active: true,
-      createdAt: '2026-07-08T00:00:00.000Z',
-      updatedAt: '2026-07-08T00:00:00.000Z',
+      createdAt: 1_760_000_000_000,
+      updatedAt: 1_760_000_000_000,
     }
     const pushClient = fakePushClient({
       getPushSubscriptionMetadata: vi.fn().mockResolvedValue(ok({pushDisabled: false, metadata})),
