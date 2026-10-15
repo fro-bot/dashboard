@@ -530,6 +530,65 @@ async function defaultRuntimeLoader(opts?: {
   const findCard = (runId: string): HTMLElement | null =>
     typeof document === 'undefined' ? null : document.querySelector<HTMLElement>(`[data-run-id="${CSS.escape(runId)}"]`)
 
+  let cancelPendingCardReveal = () => {}
+
+  const scrollRunCardIntoView = (card: HTMLElement): void => {
+    cancelPendingCardReveal()
+
+    const reduceMotion = typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const behavior: ScrollBehavior = reduceMotion ? 'auto' : 'smooth'
+    const scrollToStart = () => {
+      if (typeof card.scrollIntoView === 'function') card.scrollIntoView({block: 'start', behavior})
+    }
+    scrollToStart()
+
+    let cancelled = false
+    let firstFrame: number | undefined
+    let secondFrame: number | undefined
+    const observer = new MutationObserver(checkForRevealedContent)
+
+    const cleanup = () => {
+      cancelled = true
+      observer.disconnect()
+      if (firstFrame !== undefined) window.cancelAnimationFrame?.(firstFrame)
+      if (secondFrame !== undefined) window.cancelAnimationFrame?.(secondFrame)
+      window.removeEventListener('wheel', onUserScroll)
+      window.removeEventListener('touchmove', onUserScroll)
+      window.removeEventListener('keydown', onScrollKey)
+      if (cancelPendingCardReveal === cleanup) cancelPendingCardReveal = () => {}
+    }
+    const onUserScroll = () => cleanup()
+    const onScrollKey = (event: KeyboardEvent) => {
+      if (['ArrowDown', 'ArrowUp', 'End', 'Home', 'PageDown', 'PageUp', ' '].includes(event.key)) cleanup()
+    }
+
+    const hasRevealedContent = () =>
+      Array.from(card.querySelectorAll<HTMLElement>('[data-role="run-questions"], [data-role="run-approvals"]'))
+        .some(region => !region.hidden && region.childNodes.length > 0)
+
+    function checkForRevealedContent() {
+      if (cancelled || !hasRevealedContent()) return
+      observer.disconnect()
+      firstFrame = window.requestAnimationFrame(() => {
+        firstFrame = undefined
+        secondFrame = window.requestAnimationFrame(() => {
+          secondFrame = undefined
+          if (cancelled) return
+          scrollToStart()
+          cleanup()
+        })
+      })
+    }
+
+    cancelPendingCardReveal = cleanup
+    window.addEventListener('wheel', onUserScroll, {passive: true})
+    window.addEventListener('touchmove', onUserScroll, {passive: true})
+    window.addEventListener('keydown', onScrollKey)
+    observer.observe(card, {attributes: true, childList: true, subtree: true, attributeFilter: ['hidden']})
+    checkForRevealedContent()
+  }
+
   // What the jump notice currently says, held in memory only so a refresh can tell when it is stale.
   // A miss keeps the run it could not find; it is never rendered, logged or written to an attribute,
   // and both notices are fixed copy.
@@ -660,6 +719,7 @@ async function defaultRuntimeLoader(opts?: {
     const noticeEl = typeof document !== 'undefined'
       ? document.querySelector('[data-role="stream-status"]')
       : null
+    if (card instanceof HTMLElement) scrollRunCardIntoView(card)
     _attachStream(runId, statusEl, noticeEl)
   }
 
@@ -762,6 +822,7 @@ async function defaultRuntimeLoader(opts?: {
     const statusEl = card.querySelector('[data-role="run-status"]') ?? null
     const noticeEl = document.querySelector('[data-role="stream-status"]')
     const wasExpanded = card.dataset.expanded === 'true'
+    scrollRunCardIntoView(card)
 
     if (!wasExpanded) {
       // The shared non-toggling expand, used for launches and jumps alike.
@@ -772,7 +833,6 @@ async function defaultRuntimeLoader(opts?: {
       _attachStream(runId, statusEl, noticeEl)
     }
 
-    if (typeof card.scrollIntoView === 'function') card.scrollIntoView({block: 'nearest'})
     if (typeof card.focus === 'function') card.focus({preventScroll: true})
 
     // Every successful jump announces, whether it expanded the card, only revealed an open one, or
@@ -854,6 +914,7 @@ async function defaultRuntimeLoader(opts?: {
 
   return () => {
     disposed = true
+    cancelPendingCardReveal()
     jumpsRecoverable = false
     _setJumpSlot(epoch, {mode: 'queue', pending: null})
     stopRefreshTimer()

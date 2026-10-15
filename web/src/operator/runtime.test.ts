@@ -2187,21 +2187,39 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
   const RETRY_COPY = "Couldn't load your runs. Try again in a moment."
 
   let scrolled: string[]
+  let scrollOptions: (ScrollIntoViewOptions | undefined)[]
   let streamStatus: StreamStatus
   let visibility: DocumentVisibilityState
+  let reducedMotion: boolean
+  let animationFrames: FrameRequestCallback[]
   const runtimes: OperatorRuntimeHandle[] = []
 
   beforeEach(() => {
     scrolled = []
+    scrollOptions = []
     streamStatus = 'active'
     visibility = 'visible'
+    reducedMotion = false
+    animationFrames = []
     Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => visibility})
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn(() => ({matches: reducedMotion})),
+    })
+    Object.defineProperty(window, 'requestAnimationFrame', {
+      configurable: true,
+      value: vi.fn((callback: FrameRequestCallback) => {
+        animationFrames.push(callback)
+        return animationFrames.length
+      }),
+    })
     // jsdom has no scrollIntoView; record which card was scrolled to.
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
       writable: true,
-      value(this: HTMLElement) {
+      value(this: HTMLElement, options?: ScrollIntoViewOptions) {
         scrolled.push(this.dataset.runId ?? '')
+        scrollOptions.push(options)
       },
     })
   })
@@ -2211,6 +2229,8 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
     createOperatorRuntime({container: makeContainer(), onStateChange: vi.fn(), _runtimeLoader: async () => {}}).cleanup()
     for (const runtime of runtimes.splice(0)) runtime.cleanup()
     Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView')
+    Reflect.deleteProperty(window, 'matchMedia')
+    Reflect.deleteProperty(window, 'requestAnimationFrame')
     Reflect.deleteProperty(document, 'visibilityState')
     document.body.innerHTML = ''
     if (location.hash !== '') history.replaceState(null, '', location.pathname + location.search)
@@ -2222,6 +2242,15 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
   })
 
   const tick = () => new Promise<void>(resolve => realSetTimeout(resolve, 0))
+
+  async function flushAnimationFrames() {
+    for (let frame = 0; frame < 4; frame += 1) {
+      const callbacks = animationFrames.splice(0)
+      if (callbacks.length === 0) break
+      callbacks.forEach(callback => callback(0))
+      await tick()
+    }
+  }
 
   function deferred() {
     let resolve = () => {}
@@ -2320,6 +2349,7 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
       },
       select: (runId: string) => captured?.onSelectRun(runId),
       authRequired: () => captured?.onAuthRequired(),
+      restore: (runId: string, card: Element) => captured?.onRestoreRun?.(runId, card, 'running'),
       attachedRunIds: () => initOperatorStream.mock.calls.map(([streamOpts]) => streamOpts.runId),
     }
   }
@@ -2666,6 +2696,7 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
 
     it('collapsed card: refreshes first, then expands without toggling, attaches once, writes the hash, focuses and scrolls, and announces the status label', async () => {
       renderPage(cardHtml('run-j-a', {status: 'waiting_for_question', label: 'Waiting for question'}))
+      const focus = vi.spyOn(cardEl('run-j-a'), 'focus')
       const mounted = await mountLoaded()
 
       requestRunJump('run-j-a')
@@ -2683,8 +2714,81 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
       expect(location.hash).toBe('#run-j-a')
       expect(document.activeElement).toBe(cardEl('run-j-a'))
       expect(scrolled).toEqual(['run-j-a'])
+      expect(scrollOptions).toEqual([{block: 'start', behavior: 'smooth'}])
+      expect(focus).toHaveBeenCalledWith({preventScroll: true})
       expect(announcerEl().textContent).toBe('Opened run, Waiting for question')
       expect(announcerEl().textContent).not.toContain('run-j-a')
+    })
+
+    it('uses automatic scrolling when reduced motion is preferred', async () => {
+      reducedMotion = true
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountLoaded()
+
+      requestRunJump('run-j-a')
+      await tick()
+
+      expect(scrollOptions).toEqual([{block: 'start', behavior: 'auto'}])
+      mounted.runtime.cleanup()
+    })
+
+    it('does not scroll when a card is expanded by an ordinary click', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountLoaded()
+
+      await mounted.select('run-j-a')
+
+      expect(scrolled).toEqual([])
+    })
+
+    it('scrolls once more after the question region is revealed', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountLoaded()
+
+      requestRunJump('run-j-a')
+      await tick()
+      const questions = cardEl('run-j-a').querySelector('[data-role="run-questions"]') as HTMLElement
+      questions.hidden = false
+      questions.append(document.createElement('p'))
+      await tick()
+      await flushAnimationFrames()
+
+      expect(scrolled).toEqual(['run-j-a', 'run-j-a'])
+      expect(scrollOptions).toEqual([
+        {block: 'start', behavior: 'smooth'},
+        {block: 'start', behavior: 'smooth'},
+      ])
+      mounted.runtime.cleanup()
+    })
+
+    it('cancels the late scroll when the user starts scrolling', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountLoaded()
+
+      requestRunJump('run-j-a')
+      await tick()
+      const questions = cardEl('run-j-a').querySelector('[data-role="run-questions"]') as HTMLElement
+      questions.hidden = false
+      questions.append(document.createElement('p'))
+      await tick()
+      expect(animationFrames.length).toBeGreaterThan(0)
+
+      window.dispatchEvent(new Event('touchmove'))
+      await flushAnimationFrames()
+
+      expect(scrolled).toEqual(['run-j-a'])
+      mounted.runtime.cleanup()
+    })
+
+    it('scrolls a hash-restored card to its start', async () => {
+      renderPage(cardHtml('run-j-r'))
+      const mounted = await mountLoaded()
+
+      mounted.restore('run-j-r', cardEl('run-j-r'))
+
+      expect(scrolled).toEqual(['run-j-r'])
+      expect(scrollOptions).toEqual([{block: 'start', behavior: 'smooth'}])
+      mounted.runtime.cleanup()
     })
 
     it('seeds the attached stream from the refreshed card status', async () => {
