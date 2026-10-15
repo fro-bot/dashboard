@@ -1,9 +1,8 @@
 /**
  * SSE run-stream frame types for the /operator/runs/:runId/stream endpoint.
  *
- * These mirror the named SSE events emitted by the gateway's web/sse/ surface
- * (a parallel surface to the operator-contract barrel — not part of the contract
- * barrel itself). Vendored from fro-bot/agent.
+ * Dashboard-authored types for the named SSE events that the gateway's
+ * web/sse/run-stream-route.ts writes. Upstream has no matching file.
  *
  * Named events on the wire:
  *   event: ready  → data: ReadyFrame
@@ -15,9 +14,6 @@
  *
  * Heartbeat is an SSE comment (": heartbeat") — it is NOT a named event and
  * has no corresponding frame type here.
- *
- * Import rewrites applied:
- *   OperatorRunStatus imported from ./run-status.ts (local vendored copy)
  */
 
 import type {OperatorApprovalFrame} from './approval-frame.ts'
@@ -30,9 +26,8 @@ import type {OperatorRunStatus} from './run-status.ts'
 // ---------------------------------------------------------------------------
 
 /**
- * Reasons the gateway may reset the run stream.
- *
- * Vendored from fro-bot/agent's web/sse/ surface.
+ * Reasons the gateway may reset the run stream. Copies the union declared in
+ * the gateway's web/sse/run-stream-route.ts and manager.ts.
  */
 export type ResetReason =
   | 'no-snapshot'
