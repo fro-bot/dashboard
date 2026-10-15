@@ -75,13 +75,11 @@ describe('built client output — no analytics or advertising', () => {
     expect(offenders, `tracker token "${token}" found in: ${offenders.join(', ')}`).toEqual([])
   })
 
-  // Scoped to the JS bundle, not privacy.html itself: privacy.html's one
-  // external link (github.com/fro-bot/dashboard/issues) is a page citation,
-  // already pinned exactly by content.test.ts, and isn't a network call the
-  // browser makes on load — a new fetch/beacon target in the bundle is what
-  // this exists to catch.
-  it('GUARD: the JS bundle contains no third-party origin beyond the known two', () => {
-    const ALLOWED = new Set(['http://www.w3.org', 'https://react.dev'])
+  // Scoped to the JS bundle, not privacy.html itself: GitHub links in the
+  // footer and privacy policy are intentional navigation, not network calls
+  // made on load. A new fetch/beacon target in the bundle is what this catches.
+  it('GUARD: the JS bundle contains no third-party origin beyond documented links', () => {
+    const ALLOWED = new Set(['http://www.w3.org', 'https://react.dev', 'https://github.com'])
     const origins = new Set(jsBundleText().match(/https?:\/\/[a-zA-Z0-9.-]+/g) ?? [])
     const unexpected = [...origins].filter(origin => !ALLOWED.has(origin)).sort()
 

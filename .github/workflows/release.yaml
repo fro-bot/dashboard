@@ -146,6 +146,18 @@ jobs:
       - name: 🔧 Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
+      - name: 🟢 Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+
+      - name: 🏷️ Compute release version
+        id: version
+        run: |
+          git fetch --tags --force
+          TAG="$(node scripts/compute-release-tag.ts)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: 🏗️ Build and push candidate image
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -155,6 +167,8 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: ghcr.io/${{ github.repository }}:ci-${{ github.run_id }}-${{ github.run_attempt }}
+          build-args: |
+            DASHBOARD_VERSION=${{ steps.version.outputs.tag }}
 
       - name: 🧪 Smoke-test candidate image by digest
         run: |
@@ -346,11 +360,6 @@ jobs:
           exit-code: '1'
           version: v0.72.0
 
-      - name: 🟢 Set up Node.js
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: '24'
-
       # Mint the publication token only after all third-party actions have completed.
       - name: 🤖 Get App token for publication
         id: app-token
@@ -364,31 +373,14 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          git fetch --tags --force
-
-          TAG=""
-          for attempt in 1 2 3 4 5; do
-            TAG="$(node scripts/compute-release-tag.ts)"
-            echo "Attempt $attempt: creating $TAG"
-            if gh api --method POST \
-                "repos/${{ github.repository }}/git/refs" \
-                -f "ref=refs/tags/$TAG" \
-                -f "sha=${{ github.sha }}" \
-                >/dev/null; then
-              echo "Created tag $TAG"
-              break
-            fi
-            echo "Tag creation failed (race?), refetching and retrying..."
-            git fetch --tags --force
-            TAG=""
-            sleep 2
-          done
-
-          if [ -z "$TAG" ]; then
-            echo "Failed to create release tag after 5 attempts"
-            exit 1
-          fi
-
+          TAG="${{ steps.version.outputs.tag }}"
+          echo "Creating precomputed release tag $TAG"
+          gh api --method POST \
+            "repos/${{ github.repository }}/git/refs" \
+            -f "ref=refs/tags/$TAG" \
+            -f "sha=${{ github.sha }}" \
+            >/dev/null
+          echo "Created tag $TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: 📦 Promote release-unique image tags

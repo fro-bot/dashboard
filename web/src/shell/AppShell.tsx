@@ -94,6 +94,10 @@ export function AppShell({
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
   const [loggingOut, setLoggingOut] = useState(false)
   const logoutInFlight = useRef(false)
+  const dashboardVersion: string = import.meta.env.VITE_DASHBOARD_VERSION || 'dev'
+  const releaseNotesUrl = /^\d{4}\.\d{2}\.\d+$/.test(dashboardVersion)
+    ? `https://github.com/fro-bot/dashboard/releases/tag/${dashboardVersion}`
+    : undefined
 
   useEffect(() => {
     applyTheme(theme)
@@ -396,14 +400,31 @@ export function AppShell({
         }}
         className="sm:px-6 md:px-8 lg:px-10"
       >
-        <a
-          href="/privacy"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex min-h-11 items-center text-label text-text-muted underline underline-offset-4 transition-colors duration-fast hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-        >
-          Privacy
-        </a>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <a
+            href="/privacy"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex min-h-11 items-center text-label text-text-muted underline underline-offset-4 transition-colors duration-fast hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            Privacy
+          </a>
+          {releaseNotesUrl ? (
+            <a
+              href={releaseNotesUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={`Release notes for ${dashboardVersion}`}
+              className="inline-flex min-h-11 items-center text-label text-text-muted underline underline-offset-4 transition-colors duration-fast hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            >
+              {dashboardVersion}
+            </a>
+          ) : (
+            <span className="inline-flex min-h-11 items-center text-label text-text-muted">
+              {dashboardVersion}
+            </span>
+          )}
+        </div>
       </footer>
 
       <ReloadPrompt />

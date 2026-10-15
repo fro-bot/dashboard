@@ -16,6 +16,8 @@ RUN pnpm install --frozen-lockfile
 COPY web/ ./web/
 
 # Build the SPA — emits hashed assets to web/dist/
+ARG DASHBOARD_VERSION=dev
+ENV VITE_DASHBOARD_VERSION=$DASHBOARD_VERSION
 RUN pnpm build:web
 
 # ── Production dependency stage ───────────────────────────────────────────────
