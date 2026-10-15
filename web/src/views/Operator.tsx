@@ -28,6 +28,14 @@ import type {OperatorRuntimeHandle} from '../operator/runtime.ts'
 import {isActionDisabled} from '../operator/state.ts'
 import type {OperatorState} from '../operator/state.ts'
 
+// Live runs with nothing to show yet, held open so the waiting line stays visible. DEV-gated like the next block.
+const WAITING_FIXTURE_SCENARIOS: readonly {readonly value: string; readonly label: string}[] = import.meta.env.DEV
+  ? [
+      {value: 'waiting_no_output', label: 'Waiting: running, no output yet'},
+      {value: 'waiting_queued', label: 'Waiting: queued'},
+    ]
+  : []
+
 // Question and expired-snapshot fixture scenarios. Gated on DEV (replaced at build time) so their
 // names never reach the production bundle; the fixture build and tests keep them.
 const QUESTION_FIXTURE_SCENARIOS: readonly {readonly value: string; readonly label: string}[] = import.meta.env.DEV
@@ -441,6 +449,9 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
                       <option value="no_output">No output</option>
                       <option value="stream_reset">Stream reset</option>
                       <option value="approval_flow">Approval flow</option>
+                      {WAITING_FIXTURE_SCENARIOS.map(option => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
                       {QUESTION_FIXTURE_SCENARIOS.map(option => (
                         <option key={option.value} value={option.value}>{option.label}</option>
                       ))}

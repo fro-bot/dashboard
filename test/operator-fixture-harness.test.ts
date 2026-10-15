@@ -16,7 +16,7 @@
  * - /operator redirects to /; production /operator/* data routes remain absent.
  * - Fixture routes are public (no auth required) when flag is on.
  */
-import type {StreamFrame} from '../public/operator-stream.js'
+import type {StreamFrame, StreamState} from '../public/operator-stream.js'
 import type {GitHubOAuthClient} from '../src/auth/oauth.ts'
 import {Buffer} from 'node:buffer'
 import process from 'node:process'
@@ -28,8 +28,10 @@ import {FIXTURE_OPERATOR_PREFIX} from '../src/gateway/operator-fixture-routes.ts
 import {
   FIXTURE_QUESTION_SCENARIO_ROWS,
   FIXTURE_SCENARIO_NAMES,
+  FIXTURE_WAITING_SCENARIO_ROWS,
   fixtureQuestionScript,
   isHeldOpenScenario,
+  isNoApprovalScenario,
   serializeScenarioToSse,
 } from '../src/gateway/operator-fixture-sse.ts'
 import {parseSseChunk as serverParseSseChunk} from '../src/gateway/operator-sse-reader.ts'
@@ -3437,5 +3439,166 @@ describe('waiting summary fixtures — a run ID that is valid but not in the lis
     expect(runs.map(run => run.runId)).not.toContain(MISSING_RUN_ID)
     const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${MISSING_RUN_ID}/stream?fixtureSessionId=${fixtureSessionId}`)
     expect(res.status).toBe(404)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Waiting fixture scenarios: a live run with nothing to show yet, held open
+// ---------------------------------------------------------------------------
+
+const WAITING_SCENARIO_KEYS = FIXTURE_WAITING_SCENARIO_ROWS.map(row => row.scenario)
+const waitingRunId = (key: string): string => `run-fixture-index-${key.replaceAll('_', '-')}`
+
+describe('waiting fixture scenarios — registry and manifest', () => {
+  it('registers a running scenario and a queued scenario, each with a fixture-prefixed row', async () => {
+    expect(FIXTURE_WAITING_SCENARIO_ROWS).toEqual([
+      {scenario: 'waiting_no_output', summaryStatus: 'running'},
+      {scenario: 'waiting_queued', summaryStatus: 'queued'},
+    ])
+    expect(WAITING_SCENARIO_KEYS.map(waitingRunId)).toEqual([
+      'run-fixture-index-waiting-no-output',
+      'run-fixture-index-waiting-queued',
+    ])
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const body = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}`)).json() as {scenarios: string[]}
+    for (const key of WAITING_SCENARIO_KEYS) expect(body.scenarios).toContain(key)
+    expect(Object.values(FIXTURE_SCENARIO_NAMES)).toEqual(expect.arrayContaining(WAITING_SCENARIO_KEYS))
+  })
+
+  it('the scenario select in Operator.tsx lists exactly the waiting scenarios, apart from the question block', async () => {
+    const fs = await import('node:fs/promises')
+    const source = await fs.readFile('web/src/views/Operator.tsx', 'utf8')
+    const start = source.indexOf('WAITING_FIXTURE_SCENARIOS')
+    expect(start).toBeGreaterThan(-1)
+    const block = source.slice(start, source.indexOf('QUESTION_FIXTURE_SCENARIOS'))
+    expect([...block.matchAll(/value: '([a-z0-9_]+)'/g)].map(match => match[1])).toEqual(WAITING_SCENARIO_KEYS)
+    expect(source).toMatch(/WAITING_FIXTURE_SCENARIOS\.map\(/)
+  })
+})
+
+describe('waiting fixture scenarios — frames', () => {
+  it.each([
+    ['waiting_no_output', 'running', 'EXECUTING'],
+    ['waiting_queued', 'queued', 'PENDING'],
+  ])('%s: ready then one %s status frame, and nothing that would put content on the card', (key, status, phase) => {
+    const runId = waitingRunId(key)
+    const sse = serializeScenarioToSse(key, runId)
+    const server = serverFrames(sse)
+    const browser = browserFrames(sse)
+
+    expect(server.map(frame => frame.type)).toEqual(['ready', 'status'])
+    expect(browser).toEqual(server)
+    expect(server[0]?.data.contractVersion).toBe(OPERATOR_CONTRACT_VERSION)
+    expect(server[1]?.data.runId).toBe(runId)
+    expect(server[1]?.data.status).toBe(status)
+    expect(server[1]?.data.phase).toBe(phase)
+    for (const forbidden of ['event: output', 'event: approval', 'event: question', 'event: reset', 'checkoutProvenance', 'checkoutPreparation']) {
+      expect(sse, forbidden).not.toContain(forbidden)
+    }
+    expect(sse).not.toContain('waiting_for_')
+  })
+
+  it('the browser reducer leaves each run live and non-terminal with no output', () => {
+    for (const key of WAITING_SCENARIO_KEYS) {
+      const runId = waitingRunId(key)
+      let state: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
+      for (const frame of browserStreamFrames(serializeScenarioToSse(key, runId))) state = nextStreamState(state, frame)
+      const entry = state.runs[runId] as {terminal?: boolean; outputText?: string} | undefined
+      expect(state.connection, key).toBe('live')
+      expect(entry?.terminal, key).toBe(false)
+      expect(entry?.outputText ?? '', key).toBe('')
+    }
+  })
+})
+
+async function waitingHarness() {
+  const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+  const {fixtureSessionId} = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)).json() as {fixtureSessionId: string}
+  const {runs} = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)).json() as {runs: {runId: string; status: string; repo: string}[]}
+  const get = async (key: string, suffix: string) => app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${waitingRunId(key)}/${suffix}?fixtureSessionId=${fixtureSessionId}`)
+  return {app, fixtureSessionId, runs, get}
+}
+
+describe('waiting fixture scenarios — routes', () => {
+  it('each scenario has a fixture-prefixed row with its summary status, and its stream serves the scenario bytes and stays open', async () => {
+    const {runs, get} = await waitingHarness()
+    for (const row of FIXTURE_WAITING_SCENARIO_ROWS) {
+      const found = runs.find(candidate => candidate.runId === waitingRunId(row.scenario))
+      expect(found, row.scenario).toBeDefined()
+      expect(found?.status, row.scenario).toBe(row.summaryStatus)
+      expect(found?.repo).toMatch(/fixture/)
+
+      const res = await get(row.scenario, 'stream')
+      expect(res.status).toBe(200)
+      expect(res.headers.get('content-type')).toContain('text/event-stream')
+      const {text, endedAfterBytes} = await firstChunkThenOpen(res)
+      expect(text).toBe(serializeScenarioToSse(row.scenario, waitingRunId(row.scenario)))
+      expect(endedAfterBytes, `${row.scenario} stays open`).toBe(false)
+    }
+  })
+
+  it('both scenarios are held open with no approval, while every existing scenario keeps its behavior', () => {
+    for (const key of WAITING_SCENARIO_KEYS) {
+      expect(isHeldOpenScenario(key), key).toBe(true)
+      expect(isNoApprovalScenario(key), key).toBe(true)
+    }
+    expect(isHeldOpenScenario('success')).toBe(false)
+    expect(isHeldOpenScenario('no_output')).toBe(false)
+    expect(isHeldOpenScenario('approval_flow')).toBe(false)
+    expect(isNoApprovalScenario('approval_flow')).toBe(false)
+    expect(isHeldOpenScenario('question_single')).toBe(true)
+    expect(isNoApprovalScenario('question_single')).toBe(false)
+    expect(isNoApprovalScenario('question_no_approval')).toBe(true)
+    expect(isHeldOpenScenario('question_terminal_pending')).toBe(false)
+    expect(isHeldOpenScenario('not_a_scenario')).toBe(false)
+    expect(isNoApprovalScenario('not_a_scenario')).toBe(false)
+  })
+
+  it('lists no approvals and no questions for either scenario', async () => {
+    const {get} = await waitingHarness()
+    for (const key of WAITING_SCENARIO_KEYS) {
+      const approvals = await get(key, 'approvals')
+      expect(approvals.status).toBe(200)
+      expect((await approvals.json() as {approvals: unknown[]}).approvals, key).toEqual([])
+      const questions = await get(key, 'questions')
+      expect(questions.status).toBe(200)
+      expect((await questions.json() as {requests: unknown[]}).requests, key).toEqual([])
+    }
+  })
+
+  it('a launched run can use either scenario and is served its own held-open bytes', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const {fixtureSessionId} = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)).json() as {fixtureSessionId: string}
+    for (const key of WAITING_SCENARIO_KEYS) {
+      const launch = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({scenario: key, idempotencyKey: `fixture-idem-key-${key}-launch-001`, fixtureSessionId, csrfToken: 'fixture-csrf-placeholder', repo: 'fixture-org/fixture-repo', prompt: '[Fixture prompt]'}),
+      })
+      expect(launch.status).toBe(200)
+      const {runId} = await launch.json() as {runId: string}
+      const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream?fixtureSessionId=${fixtureSessionId}`)
+      const {text, endedAfterBytes} = await firstChunkThenOpen(res)
+      expect(text).toBe(serializeScenarioToSse(key, runId))
+      expect(endedAfterBytes).toBe(false)
+    }
+  })
+})
+
+describe('waiting fixture scenarios — production artifacts carry no scenario names or row IDs', () => {
+  it('web/dist, the service worker, and the shipped browser modules contain neither', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const files = ['web/dist/sw.js', 'web/dist/index.html', 'public/operator-stream.js', 'public/operator-launch.js', 'public/operator-run-index.js', 'public/operator-time.js']
+    for (const file of await fs.readdir('web/dist/assets')) {
+      if (file.endsWith('.js') || file.endsWith('.css')) files.push(path.join('web/dist/assets', file))
+    }
+    for (const file of files) {
+      const src = await fs.readFile(file, 'utf8')
+      for (const key of WAITING_SCENARIO_KEYS) {
+        expect(src, `${file} must not contain scenario ${key}`).not.toContain(key)
+        expect(src, `${file} must not contain ${waitingRunId(key)}`).not.toContain(waitingRunId(key))
+      }
+    }
   })
 })
