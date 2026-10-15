@@ -102,7 +102,9 @@ write: every handler that builds that entry must preserve the new fields.
 The `text` field is free-form agent output and is **not** allowlist-gateable, so it
 cannot be sanitized by enumeration like status/phase values. Render it through
 `textContent` / a text node — never HTML interpolation, never `innerHTML`. The SSR
-element ships empty and hidden; only the client writes it. Never render any other
+element ships empty and hidden. Only the stream writes it, and `updateDOM` is the only
+code that unhides it, and only when it has content: expanding a card reveals nothing,
+and each stream attach clears and hides it before the first paint. Never render any other
 frame field (`runId`, `seq`, `droppedCount`) as free text — surface a *fixed* label
 for the coalesced/truncated hint instead of echoing a count.
 
