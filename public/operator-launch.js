@@ -22,6 +22,9 @@
  * - runId appears only in the data-run-id attribute and the stream URL.
  */
 
+// Stateless, so a second instance of it (this module is loaded with a query string) is harmless.
+import {formatRelativeTime} from './operator-time.js'
+
 // Mirrors RUN_INDEX_CAP in operator-run-index.js. Not imported directly: this module
 // and operator-run-index.js are loaded as separate dynamic-import instances (each
 // carries its own ?manual=1 query string keyed module identity in the runtime seam),
@@ -676,6 +679,17 @@ export async function initOperatorLaunch(opts) {
             repoSpan.textContent = pickerRepo
           }
           card.append(repoSpan)
+
+          // Launch-seeded time: the launch instant until the stream sends the run's start time or
+          // the run list adopts the card. The marker sits on the <time>, not the card.
+          const launchedAt = new Date().toISOString()
+          const timeEl = document.createElement('time')
+          timeEl.className = 'run-updated-at'
+          timeEl.dataset.role = 'run-updated-at'
+          timeEl.dataset.timeSource = 'launch'
+          timeEl.setAttribute('datetime', launchedAt)
+          timeEl.textContent = formatRelativeTime(launchedAt)
+          card.append(timeEl)
 
           // Hidden per-card substructure for the stream renderer.
 

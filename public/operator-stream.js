@@ -25,6 +25,8 @@
  * - Status labels are rendered from a local map, never from the raw wire string.
  */
 
+import {formatRelativeTime, normalizeIsoTimestamp} from './operator-time.js'
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -3294,6 +3296,8 @@ function makeQuestionNoteCard(status) {
  *   noticeEl    — element to show stream connection state notices
  *   approvalsEl — element with [data-role="run-approvals"] to render approval prompts
  *   badgeEl     — element with [data-role="approval-badge"] for the approval count badge
+ *   timeEl      — optional [data-role="run-updated-at"] element of a launch-seeded card, kept
+ *                 showing the run's start time while the stream is attached.
  *   checkoutEl  — element with [data-role="run-checkout-detail"], the target for checkout
  *                 provenance / preparation, rendered only from the sanitized closed DTOs.
  *   summaryStatus — optional run-list summary status for this run (queued | running | succeeded |
@@ -3312,7 +3316,7 @@ function makeQuestionNoteCard(status) {
  * - Read-only: GET only for stream; approval decisions are operator-forwarded writes.
  */
 export function initOperatorStream(opts) {
-  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, checkoutEl, cancelEl, questionsEl, approvalClient: injectedApprovalClient, cancelClient: injectedCancelClient, questionClient: injectedQuestionClient, endpointBase, fixtureSessionId} = opts
+  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, timeEl, checkoutEl, cancelEl, questionsEl, approvalClient: injectedApprovalClient, cancelClient: injectedCancelClient, questionClient: injectedQuestionClient, endpointBase, fixtureSessionId} = opts
 
   // The run-list summary status for this run, when the caller has one. Only a known summary status
   // is kept; it lets a no-snapshot reset close an expired terminal run without a status frame.
@@ -3676,6 +3680,7 @@ export function initOperatorStream(opts) {
   let aborted = false // set by close() to prevent late timer from fetching
   let announcedFailure = false
   let paintedPreparationHeadline = false // reasonEl currently shows a headline this stream wrote from checkoutPreparation
+  let latestStartedAt = null // latest valid startedAt from a status frame; never reset to blank
 
   function updateDOM() {
     // Late-frame guard: after close(), no write of any kind (notice, status,
@@ -3683,6 +3688,12 @@ export function initOperatorStream(opts) {
     // buffered frame or microtask resolving after close() must not paint stale
     // state onto a card that may already be collapsed or reused for another run.
     if (aborted) return
+
+    // The seeded time is repainted from its own datetime on every paint, so it never goes stale.
+    if (timeEl) {
+      if (latestStartedAt !== null) timeEl.setAttribute('datetime', latestStartedAt)
+      timeEl.textContent = formatRelativeTime(timeEl.getAttribute('datetime'))
+    }
 
     if (noticeEl) {
       const conn = state.connection
@@ -3995,6 +4006,8 @@ export function initOperatorStream(opts) {
   function dispatch(event) {
     const prevConnection = state.connection
     state = nextStreamState(state, event)
+    const startedAt = normalizeIsoTimestamp(state.runs[runId]?.startedAt)
+    if (startedAt !== undefined) latestStartedAt = startedAt
     syncQuestionStatuses()
     updateDOM()
     // Trigger reconcile when the stream first goes live (or re-goes live after reconnect).

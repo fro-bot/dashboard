@@ -78,8 +78,43 @@ describe('optimistic launch card', () => {
 
     const roles = Array.from(card.children).map(child => (child as HTMLElement).dataset.role)
     const at = roles.indexOf('run-checkout-detail')
-    expect(roles[at - 1]).toBe('run-repo')
+    expect(roles[at - 1]).toBe('run-updated-at')
     expect(roles[at + 1]).toBe('run-output')
+  })
+
+  it('the optimistic card carries one launch-seeded <time> between the repo label and the first region', async () => {
+    const before = Date.now()
+    const card = await launchOptimisticCard()
+    const after = Date.now()
+
+    const times = card.querySelectorAll<HTMLElement>('time')
+    expect(times).toHaveLength(1)
+    const timeEl = times[0]
+    expect(timeEl?.parentElement).toBe(card)
+    expect(timeEl?.className).toBe('run-updated-at')
+    expect(timeEl?.dataset.role).toBe('run-updated-at')
+    expect(timeEl?.dataset.timeSource).toBe('launch')
+    expect(timeEl?.textContent).toBe('just now')
+
+    // The datetime is the launch instant, as a canonical ISO string.
+    const datetime = timeEl?.getAttribute('datetime') ?? ''
+    expect(new Date(datetime).toISOString()).toBe(datetime)
+    expect(Date.parse(datetime)).toBeGreaterThanOrEqual(before)
+    expect(Date.parse(datetime)).toBeLessThanOrEqual(after)
+
+    const roles = Array.from(card.children).map(child => (child as HTMLElement).dataset.role)
+    expect(roles.indexOf('run-updated-at')).toBe(roles.indexOf('run-repo') + 1)
+    expect(roles.indexOf('run-updated-at')).toBe(roles.indexOf('run-checkout-detail') - 1)
+  })
+
+  it('the seeded <time> is plain text with no child nodes, and the card gains no other time-related attribute', async () => {
+    const card = await launchOptimisticCard()
+
+    const timeEl = card.querySelector<HTMLElement>('time')
+    expect(timeEl?.children).toHaveLength(0)
+    expect(timeEl?.childNodes).toHaveLength(1)
+    expect(timeEl?.firstChild?.nodeType).toBe(Node.TEXT_NODE)
+    expect(Array.from(card.attributes).map(attr => attr.name).filter(name => name.includes('time'))).toEqual([])
   })
 
   it('the optimistic card contains exactly one hidden, empty run-questions region directly after run-approvals', async () => {

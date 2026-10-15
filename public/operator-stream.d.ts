@@ -824,6 +824,11 @@ export interface InitOptions {
   readonly fixtureSessionId?: string
   /** Secondary status metadata element (data-role="run-reason"). */
   readonly reasonEl?: Element | null
+  /**
+   * Time element (data-role="run-updated-at") of a launch-seeded card. While attached, the stream
+   * writes the run's start time into it (`datetime` and relative text), and never blanks it.
+   */
+  readonly timeEl?: Element | null
   /** Cancel control container element (data-role="run-cancel"). */
   readonly cancelEl?: (HTMLElement & {hidden: boolean}) | null
   /**

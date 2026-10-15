@@ -65,6 +65,8 @@ export function discoverCardStreamTargets(runId: string): {
   cancelEl: StreamTargetEl | null
   checkoutEl: StreamTargetEl | null
   questionsEl: StreamTargetEl | null
+  /** The card's <time>, only while it is launch-seeded: the list takes it over on adoption. */
+  timeEl: HTMLElement | null
 } {
   const card = typeof document !== 'undefined'
     ? document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
@@ -78,6 +80,7 @@ export function discoverCardStreamTargets(runId: string): {
     cancelEl: card?.querySelector<StreamTargetEl>('[data-role="run-cancel"]') ?? null,
     checkoutEl: card?.querySelector<StreamTargetEl>('[data-role="run-checkout-detail"]') ?? null,
     questionsEl: card?.querySelector<StreamTargetEl>('[data-role="run-questions"]') ?? null,
+    timeEl: card?.querySelector<HTMLElement>('[data-role="run-updated-at"][data-time-source="launch"]') ?? null,
   }
 }
 
@@ -468,7 +471,7 @@ async function defaultRuntimeLoader(opts?: {
 
     // Discover the per-card render targets so live output, coalescing hints,
     // approval prompts, and the approval badge all render — not just status.
-    const {outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, cancelEl, checkoutEl, questionsEl} = discoverCardStreamTargets(runId)
+    const {outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, cancelEl, checkoutEl, questionsEl, timeEl} = discoverCardStreamTargets(runId)
     const summaryStatus = discoverCardSummaryStatus(runId)
 
     // A re-expanded card must never keep question DOM from a previous attach: the stream and
@@ -485,6 +488,7 @@ async function defaultRuntimeLoader(opts?: {
         approvalsEl,
         badgeEl,
         reasonEl,
+        timeEl,
         cancelEl,
         checkoutEl,
         questionsEl,

@@ -781,7 +781,7 @@ describe('defaultRuntimeLoader — production stream wiring', () => {
 })
 
 describe('defaultRuntimeLoader — question region and summary status wiring', () => {
-  type InitOpts = {runId: string; questionsEl?: Element | null; summaryStatus?: string}
+  type InitOpts = {runId: string; questionsEl?: Element | null; timeEl?: Element | null; summaryStatus?: string}
 
   afterEach(() => {
     document.body.innerHTML = ''
@@ -792,7 +792,7 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
   })
 
   /** Mount the real default loader with every public module mocked; returns the captured seams. */
-  async function mountLoader() {
+  async function mountLoader(mountOptions: {onRefresh?: () => void} = {}) {
     const handle = {close: vi.fn()}
     // Snapshot the region's children at the moment each init runs, before the stream could render into it.
     const initCalls: {opts: InitOpts; regionChildrenAtInit: number | undefined}[] = []
@@ -815,7 +815,10 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
         onSelectRun = opts.onSelectRun
         onRestoreRun = opts.onRestoreRun
       },
-      refreshOperatorRunIndex: vi.fn(async () => true),
+      refreshOperatorRunIndex: vi.fn(async () => {
+        mountOptions.onRefresh?.()
+        return true
+      }),
       resetRunIndexState: vi.fn(),
       markRunStreamAttached: vi.fn(),
       markCardExpandedForLaunch: vi.fn(),
@@ -917,6 +920,80 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
       runtime.cleanup()
 
       expect(resetBootstrapState.mock.calls.length).toBeGreaterThan(afterLoad)
+    })
+  })
+
+  describe('the card time is a stream target only while it is launch-seeded', () => {
+    const timeHtml = (marker: string) => `<time data-role="run-updated-at"${marker} datetime="2000-01-01T00:00:00.000Z"></time>`
+    const cardWithTime = (runId: string, marker: string, extra = '') => `
+      <div data-run-id="${runId}"${extra}>
+        <span data-role="run-status" class="run-status status-queued"></span>
+        ${timeHtml(marker)}
+        <div data-role="run-questions" hidden></div>
+      </div>`
+    const SEEDED = ' data-time-source="launch"'
+    const timeOf = (runId: string) => document.querySelector(`[data-run-id="${runId}"] [data-role="run-updated-at"]`)
+
+    it('hands a launch-seeded <time> to the stream on expand', async () => {
+      document.body.innerHTML = `${cardWithTime('run-t-a', SEEDED)}<div data-role="stream-status"></div>`
+      const {runtime, initCalls, select} = await mountLoader()
+
+      await select('run-t-a')
+
+      expect(initCalls).toHaveLength(1)
+      expect(initCalls[0]?.opts.timeEl).toBe(timeOf('run-t-a'))
+      expect(initCalls[0]?.opts.timeEl).not.toBeNull()
+      runtime.cleanup()
+    })
+
+    it('hands a launch-seeded <time> to the stream on the launch handoff', async () => {
+      document.body.innerHTML = `${cardWithTime('run-t-launch', SEEDED, ' data-optimistic="true"')}<div data-role="stream-status"></div>`
+      const {runtime, initCalls, launched} = await mountLoader()
+
+      launched('run-t-launch', document.querySelector('[data-run-id="run-t-launch"]') as HTMLElement)
+
+      expect(initCalls[0]?.opts.timeEl).toBe(timeOf('run-t-launch'))
+      runtime.cleanup()
+    })
+
+    it('after adoption (marker gone) the pre-expand refresh leaves the stream no time target: the list time wins', async () => {
+      document.body.innerHTML = `${cardWithTime('run-t-adopted', SEEDED)}<div data-role="stream-status"></div>`
+      const {runtime, initCalls, select} = await mountLoader({
+        onRefresh: () => {
+          timeOf('run-t-adopted')?.removeAttribute('data-time-source')
+        },
+      })
+
+      await select('run-t-adopted')
+
+      expect(initCalls).toHaveLength(1)
+      expect(initCalls[0]?.opts.timeEl ?? null).toBeNull()
+      runtime.cleanup()
+    })
+
+    it('when the refresh does not list the run, the marker stays and the stream keeps the start time', async () => {
+      document.body.innerHTML = `${cardWithTime('run-t-unlisted', SEEDED)}<div data-role="stream-status"></div>`
+      const {runtime, initCalls, select} = await mountLoader({onRefresh: () => {}})
+
+      await select('run-t-unlisted')
+
+      expect(initCalls[0]?.opts.timeEl).toBe(timeOf('run-t-unlisted'))
+      runtime.cleanup()
+    })
+
+    it.each([
+      ['an ordinary list card <time>', cardWithTime('run-t-list', '')],
+      ['a <time> with another source marker', cardWithTime('run-t-list', ' data-time-source="other"')],
+      ['a card with no <time> at all', cardHtml('run-t-list', 'status-running')],
+    ])('%s is not a stream target', async (_label, html) => {
+      document.body.innerHTML = `${html}<div data-role="stream-status"></div>`
+      const {runtime, initCalls, select} = await mountLoader()
+
+      await select('run-t-list')
+
+      expect(initCalls).toHaveLength(1)
+      expect(initCalls[0]?.opts.timeEl ?? null).toBeNull()
+      runtime.cleanup()
     })
   })
 
@@ -1566,6 +1643,31 @@ describe('discoverCardStreamTargets', () => {
     expect(discoverCardStreamTargets('run-with-questions').questionsEl).toBe(questionsEl)
     expect(discoverCardStreamTargets('run-no-questions').questionsEl).toBeNull()
     expect(discoverCardStreamTargets('no-such-run').questionsEl).toBeNull()
+  })
+
+  it('returns the card time only while it carries the launch marker', () => {
+    const card = (runId: string, marker?: string) => {
+      const el = document.createElement('div')
+      el.dataset.runId = runId
+      const time = document.createElement('time')
+      time.dataset.role = 'run-updated-at'
+      if (marker !== undefined) time.dataset.timeSource = marker
+      el.append(time)
+      document.body.append(el)
+      return time
+    }
+    const seeded = card('run-time-seeded', 'launch')
+    card('run-time-plain')
+    card('run-time-other', 'other')
+    const bare = document.createElement('div')
+    bare.dataset.runId = 'run-time-bare'
+    document.body.append(bare)
+
+    expect(discoverCardStreamTargets('run-time-seeded').timeEl).toBe(seeded)
+    expect(discoverCardStreamTargets('run-time-plain').timeEl).toBeNull()
+    expect(discoverCardStreamTargets('run-time-other').timeEl).toBeNull()
+    expect(discoverCardStreamTargets('run-time-bare').timeEl).toBeNull()
+    expect(discoverCardStreamTargets('no-such-run').timeEl).toBeNull()
   })
 
   it('returns all four per-card render targets when the card and substructure exist', () => {

@@ -576,6 +576,19 @@ describe('operator runtime JS assets — served regardless of operatorUiEnabled 
     }
   })
 
+  it('every relative import in a served operator module is itself served with the flag off', async () => {
+    const fs = await import('node:fs/promises')
+    const app = await buildTestApp(false)
+    const importers = ['operator-stream.js', 'operator-launch.js', 'operator-run-index.js']
+    const imported = new Set<string>()
+    for (const file of importers) {
+      const src = await fs.readFile(`public/${file}`, 'utf8')
+      for (const match of src.matchAll(/^import\s[^'"]*from\s+'\.\/([\w-]+\.js)'/gm)) imported.add(match[1] ?? '')
+    }
+    expect([...imported].toSorted()).toEqual(['operator-time.js'])
+    for (const file of imported) expect((await app.request(`/static/${file}`)).status, file).toBe(200)
+  })
+
   it('all four operator modules load together with the flag off', async () => {
     const app = await buildTestApp(false)
     for (const path of ['/static/operator-stream.js', '/static/operator-launch.js', '/static/operator-run-index.js', '/static/operator-time.js']) {

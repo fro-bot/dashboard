@@ -1614,6 +1614,11 @@ function makeSubstructureElStub() {
         const idx = this._parentList.children.indexOf(this)
         if (idx !== -1) this._parentList.children.splice(idx, 1)
       }
+      if (this._parentEl !== null) {
+        const idx = this._parentEl._children.indexOf(this)
+        if (idx !== -1) this._parentEl._children.splice(idx, 1)
+        this._parentEl = null
+      }
     },
     get nextSibling() {
       if (this._parentList === null) return null
@@ -3298,6 +3303,167 @@ describe('card keyboard activation — scoped to the card, not nested controls',
     optimistic.dispatchEvent({type: 'keydown', key: ' ', preventDefault: vi.fn()})
     expect(optimistic.dataset.expanded).toBe('true')
     expect(onSelectRun).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Launch-seeded <time> — adoption hands the card to the list's updatedAt
+// ---------------------------------------------------------------------------
+
+/** A launch-created card carrying the launch's seeded <time>, as the launch form builds it. */
+function makeLaunchSeededCard(cards, runId, {status = 'queued', seedDatetime = '2026-06-26T12:00:00.000Z'} = {}) {
+  const card = makeStatusOnlyOptimisticCard(cards, runId)
+  card.querySelector('[data-role="run-status"]').className = `run-status status-${status}`
+  const timeEl = document.createElement('time')
+  timeEl.className = 'run-updated-at'
+  timeEl.dataset.role = 'run-updated-at'
+  timeEl.dataset.timeSource = 'launch'
+  timeEl.setAttribute('datetime', seedDatetime)
+  timeEl.textContent = 'just now'
+  card.append(timeEl)
+  return card
+}
+
+describe('launch-seeded <time> — adoption by the run list', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  const LIST_UPDATED_AT = '2026-06-26T13:00:00.000Z'
+
+  it('writes the list updatedAt into the seeded <time> and removes the marker, with one <time> left', async () => {
+    const runId = 'run-seed-adopt-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const card = makeLaunchSeededCard(cards, runId)
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running', updatedAt: LIST_UPDATED_AT})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    const timeEl = card.querySelector('[data-role="run-updated-at"]')
+    expect(countRole(card, 'run-updated-at')).toBe(1)
+    expect(timeEl.attributes.datetime).toBe(LIST_UPDATED_AT)
+    expect(timeEl.textContent).toBe(formatRelativeTime(LIST_UPDATED_AT))
+    expect(timeEl.dataset.timeSource).toBeUndefined()
+    expect(card.dataset.optimistic).toBeUndefined()
+  })
+
+  it('adopts the time even when the terminal-sticky guard skips the rest of the update', async () => {
+    const runId = 'run-seed-sticky-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const card = makeLaunchSeededCard(cards, runId, {status: 'succeeded'})
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running', updatedAt: LIST_UPDATED_AT})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    // The stale non-terminal view changes nothing else on the card...
+    expect(card.querySelector('[data-role="run-status"]').className).toBe('run-status status-succeeded')
+    // ...but the seeded time still moves to the list's.
+    const timeEl = card.querySelector('[data-role="run-updated-at"]')
+    expect(timeEl.attributes.datetime).toBe(LIST_UPDATED_AT)
+    expect(timeEl.dataset.timeSource).toBeUndefined()
+    expect(countRole(card, 'run-updated-at')).toBe(1)
+  })
+
+  it('removes the seeded <time> and its marker when the adopting view has no updatedAt', async () => {
+    const runId = 'run-seed-no-updated-at-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const card = makeLaunchSeededCard(cards, runId)
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    expect(countRole(card, 'run-updated-at')).toBe(0)
+    expect(card.querySelector('[data-role="run-updated-at"]')).toBeNull()
+  })
+
+  it('removes the seeded <time> under the terminal-sticky guard too, when the view has no updatedAt', async () => {
+    const runId = 'run-seed-sticky-no-time-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const card = makeLaunchSeededCard(cards, runId, {status: 'failed'})
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    expect(countRole(card, 'run-updated-at')).toBe(0)
+  })
+
+  it('later list diffs keep updating the adopted <time> as an ordinary list card, with no duplicates', async () => {
+    const runId = 'run-seed-repeat-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const card = makeLaunchSeededCard(cards, runId)
+    const later = '2026-06-26T14:30:00.000Z'
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running', updatedAt: LIST_UPDATED_AT})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    stubFetchRuns([makeValidSummary({runId, status: 'running', updatedAt: later})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    expect(countRole(card, 'run-updated-at')).toBe(1)
+    expect(card.querySelector('[data-role="run-updated-at"]').attributes.datetime).toBe(later)
+  })
+
+  it('an attached card is left alone: its seeded <time> and marker survive a diff while the stream owns it', async () => {
+    const runId = 'run-seed-attached-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const card = makeLaunchSeededCard(cards, runId)
+    card.dataset.streamAttached = 'true'
+    markRunStreamAttached(runId)
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running', updatedAt: LIST_UPDATED_AT})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    const timeEl = card.querySelector('[data-role="run-updated-at"]')
+    expect(timeEl.attributes.datetime).toBe('2026-06-26T12:00:00.000Z')
+    expect(timeEl.dataset.timeSource).toBe('launch')
+    expect(timeEl.textContent).toBe('just now')
+  })
+
+  it('a seeded card absent from the fetch keeps its <time> and marker: the stream keeps the start time', async () => {
+    const runId = 'run-seed-absent-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const card = makeLaunchSeededCard(cards, runId)
+
+    stubFetchRuns([makeValidSummary({runId: 'run-seed-other-001', status: 'running', updatedAt: LIST_UPDATED_AT})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    const timeEl = card.querySelector('[data-role="run-updated-at"]')
+    expect(timeEl.dataset.timeSource).toBe('launch')
+    expect(timeEl.attributes.datetime).toBe('2026-06-26T12:00:00.000Z')
+  })
+
+  it('a <time> with any other source marker is not an adoption target', async () => {
+    const runId = 'run-seed-other-source-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const card = makeLaunchSeededCard(cards, runId)
+    card.querySelector('[data-role="run-updated-at"]').dataset.timeSource = 'other'
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    expect(countRole(card, 'run-updated-at')).toBe(1)
+    expect(card.querySelector('[data-role="run-updated-at"]').dataset.timeSource).toBe('other')
+  })
+
+  it('a card with no <time> at all gains one from the list as before', async () => {
+    const runId = 'run-seed-none-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const card = makeStatusOnlyOptimisticCard(cards, runId)
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running', updatedAt: LIST_UPDATED_AT})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    expect(countRole(card, 'run-updated-at')).toBe(1)
+    expect(card.querySelector('[data-role="run-updated-at"]').attributes.datetime).toBe(LIST_UPDATED_AT)
   })
 })
 

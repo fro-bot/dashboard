@@ -11654,3 +11654,259 @@ describe('stream handle — getConnectionStatus (what a re-open from a notificat
     expect(h.listCalls).toHaveLength(1)
   })
 })
+
+// ===========================================================================
+// Launch-seeded card time — the stream writes the run's start time into timeEl
+// ===========================================================================
+
+const TS_RUN = 'run-ts-001'
+const TS_READY = `event: ready\ndata: ${JSON.stringify({contractVersion: PINNED_CONTRACT_VERSION})}\n\n`
+const TS_HOUR = 3_600_000
+
+const tsStatusFrame = (startedAt: unknown, runId = TS_RUN, status = 'running') =>
+  `event: status\ndata: ${JSON.stringify(ckStatusPayload({runId, startedAt, status}))}\n\n`
+
+const tsOutputFrame = (runId = TS_RUN) => `event: output\ndata: ${JSON.stringify({runId, text: 'hi', final: false, seq: 0})}\n\n`
+
+const tsHandles: StreamHandle[] = []
+
+/** Start a stream on fake timers with a launch-seeded `<time>`; `push` feeds the open connection. */
+function tsStart(opts: {runId?: string; seedAgoMs?: number; withTimeEl?: boolean} = {}) {
+  vi.useFakeTimers()
+  const runId = opts.runId ?? TS_RUN
+  const controllers: ReadableStreamDefaultController<Uint8Array>[] = []
+  const encoder = new TextEncoder()
+  vi.stubGlobal('document', {
+    createElement: (tag: string) => makeFakeEl(tag),
+    createTextNode: (text: string) => {
+      const node = makeFakeEl('#text')
+      node.textContent = text
+      return node
+    },
+  })
+  vi.stubGlobal('addEventListener', () => {})
+  vi.stubGlobal('fetch', async () => ({
+    ok: true,
+    status: 200,
+    headers: {get: () => 'text/event-stream'},
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controllers.push(controller)
+        controller.enqueue(encoder.encode(TS_READY))
+      },
+    }),
+  }))
+
+  const seed = new Date(Date.now() - (opts.seedAgoMs ?? 0)).toISOString()
+  const timeEl = makeFakeEl('time')
+  timeEl.attributes['data-role'] = 'run-updated-at'
+  timeEl.dataset.timeSource = 'launch'
+  timeEl.setAttribute('datetime', seed)
+  timeEl.textContent = 'just now'
+
+  const handle = initOperatorStream({
+    runId,
+    statusEl: makeFakeEl('span') as never,
+    noticeEl: makeFakeEl('div') as never,
+    ...(opts.withTimeEl === false ? {} : {timeEl: timeEl as never}),
+  })
+  tsHandles.push(handle)
+
+  return {
+    handle,
+    timeEl,
+    seed,
+    flush: async (ms = 0) => vi.advanceTimersByTimeAsync(ms),
+    push: async (chunk: string) => {
+      controllers.at(-1)?.enqueue(encoder.encode(chunk))
+      await vi.advanceTimersByTimeAsync(0)
+    },
+    end: async () => {
+      controllers.at(-1)?.close()
+      await vi.advanceTimersByTimeAsync(0)
+    },
+  }
+}
+
+function tsCleanup() {
+  for (const handle of tsHandles.splice(0)) handle.close()
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+}
+
+describe('initOperatorStream — start time on a launch-seeded card', () => {
+  afterEach(tsCleanup)
+
+  it('the first valid startedAt replaces the launch time in both datetime and text', async () => {
+    const h = tsStart()
+    await h.flush()
+    expect(h.timeEl.getAttribute('datetime')).toBe(h.seed)
+
+    const startedAt = new Date(Date.now() - 2 * TS_HOUR).toISOString()
+    await h.push(tsStatusFrame(startedAt))
+
+    expect(h.timeEl.getAttribute('datetime')).toBe(startedAt)
+    expect(h.timeEl.textContent).toBe('2 hours ago')
+  })
+
+  it('writes the canonical form of a valid startedAt that is not already canonical', async () => {
+    const h = tsStart()
+    await h.flush()
+
+    const base = new Date(Date.now() - 2 * TS_HOUR)
+    base.setMilliseconds(0)
+    await h.push(tsStatusFrame(base.toISOString().replace('.000Z', 'Z')))
+
+    expect(h.timeEl.getAttribute('datetime')).toBe(base.toISOString())
+  })
+
+  it.each([
+    ['an empty string', ''],
+    ['garbage', 'not-a-time'],
+    ['129 characters', '2'.repeat(129)],
+  ])('%s as startedAt writes nothing: the launch time stays', async (_label, startedAt) => {
+    const h = tsStart()
+    await h.flush()
+
+    await h.push(tsStatusFrame(startedAt))
+
+    expect(h.timeEl.getAttribute('datetime')).toBe(h.seed)
+    expect(h.timeEl.textContent).toBe('just now')
+  })
+
+  it('a later frame with an empty startedAt keeps the valid value', async () => {
+    const h = tsStart()
+    await h.flush()
+    const startedAt = new Date(Date.now() - 2 * TS_HOUR).toISOString()
+    await h.push(tsStatusFrame(startedAt))
+
+    await h.push(tsStatusFrame(''))
+    await h.push(tsStatusFrame('garbage'))
+
+    expect(h.timeEl.getAttribute('datetime')).toBe(startedAt)
+    expect(h.timeEl.textContent).toBe('2 hours ago')
+  })
+
+  it('the latest valid startedAt wins', async () => {
+    const h = tsStart()
+    await h.flush()
+    await h.push(tsStatusFrame(new Date(Date.now() - 2 * TS_HOUR).toISOString()))
+    const later = new Date(Date.now() - 3 * TS_HOUR).toISOString()
+
+    await h.push(tsStatusFrame(later))
+
+    expect(h.timeEl.getAttribute('datetime')).toBe(later)
+    expect(h.timeEl.textContent).toBe('3 hours ago')
+  })
+
+  it('a placeholder run entry (an output frame before any status) writes nothing', async () => {
+    const h = tsStart()
+    await h.flush()
+
+    await h.push(tsOutputFrame())
+
+    expect(h.timeEl.getAttribute('datetime')).toBe(h.seed)
+    expect(h.timeEl.textContent).toBe('just now')
+  })
+
+  it('a status frame for another run never reaches this card', async () => {
+    const h = tsStart()
+    await h.flush()
+
+    await h.push(tsStatusFrame(new Date(Date.now() - 5 * TS_HOUR).toISOString(), 'run-ts-other'))
+
+    expect(h.timeEl.getAttribute('datetime')).toBe(h.seed)
+  })
+
+  it('recomputes the relative text on every paint, from the datetime already on the element', async () => {
+    const h = tsStart()
+    await h.flush()
+    expect(h.timeEl.textContent).toBe('just now')
+
+    vi.setSystemTime(Date.now() + 5 * 60_000)
+    await h.push(tsOutputFrame())
+
+    expect(h.timeEl.getAttribute('datetime')).toBe(h.seed)
+    expect(h.timeEl.textContent).toBe('5 minutes ago')
+  })
+
+  it('a stream that drops and reconnects keeps the last time', async () => {
+    const h = tsStart()
+    await h.flush()
+    const startedAt = new Date(Date.now() - 2 * TS_HOUR).toISOString()
+    await h.push(tsStatusFrame(startedAt))
+
+    await h.end()
+
+    expect(h.timeEl.getAttribute('datetime')).toBe(startedAt)
+    expect(h.timeEl.textContent).toBe('2 hours ago')
+  })
+
+  it('a stream that fails keeps the last time', async () => {
+    const h = tsStart()
+    await h.flush()
+    const startedAt = new Date(Date.now() - 2 * TS_HOUR).toISOString()
+    await h.push(tsStatusFrame(startedAt))
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('offline')
+    })
+
+    await h.end()
+    await h.flush(60_000)
+
+    expect(h.timeEl.getAttribute('datetime')).toBe(startedAt)
+    expect(h.timeEl.textContent).not.toBe('')
+  })
+
+  it('writes nothing after close()', async () => {
+    const h = tsStart()
+    await h.flush()
+    const startedAt = new Date(Date.now() - 2 * TS_HOUR).toISOString()
+    await h.push(tsStatusFrame(startedAt))
+    h.handle.close()
+    vi.setSystemTime(Date.now() + 5 * 60_000)
+
+    await h.push(tsStatusFrame(new Date(Date.now() - 9 * TS_HOUR).toISOString()))
+    await h.push(tsOutputFrame())
+
+    expect(h.timeEl.getAttribute('datetime')).toBe(startedAt)
+    expect(h.timeEl.textContent).toBe('2 hours ago')
+  })
+
+  it('writes through textContent only: the element gets no child nodes', async () => {
+    const h = tsStart()
+    await h.flush()
+
+    await h.push(tsStatusFrame(new Date(Date.now() - 2 * TS_HOUR).toISOString()))
+
+    expect(h.timeEl.children).toHaveLength(0)
+  })
+
+  it('a stream started without a timeEl is unaffected by startedAt', async () => {
+    const h = tsStart({withTimeEl: false})
+    await h.flush()
+
+    await h.push(tsStatusFrame(new Date(Date.now() - 2 * TS_HOUR).toISOString()))
+
+    expect(h.timeEl.getAttribute('datetime')).toBe(h.seed)
+    expect(h.timeEl.textContent).toBe('just now')
+  })
+
+  it('after A→B, B’s frames never touch A’s time', async () => {
+    const a = tsStart({runId: 'run-ts-a'})
+    await a.flush()
+    const aStartedAt = new Date(Date.now() - 2 * TS_HOUR).toISOString()
+    await a.push(tsStatusFrame(aStartedAt, 'run-ts-a'))
+    a.handle.close()
+
+    const b = tsStart({runId: 'run-ts-b'})
+    await b.flush()
+    const bStartedAt = new Date(Date.now() - 4 * TS_HOUR).toISOString()
+    await b.push(tsStatusFrame(bStartedAt, 'run-ts-b'))
+
+    expect(b.timeEl.getAttribute('datetime')).toBe(bStartedAt)
+    expect(a.timeEl.getAttribute('datetime')).toBe(aStartedAt)
+    expect(a.timeEl.textContent).toBe('2 hours ago')
+  })
+})

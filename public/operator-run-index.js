@@ -653,8 +653,9 @@ const TERMINAL_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
  * set: data-run-id (immutable, set once at create), datetime (on <time>, from the
  * length-capped updatedAt already validated by parseRunSummaryItem), className
  * (allowlist-gated `.status-*` only), and textContent on the safe-view text children
- * (run-status label, run-repo text, run-updated-at text). No data-repo/data-status or
- * other run-metadata attribute is ever created.
+ * (run-status label, run-repo text, run-updated-at text). Adoption of a launch-seeded <time>
+ * also removes that <time>, or its data-time-source marker, as the list's updatedAt takes over.
+ * No data-repo/data-status or other run-metadata attribute is ever created.
  */
 function diffRunIndexList(list, views, opts) {
   const onSelectRun = opts?.onSelectRun
@@ -779,8 +780,27 @@ function cardShowsTerminalStatus(card) {
 }
 
 /**
+ * Hand a launch-seeded <time> (data-time-source="launch") to the list: write the view's updatedAt
+ * and drop the marker, or remove the <time> when the view has none (renderRunCard omits it too).
+ */
+function adoptLaunchSeededTime(card, view) {
+  if (typeof card.querySelector !== 'function') return
+  const timeEl = card.querySelector('[data-role="run-updated-at"]')
+  if (timeEl === null || timeEl === undefined || timeEl.dataset?.timeSource !== 'launch') return
+
+  if ('updatedAt' in view && view.updatedAt !== undefined) {
+    timeEl.setAttribute('datetime', view.updatedAt)
+    timeEl.textContent = formatRelativeTime(view.updatedAt)
+    delete timeEl.dataset.timeSource
+  } else {
+    timeEl.remove()
+  }
+}
+
+/**
  * Update a card's safe-view-derived fields in place. Closed attribute-mutation set:
- * className (status-* only), textContent (safe-view text children), datetime (on <time>).
+ * className (status-* only), textContent (safe-view text children), datetime (on <time>),
+ * plus removing a launch-seeded <time> and its data-time-source marker on adoption.
  * Never touches data-run-id or data-expanded on the card itself. The one structural
  * addition is a missing <time> (see below), built with the same safe-DOM shape as renderRunCard.
  * Never called for the active-stream card (the diff write-protects it).
@@ -793,6 +813,8 @@ function cardShowsTerminalStatus(card) {
  * non-terminal → anything still update.
  */
 function updateCardInPlace(card, view) {
+  // Before the sticky return: a stale view must not leave the card on its launch-seeded time.
+  adoptLaunchSeededTime(card, view)
   if (!TERMINAL_RUN_STATUSES.has(view.status) && cardShowsTerminalStatus(card)) return
 
   card.setAttribute(
