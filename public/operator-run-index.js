@@ -8,7 +8,7 @@
  * - credentials:'include', redirect:'error' on all fetch calls.
  */
 
-import {formatRelativeTime} from './operator-time.js'
+import {formatRelativeTime, LAUNCH_TIME_SOURCE, MAX_TIMESTAMP_LENGTH} from './operator-time.js'
 
 // Re-exported so existing importers of the run index keep working.
 export {formatRelativeTime}
@@ -19,7 +19,6 @@ export const RUN_INDEX_CAP = 100
 export const FETCH_TIMEOUT_MS = 10_000
 
 const MAX_ID_LENGTH = 512
-const MAX_DATE_LENGTH = 128
 
 /** 'blocked' is stream-only — a run summary never carries it. The waiting statuses are gateway overlays on a running run. */
 export const VALID_RUN_SUMMARY_STATUSES = new Set([
@@ -154,14 +153,14 @@ export function parseRunSummaryItem(input) {
     return {success: false, error: 'invalid run summary shape'}
   }
 
-  if (typeof candidate.createdAt !== 'string' || candidate.createdAt.length > MAX_DATE_LENGTH) {
+  if (typeof candidate.createdAt !== 'string' || candidate.createdAt.length > MAX_TIMESTAMP_LENGTH) {
     return {success: false, error: 'invalid run summary shape'}
   }
 
   // updatedAt is optional — if present must be a length-capped string
   if (
     'updatedAt' in candidate &&
-    (typeof candidate.updatedAt !== 'string' || candidate.updatedAt.length > MAX_DATE_LENGTH)
+    (typeof candidate.updatedAt !== 'string' || candidate.updatedAt.length > MAX_TIMESTAMP_LENGTH)
   ) {
     return {success: false, error: 'invalid run summary shape'}
   }
@@ -788,7 +787,7 @@ function cardShowsTerminalStatus(card) {
 function adoptLaunchSeededTime(card, view) {
   if (typeof card.querySelector !== 'function') return
   const timeEl = card.querySelector('[data-role="run-updated-at"]')
-  if (timeEl === null || timeEl === undefined || timeEl.dataset?.timeSource !== 'launch') return
+  if (timeEl === null || timeEl === undefined || timeEl.dataset?.timeSource !== LAUNCH_TIME_SOURCE) return
 
   if ('updatedAt' in view && view.updatedAt !== undefined) {
     timeEl.setAttribute('datetime', view.updatedAt)
@@ -1108,13 +1107,13 @@ function toggleCardExpansion(card, runId, onSelectRun) {
     const prevCard = document.querySelector(`[data-run-id="${CSS.escape(_expandedRunId)}"]`)
     if (prevCard !== null && prevCard !== undefined) {
       prevCard.dataset.expanded = 'false'
-      setSubstructureHidden(prevCard, true)
+      hideSubstructure(prevCard)
     }
   }
 
   card.dataset.expanded = isExpanded ? 'false' : 'true'
   // Collapse hides; expand shows nothing, since the stream's paint is the only thing that reveals a region.
-  if (isExpanded) setSubstructureHidden(card, true)
+  if (isExpanded) hideSubstructure(card)
   _expandedRunId = isExpanded ? null : runId
 
   onSelectRun(runId)
@@ -1156,7 +1155,7 @@ export function markCardExpandedForLaunch(runId) {
     const prevCard = document.querySelector(`[data-run-id="${CSS.escape(_expandedRunId)}"]`)
     if (prevCard !== null && prevCard !== undefined) {
       prevCard.dataset.expanded = 'false'
-      setSubstructureHidden(prevCard, true)
+      hideSubstructure(prevCard)
     }
   }
 
@@ -1189,7 +1188,7 @@ function expandCardForRestore(runId, onExpand) {
     const prevCard = document.querySelector(`[data-run-id="${CSS.escape(_expandedRunId)}"]`)
     if (prevCard !== null && prevCard !== undefined) {
       prevCard.dataset.expanded = 'false'
-      setSubstructureHidden(prevCard, true)
+      hideSubstructure(prevCard)
     }
   }
 
@@ -1199,12 +1198,12 @@ function expandCardForRestore(runId, onExpand) {
   onExpand(runId, card)
 }
 
-/** Set the `hidden` state of a card's per-card substructure regions; callers only hide. */
-function setSubstructureHidden(card, hidden) {
+/** Hide a card's per-card substructure regions. Only the stream shows one. */
+function hideSubstructure(card) {
   if (typeof card.querySelector !== 'function') return
   for (const role of SUBSTRUCTURE_ROLES) {
     const el = card.querySelector(`[data-role="${role}"]`)
-    if (el !== null && el !== undefined) el.hidden = hidden
+    if (el !== null && el !== undefined) el.hidden = true
   }
 }
 

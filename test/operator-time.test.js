@@ -1,11 +1,11 @@
 /**
- * Tests for the shared relative-time module (public/operator-time.js).
- *
- * The formatter moved here from the run index with its output unchanged; the normalizer is new.
+ * Tests for the shared time helpers in public/operator-time.js: the relative-time formatter, the ISO
+ * timestamp normalizer, and the constants other modules share (timestamp cap, launch time marker).
  */
+import {readFileSync} from 'node:fs'
 import {describe, expect, it} from 'vitest'
 import * as runIndex from '../public/operator-run-index.js'
-import {formatRelativeTime, normalizeIsoTimestamp} from '../public/operator-time.js'
+import {formatRelativeTime, LAUNCH_TIME_SOURCE, MAX_TIMESTAMP_LENGTH, normalizeIsoTimestamp} from '../public/operator-time.js'
 
 const NOW = Date.parse('2026-06-15T12:00:00.000Z')
 const SECOND = 1000
@@ -107,5 +107,47 @@ describe('normalizeIsoTimestamp', () => {
   it('accepts only what formatRelativeTime can then render', () => {
     const normalized = normalizeIsoTimestamp('2026-06-15T11:00:00Z')
     expect(formatRelativeTime(normalized, NOW)).toBe('1 hour ago')
+  })
+})
+
+describe('shared constants', () => {
+  const source = file => readFileSync(file, 'utf8')
+
+  it('exports the 128-character timestamp cap the normalizer enforces', () => {
+    expect(MAX_TIMESTAMP_LENGTH).toBe(128)
+    const base = 'Mon, 15 Jun 2026 12:00:00 GMT'
+    const padded = length => `${base} (${'x'.repeat(length - base.length - 3)})`
+    expect(normalizeIsoTimestamp(padded(MAX_TIMESTAMP_LENGTH))).toBe('2026-06-15T12:00:00.000Z')
+    expect(normalizeIsoTimestamp(padded(MAX_TIMESTAMP_LENGTH + 1))).toBeUndefined()
+  })
+
+  it('the run index caps createdAt and updatedAt with that same exported constant', () => {
+    const src = source('public/operator-run-index.js')
+    expect(src).toMatch(/import \{[^}]*MAX_TIMESTAMP_LENGTH[^}]*\} from '\.\/operator-time\.js'/)
+    expect(src).not.toContain('MAX_DATE_LENGTH')
+    expect(src).not.toMatch(/=\s*128\b/)
+  })
+
+  it('the run index accepts a 128-character timestamp and rejects 129', () => {
+    const base = {runId: 'run-cap-001', repo: 'fro-bot/agent', status: 'running'}
+    const at = length => `2026-06-15T12:00:00Z${' '.repeat(length - 20)}`
+    expect(runIndex.parseRunSummaryItem({...base, createdAt: at(MAX_TIMESTAMP_LENGTH)}).success).toBe(true)
+    expect(runIndex.parseRunSummaryItem({...base, createdAt: at(MAX_TIMESTAMP_LENGTH + 1)}).success).toBe(false)
+  })
+
+  it('the launch time marker is "launch"', () => {
+    expect(LAUNCH_TIME_SOURCE).toBe('launch')
+  })
+
+  it('the launch builder and the run index use the exported marker, not their own literal', () => {
+    for (const file of ['public/operator-launch.js', 'public/operator-run-index.js']) {
+      const src = source(file)
+      expect(src, file).toMatch(/import \{[^}]*LAUNCH_TIME_SOURCE[^}]*\} from '\.\/operator-time\.js'/)
+      expect(src, file).not.toMatch(/timeSource\s*(?:=|!==|===)\s*'launch'/)
+    }
+  })
+
+  it('the runtime seam selects the same marker value (it cannot import the public module)', () => {
+    expect(source('web/src/operator/runtime.ts')).toContain(`[data-role="run-updated-at"][data-time-source="${LAUNCH_TIME_SOURCE}"]`)
   })
 })

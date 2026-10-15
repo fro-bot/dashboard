@@ -453,7 +453,7 @@ async function defaultRuntimeLoader(opts?: {
     typeof StreamModule,
     'resetBootstrapState' | 'initOperatorStream'
   >
-  // Streams attach on expand, launch and restore only; the stream module's own bootstrap is not run here.
+  // Streams attach on expand, launch, restore and jump only; the stream module's own bootstrap is not run here.
   streamMod.resetBootstrapState()
 
   const runIndexMod = await import(/* @vite-ignore */ _runIndexSpecifier) as Pick<

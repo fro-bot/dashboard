@@ -11892,7 +11892,7 @@ describe('initOperatorStream — start time on a launch-seeded card', () => {
     await h.flush(60_000)
 
     expect(h.timeEl.getAttribute('datetime')).toBe(startedAt)
-    expect(h.timeEl.textContent).not.toBe('')
+    expect(h.timeEl.textContent).toBe('2 hours ago')
   })
 
   it('writes nothing after close()', async () => {

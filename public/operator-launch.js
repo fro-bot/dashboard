@@ -23,7 +23,7 @@
  */
 
 // Stateless, so a second instance of it (this module is loaded with a query string) is harmless.
-import {formatRelativeTime} from './operator-time.js'
+import {formatRelativeTime, LAUNCH_TIME_SOURCE} from './operator-time.js'
 
 // Mirrors RUN_INDEX_CAP in operator-run-index.js. Not imported directly: this module
 // and operator-run-index.js are loaded as separate dynamic-import instances (each
@@ -686,7 +686,7 @@ export async function initOperatorLaunch(opts) {
           const timeEl = document.createElement('time')
           timeEl.className = 'run-updated-at'
           timeEl.dataset.role = 'run-updated-at'
-          timeEl.dataset.timeSource = 'launch'
+          timeEl.dataset.timeSource = LAUNCH_TIME_SOURCE
           timeEl.setAttribute('datetime', launchedAt)
           timeEl.textContent = formatRelativeTime(launchedAt)
           card.append(timeEl)

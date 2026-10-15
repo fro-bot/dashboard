@@ -3,8 +3,11 @@
  * Pure: no DOM, no I/O, no module state.
  */
 
-/** Longest timestamp string accepted, matching the run index's cap on `updatedAt`. */
-const MAX_TIMESTAMP_LENGTH = 128
+/** Longest timestamp string accepted, here and by the run index for `createdAt` and `updatedAt`. */
+export const MAX_TIMESTAMP_LENGTH = 128
+
+/** The `data-time-source` value that marks a launch-seeded <time> until the run list adopts it. */
+export const LAUNCH_TIME_SOURCE = 'launch'
 
 /**
  * Format an ISO timestamp as a coarse relative time string.
