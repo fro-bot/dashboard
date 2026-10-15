@@ -80,4 +80,30 @@ describe('operator auth recovery after a successful initial load', () => {
     await waitFor(() => expect(maybeAutoRedirectToGatewaySignIn).toHaveBeenCalledTimes(1))
     expect(maybeAutoRedirectToGatewaySignIn).toHaveBeenCalledWith('auth-required')
   })
+
+  it('does not auto-redirect in fixture mode, which has no gateway sign-in route', async () => {
+    let onAuthRequired: (() => void) | undefined
+    vi.doMock('/static/operator-stream.js?manual=1', () => ({initOperatorStream: vi.fn()}))
+    vi.doMock('/static/operator-run-index.js?manual=1', () => ({
+      initOperatorRunIndex: vi.fn(async (options: {onAuthRequired: () => void}) => {
+        onAuthRequired = options.onAuthRequired
+        options.onAuthRequired()
+        return 'auth-required'
+      }),
+      refreshOperatorRunIndex: vi.fn(async () => false),
+      resetRunIndexState: vi.fn(),
+      markRunStreamAttached: vi.fn(),
+      markCardExpandedForLaunch: vi.fn(),
+    }))
+    vi.doMock('/static/operator-launch.js?manual=1', () => ({
+      initOperatorLaunch: vi.fn(async () => {}),
+      resetLaunchState: vi.fn(),
+    }))
+
+    render(<Operator state="ready" fixtureMode fixtureEndpointBase="/fixture/operator" fixtureSessionId="fixture-session" />)
+
+    await waitFor(() => expect(onAuthRequired).toBeDefined())
+    await act(async () => {})
+    expect(maybeAutoRedirectToGatewaySignIn).not.toHaveBeenCalled()
+  })
 })

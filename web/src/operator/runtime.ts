@@ -823,7 +823,8 @@ async function defaultRuntimeLoader(opts?: {
   // replaced this one) have nowhere to open a run.
   const initOutcome = await runIndexMod.initOperatorRunIndex(runIndexOpts)
   const runIndexLoaded = initOutcome === 'loaded' || initOutcome === 'empty'
-  if (initOutcome === 'auth-required') maybeAutoRedirectToGatewaySignIn('auth-required')
+  // The fixture harness has no gateway sign-in route, so it never redirects.
+  if (initOutcome === 'auth-required' && opts?.endpointBase === undefined) maybeAutoRedirectToGatewaySignIn('auth-required')
   if (runIndexLoaded) clearGatewaySignInRedirectGuard()
 
   launchMod.resetLaunchState()
