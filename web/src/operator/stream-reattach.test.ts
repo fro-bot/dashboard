@@ -458,6 +458,19 @@ const OPEN_QUESTION = frame('question', {...QUESTION_PAYLOAD, settled: false})
 const SETTLED_QUESTION = frame('question', {runId: RUN_ID, requestID: 'req-q', settled: true})
 
 const waitingOf = (parts: ReturnType<typeof makeFullCard>) => parts.regions['run-waiting']
+const CHECKOUT_PROVENANCE_STATUS = frame('status', {
+  ...RUNNING_STATUS,
+  checkoutProvenance: {
+    kind: 'observed',
+    observation: {
+      head: {kind: 'attached', branch: 'fixture-main', sha: 'a'.repeat(40)},
+      worktree: {kind: 'clean'},
+      operationInProgress: 'none',
+      observedAt: '2026-06-20T10:00:00Z',
+    },
+    remote: {kind: 'not-checked'},
+  },
+})
 
 describe('operator stream waiting line', () => {
   it('is hidden and empty at attach, before any frame', () => {
@@ -619,28 +632,63 @@ describe('operator stream waiting line', () => {
     handle.close()
   })
 
-  it('checkout detail showing hides the line', async () => {
+  it('checkout detail showing does not hide the line for a running run with no output', async () => {
     const {pushToLatest} = stubStreamFetch()
     const parts = makeFullCard()
     const handle = attachFull(parts)
     pushToLatest(READY + RUNNING)
     await vi.waitFor(() => expect(waitingOf(parts).hidden).toBe(false))
 
-    pushToLatest(frame('status', {
+    pushToLatest(CHECKOUT_PROVENANCE_STATUS)
+
+    await vi.waitFor(() => expect(parts.regions['run-checkout-detail'].hidden).toBe(false))
+    expect(waitingOf(parts).hidden).toBe(false)
+    expect(waitingOf(parts).textContent).toBe(WAITING_OUTPUT_COPY)
+    handle.close()
+  })
+
+  it('shows "Waiting for output…" when checkout provenance is painted on the first status', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+
+    pushToLatest(READY + CHECKOUT_PROVENANCE_STATUS)
+
+    await vi.waitFor(() => expect(parts.regions['run-checkout-detail'].hidden).toBe(false))
+    expect(waitingOf(parts).hidden).toBe(false)
+    expect(waitingOf(parts).textContent).toBe(WAITING_OUTPUT_COPY)
+    handle.close()
+  })
+
+  it('shows "Waiting to start…" for a queued run with checkout preparation painted', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+
+    pushToLatest(READY + frame('status', {
       ...RUNNING_STATUS,
-      checkoutProvenance: {
-        kind: 'observed',
-        observation: {
-          head: {kind: 'attached', branch: 'fixture-main', sha: 'a'.repeat(40)},
-          worktree: {kind: 'clean'},
-          operationInProgress: 'none',
-          observedAt: '2026-06-20T10:00:00Z',
-        },
-        remote: {kind: 'not-checked'},
-      },
+      status: 'queued',
+      phase: 'PENDING',
+      checkoutPreparation: {outcome: 'refused', reason: 'detached'},
     }))
 
     await vi.waitFor(() => expect(parts.regions['run-checkout-detail'].hidden).toBe(false))
+    expect(waitingOf(parts).hidden).toBe(false)
+    expect(waitingOf(parts).textContent).toBe(WAITING_START_COPY)
+    handle.close()
+  })
+
+  it('output still hides the line while checkout detail is showing', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts)
+    pushToLatest(READY + CHECKOUT_PROVENANCE_STATUS)
+    await vi.waitFor(() => expect(waitingOf(parts).hidden).toBe(false))
+
+    pushToLatest(OUTPUT)
+
+    await vi.waitFor(() => expect(parts.regions['run-output'].hidden).toBe(false))
+    expect(parts.regions['run-checkout-detail'].hidden).toBe(false)
     expect(waitingOf(parts).hidden).toBe(true)
     handle.close()
   })

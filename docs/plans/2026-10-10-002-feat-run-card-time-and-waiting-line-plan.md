@@ -31,7 +31,7 @@ Separately, `defaultRuntimeLoader` calls `bootstrapOperatorStreams` on every loa
 - R2. While the stream owns a launched card, the time's relative text is recomputed on every paint. The launched card has no timer. Collapsed list cards repaint on the 30-second run-list refresh.
 - R3. Fetched cards keep the run list's last-update time (`updatedAt`). When the run list takes over a collapsed launched card, that card shows `updatedAt` too.
 - R4. Expanding any card shows only regions with content. The approval badge and the Cancel region are never visible while empty.
-- R5. A waiting line inside the card shows only when all of these hold: the stream is live, the run is not terminal, the effective status is not blocked, and nothing is showing (no output, open approval, open question or checkout detail). Its copy is "Waiting to start…" for queued runs and "Waiting for output…" otherwise. Answered-question notes and a stale `waiting_for_*` status do not hide it.
+- R5. A waiting line inside the card shows only when all of these hold: the stream is live, the run is not terminal, the effective status is not blocked, and nothing is showing (no output, open approval or open question). Checkout detail is context, not output, so it does not hide the line. Its copy is "Waiting to start…" for queued runs and "Waiting for output…" otherwise. Answered-question notes and a stale `waiting_for_*` status do not hide it either.
 - R6. A collapsed card receives no stream writes: streams attach only to expanded cards.
 - R7. All new text is written as text nodes. The three card builders keep the same anatomy. The relative-time formatter lives in one shared module.
 
@@ -158,7 +158,7 @@ Separately, `defaultRuntimeLoader` calls `bootstrapOperatorStreams` on every loa
   - At attach, `initOperatorStream` clears and hides every stream-owned region: output text and its unavailable state, coalesced hint, badge, waiting line, and the regions it already resets.
   - Just before `connect()` it calls `updateDOM` once, after all closure bindings exist. That paints "Connecting to run stream…" at attach and gives the same result on every expand path.
   - Re-expanding a finished run blanks its body until the replay paints again, or shows "Output no longer available." if the replay has expired. The card shows what the stream reports now, not what was painted before.
-- **One content predicate from rendered state.** Computed inside `updateDOM` from the same values that drive the regions: output text or the unavailable state, open approval prompts, open question requests, checkout detail. Answered-question notes and the Cancel control do not count.
+- **One content predicate from rendered state.** Computed inside `updateDOM` from the same values that drive the regions: output text or the unavailable state, open approval prompts, open question requests. Checkout detail, answered-question notes and the Cancel control do not count.
 - **Status inputs for the waiting line.** The line's status test uses the effective status, so a stale `waiting_for_*` status does not hide it. A placeholder entry (empty status) counts as "status not yet known" and gets "Waiting for output…".
 - **Empty-region fixes.**
   - CSS: `[data-role="approval-badge"][hidden]` and `[data-role="run-waiting"][hidden]` both get `display: none`. The badge rule follows the `run-cancel` precedent at `web/src/index.css:1157`; today the badge block at 625-635 has no `[hidden]` override.
@@ -397,7 +397,8 @@ sequenceDiagram
 - Edge case: an answered-question note alone does not hide the line.
 - Edge case: blocked and every terminal status hide the line. The expired terminal shows "Output no longer available." instead.
 - Edge case: connecting, reconnecting, backpressure, `submitted-unobservable`, failed, not-found, drift and closed all hide the line.
-- Edge case: output, an open approval, an open question or checkout detail each hide the line. It comes back when the last open item settles and nothing else is showing.
+- Edge case: output, an open approval or an open question each hide the line. It comes back when the last open item settles and nothing else is showing.
+- Edge case: checkout detail does not hide the line. A running run with checkout provenance and no output shows "Waiting for output…", and a queued run with checkout preparation shows "Waiting to start…".
 - Edge case: a Cancel control alone does not hide the line.
 - Integration: the line is never visible on a collapsed card, and it hides on `close()`.
 - Parity: all three builders produce the same role sequence, including `run-waiting`. `ensureRunCardAnatomy` is idempotent. `discoverCardStreamTargets` returns the waiting target. The parity tests are at `test/operator-run-index-core.test.js:3580` and `3720`, and `test/operator-launch-core.test.ts:324`.

@@ -3990,16 +3990,15 @@ export function initOperatorStream(opts) {
       questionsEl.hidden = presentIds.size === 0
     }
 
-    // Waiting line: shown only while live and non-terminal, and when no output, open prompt, open
-    // question or checkout detail is showing. Answered-question notes and the wire status do not hide it.
+    // Waiting line: shown only while live and non-terminal, and when no output, open prompt or open
+    // question is showing. Checkout detail, answered-question notes and the wire status do not hide it.
     if (waitingEl) {
       const runEntry = state.runs[runId]
       const effectiveStatus = getEffectiveStatus(runEntry)
       const hasContent = runEntry?.outputUnavailable === true ||
         (typeof runEntry?.outputText === 'string' && runEntry.outputText !== '') ||
         getOpenApprovals(runEntry).length > 0 ||
-        getQuestions().length > 0 ||
-        (checkoutEl !== undefined && checkoutEl !== null && !checkoutEl.hidden)
+        getQuestions().length > 0
       // A terminal run-list status holds until the stream reports a status of its own.
       const summaryTerminal = summaryStatus !== undefined && TERMINAL_STATUSES.has(summaryStatus) &&
         (runEntry === undefined || runEntry.status === '')

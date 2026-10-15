@@ -143,9 +143,9 @@ content. Collapsing hides the regions again.
 
 While the stream is live, the waiting line reads "Waiting to start…" for a queued run
 and "Waiting for output…" otherwise. It hides on output, an open approval, an open
-question, visible checkout detail, a terminal or blocked status, and any non-live
-connection. A terminal run-list `summaryStatus` holds it hidden until the stream sends a
-non-terminal status.
+question, a terminal or blocked status, and any non-live connection. Visible checkout
+detail is context, not output, so it does not hide the line. A terminal run-list
+`summaryStatus` holds it hidden until the stream sends a non-terminal status.
 
 A launched card seeds a `<time data-time-source="launch">`, and the stream writes the
 normalized `startedAt` into it. On adoption the list's `updatedAt` takes over, or the
