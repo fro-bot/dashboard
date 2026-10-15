@@ -320,9 +320,10 @@ describe('sw.ts message handler (behavioral)', () => {
   let installListeners: string[]
   const skipWaiting = vi.fn(() => Promise.resolve())
 
-  function dispatchMessage(data: unknown): void {
+  function dispatchMessage(data: unknown): ReturnType<typeof vi.fn> {
     const waitUntil = vi.fn()
     messageListener(Object.assign(new Event('message'), {data, waitUntil}))
+    return waitUntil
   }
 
   beforeEach(async () => {
@@ -348,8 +349,10 @@ describe('sw.ts message handler (behavioral)', () => {
   })
 
   it('calls skipWaiting() when the page posts {type: SKIP_WAITING} (what updateServiceWorker(true) sends)', () => {
-    dispatchMessage({type: 'SKIP_WAITING'})
+    const waitUntil = dispatchMessage({type: 'SKIP_WAITING'})
     expect(skipWaiting).toHaveBeenCalledTimes(1)
+    // Tied to the message event's lifetime, so the worker stays alive until activation is requested.
+    expect(waitUntil).toHaveBeenCalledWith(skipWaiting.mock.results[0]?.value)
   })
 
   it('does NOT skip waiting on install — activation stays prompt-gated', () => {

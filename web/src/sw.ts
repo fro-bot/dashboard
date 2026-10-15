@@ -125,7 +125,7 @@ addEventListener('message', (event: Event) => {
   // Posted by workbox-window's messageSkipWaiting() when the operator clicks
   // Refresh in the update prompt — the sole trigger for activating a waiting worker.
   if (messageType === 'SKIP_WAITING') {
-    void self.skipWaiting()
+    e.waitUntil(self.skipWaiting())
   }
   if (messageType === 'PURGE_RUNTIME') {
     e.waitUntil(
