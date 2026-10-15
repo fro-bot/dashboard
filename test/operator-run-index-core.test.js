@@ -4755,6 +4755,41 @@ describe('refreshOperatorRunIndex — a new run lands in fetch order around the 
     expect(cardB.dataset.streamAttached).toBe('true')
   })
 
+  // The launch card is inserted on top (newest run) and expanded; the expand triggers a refresh that
+  // can land before the gateway lists the run. It must stay on top, then be adopted in place.
+  async function initWithUnlistedOptimisticOnTop() {
+    const setup = await initWith(['run-ord-B', 'run-ord-C'])
+    const optimistic = makeStatusOnlyOptimisticCard(setup.cards, 'run-ord-A')
+    setup.cards.splice(setup.cards.indexOf(optimistic), 1)
+    setup.cards.unshift(optimistic)
+    markCardExpandedForLaunch('run-ord-A')
+    expect(optimistic.dataset.expanded).toBe('true')
+    return {...setup, optimistic}
+  }
+
+  it('an unlisted optimistic card stays on top of the fetched cards, same node, still expanded', async () => {
+    const {net, cards, optimistic} = await initWithUnlistedOptimisticOnTop()
+
+    await refreshWith(net, 1, ['run-ord-B', 'run-ord-C'])
+    expect(ids(cards)).toEqual(['run-ord-A', 'run-ord-B', 'run-ord-C'])
+    expect(cards[0]).toBe(optimistic)
+    expect(optimistic.dataset.expanded).toBe('true')
+    expect(optimistic.dataset.optimistic).toBe('true')
+  })
+
+  it('once the fetch lists the optimistic card it is adopted in place', async () => {
+    const {net, cards, optimistic} = await initWithUnlistedOptimisticOnTop()
+
+    await refreshWith(net, 1, ['run-ord-B', 'run-ord-C'])
+    expect(ids(cards)).toEqual(['run-ord-A', 'run-ord-B', 'run-ord-C'])
+
+    await refreshWith(net, 2, ['run-ord-A', 'run-ord-B', 'run-ord-C'])
+    expect(ids(cards)).toEqual(['run-ord-A', 'run-ord-B', 'run-ord-C'])
+    expect(cards[0]).toBe(optimistic)
+    expect(optimistic.dataset.expanded).toBe('true')
+    expect(optimistic.dataset.optimistic).toBeUndefined()
+  })
+
   it('a focused card keeps focus when a new run is inserted above the expanded run', async () => {
     const {net, cards, doc} = await initWith(['run-ord-B'])
     const cardB = cards[0]

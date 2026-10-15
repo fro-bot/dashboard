@@ -641,7 +641,9 @@ const TERMINAL_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
  *
  * Order: the list follows the fetched order for every card. The gateway sorts by createdAt,
  * which never changes, so existing cards keep their relative order; a new run lands on top.
- * A protected card the fetch no longer lists stays behind the fetched cards, at the end.
+ * A protected card the fetch no longer lists stays behind the fetched cards, at the end — except an
+ * unlisted optimistic launch card at the head of the list, which stays there (it is the newest run,
+ * not yet indexed) until a fetch lists it.
  *
  * Protected-card identification (optimistic launch): a DOM card absent from the fetched
  * view list is preserved when it is the active-stream card, OR when it carries
@@ -693,8 +695,14 @@ function diffRunIndexList(list, views, opts) {
   const targetOrder = views.map(v => v.runId)
   const viewsByRunId = new Map(views.map(v => [v.runId, v]))
 
-  // Update/create/reposition pass, walking the target order.
+  // An unlisted optimistic launch card is the newest run, so it stays at the head of the list until
+  // the gateway indexes it (the list is newest-first). Start the walk after any such leading cards.
   let cursor = list.firstChild
+  while (cursor !== null && cursor !== undefined && isUnlistedOptimisticCard(cursor, fetchedIds)) {
+    cursor = cursor.nextSibling
+  }
+
+  // Update/create/reposition pass, walking the target order.
   for (const runId of targetOrder) {
     const view = viewsByRunId.get(runId)
     let card = existingCards.get(runId)
@@ -735,6 +743,11 @@ function diffRunIndexList(list, views, opts) {
       cursor.before(card)
     }
   }
+}
+
+/** True iff a card is an optimistic launch card the fetch does not list. */
+function isUnlistedOptimisticCard(card, fetchedIds) {
+  return card.dataset?.optimistic === 'true' && !fetchedIds.has(card.dataset.runId)
 }
 
 /** True iff a card's own run-status element already shows a terminal status class. */
