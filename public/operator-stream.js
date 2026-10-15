@@ -3995,13 +3995,10 @@ export function initOperatorStream(opts) {
     if (waitingEl) {
       const runEntry = state.runs[runId]
       const effectiveStatus = getEffectiveStatus(runEntry)
-      // Any question card the region paints counts, including one kept while its request is checked.
-      const hasQuestionCard = getQuestions().length > 0 ||
-        [...renderedQuestionCards.keys()].some(requestID => questionStatuses.get(requestID)?.kind === 'checking')
       const hasContent = runEntry?.outputUnavailable === true ||
         (typeof runEntry?.outputText === 'string' && runEntry.outputText !== '') ||
         getOpenApprovals(runEntry).length > 0 ||
-        hasQuestionCard ||
+        getQuestions().length > 0 ||
         (checkoutEl !== undefined && checkoutEl !== null && !checkoutEl.hidden)
       // A terminal run-list status holds until the stream reports a status of its own.
       const summaryTerminal = summaryStatus !== undefined && TERMINAL_STATUSES.has(summaryStatus) &&
@@ -4815,11 +4812,8 @@ export function bootstrapOperatorStreams(opts) {
 /**
  * Reset the bootstrap state.
  *
- * Closes all active stream handles and removes the pagehide listener registered
- * during the last bootstrapOperatorStreams() call. Called by the React runtime
- * seam cleanup so that a remount (e.g. after auth expiry and re-login) can
- * re-bootstrap the streams without leaking handles or duplicate listeners.
- * Also used in tests.
+ * Closes the handles and removes the pagehide listener from the last bootstrapOperatorStreams() call.
+ * That bootstrap is the module's own non-manual start; the runtime seam does not use it, and tests do.
  */
 export function resetBootstrapState() {
   // Close all active handles before clearing state

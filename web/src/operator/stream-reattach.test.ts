@@ -797,8 +797,8 @@ describe('operator stream waiting line by connection state', () => {
   })
 })
 
-describe('operator stream waiting line follows the question cards the region paints', () => {
-  it('stays hidden while a question card is on screen in "checking" state, and returns when the card goes', async () => {
+describe('operator stream waiting line beside an open question', () => {
+  it('stays hidden while an open question shows, even mid-check, and returns when the question settles', async () => {
     const {pushToLatest} = stubStreamFetch()
     const parts = makeFullCard()
     const handle = attachFull(parts, {
@@ -818,9 +818,9 @@ describe('operator stream waiting line follows the question cards the region pai
     pushToLatest(SETTLED_QUESTION)
     await vi.waitFor(() => expect(handle.getQuestions()).toHaveLength(0))
 
-    // Whatever the region paints decides the line: with the card gone, nothing is showing.
-    const cardOnScreen = parts.regions['run-questions'].textContent?.includes('Pick one') === true
-    expect(waitingOf(parts).hidden).toBe(cardOnScreen)
+    expect(parts.regions['run-questions'].hidden).toBe(true)
+    expect(waitingOf(parts).hidden).toBe(false)
+    expect(waitingOf(parts).textContent).toBe(WAITING_OUTPUT_COPY)
     handle.close()
   })
 })
