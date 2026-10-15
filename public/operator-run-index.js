@@ -639,9 +639,9 @@ const TERMINAL_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
  * repositioned via a Node move that preserves element identity. updateDOM (operator-stream.js)
  * is the sole writer to that card's substructure.
  *
- * Re-sort lock: the currently expanded card (_expandedRunId) is never repositioned by
- * this diff, even if its status flips to terminal mid-stream. Its position is frozen
- * until it collapses.
+ * Order: the list follows the fetched order for every card. The gateway sorts by createdAt,
+ * which never changes, so existing cards keep their relative order; a new run lands on top.
+ * A protected card the fetch no longer lists stays behind the fetched cards, at the end.
  *
  * Protected-card identification (optimistic launch): a DOM card absent from the fetched
  * view list is preserved when it is the active-stream card, OR when it carries
@@ -662,15 +662,11 @@ function diffRunIndexList(list, views, opts) {
   const onSelectRun = opts?.onSelectRun
   const activeStreamRunId = opts?.activeStreamRunId ?? null
 
-  // Snapshot existing DOM order and cards by runId before mutating anything.
-  const existingOrder = []
+  // Snapshot existing cards by runId before mutating anything.
   const existingCards = new Map()
   for (const child of Array.from(list.children ?? [])) {
     const runId = child.dataset?.runId
-    if (typeof runId === 'string') {
-      existingCards.set(runId, child)
-      existingOrder.push(runId)
-    }
+    if (typeof runId === 'string') existingCards.set(runId, child)
   }
 
   const fetchedIds = new Set(views.map(v => v.runId))
@@ -690,38 +686,21 @@ function diffRunIndexList(list, views, opts) {
     existingCards.delete(runId)
   }
 
-  // Re-sort lock: the currently expanded card (if it still exists) must not move
-  // relative to its siblings, even though the fetched order may rank it elsewhere
-  // (e.g. it flipped to terminal and would otherwise sort below active runs).
-  // Compute a target order that respects the fetch order for every OTHER card,
-  // but reinserts the frozen runId back at its current relative DOM index.
-  const frozenRunId = _expandedRunId
-  const frozenCardStillPresent = frozenRunId !== null && existingCards.has(frozenRunId)
-
-  let targetOrder = views.map(v => v.runId)
-  if (frozenCardStillPresent) {
-    // Position among the cards that survived removal, in their original relative order.
-    const survivingOriginalOrder = existingOrder.filter(id => existingCards.has(id))
-    const frozenIndexAmongSurvivors = survivingOriginalOrder.indexOf(frozenRunId)
-
-    const withoutFrozen = targetOrder.filter(id => id !== frozenRunId)
-    // Clamp so a frozen card at/after the end of the surviving list still lands validly.
-    const insertAt = Math.min(frozenIndexAmongSurvivors, withoutFrozen.length)
-    withoutFrozen.splice(insertAt < 0 ? withoutFrozen.length : insertAt, 0, frozenRunId)
-    targetOrder = withoutFrozen
-  }
-
+  // The list follows fetch order for every card. The gateway sorts by createdAt, which never
+  // changes for a run, so existing cards never reorder: the only changes are new runs at the top
+  // and old runs dropping off the end. A protected card the fetch no longer lists is not in this
+  // order, so the walk below leaves it behind the fetched cards, at the end of the list.
+  const targetOrder = views.map(v => v.runId)
   const viewsByRunId = new Map(views.map(v => [v.runId, v]))
 
-  // Update/create/reposition pass, walking the computed target order.
+  // Update/create/reposition pass, walking the target order.
   let cursor = list.firstChild
   for (const runId of targetOrder) {
     const view = viewsByRunId.get(runId)
     let card = existingCards.get(runId)
 
     if (card === undefined) {
-      // New card — view is guaranteed to exist here (targetOrder only contains
-      // fetched runIds plus, at most, the still-present frozen runId).
+      // New card — view is guaranteed to exist here (targetOrder only contains fetched runIds).
       card = renderRunCard(view, onSelectRun)
       if (cursor === null || cursor === undefined) {
         list.append(card)
@@ -732,12 +711,10 @@ function diffRunIndexList(list, views, opts) {
     }
 
     const isActive = runId === activeStreamRunId && card.dataset.streamAttached === 'true'
-    const isFrozen = runId === frozenRunId
 
     if (!isActive && view !== undefined) {
       // Non-active card with a fetched view: normal in-place attribute update is
-      // safe (no concurrent writer). A frozen-but-fetched card is still updated
-      // in place (status/label/time) — only its DOM position is locked.
+      // safe (no concurrent writer).
       if (card.dataset.optimistic === 'true') {
         // First non-active adoption of a launch-created card: it was built with
         // only the status anatomy, so add what a fetched card has (repo, time,
@@ -747,15 +724,8 @@ function diffRunIndexList(list, views, opts) {
       updateCardInPlace(card, view)
       if (card.dataset.optimistic === 'true') delete card.dataset.optimistic
     }
-    // Active card, or a frozen card absent from the fetch: write-protected —
-    // updateDOM (or the prior state) remains the substructure's sole writer.
-
-    if (isFrozen) {
-      // Never reposition the frozen card itself, but do advance the cursor past
-      // it so subsequent cards in this pass are inserted after its fixed slot.
-      cursor = card.nextSibling
-      continue
-    }
+    // Active card: write-protected — updateDOM remains the substructure's sole writer.
+    // It is still moved to its fetch slot (a Node move keeps its identity).
 
     if (card === cursor) {
       cursor = cursor.nextSibling
@@ -1030,7 +1000,7 @@ function insertBeforeFirstRole(card, el, roles) {
  * In place, not replace-with-renderRunCard, on purpose: the runtime seam and
  * operator-stream.js hold references into the optimistic card's substructure
  * (run-status element, etc.), and node identity also preserves DOM position, the
- * expanded/frozen lock, and focus. Replacing the node would orphan those references.
+ * expanded state, and focus. Replacing the node would orphan those references.
  *
  * Idempotent: only creates what is missing and binds listeners at most once, so
  * repeated calls never duplicate elements or handlers. Never called on the
