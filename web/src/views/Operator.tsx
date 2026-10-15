@@ -25,7 +25,7 @@ import {useEffect, useRef, useState} from 'react'
 import {getStateActionReason, getStateDetail, getStateHeadline, getStateRecoveryHint} from '../operator/copy.ts'
 import {createOperatorRuntime} from '../operator/runtime.ts'
 import type {OperatorRuntimeHandle} from '../operator/runtime.ts'
-import {maybeAutoRedirectToGatewaySignIn, navigateToGatewaySignIn} from '../operator/sign-in-recovery.ts'
+import {navigateToGatewaySignIn} from '../operator/sign-in-recovery.ts'
 import {isActionDisabled} from '../operator/state.ts'
 import type {OperatorState} from '../operator/state.ts'
 
@@ -82,10 +82,6 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
   const actionReason = getStateActionReason(state)
   const recoveryHint = getStateRecoveryHint(state)
   const actionsDisabled = isActionDisabled(state)
-
-  useEffect(() => {
-    maybeAutoRedirectToGatewaySignIn(state)
-  }, [state])
 
   // Controlled scenario state so getScenario() reads the current value at submit time.
   const [scenario, setScenario] = useState('success')

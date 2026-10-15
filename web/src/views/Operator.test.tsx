@@ -2,10 +2,9 @@ import {fireEvent, render, screen} from '@testing-library/react'
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {Operator} from './Operator.tsx'
 import type {OperatorState} from '../operator/state.ts'
-import {maybeAutoRedirectToGatewaySignIn, navigateToGatewaySignIn} from '../operator/sign-in-recovery.ts'
+import {navigateToGatewaySignIn} from '../operator/sign-in-recovery.ts'
 
 vi.mock('../operator/sign-in-recovery.ts', () => ({
-  maybeAutoRedirectToGatewaySignIn: vi.fn(),
   navigateToGatewaySignIn: vi.fn(),
 }))
 
@@ -116,12 +115,6 @@ describe('Operator — state prop rendering', () => {
     expect(navigateToGatewaySignIn).toHaveBeenCalledTimes(1)
   })
 
-  it('checks for an automatic sign-in redirect when auth is required', () => {
-    render(<Operator state="auth-required" />)
-
-    expect(maybeAutoRedirectToGatewaySignIn).toHaveBeenCalledWith('auth-required')
-  })
-
   it('shows the button without redirecting when the tab guard is already set', () => {
     sessionStorage.setItem('fro-bot.operator-sign-in-redirect', String(Date.now()))
 
@@ -152,7 +145,7 @@ describe('Operator — state prop rendering', () => {
 })
 
 describe('Operator — disabled action reasons', () => {
-  const disabledStates: OperatorState[] = ['auth-required', 'rate-limited', 'offline', 'unavailable', 'loading']
+  const disabledStates: OperatorState[] = ['rate-limited', 'offline', 'unavailable', 'loading']
 
   for (const state of disabledStates) {
     it(`renders a visible action-disabled reason for ${state}`, () => {
@@ -910,8 +903,7 @@ describe('Operator — post-launch focus-steal guard', () => {
 })
 
 describe('Operator — failure state distinct treatments', () => {
-  const failureStates: ('auth-required' | 'rate-limited' | 'offline' | 'unavailable')[] = [
-    'auth-required',
+  const failureStates: ('rate-limited' | 'offline' | 'unavailable')[] = [
     'rate-limited',
     'offline',
     'unavailable',

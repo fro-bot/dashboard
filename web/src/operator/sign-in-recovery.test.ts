@@ -74,4 +74,26 @@ describe('operator sign-in redirect recovery', () => {
     await vi.waitFor(() => expect(sessionStorage.getItem(SIGN_IN_GUARD_KEY)).toBeNull())
     runtime.cleanup()
   })
+
+  it.each(['auth-required', 'unavailable'] as const)('preserves the tab redirect guard after an %s run-list outcome', async outcome => {
+    const guardValue = String(Date.now())
+    sessionStorage.setItem(SIGN_IN_GUARD_KEY, guardValue)
+    vi.doMock('/static/operator-stream.js?manual=1', () => ({initOperatorStream: vi.fn()}))
+    vi.doMock('/static/operator-run-index.js?manual=1', () => ({
+      initOperatorRunIndex: vi.fn(async () => outcome),
+      refreshOperatorRunIndex: vi.fn(async () => false),
+      resetRunIndexState: vi.fn(),
+      markRunStreamAttached: vi.fn(),
+      markCardExpandedForLaunch: vi.fn(),
+    }))
+    vi.doMock('/static/operator-launch.js?manual=1', () => ({
+      initOperatorLaunch: vi.fn(async () => {}),
+      resetLaunchState: vi.fn(),
+    }))
+
+    const runtime = createOperatorRuntime({container: document.createElement('div'), onStateChange: vi.fn()})
+
+    await vi.waitFor(() => expect(sessionStorage.getItem(SIGN_IN_GUARD_KEY)).toBe(guardValue))
+    runtime.cleanup()
+  })
 })
