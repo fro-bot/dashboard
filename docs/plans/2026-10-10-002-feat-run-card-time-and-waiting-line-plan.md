@@ -1,7 +1,7 @@
 ---
 title: "feat: Run card time, content-only expand, and in-card waiting line"
 type: feat
-status: active
+status: completed
 date: 2026-10-10
 ---
 
@@ -212,7 +212,7 @@ sequenceDiagram
 
 ## Implementation Units
 
-- [ ] **Unit 1: Shared time module**
+- [x] **Unit 1: Shared time module**
 
 **Goal:** One relative-time formatter and ISO normalizer, served as reliably as the modules that import it.
 
@@ -246,7 +246,7 @@ sequenceDiagram
 
 **Verification:** the run index output is unchanged, and the new module is served wherever its importers are.
 
-- [ ] **Unit 2: Streams attach only on expand**
+- [x] **Unit 2: Streams attach only on expand**
 
 **Goal:** Collapsed cards never receive stream writes.
 
@@ -271,7 +271,7 @@ sequenceDiagram
 
 **Verification:** on the fixture server, no stream requests go out before a card is expanded.
 
-- [ ] **Unit 3: Launch-seeded time and stream time writer**
+- [x] **Unit 3: Launch-seeded time and stream time writer**
 
 **Goal:** A launched card shows a time immediately, and the stream keeps it current with the run's start time.
 
@@ -315,7 +315,7 @@ sequenceDiagram
 
 **Verification:** a launched card shows a time from creation through the run's start. Fetched cards are unaffected.
 
-- [ ] **Unit 4: Stream-owned reveal and empty-region fixes**
+- [x] **Unit 4: Stream-owned reveal and empty-region fixes**
 
 **Goal:** Expanding any card never shows an empty or stale region.
 
@@ -354,7 +354,7 @@ sequenceDiagram
 
 **Verification:** on the fixture server, every expand path shows only regions with content. The empty badge pill no longer renders on any card.
 
-- [ ] **Unit 5: In-card waiting line**
+- [x] **Unit 5: In-card waiting line**
 
 **Goal:** The card says the run is waiting, without repeating the status.
 
