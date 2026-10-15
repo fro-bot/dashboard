@@ -36,7 +36,7 @@ const COPY: Record<OperatorState, OperatorStateCopy> = {
   'auth-required': {
     headline: 'Sign in required',
     detail: "You're signed out.",
-    actionReason: 'Launch and approval actions are disabled until you sign in.',
+    actionReason: null,
     recoveryHint: '',
   },
   'rate-limited': {

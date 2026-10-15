@@ -44,12 +44,6 @@ describe('getStateDetail', () => {
 })
 
 describe('getStateActionReason', () => {
-  it('returns a non-empty reason for auth-required', () => {
-    const reason = getStateActionReason('auth-required')
-    expect(reason).not.toBeNull()
-    expect((reason as string).length).toBeGreaterThan(0)
-  })
-
   it('returns a non-empty reason for rate-limited', () => {
     const reason = getStateActionReason('rate-limited')
     expect(reason).not.toBeNull()
@@ -129,12 +123,6 @@ describe('copy security — no raw signal values', () => {
       })
     }
   }
-
-  it('auth-required action reason does not include raw status codes', () => {
-    const reason = getStateActionReason('auth-required') ?? ''
-    expect(reason).not.toMatch(/\b4\d\d\b/)
-    expect(reason).not.toMatch(/\b5\d\d\b/)
-  })
 
   it('rate-limited action reason does not include raw status codes', () => {
     const reason = getStateActionReason('rate-limited') ?? ''
