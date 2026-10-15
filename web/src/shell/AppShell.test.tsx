@@ -119,6 +119,7 @@ describe('AppShell', () => {
   afterEach(() => {
     document.documentElement.removeAttribute('data-theme')
     vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
     vi.restoreAllMocks()
   })
 
