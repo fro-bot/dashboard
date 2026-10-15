@@ -8,6 +8,11 @@
  * - credentials:'include', redirect:'error' on all fetch calls.
  */
 
+import {formatRelativeTime} from './operator-time.js'
+
+// Re-exported so existing importers of the run index keep working.
+export {formatRelativeTime}
+
 export const RUN_INDEX_CAP = 100
 
 /** Timeout for the /runs fetch — matches server-side Gateway fetch timeout precedent. */
@@ -226,28 +231,6 @@ export function buildRunSafeView(summary) {
     ...('updatedAt' in summary ? {updatedAt: summary.updatedAt} : {}),
     ...(reasonLabel === undefined ? {} : {reasonLabel}),
   }
-}
-
-/**
- * Format an ISO timestamp as a coarse relative time string.
- * Returns 'just now', 'N minute(s) ago', 'N hour(s) ago', or 'N day(s) ago'.
- */
-export function formatRelativeTime(isoString, nowMs = Date.now()) {
-  if (!isoString) return ''
-  const date = new Date(isoString)
-  if (Number.isNaN(date.getTime())) return ''
-
-  const diff = Math.max(0, nowMs - date.getTime())
-  if (diff < 60_000) return 'just now'
-
-  const mins = Math.floor(diff / 60_000)
-  if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'} ago`
-
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`
-
-  const days = Math.floor(hours / 24)
-  return `${days} day${days === 1 ? '' : 's'} ago`
 }
 
 /**

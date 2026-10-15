@@ -577,6 +577,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     path === '/static/operator-stream.js' ||
     path === '/static/operator-launch.js' ||
     path === '/static/operator-run-index.js' ||
+    path === '/static/operator-time.js' ||
     (operatorUiEnabled && path.startsWith('/static/')) ||
     // Fixture harness routes — public ONLY when the full fixture gate is active
     // (non-production + loopback bind + flag enabled). Otherwise not in public list.
@@ -779,6 +780,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   app.use('/static/operator-stream.js', publicStatic.serve)
   app.use('/static/operator-launch.js', publicStatic.serve)
   app.use('/static/operator-run-index.js', publicStatic.serve)
+  app.use('/static/operator-time.js', publicStatic.serve)
 
   // ── Operator UI skeleton route ────────────────────────────────────────────────
   // Only mounted when operatorUiEnabled is true (default: false).

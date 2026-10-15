@@ -7,6 +7,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 
 import {buildRunSafeView, FETCH_TIMEOUT_MS, fetchRunIndex, formatRelativeTime, initOperatorRunIndex, markCardExpandedForLaunch, markRunStreamAttached, parseRunSummaryItem, parseRunSummaryList, refreshOperatorRunIndex, resetRunIndexState, RUN_INDEX_CAP, FAILURE_REASON_LABELS as RUN_INDEX_FAILURE_REASON_LABELS, RUN_STATUS_CLASS_TOKENS, VALID_RUN_SUMMARY_STATUSES} from '../public/operator-run-index.js'
 import {FAILURE_REASON_LABELS as STREAM_FAILURE_REASON_LABELS} from '../public/operator-stream.js'
+import {formatRelativeTime as sharedFormatRelativeTime} from '../public/operator-time.js'
 import {isOperatorFailureKind, OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
 import {parseRunSummary as parseServerRunSummary} from '../src/gateway/operator-contract/run-summary.ts'
 
@@ -2683,6 +2684,28 @@ describe('CSS selector ↔ status emitter agreement', () => {
       : warning.map((v, channel) => (v * Number(mix[1]) + text[channel] * Number(mix[2])) / 100)
 
     expect(contrastRatio(fg, badgeBg)).toBeGreaterThanOrEqual(4.5)
+  })
+})
+
+describe('run-updated-at text comes from the shared time module', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('a fetched card shows exactly what operator-time formats, and the run index re-exports that formatter', async () => {
+    const updatedAt = new Date(Date.now() - 3 * 3_600_000).toISOString()
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([makeValidSummary({runId: 'run-time-shared-001', updatedAt})])
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    const timeEl = cards[0].querySelector('[data-role="run-updated-at"]')
+    expect(timeEl.textContent).toBe('3 hours ago')
+    expect(timeEl.textContent).toBe(sharedFormatRelativeTime(updatedAt))
+    expect(timeEl.attributes.datetime).toBe(updatedAt)
+    expect(formatRelativeTime).toBe(sharedFormatRelativeTime)
   })
 })
 

@@ -246,6 +246,7 @@ describe('/static/* revalidation — a deploy must not leave a stale operator mo
     '/static/operator-stream.js',
     '/static/operator-launch.js',
     '/static/operator-run-index.js',
+    '/static/operator-time.js',
   ] as const
 
   it.each(unconditionalModules)('%s carries Cache-Control: no-cache and keeps Last-Modified (flag off)', async path => {
@@ -305,7 +306,13 @@ describe('/static/* revalidation — a deploy must not leave a stale operator mo
 
 describe('/static/* conditional GET — revalidation answers 304 instead of re-sending the file', () => {
   const ETAG_PATTERN = /^"[\w-]{43}"$/
-  const paths = ['/static/operator-stream.js', '/static/operator-launch.js', '/static/operator-run-index.js', '/static/operator.css'] as const
+  const paths = [
+    '/static/operator-stream.js',
+    '/static/operator-launch.js',
+    '/static/operator-run-index.js',
+    '/static/operator-time.js',
+    '/static/operator.css',
+  ] as const
 
   it.each(paths)('GET %s returns 200 with a strong content-based ETag', async path => {
     const app = await buildTestApp(true)
@@ -558,6 +565,24 @@ describe('operator runtime JS assets — served regardless of operatorUiEnabled 
     expect(res.status).toBe(200)
   })
 
+  it('GET /static/operator-time.js returns 200 with the flag off and on, and without a session', async () => {
+    for (const flag of [false, true]) {
+      const app = await buildTestApp(flag)
+      const res = await app.request('/static/operator-time.js')
+      expect(res.status, `flag ${flag}`).toBe(200)
+      expect(res.headers.get('location'), `flag ${flag}`).toBeNull()
+      expect(res.headers.get('content-type') ?? '', `flag ${flag}`).toMatch(/(?:text|application)\/javascript/)
+      expect(await res.text(), `flag ${flag}`).toContain('formatRelativeTime')
+    }
+  })
+
+  it('all four operator modules load together with the flag off', async () => {
+    const app = await buildTestApp(false)
+    for (const path of ['/static/operator-stream.js', '/static/operator-launch.js', '/static/operator-run-index.js', '/static/operator-time.js']) {
+      expect((await app.request(path)).status, path).toBe(200)
+    }
+  })
+
   it('GET /static/operator-run-index.js returns 200 when operatorUiEnabled=true', async () => {
     const app = await buildTestApp(true)
     const res = await app.request('/static/operator-run-index.js')
@@ -735,6 +760,14 @@ describe('production static JS assets — no fixture strings', () => {
     expect(src).not.toContain('fixture-runtime-loader')
   })
 
+  it('operator-time.js source carries no fixture or endpoint strings', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-time.js', 'utf8')
+    expect(src).not.toContain('/__fixture')
+    expect(src).not.toContain('fixtureMode')
+    expect(src).not.toContain('/operator/')
+  })
+
   it('operator-stream.js default endpoint base is /operator (not fixture prefix)', async () => {
     const fs = await import('node:fs/promises')
     const src = await fs.readFile('public/operator-stream.js', 'utf8')
@@ -844,6 +877,7 @@ describe('production build artifacts — no fixture strings in web/dist JS', () 
       'public/operator-stream.js',
       'public/operator-launch.js',
       'public/operator-run-index.js',
+      'public/operator-time.js',
     ]
     for (const file of await fs.readdir('web/dist/assets')) {
       if (file.endsWith('.js') || file.endsWith('.css')) files.push(path.join('web/dist/assets', file))
@@ -869,6 +903,7 @@ describe('waiting-summary fixture rows stay out of production artifacts', () => 
       'public/operator-stream.js',
       'public/operator-launch.js',
       'public/operator-run-index.js',
+      'public/operator-time.js',
     ]
     for (const file of await fs.readdir('web/dist/assets')) {
       if (file.endsWith('.js') || file.endsWith('.css')) files.push(path.join('web/dist/assets', file))
