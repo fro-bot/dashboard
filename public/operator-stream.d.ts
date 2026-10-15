@@ -831,7 +831,7 @@ export interface InitOptions {
   readonly timeEl?: Element | null
   /**
    * Waiting-line element (data-role="run-waiting"). The stream shows it, with fixed copy, only while
-   * it is live, the run is not terminal, and nothing else on the card is showing.
+   * it is live, the run is not terminal, and no output, open approval or open question is showing.
    */
   readonly waitingEl?: (HTMLElement & {hidden: boolean}) | null
   /** Cancel control container element (data-role="run-cancel"). */
