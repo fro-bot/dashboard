@@ -25,8 +25,9 @@
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {RUN_STATUS_CLASS_TOKENS, VALID_RUN_SUMMARY_STATUSES} from '../../../public/operator-run-index.js'
-import {getQuestionPageStore, PINNED_CONTRACT_VERSION, resetQuestionPageStore} from '../../../public/operator-stream.js'
+import {clearFinishedRuns, getQuestionPageStore, PINNED_CONTRACT_VERSION, resetQuestionPageStore} from '../../../public/operator-stream.js'
 import {
+  clearFinishedRunCache,
   createOperatorRuntime,
   discoverCardStreamTargets,
   discoverCardSummaryStatus,
@@ -737,6 +738,9 @@ describe('defaultRuntimeLoader — production stream wiring', () => {
       initOperatorStream,
       bootstrapOperatorStreams,
       resetBootstrapState: vi.fn(),
+      hasUsableFinishedRun: vi.fn(() => false),
+      pruneFinishedRuns: vi.fn(),
+      clearFinishedRuns: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: async (opts: {onSelectRun: (runId: string) => void | Promise<void>}) => {
@@ -809,6 +813,9 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
       initOperatorStream,
       bootstrapOperatorStreams,
       resetBootstrapState,
+      hasUsableFinishedRun: vi.fn(() => false),
+      pruneFinishedRuns: vi.fn(),
+      clearFinishedRuns: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: async (opts: {onSelectRun: (runId: string) => void | Promise<void>; onRestoreRun: (runId: string, card: Element, status: string) => void}) => {
@@ -1184,6 +1191,9 @@ describe('defaultRuntimeLoader — run-list refresh triggers', () => {
       initOperatorStream,
       bootstrapOperatorStreams,
       resetBootstrapState: vi.fn(),
+      hasUsableFinishedRun: vi.fn(() => false),
+      pruneFinishedRuns: vi.fn(),
+      clearFinishedRuns: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: async (opts: {onSelectRun: (runId: string) => void | Promise<void>; onAuthRequired: () => void}) => {
@@ -2240,6 +2250,7 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
     vi.restoreAllMocks()
     vi.useRealTimers()
     resetQuestionPageStore()
+    clearFinishedRuns()
   })
 
   const tick = () => new Promise<void>(resolve => realSetTimeout(resolve, 0))
@@ -2313,6 +2324,9 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
       initOperatorStream,
       bootstrapOperatorStreams,
       resetBootstrapState: vi.fn(),
+      hasUsableFinishedRun: vi.fn(() => false),
+      pruneFinishedRuns: vi.fn(),
+      clearFinishedRuns: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: async (initOpts: InitOpts) => {
@@ -3433,6 +3447,801 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
       mounted.runtime.cleanup()
 
       for (const spy of spies) expect(spy).not.toHaveBeenCalled()
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Finished-run cache: a recorded run re-expands without a stream or a list refresh
+//
+// The stream module here is the real one (so the store is real), spied only to see how each attach
+// was configured; the run index is a mock whose "server" list drives card statuses and list pruning
+// the way the real list does: a card with a stream attached is never written by a list.
+// ---------------------------------------------------------------------------
+
+describe('defaultRuntimeLoader — finished-run cache', () => {
+  type StreamModuleType = typeof import('../../../public/operator-stream.js')
+  type ListStatus = keyof typeof STATUS_CLASS_TOKENS
+  type CacheInitOpts = {
+    onSelectRun: (runId: string) => void | Promise<void>
+    onAuthRequired: () => void
+    onListApplied: (runIds: readonly string[]) => void
+    onRestoreRun: (runId: string, card: Element, status: string) => void
+  }
+  type LaunchOpts = {onRunLaunched: (runId: string, card: HTMLElement) => void}
+
+  const STATUS_LABELS: Record<ListStatus, string> = {
+    queued: 'Queued',
+    running: 'Running',
+    waiting_for_approval: 'Waiting for approval',
+    waiting_for_question: 'Waiting for question',
+    succeeded: 'Succeeded',
+    failed: 'Failed',
+    cancelled: 'Cancelled',
+  }
+  const FINAL_TEXT = 'the final answer'
+  const runtimes: OperatorRuntimeHandle[] = []
+  let visibility: DocumentVisibilityState
+  let currentStream: StreamModuleType | undefined
+
+  beforeEach(() => {
+    visibility = 'visible'
+    Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => visibility})
+  })
+
+  afterEach(() => {
+    createOperatorRuntime({container: makeContainer(), onStateChange: vi.fn(), _runtimeLoader: async () => {}}).cleanup()
+    for (const runtime of runtimes.splice(0)) runtime.cleanup()
+    Reflect.deleteProperty(document, 'visibilityState')
+    document.body.innerHTML = ''
+    if (location.hash !== '') history.replaceState(null, '', location.pathname + location.search)
+    vi.doUnmock('/static/operator-stream.js?manual=1')
+    vi.doUnmock('/static/operator-run-index.js?manual=1')
+    vi.doUnmock('/static/operator-launch.js?manual=1')
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    currentStream?.clearFinishedRuns()
+    currentStream?.resetQuestionPageStore()
+    currentStream = undefined
+    clearFinishedRuns()
+    resetQuestionPageStore()
+  })
+
+  const tick = () => new Promise<void>(resolve => realSetTimeout(resolve, 0))
+  // The default 50 ms poll would make the 100-run fill below take seconds.
+  const waitFast = (assertion: () => void) => vi.waitFor(assertion, {interval: 1})
+
+  function frame(event: string, payload: unknown): string {
+    return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`
+  }
+
+  const statusFrame = (runId: string, status: string, phase: string) => frame('status', {
+    runId,
+    entityRef: 'fro-bot/agent',
+    surface: 'github',
+    phase,
+    status,
+    startedAt: '2026-06-20T10:00:00Z',
+    stale: false,
+    ...(['succeeded', 'failed', 'cancelled'].includes(status) ? {completedAt: '2026-06-20T10:05:00Z'} : {}),
+  })
+  const READY = frame('ready', {contractVersion: PINNED_CONTRACT_VERSION})
+  const RUNNING_FRAMES = (runId: string) => READY + statusFrame(runId, 'running', 'EXECUTING')
+  /** Frames that take a run from running to a finished, fully displayed result. */
+  const FINISHED_FRAMES = (runId: string, status = 'succeeded') =>
+    RUNNING_FRAMES(runId)
+    + frame('output', {runId, text: FINAL_TEXT, final: true, seq: 1})
+    + statusFrame(runId, status, 'COMPLETED')
+
+  /** A fetch stub whose stream bodies the test feeds frame by frame; one attachment per fetch. */
+  function stubStreamFetch() {
+    const attachments: {push: (text: string) => void}[] = []
+    const fetchSpy = vi.fn(async () => {
+      const queue: string[] = []
+      let wake: (() => void) | null = null
+      attachments.push({
+        push: text => {
+          queue.push(text)
+          wake?.()
+        },
+      })
+      return {
+        status: 200,
+        headers: {get: () => 'text/event-stream'},
+        body: {
+          getReader: () => ({
+            read: async () => {
+              while (queue.length === 0) {
+                await new Promise<void>(resolve => {
+                  wake = resolve
+                })
+              }
+              return {done: false, value: new TextEncoder().encode(queue.shift() as string)}
+            },
+          }),
+        },
+      }
+    })
+    vi.stubGlobal('fetch', fetchSpy)
+    return {attachments, fetchSpy}
+  }
+
+  function cardHtml(runId: string, opts: {status?: ListStatus; optimistic?: boolean} = {}): string {
+    const {status = 'running', optimistic = false} = opts
+    const klass = optimistic ? 'status-pending' : STATUS_CLASS_TOKENS[status]
+    return `<div data-run-id="${runId}" data-expanded="false" ${optimistic ? 'data-optimistic="true"' : ''} role="button" tabindex="0"><span data-role="run-status" class="run-status ${klass}">${optimistic ? 'Pending' : STATUS_LABELS[status]}</span><pre data-role="run-output" hidden></pre></div>`
+  }
+
+  function renderPage(...cards: string[]): void {
+    document.body.innerHTML = `<section data-role="run-index" data-state="loading"><div data-role="run-jump-notice" hidden><div data-role="run-jump-miss" role="status" aria-live="polite" hidden></div><button type="button" data-role="run-jump-dismiss" aria-label="Dismiss notice"></button></div><div data-role="run-index-list">${cards.join('')}</div><div data-role="stream-status" hidden></div><div data-role="run-jump-announcer" role="status" aria-live="polite"></div></section>`
+  }
+
+  const cardEl = (runId: string) => document.querySelector(`[data-run-id="${runId}"]`) as HTMLElement
+  const statusText = (runId: string) => cardEl(runId).querySelector('[data-role="run-status"]')?.textContent
+  const outputEl = (runId: string) => cardEl(runId).querySelector('[data-role="run-output"]') as HTMLElement
+
+  /** What the list writes onto a card. */
+  function writeListStatus(runId: string, status: ListStatus): void {
+    const statusEl = cardEl(runId).querySelector('[data-role="run-status"]') as HTMLElement
+    statusEl.className = `run-status ${STATUS_CLASS_TOKENS[status]}`
+    statusEl.textContent = STATUS_LABELS[status]
+  }
+
+  async function mountCache(options: {
+    server?: Record<string, ListStatus>
+    outcome?: 'loaded' | 'unavailable' | 'auth-required'
+    refresh?: () => Promise<boolean>
+    fixtureSessionId?: string
+  } = {}) {
+    const {outcome = 'loaded'} = options
+    const server = new Map<string, ListStatus>(Object.entries(options.server ?? {}))
+    const initCalls: Record<string, unknown>[] = []
+    let captured: CacheInitOpts | undefined
+    let launchOpts: LaunchOpts | undefined
+
+    /** Apply the server list the way the run index does, then report the fetched IDs. */
+    const applyServerList = () => {
+      for (const [runId, status] of server) {
+        const card = document.querySelector<HTMLElement>(`[data-run-id="${runId}"]`)
+        if (card === null || card.dataset.streamAttached === 'true') continue
+        delete card.dataset.optimistic
+        writeListStatus(runId, status)
+      }
+      for (const card of Array.from(document.querySelectorAll<HTMLElement>('[data-run-id]'))) {
+        const protectedCard = card.dataset.streamAttached === 'true' || card.dataset.optimistic === 'true'
+        if (!server.has(card.dataset.runId ?? '') && !protectedCard) card.remove()
+      }
+      captured?.onListApplied([...server.keys()])
+    }
+    const refreshOperatorRunIndex = vi.fn(options.refresh ?? (async () => {
+      applyServerList()
+      return true
+    }))
+    const markRunStreamAttached = vi.fn((runId: string) => {
+      for (const card of Array.from(document.querySelectorAll<HTMLElement>('[data-stream-attached]'))) delete card.dataset.streamAttached
+      cardEl(runId).dataset.streamAttached = 'true'
+    })
+    const markCardExpandedForLaunch = vi.fn((runId: string) => {
+      for (const card of Array.from(document.querySelectorAll<HTMLElement>('[data-run-id]'))) {
+        card.dataset.expanded = card.dataset.runId === runId ? 'true' : 'false'
+      }
+    })
+    const initOperatorLaunch = vi.fn(async (launchOptions: LaunchOpts) => {
+      launchOpts = launchOptions
+    })
+
+    vi.doMock('/static/operator-stream.js?manual=1', async () => {
+      const actual = await vi.importActual<StreamModuleType>('../../../public/operator-stream.js')
+      currentStream = actual
+      return {
+        ...actual,
+        initOperatorStream: vi.fn((streamOpts: Record<string, unknown>) => {
+          initCalls.push(streamOpts)
+          return actual.initOperatorStream(streamOpts as never)
+        }),
+      }
+    })
+    vi.doMock('/static/operator-run-index.js?manual=1', () => ({
+      initOperatorRunIndex: async (initOpts: CacheInitOpts) => {
+        captured = initOpts
+        return outcome
+      },
+      refreshOperatorRunIndex,
+      resetRunIndexState: vi.fn(),
+      markRunStreamAttached,
+      markCardExpandedForLaunch,
+    }))
+    vi.doMock('/static/operator-launch.js?manual=1', () => ({
+      initOperatorLaunch,
+      resetLaunchState: vi.fn(),
+    }))
+
+    const onStateChange = vi.fn()
+    const runtime = createOperatorRuntime({
+      container: makeContainer(),
+      onStateChange,
+      ...(options.fixtureSessionId === undefined
+        ? {}
+        : {fixtureMode: true, fixtureEndpointBase: '/__fixture/operator', fixtureSessionId: options.fixtureSessionId, getScenario: () => 'success'}),
+    })
+    runtimes.push(runtime)
+
+    return {
+      runtime,
+      onStateChange,
+      initCalls,
+      refreshOperatorRunIndex,
+      markRunStreamAttached,
+      markCardExpandedForLaunch,
+      stream: () => currentStream as StreamModuleType,
+      setServer: (runId: string, status: ListStatus) => server.set(runId, status),
+      dropServer: (runId: string) => server.delete(runId),
+      ready: async () => {
+        await vi.waitFor(() => expect(initOperatorLaunch).toHaveBeenCalled())
+        await tick()
+      },
+      /** A card activation: the run index toggles expansion, then calls onSelectRun. */
+      click: (runId: string) => {
+        const card = cardEl(runId)
+        const wasExpanded = card.dataset.expanded === 'true'
+        for (const other of Array.from(document.querySelectorAll<HTMLElement>('[data-run-id]'))) other.dataset.expanded = 'false'
+        card.dataset.expanded = wasExpanded ? 'false' : 'true'
+        return captured?.onSelectRun(runId)
+      },
+      authRequired: () => captured?.onAuthRequired(),
+      listApplied: (runIds: readonly string[]) => captured?.onListApplied(runIds),
+      restore: (runId: string) => captured?.onRestoreRun(runId, cardEl(runId), 'succeeded'),
+      launched: (runId: string) => launchOpts?.onRunLaunched(runId, cardEl(runId)),
+      attachedRunIds: () => initCalls.map(call => call.runId),
+      recordedInitCalls: () => initCalls.filter(call => call.fromFinishedRecord === true),
+    }
+  }
+
+  type Mounted = Awaited<ReturnType<typeof mountCache>>
+
+  /** Expand a run live and let it finish: the stream shows and records its terminal result. */
+  async function openAndFinish(
+    mounted: Mounted,
+    net: ReturnType<typeof stubStreamFetch>,
+    runId: string,
+    options: {status?: string; fixtureSessionId?: string} = {},
+  ) {
+    const {status = 'succeeded', fixtureSessionId} = options
+    const before = net.attachments.length
+    await mounted.click(runId)
+    await waitFast(() => expect(net.attachments).toHaveLength(before + 1))
+    net.attachments[before]?.push(FINISHED_FRAMES(runId, status))
+    await waitFast(() => expect(mounted.stream().hasUsableFinishedRun(runId, status, fixtureSessionId)).toBe(true))
+  }
+
+  /** Expand a run live and leave it running. */
+  async function openRunning(mounted: Mounted, net: ReturnType<typeof stubStreamFetch>, runId: string) {
+    const before = net.attachments.length
+    await mounted.click(runId)
+    await waitFast(() => expect(net.attachments).toHaveLength(before + 1))
+    net.attachments[before]?.push(RUNNING_FRAMES(runId))
+    await vi.waitFor(() => expect(statusText(runId)).toBe('Running'))
+  }
+
+  // -------------------------------------------------------------------------
+  // The hit path
+  // -------------------------------------------------------------------------
+
+  describe('expand', () => {
+    it('re-expanding a recorded run paints it at once: no list refresh, no fetch, hash written, handle and attached mark set', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'), cardHtml('run-c-b'))
+      const mounted = await mountCache({server: {'run-c-a': 'succeeded', 'run-c-b': 'running'}})
+      await mounted.ready()
+      await openAndFinish(mounted, net, 'run-c-a')
+      await mounted.click('run-c-a')
+      expect(location.hash).toBe('')
+      mounted.refreshOperatorRunIndex.mockClear()
+      mounted.markRunStreamAttached.mockClear()
+      net.fetchSpy.mockClear()
+      outputEl('run-c-a').textContent = ''
+
+      const result = mounted.click('run-c-a')
+
+      // Everything below is observed with no await: the whole hit is synchronous.
+      expect(result).toBeUndefined()
+      expect(mounted.refreshOperatorRunIndex).not.toHaveBeenCalled()
+      expect(net.fetchSpy).not.toHaveBeenCalled()
+      expect(location.hash).toBe('#run-c-a')
+      expect(mounted.recordedInitCalls()).toHaveLength(1)
+      expect(mounted.recordedInitCalls()[0]?.runId).toBe('run-c-a')
+      expect(mounted.markRunStreamAttached).toHaveBeenCalledWith('run-c-a')
+      expect(cardEl('run-c-a').dataset.streamAttached).toBe('true')
+      expect(statusText('run-c-a')).toBe('Succeeded')
+      expect(outputEl('run-c-a').textContent).toBe(FINAL_TEXT)
+      expect(outputEl('run-c-a').hidden).toBe(false)
+
+      // The handle is the active one: activating the card again collapses it.
+      await mounted.click('run-c-a')
+      expect(cardEl('run-c-a').dataset.streamAttached).toBeUndefined()
+      expect(location.hash).toBe('')
+      expect(mounted.recordedInitCalls()).toHaveLength(1)
+      expect(net.fetchSpy).not.toHaveBeenCalled()
+    })
+
+    it('A→B→A: a run that finished while open hits on its second expand, and B, still running when closed, misses', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'), cardHtml('run-c-b'))
+      const mounted = await mountCache({server: {'run-c-a': 'succeeded', 'run-c-b': 'running'}})
+      await mounted.ready()
+      await openAndFinish(mounted, net, 'run-c-a')
+      await openRunning(mounted, net, 'run-c-b')
+      mounted.refreshOperatorRunIndex.mockClear()
+      net.fetchSpy.mockClear()
+
+      mounted.click('run-c-a')
+
+      expect(mounted.refreshOperatorRunIndex).not.toHaveBeenCalled()
+      expect(net.fetchSpy).not.toHaveBeenCalled()
+      expect(mounted.recordedInitCalls().map(call => call.runId)).toEqual(['run-c-a'])
+      expect(statusText('run-c-a')).toBe('Succeeded')
+      expect(outputEl('run-c-a').textContent).toBe(FINAL_TEXT)
+
+      await mounted.click('run-c-b')
+      expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      await waitFast(() => expect(net.fetchSpy).toHaveBeenCalledTimes(1))
+      expect(mounted.recordedInitCalls().map(call => call.runId)).toEqual(['run-c-a'])
+    })
+
+    it('a run closed while it was still running misses: the refresh runs and the attach is live', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'), cardHtml('run-c-b'))
+      const mounted = await mountCache({server: {'run-c-a': 'running', 'run-c-b': 'running'}})
+      await mounted.ready()
+      await openRunning(mounted, net, 'run-c-a')
+      await openRunning(mounted, net, 'run-c-b')
+      mounted.refreshOperatorRunIndex.mockClear()
+
+      await mounted.click('run-c-a')
+
+      expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      expect(mounted.recordedInitCalls()).toHaveLength(0)
+      expect(net.attachments).toHaveLength(3)
+    })
+
+    it('collapsing a recorded card closes it and clears the hash without re-expanding', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'))
+      const mounted = await mountCache({server: {'run-c-a': 'succeeded'}})
+      await mounted.ready()
+      await openAndFinish(mounted, net, 'run-c-a')
+      expect(location.hash).toBe('#run-c-a')
+      mounted.refreshOperatorRunIndex.mockClear()
+
+      await mounted.click('run-c-a')
+
+      expect(location.hash).toBe('')
+      expect(cardEl('run-c-a').dataset.streamAttached).toBeUndefined()
+      expect(mounted.recordedInitCalls()).toHaveLength(0)
+      expect(mounted.attachedRunIds()).toEqual(['run-c-a'])
+      expect(mounted.refreshOperatorRunIndex).not.toHaveBeenCalled()
+    })
+
+    it("clicking recorded Y cancels X's pending expand: X never attaches", async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-x'), cardHtml('run-c-y', {status: 'succeeded'}))
+      let applyRefresh = () => {}
+      const mounted = await mountCache({
+        server: {'run-c-x': 'running', 'run-c-y': 'succeeded'},
+        refresh: () => new Promise<boolean>(resolve => {
+          applyRefresh = () => resolve(true)
+        }),
+      })
+      await mounted.ready()
+      // Y is recorded without going through the held refresh: attach it live straight from the stream module.
+      const before = net.attachments.length
+      const live = mounted.stream().initOperatorStream({runId: 'run-c-y', statusEl: null, noticeEl: null})
+      await waitFast(() => expect(net.attachments).toHaveLength(before + 1))
+      net.attachments[before]?.push(FINISHED_FRAMES('run-c-y'))
+      await waitFast(() => expect(mounted.stream().hasUsableFinishedRun('run-c-y', 'succeeded')).toBe(true))
+      live.close()
+      net.fetchSpy.mockClear()
+
+      const pendingX = mounted.click('run-c-x')
+      expect(location.hash).toBe('#run-c-x')
+      mounted.click('run-c-y')
+      expect(location.hash).toBe('#run-c-y')
+      expect(mounted.recordedInitCalls().map(call => call.runId)).toEqual(['run-c-y'])
+
+      applyRefresh()
+      await pendingX
+
+      expect(mounted.attachedRunIds()).toEqual(['run-c-y'])
+      expect(net.fetchSpy).not.toHaveBeenCalled()
+      expect(location.hash).toBe('#run-c-y')
+    })
+
+    it('a list status that differs from the record takes the refresh-then-attach path, and the live result re-records', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'))
+      const mounted = await mountCache({server: {'run-c-a': 'succeeded'}})
+      await mounted.ready()
+      await openAndFinish(mounted, net, 'run-c-a')
+      await mounted.click('run-c-a')
+      // A list has since written a different status onto the collapsed card than the one recorded.
+      mounted.setServer('run-c-a', 'failed')
+      writeListStatus('run-c-a', 'failed')
+      mounted.refreshOperatorRunIndex.mockClear()
+
+      await mounted.click('run-c-a')
+      await waitFast(() => expect(net.attachments).toHaveLength(2))
+
+      expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      expect(mounted.recordedInitCalls()).toHaveLength(0)
+      net.attachments[1]?.push(FINISHED_FRAMES('run-c-a', 'failed'))
+      await waitFast(() => expect(mounted.stream().hasUsableFinishedRun('run-c-a', 'failed')).toBe(true))
+      expect(mounted.stream().hasUsableFinishedRun('run-c-a', 'succeeded')).toBe(false)
+    })
+
+    it('an evicted run attaches live and is recorded again at terminal', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'))
+      const mounted = await mountCache({server: {'run-c-a': 'succeeded'}})
+      await mounted.ready()
+      await openAndFinish(mounted, net, 'run-c-a')
+      await mounted.click('run-c-a')
+      // 100 newer records push the oldest one out of the 100-run store.
+      for (let index = 0; index < 100; index += 1) {
+        const runId = `run-c-fill-${index}`
+        const before = net.attachments.length
+        const handle = mounted.stream().initOperatorStream({runId, statusEl: null, noticeEl: null})
+        await waitFast(() => expect(net.attachments).toHaveLength(before + 1))
+        net.attachments[before]?.push(FINISHED_FRAMES(runId))
+        await waitFast(() => expect(mounted.stream().hasUsableFinishedRun(runId, 'succeeded')).toBe(true))
+        handle.close()
+      }
+      expect(mounted.stream().hasUsableFinishedRun('run-c-a', 'succeeded')).toBe(false)
+      mounted.refreshOperatorRunIndex.mockClear()
+      const attachmentsBefore = net.attachments.length
+
+      await mounted.click('run-c-a')
+      await waitFast(() => expect(net.attachments).toHaveLength(attachmentsBefore + 1))
+
+      expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      expect(mounted.recordedInitCalls()).toHaveLength(0)
+      net.attachments[attachmentsBefore]?.push(FINISHED_FRAMES('run-c-a'))
+      await waitFast(() => expect(mounted.stream().hasUsableFinishedRun('run-c-a', 'succeeded')).toBe(true))
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Launch, jump and restore all reach _attachStream
+  // -------------------------------------------------------------------------
+
+  describe('launch, jump and restore', () => {
+    it('a launched run that finished, was collapsed and re-expanded before the list adopted it misses; once adopted it hits', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-new', {optimistic: true}), cardHtml('run-c-b'))
+      const mounted = await mountCache({server: {'run-c-b': 'running'}})
+      await mounted.ready()
+      mounted.launched('run-c-new')
+      await waitFast(() => expect(net.attachments).toHaveLength(1))
+      net.attachments[0]?.push(FINISHED_FRAMES('run-c-new'))
+      await waitFast(() => expect(mounted.stream().hasUsableFinishedRun('run-c-new', 'succeeded')).toBe(true))
+
+      // The card still has no list status, so the record cannot be used: the capped refresh runs, then a live attach.
+      await mounted.click('run-c-new')
+      mounted.refreshOperatorRunIndex.mockClear()
+      await mounted.click('run-c-new')
+      await waitFast(() => expect(net.attachments).toHaveLength(2))
+      expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      expect(mounted.recordedInitCalls()).toHaveLength(0)
+      net.attachments[1]?.push(FINISHED_FRAMES('run-c-new'))
+      await waitFast(() => expect(mounted.stream().hasUsableFinishedRun('run-c-new', 'succeeded')).toBe(true))
+
+      // Leave the card, let a list adopt it, and come back.
+      await mounted.click('run-c-new')
+      mounted.setServer('run-c-new', 'succeeded')
+      await mounted.click('run-c-b')
+      expect(cardEl('run-c-new').dataset.optimistic).toBeUndefined()
+      mounted.refreshOperatorRunIndex.mockClear()
+      net.fetchSpy.mockClear()
+
+      mounted.click('run-c-new')
+
+      expect(mounted.refreshOperatorRunIndex).not.toHaveBeenCalled()
+      expect(net.fetchSpy).not.toHaveBeenCalled()
+      expect(mounted.recordedInitCalls().map(call => call.runId)).toEqual(['run-c-new'])
+    })
+
+    it('a jump to a collapsed recorded card refreshes once, then paints from the record', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'), cardHtml('run-c-b'))
+      const mounted = await mountCache({server: {'run-c-a': 'succeeded', 'run-c-b': 'running'}})
+      await mounted.ready()
+      await openAndFinish(mounted, net, 'run-c-a')
+      await mounted.click('run-c-a')
+      mounted.refreshOperatorRunIndex.mockClear()
+      net.fetchSpy.mockClear()
+
+      requestRunJump('run-c-a')
+      await waitFast(() => expect(mounted.recordedInitCalls()).toHaveLength(1))
+
+      expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      expect(mounted.recordedInitCalls()[0]?.runId).toBe('run-c-a')
+      expect(net.fetchSpy).not.toHaveBeenCalled()
+      expect(mounted.markCardExpandedForLaunch).toHaveBeenCalledWith('run-c-a')
+      expect(location.hash).toBe('#run-c-a')
+      expect(statusText('run-c-a')).toBe('Succeeded')
+      expect(outputEl('run-c-a').textContent).toBe(FINAL_TEXT)
+    })
+
+    it('a jump to an expanded recorded card only reveals it: no attach', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'))
+      const mounted = await mountCache({server: {'run-c-a': 'succeeded'}})
+      await mounted.ready()
+      await openAndFinish(mounted, net, 'run-c-a')
+      expect(cardEl('run-c-a').dataset.expanded).toBe('true')
+      mounted.refreshOperatorRunIndex.mockClear()
+
+      requestRunJump('run-c-a')
+      await waitFast(() => expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(1))
+      await tick()
+
+      expect(mounted.attachedRunIds()).toEqual(['run-c-a'])
+      expect(mounted.recordedInitCalls()).toHaveLength(0)
+      expect(net.attachments).toHaveLength(1)
+    })
+
+    it('an in-page restore after a runtime remount hits the record', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'))
+      const first = await mountCache({server: {'run-c-a': 'succeeded'}})
+      await first.ready()
+      await openAndFinish(first, net, 'run-c-a')
+      first.runtime.cleanup()
+      net.fetchSpy.mockClear()
+
+      const second = await mountCache({server: {'run-c-a': 'succeeded'}})
+      await second.ready()
+      second.restore('run-c-a')
+
+      expect(second.recordedInitCalls().map(call => call.runId)).toEqual(['run-c-a'])
+      expect(net.fetchSpy).not.toHaveBeenCalled()
+      expect(statusText('run-c-a')).toBe('Succeeded')
+      expect(outputEl('run-c-a').textContent).toBe(FINAL_TEXT)
+    })
+
+    it('a restore on a fresh module misses and attaches live', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a', {status: 'succeeded'}))
+      const first = await mountCache({server: {'run-c-a': 'succeeded'}})
+      await first.ready()
+      await openAndFinish(first, net, 'run-c-a')
+      first.runtime.cleanup()
+      // A fresh module: its auto-bootstrap runs when it is evaluated, so evaluate it on an empty page.
+      vi.resetModules()
+      document.body.innerHTML = ''
+      await vi.importActual('../../../public/operator-stream.js')
+      renderPage(cardHtml('run-c-a', {status: 'succeeded'}))
+      net.fetchSpy.mockClear()
+
+      const second = await mountCache({server: {'run-c-a': 'succeeded'}})
+      await second.ready()
+      second.restore('run-c-a')
+
+      expect(second.recordedInitCalls()).toHaveLength(0)
+      expect(second.attachedRunIds()).toEqual(['run-c-a'])
+      await waitFast(() => expect(net.fetchSpy).toHaveBeenCalledTimes(1))
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Pruning: records follow the applied run list
+  // -------------------------------------------------------------------------
+
+  describe('pruning', () => {
+    it('a refresh that no longer lists a run deletes its record, so a later expand of the card misses', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'), cardHtml('run-c-b'))
+      const mounted = await mountCache({server: {'run-c-a': 'succeeded', 'run-c-b': 'running'}})
+      await mounted.ready()
+      await openAndFinish(mounted, net, 'run-c-a')
+      // The list drops A while its card is still open (a protected card stays on the page).
+      mounted.dropServer('run-c-a')
+
+      document.dispatchEvent(new Event('visibilitychange'))
+      await waitFast(() => expect(mounted.stream().hasUsableFinishedRun('run-c-a', 'succeeded')).toBe(false))
+      expect(cardEl('run-c-a')).not.toBeNull()
+      await mounted.click('run-c-a')
+      mounted.refreshOperatorRunIndex.mockClear()
+      const attached = mounted.attachedRunIds().length
+
+      await mounted.click('run-c-a')
+
+      expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      expect(mounted.recordedInitCalls()).toHaveLength(0)
+      expect(mounted.attachedRunIds()).toHaveLength(attached)
+    })
+
+    it('a run-list init prunes too: records for runs the first list does not carry are dropped', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'), cardHtml('run-c-b'))
+      const first = await mountCache({server: {'run-c-a': 'succeeded', 'run-c-b': 'running'}})
+      await first.ready()
+      await openAndFinish(first, net, 'run-c-a')
+      await openRunning(first, net, 'run-c-b')
+      first.runtime.cleanup()
+
+      const second = await mountCache()
+      await second.ready()
+      second.listApplied(['run-c-b'])
+
+      expect(second.stream().hasUsableFinishedRun('run-c-a', 'succeeded')).toBe(false)
+    })
+
+    it('a refresh that fails (rate-limited or offline) leaves the records alone and reports no auth state', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'), cardHtml('run-c-b'))
+      const mounted = await mountCache({server: {'run-c-a': 'succeeded', 'run-c-b': 'running'}, refresh: async () => false})
+      await mounted.ready()
+      await openAndFinish(mounted, net, 'run-c-a')
+
+      document.dispatchEvent(new Event('visibilitychange'))
+      await mounted.click('run-c-b')
+      await tick()
+
+      expect(mounted.onStateChange).not.toHaveBeenCalled()
+      expect(mounted.stream().hasUsableFinishedRun('run-c-a', 'succeeded')).toBe(true)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // auth-required clears the store; the other failure states do not
+  // -------------------------------------------------------------------------
+
+  describe('auth-required', () => {
+    it('empties the store and reports the state', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'), cardHtml('run-c-b'))
+      const mounted = await mountCache({server: {'run-c-a': 'succeeded', 'run-c-b': 'succeeded'}})
+      await mounted.ready()
+      await openAndFinish(mounted, net, 'run-c-a')
+      await openAndFinish(mounted, net, 'run-c-b')
+      expect(mounted.stream().hasUsableFinishedRun('run-c-a', 'succeeded')).toBe(true)
+
+      mounted.authRequired()
+
+      expect(mounted.onStateChange).toHaveBeenCalledWith('auth-required')
+      expect(mounted.stream().hasUsableFinishedRun('run-c-a', 'succeeded')).toBe(false)
+      expect(mounted.stream().hasUsableFinishedRun('run-c-b', 'succeeded')).toBe(false)
+    })
+
+    it('a run still open when the clear lands records nothing when it finishes afterwards', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'))
+      const mounted = await mountCache({server: {'run-c-a': 'running'}})
+      await mounted.ready()
+      await openRunning(mounted, net, 'run-c-a')
+
+      mounted.authRequired()
+      net.attachments[0]?.push(frame('output', {runId: 'run-c-a', text: FINAL_TEXT, final: true, seq: 1}) + statusFrame('run-c-a', 'succeeded', 'COMPLETED'))
+      await vi.waitFor(() => expect(statusText('run-c-a')).toBe('Succeeded'))
+
+      expect(mounted.stream().hasUsableFinishedRun('run-c-a', 'succeeded')).toBe(false)
+    })
+
+    it('a clear that lands during a miss-path refresh leaves a live attach', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'))
+      let settleRefresh = (_applied: boolean) => {}
+      let holdRefresh = false
+      const mounted = await mountCache({
+        server: {'run-c-a': 'succeeded'},
+        refresh: () => (holdRefresh
+          ? new Promise<boolean>(resolve => {
+            settleRefresh = resolve
+          })
+          : Promise.resolve(true)),
+      })
+      await mounted.ready()
+      await openAndFinish(mounted, net, 'run-c-a')
+      await mounted.click('run-c-a')
+      // The list reports something else for the card, so the expand misses and waits on the refresh.
+      writeListStatus('run-c-a', 'running')
+      holdRefresh = true
+      net.fetchSpy.mockClear()
+
+      const pending = mounted.click('run-c-a')
+      mounted.authRequired()
+      // By the time the refresh lands, the list agrees with the record again.
+      writeListStatus('run-c-a', 'succeeded')
+      settleRefresh(true)
+      await pending
+      await waitFast(() => expect(net.fetchSpy).toHaveBeenCalledTimes(1))
+
+      expect(mounted.recordedInitCalls()).toHaveLength(0)
+      expect(mounted.attachedRunIds()).toEqual(['run-c-a', 'run-c-a'])
+    })
+
+    it('an unavailable run list on a later mount does not clear the store', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'))
+      const first = await mountCache({server: {'run-c-a': 'succeeded'}})
+      await first.ready()
+      await openAndFinish(first, net, 'run-c-a')
+      first.runtime.cleanup()
+
+      const second = await mountCache({outcome: 'unavailable'})
+      await second.ready()
+
+      expect(second.stream().hasUsableFinishedRun('run-c-a', 'succeeded')).toBe(true)
+    })
+
+    it('a loader that fails (the runtime reports unavailable) does not clear the store', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'))
+      const first = await mountCache({server: {'run-c-a': 'succeeded'}})
+      await first.ready()
+      await openAndFinish(first, net, 'run-c-a')
+      first.runtime.cleanup()
+      const onStateChange = vi.fn()
+
+      const failing = createOperatorRuntime({
+        container: makeContainer(),
+        onStateChange,
+        _runtimeLoader: async () => {
+          throw new Error('module not found')
+        },
+      })
+      await vi.waitFor(() => expect(onStateChange).toHaveBeenCalledWith('unavailable'))
+      failing.cleanup()
+
+      expect(first.stream().hasUsableFinishedRun('run-c-a', 'succeeded')).toBe(true)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Fixture mode: keys carry the session, and a scenario change clears the store
+  // -------------------------------------------------------------------------
+
+  describe('fixture mode', () => {
+    it('keys records by the fixture session: expand hits with it, and a list prune keeps and drops by it', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'))
+      const mounted = await mountCache({server: {'run-c-a': 'succeeded'}, fixtureSessionId: 'sess-1'})
+      await mounted.ready()
+      await openAndFinish(mounted, net, 'run-c-a', {fixtureSessionId: 'sess-1'})
+      expect(mounted.stream().hasUsableFinishedRun('run-c-a', 'succeeded')).toBe(false)
+      await mounted.click('run-c-a')
+      mounted.refreshOperatorRunIndex.mockClear()
+      net.fetchSpy.mockClear()
+
+      mounted.click('run-c-a')
+
+      expect(mounted.refreshOperatorRunIndex).not.toHaveBeenCalled()
+      expect(net.fetchSpy).not.toHaveBeenCalled()
+      expect(mounted.recordedInitCalls().map(call => call.runId)).toEqual(['run-c-a'])
+      expect(mounted.recordedInitCalls()[0]?.fixtureSessionId).toBe('sess-1')
+
+      mounted.listApplied(['run-c-a'])
+      expect(mounted.stream().hasUsableFinishedRun('run-c-a', 'succeeded', 'sess-1')).toBe(true)
+      mounted.listApplied([])
+      expect(mounted.stream().hasUsableFinishedRun('run-c-a', 'succeeded', 'sess-1')).toBe(false)
+    })
+
+    it('switching the fixture scenario clears the store, so a run ID shared across scenarios never paints the old result', async () => {
+      const net = stubStreamFetch()
+      renderPage(cardHtml('run-c-a'))
+      const mounted = await mountCache({server: {'run-c-a': 'succeeded'}, fixtureSessionId: 'sess-1'})
+      await mounted.ready()
+      await openAndFinish(mounted, net, 'run-c-a', {fixtureSessionId: 'sess-1'})
+      await mounted.click('run-c-a')
+
+      clearFinishedRunCache()
+
+      expect(mounted.stream().hasUsableFinishedRun('run-c-a', 'succeeded', 'sess-1')).toBe(false)
+      mounted.refreshOperatorRunIndex.mockClear()
+      await mounted.click('run-c-a')
+      await waitFast(() => expect(net.attachments).toHaveLength(2))
+      expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      expect(mounted.recordedInitCalls()).toHaveLength(0)
     })
   })
 })

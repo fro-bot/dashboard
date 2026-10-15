@@ -396,6 +396,7 @@ export async function initOperatorRunIndex(opts) {
   const onRestoreRun = opts?.onRestoreRun
   const onRestoreMiss = opts?.onRestoreMiss
   const onAuthRequired = opts?.onAuthRequired
+  const onListApplied = opts?.onListApplied
 
   if (isRunIndexInitStale(myGeneration)) return 'stale'
   if (typeof document === 'undefined') return 'unavailable'
@@ -423,7 +424,7 @@ export async function initOperatorRunIndex(opts) {
 
   // Init has loaded (or failed non-auth): from here a refresh may run, configured as this init was.
   // An auth failure below clears it again — there is no session to refresh against.
-  _refreshContext = {endpointBase, fixtureSessionId, onSelectRun, onAuthRequired}
+  _refreshContext = {endpointBase, fixtureSessionId, onSelectRun, onAuthRequired, onListApplied}
 
   if (result.kind === 'unavailable') {
     // The /operator/runs fetch itself is the auth re-classification point: a stale
@@ -449,6 +450,7 @@ export async function initOperatorRunIndex(opts) {
     views = summaries.map(buildRunSafeView)
     diffRunIndexList(runIndexList, views, {onSelectRun, activeStreamRunId: _activeStreamRunId})
     remaining = runIndexList.children?.length ?? 0
+    reportListApplied(onListApplied, views)
   }
 
   showRunIndexResult({runIndexSection, runIndexList, runIndexEmpty, runIndexUnavailable}, remaining)
@@ -489,6 +491,20 @@ export async function initOperatorRunIndex(opts) {
   }
 
   return 'loaded'
+}
+
+/**
+ * Tell the caller which run IDs the list just applied: the fetched ones, not the cards left in the
+ * DOM (a protected card can outlive the list that dropped it). A callback that throws must not break
+ * the apply.
+ */
+function reportListApplied(onListApplied, views) {
+  if (typeof onListApplied !== 'function') return
+  try {
+    onListApplied(views.map(view => view.runId))
+  } catch {
+    // Nothing here is logged: errors can carry run data.
+  }
 }
 
 /** The unavailable treatment: the unavailable notice up, section state to match. */
@@ -554,6 +570,7 @@ async function applyRefresh() {
       const views = result.summaries.map(buildRunSafeView)
       diffRunIndexList(runIndexList, views, {onSelectRun: context.onSelectRun, activeStreamRunId: _activeStreamRunId})
       remaining = runIndexList.children?.length ?? 0
+      reportListApplied(context.onListApplied, views)
     }
 
     showRunIndexResult({runIndexSection, runIndexList, runIndexEmpty, runIndexUnavailable}, remaining)

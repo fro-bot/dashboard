@@ -23,7 +23,7 @@
 
 import {useEffect, useRef, useState} from 'react'
 import {getStateActionReason, getStateDetail, getStateHeadline, getStateRecoveryHint} from '../operator/copy.ts'
-import {createOperatorRuntime} from '../operator/runtime.ts'
+import {clearFinishedRunCache, createOperatorRuntime} from '../operator/runtime.ts'
 import type {OperatorRuntimeHandle} from '../operator/runtime.ts'
 import {navigateToGatewaySignIn} from '../operator/sign-in-recovery.ts'
 import {isActionDisabled} from '../operator/state.ts'
@@ -442,7 +442,8 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
                       data-testid="fixture-scenario-select"
                       className="operator-input operator-select-inline"
                       value={scenario}
-                      onChange={e => { setScenario(e.target.value) }}
+                      // A finished run's record is keyed by fixture session, not scenario, so a switch drops them all.
+                      onChange={e => { setScenario(e.target.value); clearFinishedRunCache() }}
                     >
                       <option value="success">Success</option>
                       <option value="terminal_failure">Terminal failure</option>

@@ -131,7 +131,12 @@ describe('operator sign-in redirect recovery', () => {
 
   it.each(['loaded', 'empty'] as const)('clears the tab redirect guard after a successful %s run-list load', async outcome => {
     sessionStorage.setItem(SIGN_IN_GUARD_KEY, '1')
-    vi.doMock('/static/operator-stream.js?manual=1', () => ({initOperatorStream: vi.fn()}))
+    vi.doMock('/static/operator-stream.js?manual=1', () => ({
+      initOperatorStream: vi.fn(),
+      hasUsableFinishedRun: vi.fn(() => false),
+      pruneFinishedRuns: vi.fn(),
+      clearFinishedRuns: vi.fn(),
+    }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: vi.fn(async () => outcome),
       refreshOperatorRunIndex: vi.fn(async () => true),
@@ -156,7 +161,12 @@ describe('operator sign-in redirect recovery', () => {
   it.each(['auth-required', 'unavailable'] as const)('preserves the tab redirect guard after an %s run-list outcome', async outcome => {
     const guardValue = '1'
     sessionStorage.setItem(SIGN_IN_GUARD_KEY, guardValue)
-    vi.doMock('/static/operator-stream.js?manual=1', () => ({initOperatorStream: vi.fn()}))
+    vi.doMock('/static/operator-stream.js?manual=1', () => ({
+      initOperatorStream: vi.fn(),
+      hasUsableFinishedRun: vi.fn(() => false),
+      pruneFinishedRuns: vi.fn(),
+      clearFinishedRuns: vi.fn(),
+    }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: vi.fn(async () => outcome),
       refreshOperatorRunIndex: vi.fn(async () => false),

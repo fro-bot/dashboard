@@ -268,7 +268,7 @@ sequenceDiagram
 
 **Verification:** A recorded card looks identical to the live terminal card it came from, and no request leaves the page.
 
-- [ ] **Unit 3: Runtime fast path, list pruning and clear**
+- [x] **Unit 3: Runtime fast path, list pruning and clear**
 
 **Goal:** Expand, jump, launch and in-page restore use a usable record. Applied list fetches prune the store, and `auth-required` clears it.
 

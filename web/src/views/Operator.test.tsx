@@ -488,6 +488,28 @@ describe('Operator — fixture scenario and sessionId wired to runtime', () => {
     createSpy.mockRestore()
   })
 
+  it('changing the scenario clears the finished-run cache, once per change', async () => {
+    const {vi} = await import('vitest')
+    const runtimeModule = await import('../operator/runtime.ts')
+
+    const createSpy = vi.spyOn(runtimeModule, 'createOperatorRuntime')
+    createSpy.mockImplementation(() => ({isMounted: true, cleanup: vi.fn()}))
+    const clearSpy = vi.spyOn(runtimeModule, 'clearFinishedRunCache').mockImplementation(() => {})
+
+    render(<Operator state="ready" fixtureMode={true} fixtureEndpointBase="/__fixture/operator" fixtureSessionId="fixture-session-0001" />)
+    expect(clearSpy).not.toHaveBeenCalled()
+
+    const select = screen.getByTestId('fixture-scenario-select')
+    fireEvent.change(select, {target: {value: 'terminal_failure'}})
+    expect(clearSpy).toHaveBeenCalledTimes(1)
+
+    fireEvent.change(select, {target: {value: 'success'}})
+    expect(clearSpy).toHaveBeenCalledTimes(2)
+
+    createSpy.mockRestore()
+    clearSpy.mockRestore()
+  })
+
   it('createOperatorRuntime is NOT called with fixtureSessionId or getScenario when fixtureMode is not set', async () => {
     const {vi} = await import('vitest')
     const runtimeModule = await import('../operator/runtime.ts')

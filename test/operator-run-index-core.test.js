@@ -4804,3 +4804,86 @@ describe('refreshOperatorRunIndex — a new run lands in fetch order around the 
     expect(doc.activeElement).toBe(cardB)
   })
 })
+
+describe('onListApplied — the run IDs of each applied list', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('init reports the fetched run IDs after the list is applied', async () => {
+    const net = stubControlledFetch()
+    stubDOMForRefresh()
+    const onListApplied = vi.fn()
+    const init = initOperatorRunIndex({endpointBase: '/operator', onListApplied})
+    net.respond(0, [makeValidSummary({runId: 'run-la-001'}), makeValidSummary({runId: 'run-la-002'})])
+    await init
+
+    expect(onListApplied).toHaveBeenCalledTimes(1)
+    expect([...onListApplied.mock.calls[0][0]]).toEqual(['run-la-001', 'run-la-002'])
+  })
+
+  it('init reports an empty list as no IDs', async () => {
+    const net = stubControlledFetch()
+    stubDOMForRefresh()
+    const onListApplied = vi.fn()
+    const init = initOperatorRunIndex({endpointBase: '/operator', onListApplied})
+    net.respond(0, [])
+    await init
+
+    expect(onListApplied).toHaveBeenCalledTimes(1)
+    expect([...onListApplied.mock.calls[0][0]]).toEqual([])
+  })
+
+  it('a refresh reports the fetched IDs, not the cards left in the DOM (a protected card stays but is not listed)', async () => {
+    const net = stubControlledFetch()
+    const {cards} = stubDOMForRefresh()
+    const onListApplied = vi.fn()
+    const init = initOperatorRunIndex({endpointBase: '/operator', onListApplied})
+    net.respond(0, [makeValidSummary({runId: 'run-la-keep'}), makeValidSummary({runId: 'run-la-gone'})])
+    await init
+    markRunStreamAttached('run-la-gone')
+    onListApplied.mockClear()
+
+    const refresh = refreshOperatorRunIndex()
+    net.respond(1, [makeValidSummary({runId: 'run-la-keep'})])
+    await expect(refresh).resolves.toBe(true)
+
+    expect(cards.map(card => card.dataset.runId)).toContain('run-la-gone')
+    expect(onListApplied).toHaveBeenCalledTimes(1)
+    expect([...onListApplied.mock.calls[0][0]]).toEqual(['run-la-keep'])
+  })
+
+  it('reports nothing when the fetch fails, the body is rejected, or auth fails', async () => {
+    const net = stubControlledFetch()
+    stubDOMForRefresh()
+    const onListApplied = vi.fn()
+    const init = initOperatorRunIndex({endpointBase: '/operator', onListApplied, onAuthRequired: vi.fn()})
+    net.respond(0, [makeValidSummary({runId: 'run-la-fail'})])
+    await init
+    onListApplied.mockClear()
+
+    const failed = refreshOperatorRunIndex()
+    net.respondRaw(1, {ok: false, status: 500, json: async () => ({})})
+    await expect(failed).resolves.toBe(false)
+
+    const authFailed = refreshOperatorRunIndex()
+    net.respondRaw(2, {ok: false, status: 401, json: async () => ({})})
+    await expect(authFailed).resolves.toBe(false)
+
+    expect(onListApplied).not.toHaveBeenCalled()
+  })
+
+  it('reports nothing when a reset replaces the init while it fetches', async () => {
+    const net = stubControlledFetch()
+    stubDOMForRefresh()
+    const onListApplied = vi.fn()
+    const init = initOperatorRunIndex({endpointBase: '/operator', onListApplied})
+    resetRunIndexState()
+    net.respond(0, [makeValidSummary({runId: 'run-la-stale'})])
+    await init
+
+    expect(onListApplied).not.toHaveBeenCalled()
+  })
+})

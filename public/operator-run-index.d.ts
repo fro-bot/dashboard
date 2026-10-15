@@ -157,4 +157,11 @@ export declare function initOperatorRunIndex(opts?: {
    * (401/403). The caller must reclassify to auth-required and skip any restore.
    */
   onAuthRequired?: () => void
+  /**
+   * Called after each successfully applied list (init, and every refresh that applies), with the
+   * run IDs the fetch returned. These are the fetched IDs, not the cards left in the DOM: a card
+   * the list dropped can stay on the page while it is protected. Not called for a failed, stale or
+   * auth-failed fetch. Lets the caller drop state it keeps for runs that left the list.
+   */
+  onListApplied?: (runIds: readonly string[]) => void
 }): Promise<RunIndexInitOutcome>

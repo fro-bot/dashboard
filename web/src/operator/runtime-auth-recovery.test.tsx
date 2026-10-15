@@ -24,7 +24,13 @@ describe('operator auth recovery after a successful initial load', () => {
 
   it('shows the sign-in button without redirecting when the session expires after runs loaded', async () => {
     let onAuthRequired: (() => void) | undefined
-    vi.doMock('/static/operator-stream.js?manual=1', () => ({initOperatorStream: vi.fn()}))
+    const clearFinishedRuns = vi.fn()
+    vi.doMock('/static/operator-stream.js?manual=1', () => ({
+      initOperatorStream: vi.fn(),
+      hasUsableFinishedRun: vi.fn(() => false),
+      pruneFinishedRuns: vi.fn(),
+      clearFinishedRuns,
+    }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: vi.fn(async (options: {onAuthRequired: () => void}) => {
         onAuthRequired = options.onAuthRequired
@@ -49,15 +55,22 @@ describe('operator auth recovery after a successful initial load', () => {
     await waitFor(() => expect(onAuthRequired).toBeDefined())
     expect(maybeAutoRedirectToGatewaySignIn).not.toHaveBeenCalledWith('auth-required')
 
+    expect(clearFinishedRuns).not.toHaveBeenCalled()
     await act(async () => onAuthRequired?.())
 
     expect(screen.getByRole('button', {name: 'Sign in with GitHub'})).toBeInTheDocument()
+    expect(clearFinishedRuns).toHaveBeenCalledTimes(1)
     expect(maybeAutoRedirectToGatewaySignIn).not.toHaveBeenCalledWith('auth-required')
   })
 
   it('auto-redirects when the initial run-list outcome is auth-required', async () => {
     let onAuthRequired: (() => void) | undefined
-    vi.doMock('/static/operator-stream.js?manual=1', () => ({initOperatorStream: vi.fn()}))
+    vi.doMock('/static/operator-stream.js?manual=1', () => ({
+      initOperatorStream: vi.fn(),
+      hasUsableFinishedRun: vi.fn(() => false),
+      pruneFinishedRuns: vi.fn(),
+      clearFinishedRuns: vi.fn(),
+    }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: vi.fn(async (options: {onAuthRequired: () => void}) => {
         onAuthRequired = options.onAuthRequired
@@ -83,7 +96,12 @@ describe('operator auth recovery after a successful initial load', () => {
 
   it('does not auto-redirect in fixture mode, which has no gateway sign-in route', async () => {
     let onAuthRequired: (() => void) | undefined
-    vi.doMock('/static/operator-stream.js?manual=1', () => ({initOperatorStream: vi.fn()}))
+    vi.doMock('/static/operator-stream.js?manual=1', () => ({
+      initOperatorStream: vi.fn(),
+      hasUsableFinishedRun: vi.fn(() => false),
+      pruneFinishedRuns: vi.fn(),
+      clearFinishedRuns: vi.fn(),
+    }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: vi.fn(async (options: {onAuthRequired: () => void}) => {
         onAuthRequired = options.onAuthRequired

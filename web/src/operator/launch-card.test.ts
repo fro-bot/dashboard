@@ -17,7 +17,12 @@ const STREAM_SPECIFIER = '/static/operator-stream.js?manual=1'
  * auto-start finds nothing to wire.
  */
 async function importLaunchModuleWithStreamMock(): Promise<LaunchModule> {
-  vi.doMock(STREAM_SPECIFIER, () => ({initOperatorStream: vi.fn()}))
+  vi.doMock(STREAM_SPECIFIER, () => ({
+    initOperatorStream: vi.fn(),
+    hasUsableFinishedRun: vi.fn(() => false),
+    pruneFinishedRuns: vi.fn(),
+    clearFinishedRuns: vi.fn(),
+  }))
   return import('../../../public/operator-launch.js')
 }
 
