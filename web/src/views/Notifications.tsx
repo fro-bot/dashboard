@@ -371,7 +371,7 @@ export function Notifications({
 
         {copy.installSteps && (
           <ol
-            aria-label="Install Fro Bot on your iPhone"
+            aria-label="Install Fro Bot to your Home Screen"
             className="list-decimal list-inside space-y-2 rounded-md border border-border bg-surface-raised p-3 text-body-sm text-text"
           >
             {copy.installSteps.map((step) => (

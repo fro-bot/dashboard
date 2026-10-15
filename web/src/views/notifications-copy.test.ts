@@ -79,6 +79,12 @@ describe('copy security checks', () => {
           expect(copy.ctaText).not.toMatch(pattern)
         })
       }
+
+      for (const [index, step] of (copy.installSteps ?? []).entries()) {
+        it(`state "${state}" installSteps[${index}] does not match sensitive pattern ${pattern}`, () => {
+          expect(step).not.toMatch(pattern)
+        })
+      }
     }
   }
 })

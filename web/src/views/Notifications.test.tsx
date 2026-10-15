@@ -137,6 +137,7 @@ describe('Notifications Component', () => {
 
     expect(screen.getByTestId('notifications-headline')).toHaveTextContent('Installation Required')
     expect(screen.queryByRole('button', {name: 'Install App'})).not.toBeInTheDocument()
+    expect(screen.getByRole('list', {name: 'Install Fro Bot to your Home Screen'})).toBeInTheDocument()
     expect(screen.getAllByRole('listitem').map((item) => item.textContent)).toEqual([
       'Tap the Share icon in Safari.',
       'Tap “Add to Home Screen.”',
