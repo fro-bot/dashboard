@@ -28,7 +28,6 @@ import {FIXTURE_OPERATOR_PREFIX} from '../src/gateway/operator-fixture-routes.ts
 import {
   FIXTURE_QUESTION_SCENARIO_ROWS,
   FIXTURE_SCENARIO_NAMES,
-  FIXTURE_WAITING_SCENARIO_ROWS,
   fixtureQuestionScript,
   isHeldOpenScenario,
   isNoApprovalScenario,
@@ -2697,13 +2696,15 @@ const EXPECTED_FRAME_TYPES: Readonly<Record<string, readonly string[]>> = {
   expired_completed_terminal_frame: ['ready', 'reset', 'status'],
   expired_completed_silent: ['ready', 'reset'],
   running_after_no_snapshot: ['ready', 'reset', 'status', 'output'],
+  waiting_no_output: ['ready', 'status'],
+  waiting_queued: ['ready', 'status'],
 }
 
 // eslint-disable-next-line no-control-regex
 const QUESTION_UNSAFE_CHARS = /[\u0000-\u0008\v\f\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/
 
 describe('question fixture scenarios — registry and manifest', () => {
-  it('lists the thirteen scenarios in the manifest, each with a row', async () => {
+  it('lists the fifteen scenarios in the manifest, each with a row', async () => {
     expect(QUESTION_SCENARIO_KEYS).toEqual(Object.keys(EXPECTED_FRAME_TYPES))
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
     const body = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}`)).json() as {scenarios: string[]}
@@ -2722,6 +2723,8 @@ describe('question fixture scenarios — registry and manifest', () => {
       'run-fixture-index-expired-completed-terminal-frame',
       'run-fixture-index-expired-completed-silent',
       'run-fixture-index-running-after-no-snapshot',
+      'run-fixture-index-waiting-no-output',
+      'run-fixture-index-waiting-queued',
     ])
   })
 
@@ -2756,7 +2759,7 @@ describe('question fixture scenarios — frames parse under both readers', () =>
     for (const key of QUESTION_SCENARIO_KEYS) {
       const frames = serverFrames(serializeScenarioToSse(key, questionRunId(key)))
       const statuses = frames.filter(frame => frame.type === 'status').map(frame => frame.data.status)
-      for (const status of statuses) expect(['running', 'succeeded', 'failed']).toContain(status)
+      for (const status of statuses) expect(['queued', 'running', 'succeeded', 'failed']).toContain(status)
       const firstQuestion = frames.findIndex(frame => frame.type === 'question')
       if (firstQuestion !== -1) {
         const statusBefore = frames.slice(0, firstQuestion).findLast(frame => frame.type === 'status')
@@ -2969,6 +2972,7 @@ describe('question fixture routes — recent-runs rows and streams', () => {
       question_text_sentinels: 'waiting_for_question',
       question_no_approval: 'waiting_for_question',
       expired_completed_silent: 'succeeded',
+      waiting_queued: 'queued',
     }
     for (const key of QUESTION_SCENARIO_KEYS) {
       const row = runs.find(candidate => candidate.runId === questionRunId(key))
@@ -3148,7 +3152,7 @@ describe('question_no_approval — a question with no approval prompt', () => {
       return (await res.json() as {approvals: unknown[]}).approvals
     }
     expect(await approvals(key)).toEqual([])
-    for (const other of QUESTION_SCENARIO_KEYS.filter(candidate => candidate !== key)) {
+    for (const other of QUESTION_SCENARIO_KEYS.filter(candidate => candidate !== key && !isNoApprovalScenario(candidate))) {
       expect(await approvals(other), `${other} keeps the harness approval`).toHaveLength(1)
     }
   })
@@ -3446,6 +3450,7 @@ describe('waiting summary fixtures — a run ID that is valid but not in the lis
 // Waiting fixture scenarios: a live run with nothing to show yet, held open
 // ---------------------------------------------------------------------------
 
+const FIXTURE_WAITING_SCENARIO_ROWS = FIXTURE_QUESTION_SCENARIO_ROWS.filter(row => row.scenario.startsWith('waiting_'))
 const WAITING_SCENARIO_KEYS = FIXTURE_WAITING_SCENARIO_ROWS.map(row => row.scenario)
 const waitingRunId = (key: string): string => `run-fixture-index-${key.replaceAll('_', '-')}`
 
@@ -3465,14 +3470,12 @@ describe('waiting fixture scenarios — registry and manifest', () => {
     expect(Object.values(FIXTURE_SCENARIO_NAMES)).toEqual(expect.arrayContaining(WAITING_SCENARIO_KEYS))
   })
 
-  it('the scenario select in Operator.tsx lists exactly the waiting scenarios, apart from the question block', async () => {
+  it('the scenario select in Operator.tsx lists exactly the waiting scenarios among its question-block options', async () => {
     const fs = await import('node:fs/promises')
     const source = await fs.readFile('web/src/views/Operator.tsx', 'utf8')
-    const start = source.indexOf('WAITING_FIXTURE_SCENARIOS')
-    expect(start).toBeGreaterThan(-1)
-    const block = source.slice(start, source.indexOf('QUESTION_FIXTURE_SCENARIOS'))
-    expect([...block.matchAll(/value: '([a-z0-9_]+)'/g)].map(match => match[1])).toEqual(WAITING_SCENARIO_KEYS)
-    expect(source).toMatch(/WAITING_FIXTURE_SCENARIOS\.map\(/)
+    const block = source.slice(source.indexOf('QUESTION_FIXTURE_SCENARIOS'), source.indexOf('interface OperatorProps'))
+    const values = [...block.matchAll(/value: '([a-z0-9_]+)'/g)].map(match => match[1])
+    expect(values.filter(value => value?.startsWith('waiting_'))).toEqual(WAITING_SCENARIO_KEYS)
   })
 })
 

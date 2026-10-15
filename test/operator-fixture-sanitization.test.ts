@@ -16,7 +16,6 @@ import {
   FIXTURE_APPROVAL_SCENARIO_ROWS,
   FIXTURE_QUESTION_SCENARIO_ROWS,
   FIXTURE_SCENARIO_NAMES,
-  FIXTURE_WAITING_SCENARIO_ROWS,
   fixtureQuestionScript,
   serializeScenarioToSse,
 } from '../src/gateway/operator-fixture-sse.ts'
@@ -404,7 +403,7 @@ describe('fixture no-leak guard — question scenarios', () => {
   }
 
   it('every question request ID is req-fixture- prefixed, and every frame carries the bound run ID', () => {
-    expect(QUESTION_KEYS.length).toBe(13)
+    expect(QUESTION_KEYS.length).toBe(15)
     for (const key of QUESTION_KEYS) {
       const runId = `run-fixture-index-${key.replaceAll('_', '-')}`
       for (const record of questionRecords(serializeScenarioToSse(key, runId))) {
@@ -477,6 +476,7 @@ describe('fixture no-leak guard — waiting summary rows', () => {
 })
 
 describe('fixture no-leak guard — waiting scenarios', () => {
+  const FIXTURE_WAITING_SCENARIO_ROWS = FIXTURE_QUESTION_SCENARIO_ROWS.filter(row => row.scenario.startsWith('waiting_'))
   const runIdFor = (scenario: string): string => `run-fixture-index-${scenario.replaceAll('_', '-')}`
 
   it('carry only the bound run ID and synthetic status fields, and no free-form text or request IDs', () => {

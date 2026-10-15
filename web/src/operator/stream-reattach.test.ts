@@ -796,3 +796,96 @@ describe('operator stream waiting line by connection state', () => {
     handle.close()
   })
 })
+
+describe('operator stream waiting line follows the question cards the region paints', () => {
+  it('stays hidden while a question card is on screen in "checking" state, and returns when the card goes', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts, {
+      questionClient: {
+        listRunQuestions: vi.fn(() => new Promise<never>(() => {})),
+        decideRunQuestion: vi.fn(async () => ({kind: 'decided', state: 'already_claimed'})),
+      },
+    })
+    pushToLatest(READY + RUNNING + OPEN_QUESTION)
+    await vi.waitFor(() => expect(parts.regions['run-questions'].hidden).toBe(false))
+    await handle.decideQuestion('req-q', {decision: 'skip'})
+    void handle.checkQuestions('req-q')
+    expect(handle.getQuestionStatus('req-q')).toEqual({kind: 'checking'})
+    expect(parts.regions['run-questions'].textContent).toContain('Pick one')
+    expect(waitingOf(parts).hidden).toBe(true)
+
+    pushToLatest(SETTLED_QUESTION)
+    await vi.waitFor(() => expect(handle.getQuestions()).toHaveLength(0))
+
+    // Whatever the region paints decides the line: with the card gone, nothing is showing.
+    const cardOnScreen = parts.regions['run-questions'].textContent?.includes('Pick one') === true
+    expect(waitingOf(parts).hidden).toBe(cardOnScreen)
+    handle.close()
+  })
+})
+
+describe('operator stream waiting line with a run-list summary status', () => {
+  it.each(['succeeded', 'failed', 'cancelled'])('a %s summary shows no waiting line at attach or after ready', async summaryStatus => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts, {summaryStatus})
+    expect(waitingOf(parts).hidden).toBe(true)
+
+    pushToLatest(READY)
+    await vi.waitFor(() => expect(parts.noticeEl.hidden).toBe(true))
+
+    expect(waitingOf(parts).hidden).toBe(true)
+    handle.close()
+  })
+
+  it.each(['queued', 'running', 'waiting_for_approval', 'waiting_for_question'])('a non-terminal %s summary still shows the line once the stream is live', async summaryStatus => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts, {summaryStatus})
+
+    pushToLatest(READY)
+
+    await vi.waitFor(() => expect(waitingOf(parts).hidden).toBe(false))
+    expect(waitingOf(parts).textContent).toBe(WAITING_OUTPUT_COPY)
+    handle.close()
+  })
+
+  it('a stream status frame that is not terminal wins over a terminal summary', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts, {summaryStatus: 'succeeded'})
+
+    pushToLatest(READY + RUNNING)
+
+    await vi.waitFor(() => expect(parts.statusEl.textContent).toBe('Running'))
+    expect(waitingOf(parts).hidden).toBe(false)
+    expect(waitingOf(parts).textContent).toBe(WAITING_OUTPUT_COPY)
+    handle.close()
+  })
+
+  it('a terminal summary with a placeholder entry and no status yet keeps the line hidden', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts, {summaryStatus: 'failed'})
+
+    pushToLatest(READY + SETTLED_APPROVAL)
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    expect(waitingOf(parts).hidden).toBe(true)
+    handle.close()
+  })
+
+  it('the no-snapshot path still shows "Output no longer available." with a terminal summary', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const handle = attachFull(parts, {summaryStatus: 'failed'})
+
+    pushToLatest(READY + NO_SNAPSHOT)
+
+    await vi.waitFor(() => expect(parts.regions['run-output'].textContent).toBe('Output no longer available.'))
+    expect(parts.regions['run-output'].hidden).toBe(false)
+    expect(waitingOf(parts).hidden).toBe(true)
+    handle.close()
+  })
+})

@@ -861,7 +861,7 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
       const {runtime, initCalls, bootstrapOperatorStreams, resetBootstrapState} = await mountLoader()
 
       expect(bootstrapOperatorStreams).not.toHaveBeenCalled()
-      expect(resetBootstrapState).toHaveBeenCalled()
+      expect(resetBootstrapState).not.toHaveBeenCalled()
       expect(initCalls).toHaveLength(0)
       runtime.cleanup()
     })
@@ -911,15 +911,14 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
       runtime.cleanup()
     })
 
-    it('still resets the stream module state on load and on cleanup', async () => {
+    it('never touches the stream bootstrap state, on load or on cleanup', async () => {
       document.body.innerHTML = '<div data-role="stream-status"></div>'
-      const {runtime, resetBootstrapState} = await mountLoader()
-      const afterLoad = resetBootstrapState.mock.calls.length
-      expect(afterLoad).toBeGreaterThanOrEqual(1)
+      const {runtime, resetBootstrapState, bootstrapOperatorStreams} = await mountLoader()
 
       runtime.cleanup()
 
-      expect(resetBootstrapState.mock.calls.length).toBeGreaterThan(afterLoad)
+      expect(resetBootstrapState).not.toHaveBeenCalled()
+      expect(bootstrapOperatorStreams).not.toHaveBeenCalled()
     })
   })
 

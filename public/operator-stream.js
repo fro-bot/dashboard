@@ -3995,12 +3995,19 @@ export function initOperatorStream(opts) {
     if (waitingEl) {
       const runEntry = state.runs[runId]
       const effectiveStatus = getEffectiveStatus(runEntry)
+      // Any question card the region paints counts, including one kept while its request is checked.
+      const hasQuestionCard = getQuestions().length > 0 ||
+        [...renderedQuestionCards.keys()].some(requestID => questionStatuses.get(requestID)?.kind === 'checking')
       const hasContent = runEntry?.outputUnavailable === true ||
         (typeof runEntry?.outputText === 'string' && runEntry.outputText !== '') ||
         getOpenApprovals(runEntry).length > 0 ||
-        getQuestions().length > 0 ||
+        hasQuestionCard ||
         (checkoutEl !== undefined && checkoutEl !== null && !checkoutEl.hidden)
-      const waiting = state.connection === 'live' && runEntry?.terminal !== true && effectiveStatus !== 'blocked' && !hasContent
+      // A terminal run-list status holds until the stream reports a status of its own.
+      const summaryTerminal = summaryStatus !== undefined && TERMINAL_STATUSES.has(summaryStatus) &&
+        (runEntry === undefined || runEntry.status === '')
+      const isTerminal = runEntry?.terminal === true || summaryTerminal
+      const waiting = state.connection === 'live' && !isTerminal && effectiveStatus !== 'blocked' && !hasContent
       if (waiting) waitingEl.textContent = effectiveStatus === 'queued' ? WAITING_TO_START_COPY : WAITING_FOR_OUTPUT_COPY
       waitingEl.hidden = !waiting
     }

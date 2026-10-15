@@ -165,7 +165,7 @@ export type CheckoutScenarioName =
   | 'workspace_unavailable'
   | 'checkout_malformed_preparation'
 
-/** The scenarios that carry agent questions or exercise the expired-snapshot paths. */
+/** The scenarios that carry agent questions, exercise the expired-snapshot paths, or hold a live run with nothing to show. */
 export type QuestionScenarioName =
   | 'question_single'
   | 'question_multi_shapes'
@@ -180,9 +180,8 @@ export type QuestionScenarioName =
   | 'expired_completed_terminal_frame'
   | 'expired_completed_silent'
   | 'running_after_no_snapshot'
-
-/** The scenarios whose run is live with nothing to show yet. */
-export type WaitingScenarioName = 'waiting_no_output' | 'waiting_queued'
+  | 'waiting_no_output'
+  | 'waiting_queued'
 
 const FIXTURE_RUN_ID_MALFORMED = 'run-fixture-malformed-001'
 
@@ -884,7 +883,7 @@ export interface FixtureQuestionScript {
 }
 
 /** Summary statuses a question or expired-snapshot row can show. */
-type QuestionSummaryStatus = 'running' | 'succeeded' | 'waiting_for_question'
+type QuestionSummaryStatus = 'queued' | 'running' | 'succeeded' | 'waiting_for_question'
 
 interface QuestionScenarioSpec {
   /** Status the recent-runs row shows before the stream is opened (the card's summary status). */
@@ -1020,43 +1019,25 @@ const QUESTION_SCENARIO_SPECS: Readonly<Record<QuestionScenarioName, QuestionSce
       statusFrame(runId, 'running', 'EXECUTING', QUESTION_STARTED_AT) +
       outputFrame(runId, '[Fixture output — synthetic run result after the snapshot reset]', false, 0),
   },
-}
 
-interface WaitingScenarioSpec {
-  /** Status the recent-runs row shows. */
-  readonly summaryStatus: 'running' | 'queued'
-  /** The stream ends open, as the gateway's does for a run that is not finished. */
-  readonly holdOpen: true
-  /** The run has no approval prompt and no question, so the harness lists neither. */
-  readonly noApproval: true
-  readonly build: (activeRunId: string) => string
-}
-
-const WAITING_SCENARIO_SPECS: Readonly<Record<WaitingScenarioName, WaitingScenarioSpec>> = {
+  // A live run with nothing to show yet, held open: the card keeps its waiting line. No question, no approval.
   waiting_no_output: {
     summaryStatus: 'running',
     holdOpen: true,
     noApproval: true,
+    script: {openRequests: []},
     build: runId => readyFrame(OPERATOR_CONTRACT_VERSION) + statusFrame(runId, 'running', 'EXECUTING', QUESTION_STARTED_AT),
   },
   waiting_queued: {
     summaryStatus: 'queued',
     holdOpen: true,
     noApproval: true,
+    script: {openRequests: []},
     build: runId => readyFrame(OPERATOR_CONTRACT_VERSION) + statusFrame(runId, 'queued', 'PENDING', QUESTION_STARTED_AT),
   },
 }
 
-/** Rows for the recent-runs list: one per waiting scenario. */
-export const FIXTURE_WAITING_SCENARIO_ROWS: readonly {
-  readonly scenario: WaitingScenarioName
-  readonly summaryStatus: WaitingScenarioSpec['summaryStatus']
-}[] = (Object.keys(WAITING_SCENARIO_SPECS) as WaitingScenarioName[]).map(scenario => ({
-  scenario,
-  summaryStatus: WAITING_SCENARIO_SPECS[scenario].summaryStatus,
-}))
-
-/** Rows for the recent-runs list: one per question or expired-snapshot scenario. Order follows FIXTURE_SCENARIO_NAMES. */
+/** Rows for the recent-runs list: one per question, expired-snapshot or waiting scenario. Order follows FIXTURE_SCENARIO_NAMES. */
 export const FIXTURE_QUESTION_SCENARIO_ROWS: readonly {
   readonly scenario: QuestionScenarioName
   readonly summaryStatus: QuestionSummaryStatus
@@ -1084,24 +1065,14 @@ export function fixtureQuestionScript(scenarioName: string): FixtureQuestionScri
   return isQuestionScenarioName(scenarioName) ? QUESTION_SCENARIO_SPECS[scenarioName].script : undefined
 }
 
-function isWaitingScenarioName(name: string): name is WaitingScenarioName {
-  return Object.hasOwn(WAITING_SCENARIO_SPECS, name)
-}
-
-/** The hold-open and approval flags of a question or waiting scenario; undefined for every other scenario. */
-function streamFlags(scenarioName: string): {readonly holdOpen: boolean; readonly noApproval?: true} | undefined {
-  if (isQuestionScenarioName(scenarioName)) return QUESTION_SCENARIO_SPECS[scenarioName]
-  return isWaitingScenarioName(scenarioName) ? WAITING_SCENARIO_SPECS[scenarioName] : undefined
-}
-
 /** True when the scenario's stream ends open, with no terminal frame, as the gateway's does for a live run. */
 export function isHeldOpenScenario(scenarioName: string): boolean {
-  return streamFlags(scenarioName)?.holdOpen === true
+  return isQuestionScenarioName(scenarioName) && QUESTION_SCENARIO_SPECS[scenarioName].holdOpen
 }
 
 /** True when the scenario's run has no open approval prompt, so the harness approval list is empty. */
 export function isNoApprovalScenario(scenarioName: string): boolean {
-  return streamFlags(scenarioName)?.noApproval === true
+  return isQuestionScenarioName(scenarioName) && QUESTION_SCENARIO_SPECS[scenarioName].noApproval === true
 }
 
 const QUESTION_SCENARIO_BUILDERS = Object.fromEntries(
@@ -1111,14 +1082,9 @@ const QUESTION_SCENARIO_BUILDERS = Object.fromEntries(
   ]),
 ) as Readonly<Record<QuestionScenarioName, (activeRunId: string) => string>>
 
-const WAITING_SCENARIO_BUILDERS = Object.fromEntries(
-  (Object.keys(WAITING_SCENARIO_SPECS) as WaitingScenarioName[]).map(scenario => [scenario, WAITING_SCENARIO_SPECS[scenario].build]),
-) as Readonly<Record<WaitingScenarioName, (activeRunId: string) => string>>
-
 const SCENARIO_BUILDERS: Readonly<Record<FixtureScenarioName, (activeRunId: string) => string>> = {
   ...CHECKOUT_SCENARIO_BUILDERS,
   ...QUESTION_SCENARIO_BUILDERS,
-  ...WAITING_SCENARIO_BUILDERS,
   [FIXTURE_SCENARIO_NAMES.success]: buildSuccessScenario,
   [FIXTURE_SCENARIO_NAMES.terminal_failure]: buildTerminalFailureScenario,
   [FIXTURE_SCENARIO_NAMES.terminal_failure_known_reason]: buildTerminalFailureKnownReasonScenario,

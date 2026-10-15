@@ -451,10 +451,9 @@ async function defaultRuntimeLoader(opts?: {
   // check-types instead of surfacing as a silently skipped call. Only the members listed are read.
   const streamMod = await import(/* @vite-ignore */ _streamSpecifier) as Pick<
     typeof StreamModule,
-    'resetBootstrapState' | 'initOperatorStream'
+    'initOperatorStream'
   >
   // Streams attach on expand, launch, restore and jump only; the stream module's own bootstrap is not run here.
-  streamMod.resetBootstrapState()
 
   const runIndexMod = await import(/* @vite-ignore */ _runIndexSpecifier) as Pick<
     typeof RunIndexModule,
@@ -859,7 +858,6 @@ async function defaultRuntimeLoader(opts?: {
     _cancelPendingExpand()
     // Close the active stream handle on cleanup.
     _closeActiveStream()
-    streamMod.resetBootstrapState()
     launchMod.resetLaunchState()
     runIndexMod.resetRunIndexState()
   }
