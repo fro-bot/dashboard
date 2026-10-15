@@ -73,7 +73,7 @@ This reverses the earlier rule in `docs/plans/2026-10-10-002-feat-run-card-time-
   "verdict": "build-new-within-scope",
   "scope": "public/operator-*.js and web/src/operator/ (operator stream, run index, launch, runtime seam)",
   "freshness": {
-    "vcs_reference": "b16d06109d307cd10735de6b1da5dd47ea0423f6"
+    "vcs_reference": "9d590cde5f35715ed3b268f6291c4cd163bf2921"
   },
   "budget": {
     "max_search_passes": 15,
