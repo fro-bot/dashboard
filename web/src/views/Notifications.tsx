@@ -369,6 +369,17 @@ export function Notifications({
           </p>
         </div>
 
+        {copy.installSteps && (
+          <ol
+            aria-label="Install Fro Bot to your Home Screen"
+            className="list-decimal list-inside space-y-2 rounded-md border border-border bg-surface-raised p-3 text-body-sm text-text"
+          >
+            {copy.installSteps.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ol>
+        )}
+
         {copy.recoveryHint.length > 0 && (
           <p
             data-testid="notifications-recovery"

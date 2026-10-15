@@ -25,6 +25,7 @@ export interface NotificationStateCopy {
   readonly privacyPolicyLinkText: string
   readonly ctaText: string | null
   readonly recoveryHint: string
+  readonly installSteps?: readonly string[]
 }
 
 const COPY: Record<NotificationUiState, NotificationStateCopy> = {
@@ -65,10 +66,15 @@ const COPY: Record<NotificationUiState, NotificationStateCopy> = {
   },
   'ios-not-installed': {
     headline: 'Installation Required',
-    detail: 'Web Push on iOS requires launching this dashboard as an installed Home Screen app.',
+    detail: 'Add Fro Bot to your Home Screen before turning on notifications.',
     privacyPolicyLinkText: 'How we handle notification data',
-    ctaText: 'Install App',
-    recoveryHint: 'Open the share menu and select "Add to Home Screen" to install.',
+    ctaText: null,
+    recoveryHint: '',
+    installSteps: [
+      'Tap the Share icon in Safari.',
+      'Tap “Add to Home Screen.”',
+      'Open Fro Bot from your Home Screen to turn on notifications.',
+    ],
   },
   'sw-not-ready': {
     headline: 'Initializing background sync',

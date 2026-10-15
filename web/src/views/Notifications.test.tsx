@@ -127,7 +127,7 @@ describe('Notifications Component', () => {
     expect(screen.getByTestId('notifications-settings')).toBeInTheDocument()
   })
 
-  it('handles state: ios-not-installed', async () => {
+  it('shows installation instructions without an install button on iOS', async () => {
     addMetaTag()
     vi.mocked(getPushSupport).mockReturnValue({supported: false, needsInstall: true})
 
@@ -136,7 +136,23 @@ describe('Notifications Component', () => {
     })
 
     expect(screen.getByTestId('notifications-headline')).toHaveTextContent('Installation Required')
-    expect(screen.getByTestId('notifications-cta')).toHaveTextContent('Install App')
+    expect(screen.queryByRole('button', {name: 'Install App'})).not.toBeInTheDocument()
+    expect(screen.getByRole('list', {name: 'Install Fro Bot to your Home Screen'})).toBeInTheDocument()
+    expect(screen.getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+      'Tap the Share icon in Safari.',
+      'Tap “Add to Home Screen.”',
+      'Open Fro Bot from your Home Screen to turn on notifications.',
+    ])
+  })
+
+  it('keeps the enable notifications button for non-iOS users', async () => {
+    addMetaTag()
+
+    await act(async () => {
+      render(<Notifications />)
+    })
+
+    expect(screen.getByRole('button', {name: 'Enable notifications'})).toBeInTheDocument()
   })
 
   it('handles state: unsupported', async () => {
