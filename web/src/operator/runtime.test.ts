@@ -2238,6 +2238,7 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
     vi.doUnmock('/static/operator-run-index.js?manual=1')
     vi.doUnmock('/static/operator-launch.js?manual=1')
     vi.restoreAllMocks()
+    vi.useRealTimers()
     resetQuestionPageStore()
   })
 
@@ -2777,6 +2778,112 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
       await flushAnimationFrames()
 
       expect(scrolled).toEqual(['run-j-a'])
+      mounted.runtime.cleanup()
+    })
+
+    it('expires the late reveal window after ten seconds', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountLoaded()
+      vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']})
+
+      requestRunJump('run-j-a')
+      await tick()
+      await vi.advanceTimersByTimeAsync(10_001)
+      const questions = cardEl('run-j-a').querySelector('[data-role="run-questions"]') as HTMLElement
+      questions.hidden = false
+      questions.append(document.createElement('p'))
+      await tick()
+      await flushAnimationFrames()
+
+      expect(scrolled).toEqual(['run-j-a'])
+      mounted.runtime.cleanup()
+    })
+
+    it('cancels the late reveal on pointerdown', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountLoaded()
+
+      requestRunJump('run-j-a')
+      await tick()
+      window.dispatchEvent(new Event('pointerdown'))
+      const questions = cardEl('run-j-a').querySelector('[data-role="run-questions"]') as HTMLElement
+      questions.hidden = false
+      questions.append(document.createElement('p'))
+      await tick()
+      await flushAnimationFrames()
+
+      expect(scrolled).toEqual(['run-j-a'])
+      mounted.runtime.cleanup()
+    })
+
+    it('cancels the late reveal when an ordinary click selects another card', async () => {
+      renderPage(cardHtml('run-j-a'), cardHtml('run-j-b'))
+      const mounted = await mountLoaded()
+
+      requestRunJump('run-j-a')
+      await tick()
+      await mounted.select('run-j-b')
+      const questions = cardEl('run-j-a').querySelector('[data-role="run-questions"]') as HTMLElement
+      questions.hidden = false
+      questions.append(document.createElement('p'))
+      await tick()
+      await flushAnimationFrames()
+
+      expect(scrolled).toEqual(['run-j-a'])
+      mounted.runtime.cleanup()
+    })
+
+    it('cancels the late reveal when the expanded card is collapsed', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountLoaded()
+
+      requestRunJump('run-j-a')
+      await tick()
+      cardEl('run-j-a').dataset.expanded = 'false'
+      await mounted.select('run-j-a')
+      const questions = cardEl('run-j-a').querySelector('[data-role="run-questions"]') as HTMLElement
+      questions.hidden = false
+      questions.append(document.createElement('p'))
+      await tick()
+      await flushAnimationFrames()
+
+      expect(scrolled).toEqual(['run-j-a'])
+      mounted.runtime.cleanup()
+    })
+
+    it('does not late-scroll a card that is collapsed before the question paints', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountLoaded()
+
+      requestRunJump('run-j-a')
+      await tick()
+      cardEl('run-j-a').dataset.expanded = 'false'
+      const questions = cardEl('run-j-a').querySelector('[data-role="run-questions"]') as HTMLElement
+      questions.hidden = false
+      questions.append(document.createElement('p'))
+      await tick()
+      await flushAnimationFrames()
+
+      expect(scrolled).toEqual(['run-j-a'])
+      mounted.runtime.cleanup()
+    })
+
+    it('does not cancel the late reveal for an arrow key inside an input', async () => {
+      renderPage(cardHtml('run-j-a'))
+      const mounted = await mountLoaded()
+
+      requestRunJump('run-j-a')
+      await tick()
+      const input = document.createElement('input')
+      cardEl('run-j-a').append(input)
+      const questions = cardEl('run-j-a').querySelector('[data-role="run-questions"]') as HTMLElement
+      questions.hidden = false
+      questions.append(document.createElement('p'))
+      await tick()
+      input.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowDown', bubbles: true}))
+      await flushAnimationFrames()
+
+      expect(scrolled).toEqual(['run-j-a', 'run-j-a'])
       mounted.runtime.cleanup()
     })
 

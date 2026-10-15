@@ -546,6 +546,7 @@ async function defaultRuntimeLoader(opts?: {
     let cancelled = false
     let firstFrame: number | undefined
     let secondFrame: number | undefined
+    let revealTimeout: number | undefined
     const observer = new MutationObserver(checkForRevealedContent)
 
     const cleanup = () => {
@@ -553,13 +554,17 @@ async function defaultRuntimeLoader(opts?: {
       observer.disconnect()
       if (firstFrame !== undefined) window.cancelAnimationFrame?.(firstFrame)
       if (secondFrame !== undefined) window.cancelAnimationFrame?.(secondFrame)
+      if (revealTimeout !== undefined) window.clearTimeout(revealTimeout)
       window.removeEventListener('wheel', onUserScroll)
       window.removeEventListener('touchmove', onUserScroll)
+      window.removeEventListener('pointerdown', onUserScroll)
       window.removeEventListener('keydown', onScrollKey)
       if (cancelPendingCardReveal === cleanup) cancelPendingCardReveal = () => {}
     }
     const onUserScroll = () => cleanup()
     const onScrollKey = (event: KeyboardEvent) => {
+      if (event.target instanceof Element
+        && event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])') !== null) return
       if (['ArrowDown', 'ArrowUp', 'End', 'Home', 'PageDown', 'PageUp', ' '].includes(event.key)) cleanup()
     }
 
@@ -568,13 +573,13 @@ async function defaultRuntimeLoader(opts?: {
         .some(region => !region.hidden && region.childNodes.length > 0)
 
     function checkForRevealedContent() {
-      if (cancelled || !hasRevealedContent()) return
+      if (cancelled || card.dataset.expanded !== 'true' || !hasRevealedContent()) return
       observer.disconnect()
       firstFrame = window.requestAnimationFrame(() => {
         firstFrame = undefined
         secondFrame = window.requestAnimationFrame(() => {
           secondFrame = undefined
-          if (cancelled) return
+          if (cancelled || card.dataset.expanded !== 'true') return cleanup()
           scrollToStart()
           cleanup()
         })
@@ -584,8 +589,10 @@ async function defaultRuntimeLoader(opts?: {
     cancelPendingCardReveal = cleanup
     window.addEventListener('wheel', onUserScroll, {passive: true})
     window.addEventListener('touchmove', onUserScroll, {passive: true})
+    window.addEventListener('pointerdown', onUserScroll)
     window.addEventListener('keydown', onScrollKey)
-    observer.observe(card, {attributes: true, childList: true, subtree: true, attributeFilter: ['hidden']})
+    revealTimeout = window.setTimeout(cleanup, 10_000)
+    observer.observe(card, {attributes: true, childList: true, subtree: true, attributeFilter: ['hidden', 'data-expanded']})
     checkForRevealedContent()
   }
 
@@ -650,6 +657,7 @@ async function defaultRuntimeLoader(opts?: {
   // status it already shows, and the expand proceeds. The whole wait is cancelable: a collapse
   // never waits, and supersedes an expand that is still waiting.
   const onSelectRun = (runId: string): Promise<void> | void => {
+    cancelPendingCardReveal()
     if (_activeStreamRunId === runId) {
       _cancelPendingExpand()
       _closeActiveStream()
