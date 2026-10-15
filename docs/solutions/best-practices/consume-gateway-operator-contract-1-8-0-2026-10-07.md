@@ -141,6 +141,8 @@ stream-owned region, paints "Connecting to run stream…" once, then calls `conn
 `updateDOM` is the only code that unhides a region, and only when the region has
 content. Collapsing hides the regions again.
 
+A recorded re-expand goes through the same seed-then-`updateDOM` path: the record seeds the stream state, and nothing is revealed until `updateDOM` runs, so the rule still holds. The record store is page memory only, bounded to 100 runs and 2,000,000 characters of output with least-recently-used eviction. It is cleared on `auth-required` and on a fixture scenario change, and it drops runs that leave the latest applied run list.
+
 While the stream is live, the waiting line reads "Waiting to start…" for a queued run
 and "Waiting for output…" otherwise. It hides on output, an open approval, an open
 question, a terminal or blocked status, and any non-live connection. Visible checkout
