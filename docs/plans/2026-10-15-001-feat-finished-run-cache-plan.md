@@ -194,7 +194,7 @@ sequenceDiagram
 
 ## Implementation Units
 
-- [ ] **Unit 1: Finished-run store and recording**
+- [x] **Unit 1: Finished-run store and recording**
 
 **Goal:** Record a card's displayed terminal result, bounded and in memory, and make sure a clear can't be undone by late frames.
 

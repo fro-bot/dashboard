@@ -957,6 +957,139 @@ export function resetQuestionPageStore() {
   questionPageStore.clear()
 }
 
+// ---------------------------------------------------------------------------
+// Finished-run store
+//
+// What a card displayed when its run turned terminal, kept for the page lifetime so a re-expand
+// can paint it with no stream. A sibling of the question store with its own contract: in memory
+// only (never persisted), bounded, and evicted least-recently-used. A terminal run never changes,
+// so the record is a snapshot, not a cache with a freshness story.
+//
+// A record is a whitelist copy of the run entry, deeply frozen. It never carries approval or
+// question state, sequence numbers, or cancel bookkeeping.
+// ---------------------------------------------------------------------------
+
+/** Most runs the store holds. */
+const MAX_FINISHED_RUNS = 100
+
+/** Most output characters the store holds across all runs. Per-run output is already capped at MAX_OUTPUT_TEXT_CHARS. */
+const MAX_FINISHED_OUTPUT_CHARS = 2_000_000
+
+// Insertion order is recency order: the first key is the least recently used.
+const finishedRunStore = new Map()
+let finishedRunChars = 0
+
+// Bumped by every clear. An attachment captures it at start and writes only while it is unchanged,
+// so a frame that lands after a clear cannot put an entry back.
+let finishedRunGeneration = 0
+
+/** The store key: the run ID, or the fixture session plus the run ID when a fixture session is set. */
+function finishedRunKey(runId, fixtureSessionId) {
+  return fixtureSessionId === undefined ? runId : `${fixtureSessionId}\u0000${runId}`
+}
+
+/** A deep, frozen copy of closed JSON-shaped data. Own keys are copied as data, so `__proto__` stays inert. */
+function freezeCopy(value) {
+  if (Array.isArray(value)) return Object.freeze(value.map(freezeCopy))
+  if (value !== null && typeof value === 'object') {
+    return Object.freeze(Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, freezeCopy(entry)])))
+  }
+  return value
+}
+
+/**
+ * The whitelist record for a terminal run entry, or undefined when the result is not final: the
+ * entry's output must be the authoritative final text, or the "output no longer available" result.
+ * Output with gaps, or with no final frame, is left for a live attach to repair.
+ */
+function toFinishedRunRecord(runEntry) {
+  if (runEntry?.terminal !== true) return undefined
+  if (runEntry.outputFinal !== true && runEntry.outputUnavailable !== true) return undefined
+  return Object.freeze({
+    runId: runEntry.runId,
+    status: runEntry.status,
+    terminal: true,
+    phase: runEntry.phase,
+    stale: runEntry.stale,
+    startedAt: runEntry.startedAt,
+    ...(runEntry.reasonLabel === undefined ? {} : {reasonLabel: runEntry.reasonLabel}),
+    ...(typeof runEntry.outputText === 'string' ? {outputText: runEntry.outputText} : {}),
+    outputTruncated: runEntry.outputTruncated === true,
+    outputCoalesced: runEntry.outputCoalesced === true,
+    ...(runEntry.outputUnavailable === true ? {outputUnavailable: true} : {}),
+    ...(runEntry.checkoutProvenance === undefined ? {} : {checkoutProvenance: freezeCopy(runEntry.checkoutProvenance)}),
+    ...(runEntry.checkoutPreparation === undefined ? {} : {checkoutPreparation: freezeCopy(runEntry.checkoutPreparation)}),
+  })
+}
+
+function finishedRunSize(record) {
+  return record.outputText?.length ?? 0
+}
+
+function deleteFinishedRun(key) {
+  const record = finishedRunStore.get(key)
+  if (record === undefined) return
+  finishedRunChars -= finishedRunSize(record)
+  finishedRunStore.delete(key)
+}
+
+/**
+ * Store a record as the newest entry, evicting the least recently used until both bounds hold.
+ * An overwrite replaces the old entry and its size rather than adding to it. There is no
+ * per-entry oversize case: a record's output is already capped below the budget.
+ */
+function writeFinishedRun(key, record) {
+  deleteFinishedRun(key)
+  const size = finishedRunSize(record)
+  while (
+    finishedRunStore.size > 0 &&
+    (finishedRunStore.size >= MAX_FINISHED_RUNS || finishedRunChars + size > MAX_FINISHED_OUTPUT_CHARS)
+  ) {
+    deleteFinishedRun(finishedRunStore.keys().next().value)
+  }
+  finishedRunStore.set(key, record)
+  finishedRunChars += size
+}
+
+/**
+ * True when a record exists for the run and its status equals `listStatus`, the status the run list
+ * last applied to the card. A pure check: it neither reads the record out nor changes recency.
+ */
+export function hasUsableFinishedRun(runId, listStatus, fixtureSessionId) {
+  return typeof listStatus === 'string' && finishedRunStore.get(finishedRunKey(runId, fixtureSessionId))?.status === listStatus
+}
+
+/** The frozen record for the run, or undefined. A read moves the entry to most recently used. */
+export function getFinishedRun(runId, fixtureSessionId) {
+  const key = finishedRunKey(runId, fixtureSessionId)
+  const record = finishedRunStore.get(key)
+  if (record === undefined) return undefined
+  finishedRunStore.delete(key)
+  finishedRunStore.set(key, record)
+  return record
+}
+
+/** Keep only the records whose run IDs are in `runIds`; drop every other one. */
+export function pruneFinishedRuns(runIds, fixtureSessionId) {
+  const keep = new Set()
+  for (const runId of runIds) keep.add(finishedRunKey(runId, fixtureSessionId))
+  for (const key of [...finishedRunStore.keys()]) {
+    if (!keep.has(key)) deleteFinishedRun(key)
+  }
+}
+
+/** Drop every record and invalidate every attachment started before now, so none can write again. */
+export function clearFinishedRuns() {
+  finishedRunStore.clear()
+  finishedRunChars = 0
+  finishedRunGeneration += 1
+}
+
+/** Empty the store between tests. Also bumps the generation, so a leaked attachment cannot repopulate it. */
+export function resetFinishedRuns() {
+  clearFinishedRuns()
+}
+
 /**
  * Tombstone a question request for the page and drop it from the run entry: its open request, its
  * draft, and any claimed exemption. Shared by the settle frame and by this page's own
@@ -3342,6 +3475,9 @@ function makeQuestionNoteCard(status) {
 export function initOperatorStream(opts) {
   const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, timeEl, waitingEl, checkoutEl, cancelEl, questionsEl, approvalClient: injectedApprovalClient, cancelClient: injectedCancelClient, questionClient: injectedQuestionClient, endpointBase, fixtureSessionId} = opts
 
+  // The finished-run store generation this attachment started under: a clear since then retires its writes.
+  const attachGeneration = finishedRunGeneration
+
   // The run-list summary status for this run, when the caller has one. Only a known summary status
   // is kept; it lets a no-snapshot reset close an expired terminal run without a status frame.
   const summaryStatus = typeof opts.summaryStatus === 'string' && SUMMARY_STATUSES.has(opts.summaryStatus)
@@ -4063,13 +4199,32 @@ export function initOperatorStream(opts) {
   // the GET resolves, the result is stale and must be discarded.
   let connectEpoch = 0
 
+  // Whether this attachment has already written its run's finished record. At most once per attachment.
+  let finishedRunRecorded = false
+
+  /**
+   * Record the displayed terminal result of this stream's own run. `dispatch` is reachable after
+   * close(), so an aborted attachment must not write. A clear since attach retires the write.
+   * Nothing is recorded unless the output is final, or is the "output no longer available" result.
+   */
+  function recordFinishedRun() {
+    if (finishedRunRecorded || aborted || finishedRunGeneration !== attachGeneration) return
+    const record = toFinishedRunRecord(state.runs[runId])
+    if (record === undefined) return
+    finishedRunRecorded = true
+    writeFinishedRun(finishedRunKey(runId, fixtureSessionId), record)
+  }
+
   function dispatch(event) {
     const prevConnection = state.connection
+    const wasTerminal = state.runs[runId]?.terminal === true
     state = nextStreamState(state, event)
     const startedAt = normalizeIsoTimestamp(state.runs[runId]?.startedAt)
     if (startedAt !== undefined) latestStartedAt = startedAt
     syncQuestionStatuses()
     updateDOM()
+    // The run's first terminal entry is the only moment worth recording: a terminal run never changes.
+    if (!wasTerminal) recordFinishedRun()
     // Trigger reconcile when the stream first goes live (or re-goes live after reconnect).
     // This is the one-shot GET on (re)connect.
     if (prevConnection !== 'live' && state.connection === 'live') {

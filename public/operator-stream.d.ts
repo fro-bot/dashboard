@@ -657,6 +657,50 @@ export declare function getQuestionPageStore(runId: string): QuestionPageRecord
 /** Drop every run's tombstones and drafts (tests; page teardown). */
 export declare function resetQuestionPageStore(): void
 
+/**
+ * What a card displayed when its run turned terminal: a deeply frozen whitelist copy of the run entry.
+ * Never carries approval or question state, sequence numbers, or cancel bookkeeping. The checkout
+ * objects are frozen copies. `outputText` is absent for an "output no longer available" result.
+ */
+export interface FinishedRunRecord {
+  readonly runId: string
+  readonly status: string
+  readonly terminal: true
+  readonly phase: string
+  readonly stale: boolean
+  readonly startedAt: string
+  readonly reasonLabel?: string
+  readonly outputText?: string
+  readonly outputTruncated: boolean
+  readonly outputCoalesced: boolean
+  readonly outputUnavailable?: true
+  readonly checkoutProvenance?: CheckoutProvenance
+  readonly checkoutPreparation?: CheckoutPreparation
+}
+
+/**
+ * True when a record exists for the run and its status equals `listStatus`, the status the run list
+ * last applied to the card. Pure: it neither reads the record out nor changes recency. In fixture
+ * mode pass the fixture session, which scopes the key.
+ */
+export declare function hasUsableFinishedRun(
+  runId: string,
+  listStatus: string | undefined,
+  fixtureSessionId?: string,
+): boolean
+
+/** The frozen record for the run, or undefined. A read moves the entry to most recently used. */
+export declare function getFinishedRun(runId: string, fixtureSessionId?: string): FinishedRunRecord | undefined
+
+/** Keep only the records whose run IDs are in `runIds`; drop every other one. */
+export declare function pruneFinishedRuns(runIds: Iterable<string>, fixtureSessionId?: string): void
+
+/** Drop every record and retire every attachment started before now, so none can write again. */
+export declare function clearFinishedRuns(): void
+
+/** Empty the finished-run store between tests; also retires attachments started before now. */
+export declare function resetFinishedRuns(): void
+
 // ---------------------------------------------------------------------------
 // DOM shell (browser-only — never called at module top-level)
 // ---------------------------------------------------------------------------
