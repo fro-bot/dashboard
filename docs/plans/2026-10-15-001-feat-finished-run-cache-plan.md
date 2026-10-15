@@ -315,7 +315,7 @@ sequenceDiagram
 
 **Verification:** Every expand trigger either paints from a usable record with no stream, or behaves exactly as today.
 
-- [ ] **Unit 4: Browser verification and docs**
+- [x] **Unit 4: Browser verification and docs**
 
 **Goal:** Prove the hit and miss paths on the assembled fixture app, and record the new path in the docs that describe attach and `no-snapshot`.
 
