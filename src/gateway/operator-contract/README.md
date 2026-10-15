@@ -1,5 +1,6 @@
 Source: fro-bot/agent
-Path: packages/gateway/src/operator-contract/ (contract barrel) + packages/gateway/src/web/sse/ (SSE surface)
+Path: packages/gateway/src/operator-contract/ (contract barrel). `sse-frames.ts` is dashboard-authored from the
+events packages/gateway/src/web/sse/run-stream-route.ts writes.
 Contract version: exported as `OPERATOR_CONTRACT_VERSION` in `version.ts`, the single source. No other file, comment,
 or test hand-types a version or release tag; tests compare against the constant.
 Vendored copy — do not hand-edit behavior. Refresh by re-copying upstream and
