@@ -234,7 +234,7 @@ sequenceDiagram
 
 **Verification:** The store records only finished, displayed results, stays within both bounds, and is empty after a clear.
 
-- [ ] **Unit 2: Paint a recorded run without a stream**
+- [x] **Unit 2: Paint a recorded run without a stream**
 
 **Goal:** `initOperatorStream` can start from a record and paint the finished card with no network activity.
 

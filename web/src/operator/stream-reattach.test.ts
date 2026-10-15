@@ -1,5 +1,12 @@
 import {afterEach, describe, expect, it, vi} from 'vitest'
-import {FIRST_FRAME_TIMEOUT_MS, PINNED_CONTRACT_VERSION, initOperatorStream, resetQuestionPageStore} from '../../../public/operator-stream.js'
+import {
+  clearFinishedRuns,
+  FIRST_FRAME_TIMEOUT_MS,
+  getFinishedRun,
+  initOperatorStream,
+  PINNED_CONTRACT_VERSION,
+  resetQuestionPageStore,
+} from '../../../public/operator-stream.js'
 
 const RUN_ID = 'run-reattach'
 
@@ -109,6 +116,7 @@ afterEach(() => {
   document.body.replaceChildren()
   vi.unstubAllGlobals()
   resetQuestionPageStore()
+  clearFinishedRuns()
 })
 
 describe('operator stream re-attach on one card', () => {
@@ -935,5 +943,116 @@ describe('operator stream waiting line with a run-list summary status', () => {
     expect(parts.regions['run-output'].hidden).toBe(false)
     expect(waitingOf(parts).hidden).toBe(true)
     handle.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A recorded run re-expands from memory: no stream, and the stream-owned regions stay clean
+// ---------------------------------------------------------------------------
+
+const FINAL_OUTPUT = frame('output', {runId: RUN_ID, text: 'the final answer', final: true, seq: 1})
+const SUCCEEDED_WITH_CHECKOUT = frame('status', {
+  ...RUNNING_STATUS,
+  status: 'succeeded',
+  phase: 'COMPLETED',
+  completedAt: '2026-06-20T10:05:00Z',
+  checkoutProvenance: {
+    kind: 'observed',
+    observation: {
+      head: {kind: 'attached', branch: 'fixture-main', sha: 'a'.repeat(40)},
+      worktree: {kind: 'clean'},
+      operationInProgress: 'none',
+      observedAt: '2026-06-20T10:00:00Z',
+    },
+    remote: {kind: 'not-checked'},
+  },
+})
+
+const STREAM_OWNED_EMPTY_REGIONS = ['run-approvals', 'run-questions', 'run-waiting', 'run-cancel', 'approval-badge'] as const
+
+describe('operator stream recorded re-expand', () => {
+  it('paints a finished run from its record on every re-expand: no fetch, one copy of each region, the other regions hidden and empty', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const live = attachFull(parts)
+    pushToLatest(READY + RUNNING + FINAL_OUTPUT + SUCCEEDED_WITH_CHECKOUT)
+    await vi.waitFor(() => expect(parts.statusEl.textContent).toBe('Succeeded'))
+    expect(getFinishedRun(RUN_ID)).toBeDefined()
+    const checkoutText = parts.regions['run-checkout-detail'].textContent
+    expect(checkoutText).not.toBe('')
+    live.close()
+
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    for (let expand = 0; expand < 3; expand++) {
+      const handle = attachFull(parts, {fromFinishedRecord: true})
+
+      expect(handle.getConnectionStatus()).toBe('terminal')
+      expect(parts.statusEl.textContent).toBe('Succeeded')
+      expect(parts.noticeEl.textContent).toBe('')
+      expect(parts.regions['run-output'].textContent).toBe('the final answer')
+      expect(parts.regions['run-output'].hidden).toBe(false)
+      expect(parts.regions['run-checkout-detail'].hidden).toBe(false)
+      expect(parts.regions['run-checkout-detail'].textContent).toBe(checkoutText)
+      expect(parts.regions['run-checkout-detail'].querySelectorAll('.checkout-detail')).toHaveLength(1)
+      for (const role of STREAM_OWNED_EMPTY_REGIONS) {
+        expect(parts.regions[role].hidden).toBe(true)
+        expect(parts.regions[role].childNodes).toHaveLength(0)
+        expect(parts.regions[role].textContent).toBe('')
+      }
+      expect(parts.card.querySelectorAll('.run-cancel-control, .approval-prompt, .question-region__request')).toHaveLength(0)
+      handle.close()
+    }
+
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('clears markup left in the regions by an earlier attachment before painting the record', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeFullCard()
+    const live = attachFull(parts)
+    pushToLatest(READY + RUNNING + FINAL_OUTPUT + SUCCEEDED)
+    await vi.waitFor(() => expect(parts.statusEl.textContent).toBe('Succeeded'))
+    live.close()
+    for (const role of STREAM_OWNED_EMPTY_REGIONS) {
+      const stale = document.createElement('div')
+      stale.className = 'approval-prompt'
+      stale.textContent = 'stale'
+      parts.regions[role].append(stale)
+      parts.regions[role].hidden = false
+    }
+
+    const handle = attachFull(parts, {fromFinishedRecord: true})
+
+    for (const role of STREAM_OWNED_EMPTY_REGIONS) {
+      expect(parts.regions[role].hidden).toBe(true)
+      expect(parts.regions[role].childNodes).toHaveLength(0)
+    }
+    handle.close()
+  })
+
+  it('does not move to "submitted-unobservable" after the first-frame timeout would have fired', async () => {
+    vi.useFakeTimers()
+    try {
+      const {pushToLatest} = stubStreamFetch()
+      const parts = makeFullCard()
+      const live = attachFull(parts)
+      pushToLatest(READY + RUNNING + FINAL_OUTPUT + SUCCEEDED)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(parts.statusEl.textContent).toBe('Succeeded')
+      live.close()
+      const fetchSpy = vi.fn()
+      vi.stubGlobal('fetch', fetchSpy)
+
+      const handle = attachFull(parts, {fromFinishedRecord: true})
+      await vi.advanceTimersByTimeAsync(FIRST_FRAME_TIMEOUT_MS + 1000)
+
+      expect(parts.noticeEl.dataset.connectionState).toBe('closed')
+      expect(parts.statusEl.textContent).toBe('Succeeded')
+      expect(fetchSpy).not.toHaveBeenCalled()
+      handle.close()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -695,11 +695,8 @@ export declare function getFinishedRun(runId: string, fixtureSessionId?: string)
 /** Keep only the records whose run IDs are in `runIds`; drop every other one. */
 export declare function pruneFinishedRuns(runIds: Iterable<string>, fixtureSessionId?: string): void
 
-/** Drop every record and retire every attachment started before now, so none can write again. */
+/** Drop every record and retire every attachment started before now, so none can write again. Tests call it between cases. */
 export declare function clearFinishedRuns(): void
-
-/** Empty the finished-run store between tests; also retires attachments started before now. */
-export declare function resetFinishedRuns(): void
 
 // ---------------------------------------------------------------------------
 // DOM shell (browser-only — never called at module top-level)
@@ -901,6 +898,14 @@ export interface InitOptions {
    * without a status frame. Unknown values are ignored.
    */
   readonly summaryStatus?: RunSummaryStatus
+  /**
+   * Paint the run's finished record (see `getFinishedRun`, keyed with `fixtureSessionId` when set)
+   * instead of attaching. The handle opens no stream, arms no first-frame timer and builds no
+   * cancel, approval or question client; `getConnectionStatus()` returns `'terminal'`. The caller
+   * decides hit or miss first (`hasUsableFinishedRun`); with no record for the run this attaches
+   * normally.
+   */
+  readonly fromFinishedRecord?: boolean
 }
 
 export declare function initOperatorStream(opts: InitOptions): StreamHandle

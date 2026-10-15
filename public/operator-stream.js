@@ -1078,16 +1078,14 @@ export function pruneFinishedRuns(runIds, fixtureSessionId) {
   }
 }
 
-/** Drop every record and invalidate every attachment started before now, so none can write again. */
+/**
+ * Drop every record and invalidate every attachment started before now, so none can write again.
+ * Tests call this between cases too: the generation bump keeps a leaked attachment from repopulating.
+ */
 export function clearFinishedRuns() {
   finishedRunStore.clear()
   finishedRunChars = 0
   finishedRunGeneration += 1
-}
-
-/** Empty the store between tests. Also bumps the generation, so a leaked attachment cannot repopulate it. */
-export function resetFinishedRuns() {
-  clearFinishedRuns()
 }
 
 /**
@@ -3484,6 +3482,12 @@ export function initOperatorStream(opts) {
     ? opts.summaryStatus
     : undefined
 
+  // A recorded paint: the run's finished record, read once here (that read is the only recency bump).
+  // The caller decides hit or miss first; with the option set but no record this is a normal attach.
+  // A recorded handle opens no stream and builds no decision clients: nothing about a finished run changes.
+  const finishedRecord = opts.fromFinishedRecord === true ? getFinishedRun(runId, fixtureSessionId) : undefined
+  const fromRecord = finishedRecord !== undefined
+
   // Every stream-owned region starts each attachment empty and hidden; updateDOM alone shows one.
   if (checkoutEl) {
     checkoutEl.textContent = ''
@@ -3527,7 +3531,7 @@ export function initOperatorStream(opts) {
   // Build the approval client lazily (only if approvalsEl is present).
   // Pass endpointBase and fixtureSessionId so fixture mode uses the fixture approval routes
   // and includes the session ID in all approval requests.
-  const approvalClient = approvalsEl !== undefined && approvalsEl !== null
+  const approvalClient = !fromRecord && approvalsEl !== undefined && approvalsEl !== null
     ? (injectedApprovalClient ?? buildApprovalClient(
         endpointBase === undefined && fixtureSessionId === undefined
           ? undefined
@@ -3540,21 +3544,23 @@ export function initOperatorStream(opts) {
 
   // Build the question client only when the caller wires questions: an injected client, or the
   // question region element. A stream with neither never touches the questions routes.
-  const questionClient = injectedQuestionClient ?? (
-    questionsEl !== undefined && questionsEl !== null
-      ? buildQuestionClient(
-          endpointBase === undefined && fixtureSessionId === undefined
-            ? undefined
-            : {
-                ...(endpointBase === undefined ? {} : {endpointBase}),
-                ...(fixtureSessionId === undefined ? {} : {fixtureSessionId}),
-              },
-        )
-      : null
-  )
+  const questionClient = fromRecord
+    ? null
+    : injectedQuestionClient ?? (
+      questionsEl !== undefined && questionsEl !== null
+        ? buildQuestionClient(
+            endpointBase === undefined && fixtureSessionId === undefined
+              ? undefined
+              : {
+                  ...(endpointBase === undefined ? {} : {endpointBase}),
+                  ...(fixtureSessionId === undefined ? {} : {fixtureSessionId}),
+                },
+          )
+        : null
+    )
 
   // Build the cancel client lazily (only if cancelEl is present).
-  const cancelClient = cancelEl !== undefined && cancelEl !== null
+  const cancelClient = !fromRecord && cancelEl !== undefined && cancelEl !== null
     ? (injectedCancelClient ?? buildCancelClient(
         endpointBase === undefined && fixtureSessionId === undefined
           ? undefined
@@ -3843,13 +3849,22 @@ export function initOperatorStream(opts) {
     return {el, update}
   }
 
-  let state = {
-    connection: 'connecting',
-    runs: Object.create(null), // null-prototype to guard against __proto__ key pollution
-    retryCount: 0,
-    shouldReconnect: false,
-    ...(summaryStatus === undefined ? {} : {summaryStatus}),
-  }
+  // A recorded run starts closed and terminal. Its entry is a mutable copy: the stored record is frozen
+  // and must never be handed to the state, whose reducer and painter own their entries.
+  let state = fromRecord
+    ? {
+        connection: 'closed',
+        runs: Object.assign(Object.create(null), {[runId]: {...finishedRecord, terminal: true, cancelInFlight: false}}),
+        retryCount: 0,
+        shouldReconnect: false,
+      }
+    : {
+        connection: 'connecting',
+        runs: Object.create(null), // null-prototype to guard against __proto__ key pollution
+        retryCount: 0,
+        shouldReconnect: false,
+        ...(summaryStatus === undefined ? {} : {summaryStatus}),
+      }
 
   let abortController = null
   let reconnectTimer = null // track pending reconnect timer
@@ -3857,7 +3872,8 @@ export function initOperatorStream(opts) {
   let aborted = false // set by close() to prevent late timer from fetching
   let announcedFailure = false
   let paintedPreparationHeadline = false // reasonEl currently shows a headline this stream wrote from checkoutPreparation
-  let latestStartedAt = null // latest valid startedAt from a status frame; never reset to blank
+  // Latest valid startedAt from a status frame; never reset to blank. A recorded run seeds it so the first paint has it.
+  let latestStartedAt = fromRecord ? (normalizeIsoTimestamp(finishedRecord.startedAt) ?? null) : null
 
   function updateDOM() {
     // Late-frame guard: after close(), no write of any kind (notice, status,
@@ -4880,10 +4896,11 @@ export function initOperatorStream(opts) {
   }
 
   // One paint before connecting, so the card shows "Connecting to run stream…" and no stale region.
+  // A recorded run paints its finished result here and never connects: no stream, no first-frame timer.
   updateDOM()
 
   // Start the connection
-  connect()
+  if (!fromRecord) connect()
 
   // Return a handle to allow external abort (e.g. page unload)
   return {
