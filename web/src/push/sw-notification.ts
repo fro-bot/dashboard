@@ -9,12 +9,13 @@
  *
  * Wire shape: the gateway sends `{title, body, data: {type, route, runId?, failureLabel?}}`.
  * Top-level `title` and `body` are i18n keys, not display text, and are never
- * rendered. Only `data.type`, `data.failureLabel`, and (for `question` only)
- * `data.runId` with `data.route` are read; any other field is ignored. The
- * output `route` is always the literal `/`: the notification never carries a
- * URL built from wire text. A `question` keeps its `runId` only when the ID
- * matches `RUN_ID_PATTERN` and the wire `route` is exactly `/operator#<runId>`;
- * the click handler turns that ID into a target and nothing else reads it.
+ * rendered. Only `data.type`, `data.failureLabel`, and (for `question` and
+ * `approval` only) `data.runId` with `data.route` are read; any other field is
+ * ignored. The output `route` is always the literal `/`: the notification never
+ * carries a URL built from wire text. A `question` or `approval` keeps its
+ * `runId` only when the ID matches `RUN_ID_PATTERN` and the wire `route` is
+ * exactly `/operator#<runId>`; the click handler turns that ID into a target and
+ * nothing else reads it.
  *
  * Safe-copy notification rendering: copy is a fixed map keyed by
  * `data.type`, plus an optional `data.failureLabel` that must be a member of
@@ -55,32 +56,49 @@ const FAILURE_REASONS: ReadonlyMap<string, string> = new Map([
  */
 export const KNOWN_FAILURE_LABELS: ReadonlySet<string> = new Set([...FAILURE_REASONS.keys(), 'unknown'])
 
-/** A question that asked from a known run. The only shape that carries a `runId`. */
-export interface QuestionRunNotificationData {
-  readonly type: 'question'
-  readonly route: '/'
-  readonly runId: string
+/** Notification types that can point at a run: the only ones whose data may carry a `runId`. */
+export const RUN_JUMP_TYPES = ['question', 'approval'] as const
+
+export type RunJumpType = (typeof RUN_JUMP_TYPES)[number]
+
+/** Whether a stored or wire `type` is one that can carry a run ID. The one check both the builder and the click resolver use. */
+export function isRunJumpType(value: unknown): value is RunJumpType {
+  return RUN_JUMP_TYPES.some(known => known === value)
 }
 
-/** A question whose payload had no admissible `runId` (absent, malformed, or a mismatched route). */
-export interface QuestionNoRunNotificationData {
-  readonly type: 'question'
-  readonly route: '/'
-  readonly runId?: never
+/**
+ * Admit a run ID from untrusted data: only a string matching `RUN_ID_PATTERN`. Shared by the wire check
+ * and the stored-data check, so both apply the same pattern.
+ */
+export function admitRunId(value: unknown): string | undefined {
+  return typeof value === 'string' && RUN_ID_PATTERN.test(value) ? value : undefined
 }
 
-/** Every other notification: no `runId`. `question` is excluded, so each question shape is one of the two above. */
+/**
+ * A question or approval from a known run. The only shape that carries a `runId`. One member per type
+ * (not one member with a union `type`), so checking `data.type` still narrows.
+ */
+export type RunNotificationData = {
+  readonly [Type in RunJumpType]: {readonly type: Type; readonly route: '/'; readonly runId: string}
+}[RunJumpType]
+
+/** A question or approval whose payload had no admissible `runId` (absent, malformed, or a mismatched route). */
+export type NoRunNotificationData = {
+  readonly [Type in RunJumpType]: {readonly type: Type; readonly route: '/'; readonly runId?: never}
+}[RunJumpType]
+
+/** Every other notification: no `runId`. The run-jump types are excluded, so each of them is one of the two above. */
 export interface PlainNotificationData {
-  readonly type: Exclude<PushNotificationType, 'question'> | 'unknown'
+  readonly type: Exclude<PushNotificationType, RunJumpType> | 'unknown'
   readonly route: '/'
   readonly runId?: never
 }
 
 /**
- * Narrow on `runId`: `data.runId !== undefined` selects `QuestionRunNotificationData` and gives
- * `runId: string`; `data.type === 'question'` alone leaves the run and no-run question shapes.
+ * Narrow on `runId`: `data.runId !== undefined` selects `RunNotificationData` and gives
+ * `runId: string`; `isRunJumpType(data.type)` alone leaves the run and no-run shapes.
  */
-export type SafeNotificationData = QuestionRunNotificationData | QuestionNoRunNotificationData | PlainNotificationData
+export type SafeNotificationData = RunNotificationData | NoRunNotificationData | PlainNotificationData
 
 export interface SafeNotification {
   readonly title: string
@@ -125,14 +143,23 @@ function isKnownType(value: unknown): value is PushNotificationType {
 }
 
 /**
- * A question's `runId`, or `undefined`. Admitted only when the ID matches
+ * A question's or approval's `runId`, or `undefined`. Admitted only when the ID matches
  * `RUN_ID_PATTERN` and the wire `route` equals exactly `/operator#<runId>`, the
  * only shape the gateway emits for it.
  */
-function readWireQuestionRunId(candidate: Record<string, unknown>): string | undefined {
-  const {runId, route} = candidate
-  if (typeof runId !== 'string' || RUN_ID_PATTERN.test(runId) === false) return undefined
-  return route === `/operator#${runId}` ? runId : undefined
+function readWireRunId(candidate: Record<string, unknown>): string | undefined {
+  const runId = admitRunId(candidate.runId)
+  return runId !== undefined && candidate.route === `/operator#${runId}` ? runId : undefined
+}
+
+/** `notification` with the run ID attached, or unchanged when the payload carries no admissible one. */
+function withWireRunId(
+  notification: SafeNotification,
+  type: RunJumpType,
+  candidate: Record<string, unknown>,
+): SafeNotification {
+  const runId = readWireRunId(candidate)
+  return runId === undefined ? notification : {...notification, data: {type, route: '/', runId}}
 }
 
 /**
@@ -168,14 +195,11 @@ export function buildNotification(rawPayload: unknown): SafeNotification {
 
   switch (type) {
     case 'approval':
-      return COPY_MAP.approval(failureLabel)
+      return withWireRunId(COPY_MAP.approval(failureLabel), 'approval', candidate)
     case 'run_failed':
       return COPY_MAP.run_failed(failureLabel)
-    case 'question': {
-      const notification = COPY_MAP.question(failureLabel)
-      const runId = readWireQuestionRunId(candidate)
-      return runId === undefined ? notification : {...notification, data: {type: 'question', route: '/', runId}}
-    }
+    case 'question':
+      return withWireRunId(COPY_MAP.question(failureLabel), 'question', candidate)
     default: {
       const exhaustiveType: never = type
       return exhaustiveType

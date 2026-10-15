@@ -4,9 +4,9 @@ import {afterEach, describe, expect, it, vi} from 'vitest'
 import {FAILURE_REASON_LABELS} from '../../../public/operator-stream.js'
 import {buildNotification, KNOWN_FAILURE_LABELS, PUSH_NOTIFICATION_TYPES} from './sw-notification.ts'
 import type {
+  NoRunNotificationData,
   PlainNotificationData,
-  QuestionNoRunNotificationData,
-  QuestionRunNotificationData,
+  RunNotificationData,
   SafeNotificationData,
 } from './sw-notification.ts'
 
@@ -250,6 +250,7 @@ describe('buildNotification (wire payload shape)', () => {
 describe('question runId (discriminated data)', () => {
   const RUN_ID = '3f2b9c1e-7a4d-4e8b-9c55-0d1e2f3a4b5c'
   const questionWire = (data: Record<string, unknown>) => ({...WIRE.question, data: {type: 'question', ...data}})
+  const approvalWire = (data: Record<string, unknown>) => ({...WIRE.approval, data: {type: 'approval', ...data}})
 
   afterEach(() => {
     vi.restoreAllMocks()
@@ -296,24 +297,22 @@ describe('question runId (discriminated data)', () => {
     expect(buildNotification(questionWire({runId: RUN_ID})).data).toEqual({type: 'question', route: '/'})
   })
 
-  it('approval and run_failed never carry a runId, even when the wire has a matching route', () => {
-    for (const type of ['approval', 'run_failed']) {
-      const result = buildNotification({data: {type, route: `/operator#${RUN_ID}`, runId: RUN_ID}})
-      expect(Object.hasOwn(result.data, 'runId')).toBe(false)
-      expect(JSON.stringify(result)).not.toContain(RUN_ID)
-    }
+  it('run_failed never carries a runId, even when the wire has a matching route', () => {
+    const result = buildNotification({data: {type: 'run_failed', route: `/operator#${RUN_ID}`, runId: RUN_ID}})
+    expect(Object.hasOwn(result.data, 'runId')).toBe(false)
+    expect(JSON.stringify(result)).not.toContain(RUN_ID)
   })
 
-  it('narrows SafeNotificationData: runId is a string only on the run-bearing question variant', () => {
+  it('narrows SafeNotificationData: runId is a string only on the run-bearing variant', () => {
     // Compile-time contract (pnpm check-types): each branch assigns to exactly one variant.
     const classify = (data: SafeNotificationData): string => {
       if (data.runId !== undefined) {
-        const withRun: QuestionRunNotificationData = data
+        const withRun: RunNotificationData = data
         const runId: string = withRun.runId
-        return runId === '' ? 'empty' : 'question-run'
+        return runId === '' ? 'empty' : `${withRun.type}-run`
       }
-      if (data.type === 'question') {
-        const withoutRun: QuestionNoRunNotificationData = data
+      if (data.type === 'question' || data.type === 'approval') {
+        const withoutRun: NoRunNotificationData = data
         return `${withoutRun.type}-no-run`
       }
       const plain: PlainNotificationData = data
@@ -322,8 +321,53 @@ describe('question runId (discriminated data)', () => {
 
     expect(classify(buildNotification(questionWire({route: `/operator#${RUN_ID}`, runId: RUN_ID})).data)).toBe('question-run')
     expect(classify(buildNotification(questionWire({route: '/', runId: '../x'})).data)).toBe('question-no-run')
-    expect(classify(buildNotification(WIRE.approval).data)).toBe('approval')
+    expect(classify(buildNotification(approvalWire({route: `/operator#${RUN_ID}`, runId: RUN_ID})).data)).toBe('approval-run')
+    expect(classify(buildNotification(WIRE.approval).data)).toBe('approval-no-run')
+    expect(classify(buildNotification(WIRE.runFailedNoLabel).data)).toBe('run_failed')
     expect(classify(buildNotification(null).data)).toBe('unknown')
+  })
+
+  it('an approval keeps a valid runId when route is exactly /operator#<runId>', () => {
+    expect(buildNotification(approvalWire({route: `/operator#${RUN_ID}`, runId: RUN_ID}))).toEqual({
+      title: 'Approval needed',
+      body: 'A run is waiting for your approval.',
+      data: {type: 'approval', route: '/', runId: RUN_ID},
+    })
+  })
+
+  it('an approval drops runId when it fails the pattern', () => {
+    const bad = ['a'.repeat(129), '', '../x', 'a/b', '%2F', 'has space', 'javascript:alert(1)', 12345, null]
+    for (const runId of bad) {
+      const result = buildNotification(approvalWire({route: `/operator#${String(runId)}`, runId}))
+      expect(result.data).toEqual({type: 'approval', route: '/'})
+      expect(Object.hasOwn(result.data, 'runId')).toBe(false)
+    }
+  })
+
+  it('an approval drops a valid runId when route is not exactly /operator#<runId>', () => {
+    const routes = [
+      '/',
+      '/operator',
+      '/operator#',
+      `/operator#${RUN_ID}x`,
+      `/operator#other`,
+      `/operator/#${RUN_ID}`,
+      `https://evil.example/operator#${RUN_ID}`,
+      `//evil.example/operator#${RUN_ID}`,
+      undefined,
+      42,
+    ]
+    for (const route of routes) {
+      const result = buildNotification(approvalWire({route, runId: RUN_ID}))
+      expect(result.data).toEqual({type: 'approval', route: '/'})
+      expect(Object.hasOwn(result.data, 'runId')).toBe(false)
+    }
+    expect(buildNotification(approvalWire({runId: RUN_ID})).data).toEqual({type: 'approval', route: '/'})
+  })
+
+  it('an approval with no runId keeps its current shape', () => {
+    expect(buildNotification(WIRE.approval).data).toEqual({type: 'approval', route: '/'})
+    expect(buildNotification(approvalWire({route: `/operator#${RUN_ID}`})).data).toEqual({type: 'approval', route: '/'})
   })
 
   it('a top-level runId outside data is ignored', () => {
@@ -337,6 +381,7 @@ describe('question runId (discriminated data)', () => {
     )
     buildNotification(questionWire({route: `/operator#${RUN_ID}`, runId: RUN_ID}))
     buildNotification(questionWire({route: '/', runId: '../x'}))
+    buildNotification(approvalWire({route: `/operator#${RUN_ID}`, runId: RUN_ID}))
     buildNotification(null)
     for (const spy of spies) expect(spy).not.toHaveBeenCalled()
   })

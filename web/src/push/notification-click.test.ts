@@ -53,6 +53,7 @@ function makeClients(windowClients: readonly (ClickWindowClient & {readonly cont
 }
 
 const questionData = (runId: unknown) => ({type: 'question', route: '/', runId})
+const approvalData = (runId: unknown) => ({type: 'approval', route: '/', runId})
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -193,6 +194,88 @@ describe('handleNotificationClick: question with a valid runId', () => {
   })
 })
 
+describe('handleNotificationClick: approval with a valid runId', () => {
+  it('focuses the focused app window and posts exactly one OPEN_RUN message to it, opening nothing', async () => {
+    const focused = makeClient('https://dash.example/', {focused: true, visibilityState: 'visible'})
+    const visible = makeClient('https://dash.example/', {visibilityState: 'visible'})
+    const hidden = makeClient('https://dash.example/', {visibilityState: 'hidden'})
+    const {clients, opened} = makeClients([hidden, visible, focused])
+
+    await handleNotificationClick(clients, approvalData(RUN_ID))
+
+    expect(focused.focusCalls).toHaveLength(1)
+    expect(focused.messages).toEqual([{type: 'OPEN_RUN', runId: RUN_ID}])
+    expect(visible.messages).toEqual([])
+    expect(hidden.messages).toEqual([])
+    expect(opened).toEqual([])
+  })
+
+  it('opens /#<runId> when there is no app window', async () => {
+    const {clients, opened} = makeClients([])
+    await handleNotificationClick(clients, approvalData(RUN_ID))
+    expect(opened).toEqual([`/#${RUN_ID}`])
+  })
+
+  it('opens /#<runId> when the only window is /privacy, and posts nothing to it', async () => {
+    const privacy = makeClient('https://dash.example/privacy', {focused: true, visibilityState: 'visible'})
+    const {clients, opened} = makeClients([privacy])
+
+    await handleNotificationClick(clients, approvalData(RUN_ID))
+
+    expect(opened).toEqual([`/#${RUN_ID}`])
+    expect(privacy.messages).toEqual([])
+    expect(privacy.focusCalls).toHaveLength(0)
+  })
+
+  it('still posts the message when focus() rejects', async () => {
+    const app = makeClient('https://dash.example/', {focused: true, visibilityState: 'visible', focusRejects: true})
+    const {clients, opened} = makeClients([app])
+
+    await handleNotificationClick(clients, approvalData(RUN_ID))
+
+    expect(app.messages).toEqual([{type: 'OPEN_RUN', runId: RUN_ID}])
+    expect(opened).toEqual([])
+  })
+
+  it('asks only for controlled window clients and opens /#<runId> when the only app window is uncontrolled', async () => {
+    const uncontrolled = makeClient('https://dash.example/', {focused: true, visibilityState: 'visible', controlled: false})
+    const {clients, opened, matchAllOptions} = makeClients([uncontrolled])
+
+    await handleNotificationClick(clients, approvalData(RUN_ID))
+
+    expect(matchAllOptions).toEqual([{type: 'window', includeUncontrolled: false}])
+    expect(opened).toEqual([`/#${RUN_ID}`])
+    expect(uncontrolled.focusCalls).toHaveLength(0)
+    expect(uncontrolled.messages).toEqual([])
+  })
+
+  it('an invalid runId keeps the current behavior: focus an app window or open /, no message', async () => {
+    for (const runId of [undefined, '', '../x', 'a/b', 'a'.repeat(129), 12345]) {
+      const app = makeClient('https://dash.example/', {focused: true, visibilityState: 'visible'})
+      const none = makeClients([])
+      await handleNotificationClick(none.clients, approvalData(runId))
+      expect(none.opened).toEqual(['/'])
+
+      const withApp = makeClients([app])
+      await handleNotificationClick(withApp.clients, approvalData(runId))
+      expect(app.messages).toEqual([])
+      expect(app.focusCalls).toHaveLength(1)
+      expect(withApp.opened).toEqual([])
+      expect(withApp.matchAllOptions).toEqual([{type: 'window', includeUncontrolled: true}])
+    }
+  })
+
+  it('makes no console.* calls', async () => {
+    const spies = (['debug', 'error', 'info', 'log', 'trace', 'warn'] as const).map(method =>
+      vi.spyOn(console, method).mockImplementation(() => {}),
+    )
+    const app = makeClient('https://dash.example/', {focused: true, visibilityState: 'visible', focusRejects: true})
+    await handleNotificationClick(makeClients([app]).clients, approvalData(RUN_ID))
+    await handleNotificationClick(makeClients([]).clients, approvalData(RUN_ID))
+    for (const spy of spies) expect(spy).not.toHaveBeenCalled()
+  })
+})
+
 describe('handleNotificationClick: other types focus an app window and never post a message', () => {
   for (const type of ['approval', 'run_failed'] as const) {
     it(`${type}: focuses the focused window and posts no message`, async () => {
@@ -250,12 +333,21 @@ describe('handleNotificationClick: other types focus an app window and never pos
       expect(opened).toEqual([])
     })
 
-    it(`${type}: ignores a runId in its data`, async () => {
-      const {clients, opened} = makeClients([])
-      await handleNotificationClick(clients, {type, route: '/', runId: RUN_ID})
-      expect(opened).toEqual(['/'])
-    })
   }
+
+  it('run_failed: ignores a runId in its data', async () => {
+    const app = makeClient('https://dash.example/', {focused: true, visibilityState: 'visible'})
+    const none = makeClients([])
+    await handleNotificationClick(none.clients, {type: 'run_failed', route: '/', runId: RUN_ID})
+    expect(none.opened).toEqual(['/'])
+
+    const withApp = makeClients([app])
+    await handleNotificationClick(withApp.clients, {type: 'run_failed', route: '/', runId: RUN_ID})
+    expect(app.messages).toEqual([])
+    expect(app.focusCalls).toHaveLength(1)
+    expect(withApp.opened).toEqual([])
+    expect(withApp.matchAllOptions).toEqual([{type: 'window', includeUncontrolled: true}])
+  })
 
   for (const type of ['approval', 'run_failed'] as const) {
     it(`${type}: keeps looking at uncontrolled windows too, and focuses an uncontrolled-only app window`, async () => {

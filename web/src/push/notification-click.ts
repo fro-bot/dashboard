@@ -11,16 +11,16 @@
  * Behavior (only app windows count, for every type: URL pathname `/`, so a
  * `/privacy` tab is never focused or messaged):
  *   - pick the focused app window, then a visible one, then any;
- *   - `question` with a valid `runId`: only controlled windows are considered
+ *   - `question` or `approval` with a valid `runId`: only controlled windows are considered
  *     (the page accepts `OPEN_RUN` only from its controlling worker); focus the
  *     pick (a `focus()` failure is swallowed) and post `{type: 'OPEN_RUN', runId}`
  *     to that one client; with no controlled app window, open `/#<runId>`;
- *   - every other case (other types, a question with no valid `runId`, data
- *     from an older worker): all windows, controlled or not, are considered;
+ *   - every other case (other types, a question or approval with no valid `runId`,
+ *     data from an older worker): all windows, controlled or not, are considered;
  *     focus the pick, post nothing; with no app window, open `/`.
  */
 
-import {RUN_ID_PATTERN} from '../operator/run-id.ts'
+import {admitRunId, isRunJumpType} from './sw-notification.ts'
 
 /** The slice of `WindowClient` the resolver uses. */
 export interface ClickWindowClient {
@@ -37,12 +37,11 @@ export interface ClickClients {
   openWindow(url: string): Promise<unknown>
 }
 
-/** The `runId` of a question notification's stored data, or `undefined` for anything else. */
-function readStoredQuestionRunId(data: unknown): string | undefined {
+/** The `runId` of a question or approval notification's stored data, or `undefined` for anything else. */
+function readStoredRunId(data: unknown): string | undefined {
   if (typeof data !== 'object' || data === null || Array.isArray(data)) return undefined
   const {type, runId} = data as Record<string, unknown>
-  if (type !== 'question' || typeof runId !== 'string') return undefined
-  return RUN_ID_PATTERN.test(runId) ? runId : undefined
+  return isRunJumpType(type) ? admitRunId(runId) : undefined
 }
 
 function isAppWindow(client: ClickWindowClient): boolean {
@@ -68,9 +67,9 @@ function pickAppWindow(windowClients: readonly ClickWindowClient[]): ClickWindow
  * `data` is the notification's stored `data`, treated as untrusted.
  */
 export async function handleNotificationClick(clients: ClickClients, data: unknown): Promise<void> {
-  const runId = readStoredQuestionRunId(data)
-  // The OPEN_RUN message is only accepted from the worker that controls the page, so a question with
-  // a run ID looks only at controlled windows: an uncontrolled one (a page loaded before this worker
+  const runId = readStoredRunId(data)
+  // The OPEN_RUN message is only accepted from the worker that controls the page, so a question or approval
+  // with a run ID looks only at controlled windows: an uncontrolled one (a page loaded before this worker
   // activated) would take the focus and silently drop the message. With none, the run opens in a new
   // window. Every other click keeps looking at all windows, since it only focuses one.
   const windowClients = await clients.matchAll({type: 'window', includeUncontrolled: runId === undefined})

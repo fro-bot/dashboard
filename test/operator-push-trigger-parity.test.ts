@@ -70,9 +70,9 @@ describe('privacy page payload sentence', () => {
     expect(section).not.toMatch(/never[^.]*run (id|identifier)s?\b/i)
   })
 
-  it('states that a question notification carries the ID of the run that asked', () => {
+  it('states that question and approval notifications can carry the ID of the run they are about', () => {
     const section = payloadSentences()
-    expect(section).toMatch(/question notification carries the ID of the run that asked/i)
+    expect(section).toMatch(/question and approval notifications can carry the ID of the run they are about/i)
     expect(section).toMatch(/used only to open that run/i)
   })
 
