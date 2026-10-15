@@ -2,7 +2,6 @@ import type {OperatorState} from './state.ts'
 
 export const GATEWAY_SIGN_IN_URL = '/operator/auth/github/start?return_to=/operator'
 const SIGN_IN_REDIRECT_GUARD_KEY = 'fro-bot.operator-sign-in-redirect'
-const SIGN_IN_REDIRECT_GUARD_MS = 60_000
 
 export function navigateToGatewaySignIn(assign: (url: string) => void = url => globalThis.location.assign(url)): void {
   assign(GATEWAY_SIGN_IN_URL)
@@ -15,11 +14,12 @@ export function maybeAutoRedirectToGatewaySignIn(
   if (state !== 'auth-required') return
 
   try {
-    const now = Date.now()
-    const previousRedirect = Number(sessionStorage.getItem(SIGN_IN_REDIRECT_GUARD_KEY))
-    if (Number.isFinite(previousRedirect) && previousRedirect > 0 && now - previousRedirect < SIGN_IN_REDIRECT_GUARD_MS) return
+    // One-shot per tab: the flag is a presence marker with no expiry. Only a successful run-list
+    // load clears it (clearGatewaySignInRedirectGuard), so a signed-out tab that still has the flag
+    // shows the manual sign-in button instead of looping through the gateway.
+    if (sessionStorage.getItem(SIGN_IN_REDIRECT_GUARD_KEY) !== null) return
 
-    sessionStorage.setItem(SIGN_IN_REDIRECT_GUARD_KEY, String(now))
+    sessionStorage.setItem(SIGN_IN_REDIRECT_GUARD_KEY, '1')
     navigate()
   } catch {
     // Without a reliable tab-scoped loop guard, leave the manual sign-in action available.
