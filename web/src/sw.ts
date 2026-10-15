@@ -28,6 +28,16 @@
  * gated cutover caveat — do not add forced activation outside the prompt-mode
  * discipline. The /operator redirect handler below ensures that once the new SW
  * is active, offline /operator navigations canonicalize to the cached / shell.
+ *
+ * PROMPT-GATED ACTIVATION: a new worker installs and then WAITS. It never calls
+ * skipWaiting() on install. The only activation path is the page's Refresh click:
+ * updateServiceWorker(true) posts {type:'SKIP_WAITING'} (workbox-window's
+ * messageSkipWaiting), the message handler below calls self.skipWaiting(), and the
+ * page reloads on the resulting `controlling` event. With injectManifest the
+ * worker must handle that message itself — nothing does it for us. No client-claim
+ * call is made on purpose: pages already controlled by the old worker switch to
+ * the new one when it activates (that fires controllerchange); claiming only matters
+ * for first-install pages that have no controller yet.
  */
 
 import {cleanupOutdatedCaches, createHandlerBoundToURL, precacheAndRoute} from 'workbox-precaching'
@@ -41,7 +51,9 @@ import {OPERATOR_RUNTIME_CACHE} from './pwa/cache-names.ts'
 import {handleNotificationClick} from './push/notification-click.ts'
 import {buildNotification} from './push/sw-notification.ts'
 
-declare const self: ServiceWorkerGlobalScope
+// skipWaiting is a WebWorker-lib member absent from the ServiceWorkerGlobalScope
+// type in scope here (see the type note on SWMessageEvent below); declare it minimally.
+declare const self: ServiceWorkerGlobalScope & {skipWaiting(): Promise<void>}
 
 // 1. Auth routes — OAuth callbacks must reach the server.
 registerRoute(
@@ -110,6 +122,11 @@ const LEGACY_MONITORING_CACHE = 'monitoring-v1'
 addEventListener('message', (event: Event) => {
   const e = event as SWMessageEvent
   const messageType = (e.data as {type?: string} | null)?.type
+  // Posted by workbox-window's messageSkipWaiting() when the operator clicks
+  // Refresh in the update prompt — the sole trigger for activating a waiting worker.
+  if (messageType === 'SKIP_WAITING') {
+    void self.skipWaiting()
+  }
   if (messageType === 'PURGE_RUNTIME') {
     e.waitUntil(
       Promise.all([caches.delete(OPERATOR_RUNTIME_CACHE), caches.delete(LEGACY_MONITORING_CACHE)]).then(

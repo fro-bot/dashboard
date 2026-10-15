@@ -12,7 +12,21 @@
 
 import {readFileSync} from 'node:fs'
 import {resolve} from 'node:path'
-import {describe, expect, it} from 'vitest'
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
+
+// Behavioral tests below evaluate the real sw.ts entry in jsdom. Workbox's
+// routing/precache/strategies need a real ServiceWorkerGlobalScope, so they are
+// stubbed; everything else (the message handler under test) is the real source.
+vi.mock('workbox-precaching', () => ({
+  cleanupOutdatedCaches: vi.fn(),
+  createHandlerBoundToURL: vi.fn(() => vi.fn()),
+  precacheAndRoute: vi.fn(),
+}))
+vi.mock('workbox-routing', () => ({
+  NavigationRoute: vi.fn(),
+  registerRoute: vi.fn(),
+}))
+vi.mock('workbox-strategies', () => ({NetworkOnly: vi.fn()}))
 
 // Resolve relative to the web/ root (vitest.config.ts sets root: 'web').
 const SW_PATH = resolve(__dirname, '../dist/sw.js')
@@ -277,6 +291,13 @@ describe('sw.js build output', () => {
     expect(changeHandlerSource).not.toContain('applicationServerKey')
   })
 
+  it('GUARD: SKIP_WAITING is handled in the message handler and never in an install listener (prompt-gated activation)', () => {
+    const src = readFileSync(resolve(import.meta.dirname, 'sw.ts'), 'utf8')
+    expect(src).toContain("'SKIP_WAITING'")
+    expect(src).not.toContain("addEventListener('install'")
+    expect(src).not.toContain('clients.claim')
+  })
+
   it('GUARD: the push/notificationclick/pushsubscriptionchange handlers are registered AFTER the message handler', () => {
     const src = readFileSync(resolve(import.meta.dirname, 'sw.ts'), 'utf8')
     const messageHandlerIdx = src.indexOf("addEventListener('message'")
@@ -284,5 +305,68 @@ describe('sw.js build output', () => {
     expect(messageHandlerIdx).toBeGreaterThan(-1)
     expect(pushHandlerIdx).toBeGreaterThan(-1)
     expect(messageHandlerIdx).toBeLessThan(pushHandlerIdx)
+  })
+})
+
+// vite-plugin-pwa's useRegisterSW → updateServiceWorker(true) → workbox-window
+// messageSkipWaiting() posts exactly {type: 'SKIP_WAITING'} to the waiting worker
+// (workbox-window 7.4.1 SKIP_WAITING_MESSAGE; vite-plugin-pwa 1.3.0 client/build/react.js).
+// The page's `controlling` listener then reloads. With injectManifest, the custom
+// worker must call skipWaiting() itself, or Refresh is a no-op and the old
+// worker keeps serving the old precached shell indefinitely.
+describe('sw.ts message handler (behavioral)', () => {
+  type MessageListener = (event: Event) => void
+  let messageListener: MessageListener
+  let installListeners: string[]
+  const skipWaiting = vi.fn(() => Promise.resolve())
+
+  function dispatchMessage(data: unknown): void {
+    const waitUntil = vi.fn()
+    messageListener(Object.assign(new Event('message'), {data, waitUntil}))
+  }
+
+  beforeEach(async () => {
+    vi.resetModules()
+    skipWaiting.mockClear()
+    installListeners = []
+    const captured: Record<string, MessageListener> = {}
+    vi.spyOn(globalThis, 'addEventListener').mockImplementation(((type: string, listener: MessageListener) => {
+      captured[type] = listener
+      if (type === 'install') installListeners.push(type)
+    }) as typeof globalThis.addEventListener)
+    vi.stubGlobal('skipWaiting', skipWaiting)
+    vi.stubGlobal('caches', {delete: vi.fn(() => Promise.resolve(true))})
+    await import('./sw.ts')
+    const listener = captured.message
+    if (listener === undefined) throw new Error('sw.ts did not register a message listener')
+    messageListener = listener
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('calls skipWaiting() when the page posts {type: SKIP_WAITING} (what updateServiceWorker(true) sends)', () => {
+    dispatchMessage({type: 'SKIP_WAITING'})
+    expect(skipWaiting).toHaveBeenCalledTimes(1)
+  })
+
+  it('does NOT skip waiting on install — activation stays prompt-gated', () => {
+    expect(skipWaiting).not.toHaveBeenCalled()
+    expect(installListeners).toEqual([])
+  })
+
+  it.each([
+    ['PURGE_RUNTIME', {type: 'PURGE_RUNTIME'}],
+    ['an unknown type', {type: 'SOMETHING_ELSE'}],
+    ['a case variant', {type: 'skip_waiting'}],
+    ['a type substring', {type: 'SKIP_WAITING_NOW'}],
+    ['an empty object', {}],
+    ['a string payload', 'SKIP_WAITING'],
+    ['null', null],
+  ])('does NOT call skipWaiting() for %s', (_label, data) => {
+    dispatchMessage(data)
+    expect(skipWaiting).not.toHaveBeenCalled()
   })
 })
