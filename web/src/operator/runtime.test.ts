@@ -730,11 +730,12 @@ describe('defaultRuntimeLoader — production stream wiring', () => {
   it('selecting a card runs the real _attachStream, which hands the discovered checkoutEl to initOperatorStream', async () => {
     const handle = {close: vi.fn()}
     const initOperatorStream = vi.fn((_opts: {runId: string; checkoutEl?: Element | null}) => handle)
+    const bootstrapOperatorStreams = vi.fn()
     let onSelectRun: ((runId: string) => void | Promise<void>) | undefined
     // A vitest module mock throws on any export the factory omits, so every export the loader reads is listed.
     vi.doMock('/static/operator-stream.js?manual=1', () => ({
       initOperatorStream,
-      bootstrapOperatorStreams: vi.fn(),
+      bootstrapOperatorStreams,
       resetBootstrapState: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
@@ -764,9 +765,13 @@ describe('defaultRuntimeLoader — production stream wiring', () => {
     await vi.waitFor(() => expect(onSelectRun).toBeDefined())
     expect(onStateChange).not.toHaveBeenCalled()
 
+    expect(bootstrapOperatorStreams).not.toHaveBeenCalled()
+    expect(initOperatorStream).not.toHaveBeenCalled()
+
     await onSelectRun?.('run-wired-1')
 
     expect(region).not.toBeNull()
+    expect(bootstrapOperatorStreams).not.toHaveBeenCalled()
     expect(initOperatorStream).toHaveBeenCalledTimes(1)
     expect(initOperatorStream.mock.calls[0]?.[0].runId).toBe('run-wired-1')
     expect(initOperatorStream.mock.calls[0]?.[0].checkoutEl).toBe(region)
@@ -795,16 +800,20 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
       initCalls.push({opts, regionChildrenAtInit: opts.questionsEl?.childNodes.length})
       return handle
     })
+    const bootstrapOperatorStreams = vi.fn()
+    const resetBootstrapState = vi.fn()
     let onSelectRun: ((runId: string) => void | Promise<void>) | undefined
+    let onRestoreRun: ((runId: string, card: Element, status: string) => void) | undefined
     let onRunLaunched: ((runId: string, card: HTMLElement) => void) | undefined
     vi.doMock('/static/operator-stream.js?manual=1', () => ({
       initOperatorStream,
-      bootstrapOperatorStreams: vi.fn(),
-      resetBootstrapState: vi.fn(),
+      bootstrapOperatorStreams,
+      resetBootstrapState,
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
-      initOperatorRunIndex: async (opts: {onSelectRun: (runId: string) => void | Promise<void>}) => {
+      initOperatorRunIndex: async (opts: {onSelectRun: (runId: string) => void | Promise<void>; onRestoreRun: (runId: string, card: Element, status: string) => void}) => {
         onSelectRun = opts.onSelectRun
+        onRestoreRun = opts.onRestoreRun
       },
       refreshOperatorRunIndex: vi.fn(async () => true),
       resetRunIndexState: vi.fn(),
@@ -825,6 +834,10 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
     return {
       runtime,
       initCalls,
+      handle,
+      bootstrapOperatorStreams,
+      resetBootstrapState,
+      restored: (runId: string, card: Element) => onRestoreRun?.(runId, card, 'running'),
       // Expanding waits for the run-list refresh, so a select settles once the stream is attached.
       select: async (runId: string) => { await onSelectRun?.(runId) },
       launched: (runId: string, card: HTMLElement) => onRunLaunched?.(runId, card),
@@ -838,6 +851,74 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
         <div data-role="run-questions" hidden></div>
       </div>`
   }
+
+  describe('streams attach only on expand', () => {
+    it('does not bootstrap streams on load: pre-rendered cards get none until one is expanded', async () => {
+      document.body.innerHTML = `${cardHtml('run-q-a', 'status-running')}${cardHtml('run-q-b', 'status-queued')}<div data-role="stream-status"></div>`
+      const {runtime, initCalls, bootstrapOperatorStreams, resetBootstrapState} = await mountLoader()
+
+      expect(bootstrapOperatorStreams).not.toHaveBeenCalled()
+      expect(resetBootstrapState).toHaveBeenCalled()
+      expect(initCalls).toHaveLength(0)
+      runtime.cleanup()
+    })
+
+    it('a remount that leaves cards in the list starts no stream, and none until a card is expanded', async () => {
+      document.body.innerHTML = `${cardHtml('run-q-a', 'status-running')}${cardHtml('run-q-b', 'status-succeeded')}<div data-role="stream-status"></div>`
+      const first = await mountLoader()
+      await first.select('run-q-a')
+      first.runtime.cleanup()
+      expect(first.handle.close).toHaveBeenCalledTimes(1)
+
+      const second = await mountLoader()
+
+      expect(second.bootstrapOperatorStreams).not.toHaveBeenCalled()
+      expect(second.initCalls).toHaveLength(0)
+      await second.select('run-q-b')
+      expect(second.initCalls.map(call => call.opts.runId)).toEqual(['run-q-b'])
+      second.runtime.cleanup()
+    })
+
+    it('expanding attaches exactly one stream and collapsing closes it', async () => {
+      document.body.innerHTML = `${cardHtml('run-q-a', 'status-running')}<div data-role="stream-status"></div>`
+      const {runtime, initCalls, handle, bootstrapOperatorStreams, select} = await mountLoader()
+
+      await select('run-q-a')
+      expect(initCalls).toHaveLength(1)
+      expect(handle.close).not.toHaveBeenCalled()
+
+      await select('run-q-a')
+      expect(handle.close).toHaveBeenCalledTimes(1)
+      expect(initCalls).toHaveLength(1)
+      expect(bootstrapOperatorStreams).not.toHaveBeenCalled()
+      runtime.cleanup()
+    })
+
+    it('a restored card and a launched card each attach one stream with no bootstrap involved', async () => {
+      document.body.innerHTML = `${cardHtml('run-q-restore', 'status-running')}${cardHtml('run-q-launch', 'status-queued', ' data-optimistic="true"')}<div data-role="stream-status"></div>`
+      const {runtime, initCalls, bootstrapOperatorStreams, restored, launched} = await mountLoader()
+      expect(initCalls).toHaveLength(0)
+
+      restored('run-q-restore', document.querySelector('[data-run-id="run-q-restore"]') as HTMLElement)
+      expect(initCalls.map(call => call.opts.runId)).toEqual(['run-q-restore'])
+
+      launched('run-q-launch', document.querySelector('[data-run-id="run-q-launch"]') as HTMLElement)
+      expect(initCalls.map(call => call.opts.runId)).toEqual(['run-q-restore', 'run-q-launch'])
+      expect(bootstrapOperatorStreams).not.toHaveBeenCalled()
+      runtime.cleanup()
+    })
+
+    it('still resets the stream module state on load and on cleanup', async () => {
+      document.body.innerHTML = '<div data-role="stream-status"></div>'
+      const {runtime, resetBootstrapState} = await mountLoader()
+      const afterLoad = resetBootstrapState.mock.calls.length
+      expect(afterLoad).toBeGreaterThanOrEqual(1)
+
+      runtime.cleanup()
+
+      expect(resetBootstrapState.mock.calls.length).toBeGreaterThan(afterLoad)
+    })
+  })
 
   it('hands the discovered questionsEl and the card summary status to initOperatorStream', async () => {
     document.body.innerHTML = `${cardHtml('run-q-a', 'status-succeeded')}${cardHtml('run-q-b', 'status-running')}<div data-role="stream-status"></div>`
@@ -1001,13 +1082,14 @@ describe('defaultRuntimeLoader — run-list refresh triggers', () => {
   async function mountLoader(refresh: () => Promise<boolean> = async () => true) {
     const handle = {close: vi.fn()}
     const initOperatorStream = vi.fn((_opts: InitOpts) => handle)
+    const bootstrapOperatorStreams = vi.fn()
     const refreshOperatorRunIndex = vi.fn(refresh)
     let onSelectRun: ((runId: string) => void | Promise<void>) | undefined
     let onAuthRequired: (() => void) | undefined
     let onRunLaunched: ((runId: string, card: HTMLElement) => void) | undefined
     vi.doMock('/static/operator-stream.js?manual=1', () => ({
       initOperatorStream,
-      bootstrapOperatorStreams: vi.fn(),
+      bootstrapOperatorStreams,
       resetBootstrapState: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
@@ -1041,6 +1123,7 @@ describe('defaultRuntimeLoader — run-list refresh triggers', () => {
       runtime,
       handle,
       initOperatorStream,
+      bootstrapOperatorStreams,
       refreshOperatorRunIndex,
       onStateChange,
       select: (runId: string) => onSelectRun?.(runId),
@@ -2058,10 +2141,11 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
       }
     })
     const initOperatorLaunch = vi.fn(async () => {})
+    const bootstrapOperatorStreams = vi.fn()
     let captured: InitOpts | undefined
     vi.doMock('/static/operator-stream.js?manual=1', () => ({
       initOperatorStream,
-      bootstrapOperatorStreams: vi.fn(),
+      bootstrapOperatorStreams,
       resetBootstrapState: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
@@ -2089,6 +2173,7 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
       handles,
       questionChildrenAtAttach,
       initOperatorStream,
+      bootstrapOperatorStreams,
       refreshOperatorRunIndex,
       markCardExpandedForLaunch,
       onStateChange,

@@ -446,13 +446,10 @@ async function defaultRuntimeLoader(opts?: {
   // check-types instead of surfacing as a silently skipped call. Only the members listed are read.
   const streamMod = await import(/* @vite-ignore */ _streamSpecifier) as Pick<
     typeof StreamModule,
-    'bootstrapOperatorStreams' | 'resetBootstrapState' | 'initOperatorStream'
+    'resetBootstrapState' | 'initOperatorStream'
   >
+  // Streams attach on expand, launch and restore only; the stream module's own bootstrap is not run here.
   streamMod.resetBootstrapState()
-  const streamOpts = opts?.endpointBase !== undefined || opts?.fixtureSessionId !== undefined
-    ? {endpointBase: opts.endpointBase, fixtureSessionId: opts.fixtureSessionId}
-    : undefined
-  streamMod.bootstrapOperatorStreams(streamOpts)
 
   const runIndexMod = await import(/* @vite-ignore */ _runIndexSpecifier) as Pick<
     typeof RunIndexModule,
