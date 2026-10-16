@@ -1080,7 +1080,8 @@ export function pruneFinishedRuns(runIds, fixtureSessionId) {
 
 /**
  * Drop every record and invalidate every attachment started before now, so none can write again.
- * Tests call this between cases too: the generation bump keeps a leaked attachment from repopulating.
+ * Production calls this when auth is required and when the fixture scenario changes; tests also call it
+ * between cases. The generation bump keeps a leaked attachment from repopulating.
  */
 export function clearFinishedRuns() {
   finishedRunStore.clear()
@@ -3486,7 +3487,7 @@ export function initOperatorStream(opts) {
   // The caller decides hit or miss first; with the option set but no record this is a normal attach.
   // A recorded handle opens no stream and builds no decision clients: nothing about a finished run changes.
   const finishedRecord = opts.fromFinishedRecord === true ? getFinishedRun(runId, fixtureSessionId) : undefined
-  const fromRecord = finishedRecord !== undefined
+  const fromFinishedRecord = finishedRecord !== undefined
 
   // Every stream-owned region starts each attachment empty and hidden; updateDOM alone shows one.
   if (checkoutEl) {
@@ -3531,7 +3532,7 @@ export function initOperatorStream(opts) {
   // Build the approval client lazily (only if approvalsEl is present).
   // Pass endpointBase and fixtureSessionId so fixture mode uses the fixture approval routes
   // and includes the session ID in all approval requests.
-  const approvalClient = !fromRecord && approvalsEl !== undefined && approvalsEl !== null
+  const approvalClient = !fromFinishedRecord && approvalsEl !== undefined && approvalsEl !== null
     ? (injectedApprovalClient ?? buildApprovalClient(
         endpointBase === undefined && fixtureSessionId === undefined
           ? undefined
@@ -3544,7 +3545,7 @@ export function initOperatorStream(opts) {
 
   // Build the question client only when the caller wires questions: an injected client, or the
   // question region element. A stream with neither never touches the questions routes.
-  const questionClient = fromRecord
+  const questionClient = fromFinishedRecord
     ? null
     : injectedQuestionClient ?? (
       questionsEl !== undefined && questionsEl !== null
@@ -3560,7 +3561,7 @@ export function initOperatorStream(opts) {
     )
 
   // Build the cancel client lazily (only if cancelEl is present).
-  const cancelClient = !fromRecord && cancelEl !== undefined && cancelEl !== null
+  const cancelClient = !fromFinishedRecord && cancelEl !== undefined && cancelEl !== null
     ? (injectedCancelClient ?? buildCancelClient(
         endpointBase === undefined && fixtureSessionId === undefined
           ? undefined
@@ -3851,7 +3852,7 @@ export function initOperatorStream(opts) {
 
   // A recorded run starts closed and terminal. Its entry is a mutable copy: the stored record is frozen
   // and must never be handed to the state, whose reducer and painter own their entries.
-  let state = fromRecord
+  let state = fromFinishedRecord
     ? {
         connection: 'closed',
         runs: Object.assign(Object.create(null), {[runId]: {...finishedRecord, terminal: true, cancelInFlight: false}}),
@@ -3873,7 +3874,7 @@ export function initOperatorStream(opts) {
   let announcedFailure = false
   let paintedPreparationHeadline = false // reasonEl currently shows a headline this stream wrote from checkoutPreparation
   // Latest valid startedAt from a status frame; never reset to blank. A recorded run seeds it so the first paint has it.
-  let latestStartedAt = fromRecord ? (normalizeIsoTimestamp(finishedRecord.startedAt) ?? null) : null
+  let latestStartedAt = fromFinishedRecord ? (normalizeIsoTimestamp(finishedRecord.startedAt) ?? null) : null
 
   function updateDOM() {
     // Late-frame guard: after close(), no write of any kind (notice, status,
@@ -4900,7 +4901,7 @@ export function initOperatorStream(opts) {
   updateDOM()
 
   // Start the connection
-  if (!fromRecord) connect()
+  if (!fromFinishedRecord) connect()
 
   // Return a handle to allow external abort (e.g. page unload)
   return {

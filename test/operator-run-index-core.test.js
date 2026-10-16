@@ -4875,6 +4875,41 @@ describe('onListApplied — the run IDs of each applied list', () => {
     expect(onListApplied).not.toHaveBeenCalled()
   })
 
+  it('init still resolves loaded with the card listed when onListApplied throws', async () => {
+    const net = stubControlledFetch()
+    const {cards} = stubDOMForRefresh()
+    const onListApplied = vi.fn(() => {
+      throw new Error('boom')
+    })
+    const init = initOperatorRunIndex({endpointBase: '/operator', onListApplied})
+    net.respond(0, [makeValidSummary({runId: 'run-la-throw'})])
+
+    await expect(init).resolves.toBe('loaded')
+    expect(onListApplied).toHaveBeenCalledTimes(1)
+    expect(cards.map(card => card.dataset.runId)).toEqual(['run-la-throw'])
+  })
+
+  it('a refresh still resolves true with the card listed when onListApplied throws', async () => {
+    const net = stubControlledFetch()
+    const {cards} = stubDOMForRefresh()
+    let shouldThrow = false
+    const onListApplied = vi.fn(() => {
+      if (shouldThrow) throw new Error('boom')
+    })
+    const init = initOperatorRunIndex({endpointBase: '/operator', onListApplied})
+    net.respond(0, [makeValidSummary({runId: 'run-la-first'})])
+    await init
+    shouldThrow = true
+    onListApplied.mockClear()
+
+    const refresh = refreshOperatorRunIndex()
+    net.respond(1, [makeValidSummary({runId: 'run-la-second'})])
+
+    await expect(refresh).resolves.toBe(true)
+    expect(onListApplied).toHaveBeenCalledTimes(1)
+    expect(cards.map(card => card.dataset.runId)).toEqual(['run-la-second'])
+  })
+
   it('reports nothing when a reset replaces the init while it fetches', async () => {
     const net = stubControlledFetch()
     stubDOMForRefresh()

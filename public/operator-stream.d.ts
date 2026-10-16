@@ -695,7 +695,7 @@ export declare function getFinishedRun(runId: string, fixtureSessionId?: string)
 /** Keep only the records whose run IDs are in `runIds`; drop every other one. */
 export declare function pruneFinishedRuns(runIds: Iterable<string>, fixtureSessionId?: string): void
 
-/** Drop every record and retire every attachment started before now, so none can write again. Tests call it between cases. */
+/** Drop every record and retire every attachment started before now, so none can write again. Production calls it when auth is required and when the fixture scenario changes; tests also call it between cases. */
 export declare function clearFinishedRuns(): void
 
 // ---------------------------------------------------------------------------
