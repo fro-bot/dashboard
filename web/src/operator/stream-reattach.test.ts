@@ -2,10 +2,10 @@ import {afterEach, describe, expect, it, vi} from 'vitest'
 import {
   clearFinishedRuns,
   FIRST_FRAME_TIMEOUT_MS,
-  getFinishedRun,
   initOperatorStream,
   PINNED_CONTRACT_VERSION,
   resetQuestionPageStore,
+  takeUsableFinishedRun,
 } from '../../../public/operator-stream.js'
 
 const RUN_ID = 'run-reattach'
@@ -977,7 +977,7 @@ describe('operator stream recorded re-expand', () => {
     const live = attachFull(parts)
     pushToLatest(READY + RUNNING + FINAL_OUTPUT + SUCCEEDED_WITH_CHECKOUT)
     await vi.waitFor(() => expect(parts.statusEl.textContent).toBe('Succeeded'))
-    expect(getFinishedRun(RUN_ID)).toBeDefined()
+    expect(takeUsableFinishedRun(RUN_ID, 'succeeded')).toBeDefined()
     const checkoutText = parts.regions['run-checkout-detail'].textContent
     expect(checkoutText).not.toBe('')
     live.close()
@@ -985,7 +985,7 @@ describe('operator stream recorded re-expand', () => {
     const fetchSpy = vi.fn()
     vi.stubGlobal('fetch', fetchSpy)
     for (let expand = 0; expand < 3; expand++) {
-      const handle = attachFull(parts, {fromFinishedRecord: true})
+      const handle = attachFull(parts, {finishedRecord: takeUsableFinishedRun(RUN_ID, 'succeeded')})
 
       expect(handle.getConnectionStatus()).toBe('terminal')
       expect(parts.statusEl.textContent).toBe('Succeeded')
@@ -1022,7 +1022,7 @@ describe('operator stream recorded re-expand', () => {
       parts.regions[role].hidden = false
     }
 
-    const handle = attachFull(parts, {fromFinishedRecord: true})
+    const handle = attachFull(parts, {finishedRecord: takeUsableFinishedRun(RUN_ID, 'succeeded')})
 
     for (const role of STREAM_OWNED_EMPTY_REGIONS) {
       expect(parts.regions[role].hidden).toBe(true)
@@ -1044,7 +1044,7 @@ describe('operator stream recorded re-expand', () => {
       const fetchSpy = vi.fn()
       vi.stubGlobal('fetch', fetchSpy)
 
-      const handle = attachFull(parts, {fromFinishedRecord: true})
+      const handle = attachFull(parts, {finishedRecord: takeUsableFinishedRun(RUN_ID, 'succeeded')})
       await vi.advanceTimersByTimeAsync(FIRST_FRAME_TIMEOUT_MS + 1000)
 
       expect(parts.noticeEl.dataset.connectionState).toBe('closed')

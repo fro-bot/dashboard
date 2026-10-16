@@ -19,7 +19,7 @@ const STREAM_SPECIFIER = '/static/operator-stream.js?manual=1'
 async function importLaunchModuleWithStreamMock(): Promise<LaunchModule> {
   vi.doMock(STREAM_SPECIFIER, () => ({
     initOperatorStream: vi.fn(),
-    hasUsableFinishedRun: vi.fn(() => false),
+    takeUsableFinishedRun: vi.fn(() => undefined),
     pruneFinishedRuns: vi.fn(),
     clearFinishedRuns: vi.fn(),
   }))

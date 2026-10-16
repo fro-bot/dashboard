@@ -27,7 +27,7 @@ describe('operator auth recovery after a successful initial load', () => {
     const clearFinishedRuns = vi.fn()
     vi.doMock('/static/operator-stream.js?manual=1', () => ({
       initOperatorStream: vi.fn(),
-      hasUsableFinishedRun: vi.fn(() => false),
+      takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns,
     }))
@@ -67,7 +67,7 @@ describe('operator auth recovery after a successful initial load', () => {
     let onAuthRequired: (() => void) | undefined
     vi.doMock('/static/operator-stream.js?manual=1', () => ({
       initOperatorStream: vi.fn(),
-      hasUsableFinishedRun: vi.fn(() => false),
+      takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns: vi.fn(),
     }))
@@ -98,7 +98,7 @@ describe('operator auth recovery after a successful initial load', () => {
     let onAuthRequired: (() => void) | undefined
     vi.doMock('/static/operator-stream.js?manual=1', () => ({
       initOperatorStream: vi.fn(),
-      hasUsableFinishedRun: vi.fn(() => false),
+      takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns: vi.fn(),
     }))

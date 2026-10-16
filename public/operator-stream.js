@@ -1059,11 +1059,16 @@ export function hasUsableFinishedRun(runId, listStatus, fixtureSessionId) {
   return typeof listStatus === 'string' && finishedRunStore.get(finishedRunKey(runId, fixtureSessionId))?.status === listStatus
 }
 
-/** The frozen record for the run, or undefined. A read moves the entry to most recently used. */
-export function getFinishedRun(runId, fixtureSessionId) {
+/**
+ * The frozen record for the run when its status equals `listStatus` (the usability rule of
+ * `hasUsableFinishedRun`), else undefined. A hit moves the entry to most recently used; a miss changes
+ * nothing. This is the one read of the store: the caller hands the record to `initOperatorStream`.
+ */
+export function takeUsableFinishedRun(runId, listStatus, fixtureSessionId) {
+  if (typeof listStatus !== 'string') return undefined
   const key = finishedRunKey(runId, fixtureSessionId)
   const record = finishedRunStore.get(key)
-  if (record === undefined) return undefined
+  if (record?.status !== listStatus) return undefined
   finishedRunStore.delete(key)
   finishedRunStore.set(key, record)
   return record
@@ -3439,6 +3444,66 @@ function makeQuestionNoteCard(status) {
 }
 
 /**
+ * The seed for a live attach: the run starts connecting, and the decision clients are built when the
+ * caller wires their regions (or injects them). `opts` is `initOperatorStream`'s options.
+ */
+function liveStreamSetup(opts, summaryStatus) {
+  const {approvalsEl, questionsEl, cancelEl, endpointBase, fixtureSessionId} = opts
+  // Pass endpointBase and fixtureSessionId so fixture mode uses the fixture routes and includes the
+  // session ID in every request.
+  const clientOptions = () => endpointBase === undefined && fixtureSessionId === undefined
+    ? undefined
+    : {
+        ...(endpointBase === undefined ? {} : {endpointBase}),
+        ...(fixtureSessionId === undefined ? {} : {fixtureSessionId}),
+      }
+
+  return {
+    network: true,
+    initialStartedAt: null,
+    initialState: {
+      connection: 'connecting',
+      runs: Object.create(null), // null-prototype to guard against __proto__ key pollution
+      retryCount: 0,
+      shouldReconnect: false,
+      ...(summaryStatus === undefined ? {} : {summaryStatus}),
+    },
+    // Built only when the region is present: a stream without the region never touches those routes.
+    approvalClient: approvalsEl !== undefined && approvalsEl !== null
+      ? (opts.approvalClient ?? buildApprovalClient(clientOptions()))
+      : null,
+    // An injected client is used even without the region; otherwise one is built only for the region.
+    questionClient: opts.questionClient ?? (
+      questionsEl !== undefined && questionsEl !== null ? buildQuestionClient(clientOptions()) : null
+    ),
+    cancelClient: cancelEl !== undefined && cancelEl !== null
+      ? (opts.cancelClient ?? buildCancelClient(clientOptions()))
+      : null,
+  }
+}
+
+/**
+ * The seed for a recorded attach: the run starts closed and terminal from its finished record, with
+ * no decision clients and no network. The entry is a mutable copy: the stored record is frozen and
+ * must never be handed to the state, whose reducer and painter own their entries.
+ */
+function recordedStreamSetup(runId, record) {
+  return {
+    network: false,
+    initialStartedAt: normalizeIsoTimestamp(record.startedAt) ?? null,
+    initialState: {
+      connection: 'closed',
+      runs: Object.assign(Object.create(null), {[runId]: {...record, terminal: true, cancelInFlight: false}}),
+      retryCount: 0,
+      shouldReconnect: false,
+    },
+    approvalClient: null,
+    questionClient: null,
+    cancelClient: null,
+  }
+}
+
+/**
  * Initialize the operator run stream for a given run ID.
  *
  * This function touches the DOM and must only be called from a browser context.
@@ -3461,6 +3526,9 @@ function makeQuestionNoteCard(status) {
  *                 show its status plus "Output no longer available." without a status frame.
  *   approvalClient — optional pre-built approval client (for testing); if absent,
  *                    buildApprovalClient() is called when the flag is on
+ *   finishedRecord — optional finished-run record the caller took from the store
+ *                 (takeUsableFinishedRun). When present the run paints from it with no stream
+ *                 and no decision clients; this function never reads the store.
  *
  * Security:
  * - Never logs frame data, run IDs, repo names, or stream URLs.
@@ -3472,7 +3540,7 @@ function makeQuestionNoteCard(status) {
  * - Read-only: GET only for stream; approval decisions are operator-forwarded writes.
  */
 export function initOperatorStream(opts) {
-  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, timeEl, waitingEl, checkoutEl, cancelEl, questionsEl, approvalClient: injectedApprovalClient, cancelClient: injectedCancelClient, questionClient: injectedQuestionClient, endpointBase, fixtureSessionId} = opts
+  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, timeEl, waitingEl, checkoutEl, cancelEl, questionsEl, endpointBase, fixtureSessionId} = opts
 
   // The finished-run store generation this attachment started under: a clear since then retires its writes.
   const attachGeneration = finishedRunGeneration
@@ -3482,12 +3550,6 @@ export function initOperatorStream(opts) {
   const summaryStatus = typeof opts.summaryStatus === 'string' && SUMMARY_STATUSES.has(opts.summaryStatus)
     ? opts.summaryStatus
     : undefined
-
-  // A recorded paint: the run's finished record, read once here (that read is the only recency bump).
-  // The caller decides hit or miss first; with the option set but no record this is a normal attach.
-  // A recorded handle opens no stream and builds no decision clients: nothing about a finished run changes.
-  const finishedRecord = opts.fromFinishedRecord === true ? getFinishedRun(runId, fixtureSessionId) : undefined
-  const fromFinishedRecord = finishedRecord !== undefined
 
   // Every stream-owned region starts each attachment empty and hidden; updateDOM alone shows one.
   if (checkoutEl) {
@@ -3529,48 +3591,13 @@ export function initOperatorStream(opts) {
     cancelEl.hidden = true
   }
 
-  // Build the approval client lazily (only if approvalsEl is present).
-  // Pass endpointBase and fixtureSessionId so fixture mode uses the fixture approval routes
-  // and includes the session ID in all approval requests.
-  const approvalClient = !fromFinishedRecord && approvalsEl !== undefined && approvalsEl !== null
-    ? (injectedApprovalClient ?? buildApprovalClient(
-        endpointBase === undefined && fixtureSessionId === undefined
-          ? undefined
-          : {
-              ...(endpointBase === undefined ? {} : {endpointBase}),
-              ...(fixtureSessionId === undefined ? {} : {fixtureSessionId}),
-            },
-      ))
-    : null
-
-  // Build the question client only when the caller wires questions: an injected client, or the
-  // question region element. A stream with neither never touches the questions routes.
-  const questionClient = fromFinishedRecord
-    ? null
-    : injectedQuestionClient ?? (
-      questionsEl !== undefined && questionsEl !== null
-        ? buildQuestionClient(
-            endpointBase === undefined && fixtureSessionId === undefined
-              ? undefined
-              : {
-                  ...(endpointBase === undefined ? {} : {endpointBase}),
-                  ...(fixtureSessionId === undefined ? {} : {fixtureSessionId}),
-                },
-          )
-        : null
-    )
-
-  // Build the cancel client lazily (only if cancelEl is present).
-  const cancelClient = !fromFinishedRecord && cancelEl !== undefined && cancelEl !== null
-    ? (injectedCancelClient ?? buildCancelClient(
-        endpointBase === undefined && fixtureSessionId === undefined
-          ? undefined
-          : {
-              ...(endpointBase === undefined ? {} : {endpointBase}),
-              ...(fixtureSessionId === undefined ? {} : {fixtureSessionId}),
-            },
-      ))
-    : null
+  // The one place a recorded run differs from a live one. A recorded run arrives as its finished record
+  // (the caller took it; nothing here reads the store) and starts closed and terminal, with no decision
+  // clients and no network. A live run starts connecting and builds its clients. Everything below this
+  // line is shared: the one painter (updateDOM) paints either seed.
+  const {network, initialState, initialStartedAt, approvalClient, questionClient, cancelClient} = opts.finishedRecord === undefined
+    ? liveStreamSetup(opts, summaryStatus)
+    : recordedStreamSetup(runId, opts.finishedRecord)
 
   // The rendered cancel control instance ({el, notifyTerminal}), created lazily
   // the first time updateDOM sees a non-terminal run for this stream.
@@ -3850,22 +3877,7 @@ export function initOperatorStream(opts) {
     return {el, update}
   }
 
-  // A recorded run starts closed and terminal. Its entry is a mutable copy: the stored record is frozen
-  // and must never be handed to the state, whose reducer and painter own their entries.
-  let state = fromFinishedRecord
-    ? {
-        connection: 'closed',
-        runs: Object.assign(Object.create(null), {[runId]: {...finishedRecord, terminal: true, cancelInFlight: false}}),
-        retryCount: 0,
-        shouldReconnect: false,
-      }
-    : {
-        connection: 'connecting',
-        runs: Object.create(null), // null-prototype to guard against __proto__ key pollution
-        retryCount: 0,
-        shouldReconnect: false,
-        ...(summaryStatus === undefined ? {} : {summaryStatus}),
-      }
+  let state = initialState
 
   let abortController = null
   let reconnectTimer = null // track pending reconnect timer
@@ -3874,7 +3886,7 @@ export function initOperatorStream(opts) {
   let announcedFailure = false
   let paintedPreparationHeadline = false // reasonEl currently shows a headline this stream wrote from checkoutPreparation
   // Latest valid startedAt from a status frame; never reset to blank. A recorded run seeds it so the first paint has it.
-  let latestStartedAt = fromFinishedRecord ? (normalizeIsoTimestamp(finishedRecord.startedAt) ?? null) : null
+  let latestStartedAt = initialStartedAt
 
   function updateDOM() {
     // Late-frame guard: after close(), no write of any kind (notice, status,
@@ -4901,7 +4913,7 @@ export function initOperatorStream(opts) {
   updateDOM()
 
   // Start the connection
-  if (!fromFinishedRecord) connect()
+  if (network) connect()
 
   // Return a handle to allow external abort (e.g. page unload)
   return {

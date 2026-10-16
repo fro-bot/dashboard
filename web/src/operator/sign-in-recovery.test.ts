@@ -133,7 +133,7 @@ describe('operator sign-in redirect recovery', () => {
     sessionStorage.setItem(SIGN_IN_GUARD_KEY, '1')
     vi.doMock('/static/operator-stream.js?manual=1', () => ({
       initOperatorStream: vi.fn(),
-      hasUsableFinishedRun: vi.fn(() => false),
+      takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns: vi.fn(),
     }))
@@ -163,7 +163,7 @@ describe('operator sign-in redirect recovery', () => {
     sessionStorage.setItem(SIGN_IN_GUARD_KEY, guardValue)
     vi.doMock('/static/operator-stream.js?manual=1', () => ({
       initOperatorStream: vi.fn(),
-      hasUsableFinishedRun: vi.fn(() => false),
+      takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns: vi.fn(),
     }))

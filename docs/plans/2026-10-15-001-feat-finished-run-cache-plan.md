@@ -370,6 +370,7 @@ sequenceDiagram
 | A record outlives the operator's access to the run | Every applied list fetch prunes records for runs it no longer lists; `auth-required` clears the store |
 | Late frames after a clear re-add data | The generation counter drops writes from attachments older than the clear |
 | New exports break mocked tests | Unit 3 updates every stream-module mock and reset hook |
+| The final output arrives after the terminal status | Accepted: the record is written only when the run first turns terminal, so that attachment records nothing and the next expand attaches live. The gateway sends the final output first |
 
 ## Sources & References
 

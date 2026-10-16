@@ -29,7 +29,7 @@ import {validateDynamicId} from './validate-dynamic-id.ts'
 import type * as LaunchModule from '../../../public/operator-launch.js'
 import type * as RunIndexModule from '../../../public/operator-run-index.js'
 import type * as StreamModule from '../../../public/operator-stream.js'
-import type {RunSummaryStatus, StreamHandle} from '../../../public/operator-stream.js'
+import type {FinishedRunRecord, RunSummaryStatus, StreamHandle} from '../../../public/operator-stream.js'
 import type {OperatorState} from './state.ts'
 import {clearGatewaySignInRedirectGuard, maybeAutoRedirectToGatewaySignIn} from './sign-in-recovery.ts'
 
@@ -467,7 +467,7 @@ async function defaultRuntimeLoader(opts?: {
   // check-types instead of surfacing as a silently skipped call. Only the members listed are read.
   const streamMod = await import(/* @vite-ignore */ _streamSpecifier) as Pick<
     typeof StreamModule,
-    'initOperatorStream' | 'hasUsableFinishedRun' | 'pruneFinishedRuns' | 'clearFinishedRuns'
+    'initOperatorStream' | 'takeUsableFinishedRun' | 'pruneFinishedRuns' | 'clearFinishedRuns'
   >
   _clearFinishedRuns = () => streamMod.clearFinishedRuns()
   // Streams attach on expand, launch, restore and jump only; the stream module's own bootstrap is not run here.
@@ -482,7 +482,14 @@ async function defaultRuntimeLoader(opts?: {
     'initOperatorLaunch' | 'resetLaunchState'
   >
 
-  function _attachStream(runId: string, statusEl: Element | null, noticeEl: Element | null): void {
+  // `takenRecord` is a record the caller already took for this attach (onSelectRun's hit); otherwise the
+  // record is taken here. Either way the store is read once per attach, so recency bumps once.
+  function _attachStream(
+    runId: string,
+    statusEl: Element | null,
+    noticeEl: Element | null,
+    takenRecord?: FinishedRunRecord,
+  ): void {
     // Any attach supersedes an expand still waiting on the refresh.
     _cancelPendingExpand()
     _closeActiveStream()
@@ -493,7 +500,7 @@ async function defaultRuntimeLoader(opts?: {
     const summaryStatus = discoverCardSummaryStatus(runId)
     // A run the page already saw finish paints from its record, with no stream. Every other run, and
     // a record that no longer matches what the list shows for the card, attaches live as before.
-    const fromFinishedRecord = streamMod.hasUsableFinishedRun(runId, summaryStatus, opts?.fixtureSessionId)
+    const finishedRecord = takenRecord ?? streamMod.takeUsableFinishedRun(runId, summaryStatus, opts?.fixtureSessionId)
 
     // A re-expanded card must never keep question DOM from a previous attach: the stream and
     // page store rebuild this region from scratch.
@@ -515,7 +522,7 @@ async function defaultRuntimeLoader(opts?: {
         checkoutEl,
         questionsEl,
         ...(summaryStatus === undefined ? {} : {summaryStatus}),
-        ...(fromFinishedRecord ? {fromFinishedRecord: true} : {}),
+        ...(finishedRecord === undefined ? {} : {finishedRecord}),
         endpointBase: opts?.endpointBase,
         fixtureSessionId: opts?.fixtureSessionId,
       })
@@ -698,7 +705,7 @@ async function defaultRuntimeLoader(opts?: {
     // From here the card is being expanded: a jump's notice is stale.
     clearJumpNotice()
 
-    const attachExpanded = () => {
+    const attachExpanded = (takenRecord?: FinishedRunRecord) => {
       // Find the card element for this runId to get its statusEl and noticeEl.
       const card = typeof document !== 'undefined'
         ? document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`)
@@ -707,7 +714,7 @@ async function defaultRuntimeLoader(opts?: {
       const noticeEl = typeof document !== 'undefined'
         ? document.querySelector('[data-role="stream-status"]')
         : null
-      _attachStream(runId, statusEl, noticeEl)
+      _attachStream(runId, statusEl, noticeEl, takenRecord)
     }
 
     // Expanding another card ends the open stream now; only the new attach waits, for the refresh
@@ -715,8 +722,10 @@ async function defaultRuntimeLoader(opts?: {
     _cancelPendingExpand()
     _closeActiveStream()
     _writeRunHash(runId)
-    if (streamMod.hasUsableFinishedRun(runId, discoverCardSummaryStatus(runId), opts?.fixtureSessionId)) {
-      attachExpanded()
+    // A run the page already saw finish attaches at once from its record, with no refresh to wait for.
+    const finishedRecord = streamMod.takeUsableFinishedRun(runId, discoverCardSummaryStatus(runId), opts?.fixtureSessionId)
+    if (finishedRecord !== undefined) {
+      attachExpanded(finishedRecord)
       return
     }
     const wait = _waitForRefreshOrCap(refreshRunList())

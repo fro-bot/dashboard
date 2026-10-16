@@ -738,7 +738,7 @@ describe('defaultRuntimeLoader — production stream wiring', () => {
       initOperatorStream,
       bootstrapOperatorStreams,
       resetBootstrapState: vi.fn(),
-      hasUsableFinishedRun: vi.fn(() => false),
+      takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns: vi.fn(),
     }))
@@ -813,7 +813,7 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
       initOperatorStream,
       bootstrapOperatorStreams,
       resetBootstrapState,
-      hasUsableFinishedRun: vi.fn(() => false),
+      takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns: vi.fn(),
     }))
@@ -1191,7 +1191,7 @@ describe('defaultRuntimeLoader — run-list refresh triggers', () => {
       initOperatorStream,
       bootstrapOperatorStreams,
       resetBootstrapState: vi.fn(),
-      hasUsableFinishedRun: vi.fn(() => false),
+      takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns: vi.fn(),
     }))
@@ -2324,7 +2324,7 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
       initOperatorStream,
       bootstrapOperatorStreams,
       resetBootstrapState: vi.fn(),
-      hasUsableFinishedRun: vi.fn(() => false),
+      takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns: vi.fn(),
     }))
@@ -3693,7 +3693,7 @@ describe('defaultRuntimeLoader — finished-run cache', () => {
       restore: (runId: string) => captured?.onRestoreRun(runId, cardEl(runId), 'succeeded'),
       launched: (runId: string) => launchOpts?.onRunLaunched(runId, cardEl(runId)),
       attachedRunIds: () => initCalls.map(call => call.runId),
-      recordedInitCalls: () => initCalls.filter(call => call.fromFinishedRecord === true),
+      recordedInitCalls: () => initCalls.filter(call => call.finishedRecord !== undefined),
     }
   }
 

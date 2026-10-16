@@ -689,8 +689,16 @@ export declare function hasUsableFinishedRun(
   fixtureSessionId?: string,
 ): boolean
 
-/** The frozen record for the run, or undefined. A read moves the entry to most recently used. */
-export declare function getFinishedRun(runId: string, fixtureSessionId?: string): FinishedRunRecord | undefined
+/**
+ * The frozen record for the run when its status equals `listStatus` (the rule of `hasUsableFinishedRun`),
+ * else undefined. A hit moves the entry to most recently used; a miss changes nothing. This is the one
+ * read of the store: pass the record to `initOperatorStream` as `finishedRecord`.
+ */
+export declare function takeUsableFinishedRun(
+  runId: string,
+  listStatus: string | undefined,
+  fixtureSessionId?: string,
+): FinishedRunRecord | undefined
 
 /** Keep only the records whose run IDs are in `runIds`; drop every other one. */
 export declare function pruneFinishedRuns(runIds: Iterable<string>, fixtureSessionId?: string): void
@@ -899,13 +907,12 @@ export interface InitOptions {
    */
   readonly summaryStatus?: RunSummaryStatus
   /**
-   * Paint the run's finished record (see `getFinishedRun`, keyed with `fixtureSessionId` when set)
-   * instead of attaching. The handle opens no stream, arms no first-frame timer and builds no
-   * cancel, approval or question client; `getConnectionStatus()` returns `'terminal'`. The caller
-   * decides hit or miss first (`hasUsableFinishedRun`); with no record for the run this attaches
-   * normally.
+   * Paint this finished record (from `takeUsableFinishedRun`) instead of attaching. The handle opens
+   * no stream, arms no first-frame timer and builds no cancel, approval or question client;
+   * `getConnectionStatus()` returns `'terminal'`. It never reads the store. Without a record this
+   * attaches normally.
    */
-  readonly fromFinishedRecord?: boolean
+  readonly finishedRecord?: FinishedRunRecord
 }
 
 export declare function initOperatorStream(opts: InitOptions): StreamHandle
