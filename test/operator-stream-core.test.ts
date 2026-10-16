@@ -12749,7 +12749,7 @@ describe('finished-run store — recorded init', () => {
     expect(clients.cancelClient.refreshCsrf).not.toHaveBeenCalled()
   })
 
-  it('leaves the stored record frozen, untouched and not re-recorded, and bumps recency only by its one read', async () => {
+  it('leaves the stored record frozen, untouched and not re-recorded', async () => {
     await fcFinish('run-fc-r8', {text: 'once'})
     await fcFinish('run-fc-other')
     const before = fcRecord('run-fc-r8')
