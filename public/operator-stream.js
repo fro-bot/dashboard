@@ -3484,8 +3484,9 @@ function liveStreamSetup(opts, summaryStatus) {
 
 /**
  * The seed for a recorded attach: the run starts closed and terminal from its finished record, with
- * no decision clients and no network. The entry is a mutable copy: the stored record is frozen and
- * must never be handed to the state, whose reducer and painter own their entries.
+ * no decision clients and no network. The entry is a shallow copy of the frozen record, so its nested
+ * checkout objects stay frozen and shared; the reducer only replaces or deletes those fields, never
+ * mutates them.
  */
 function recordedStreamSetup(runId, record) {
   return {
