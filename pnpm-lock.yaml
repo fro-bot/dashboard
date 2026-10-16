@@ -21,7 +21,7 @@ importers:
         version: 0.1.0
       '@hono/node-server':
         specifier: ^2.0.0
-        version: 2.1.4(hono@4.13.13)
+        version: 2.1.5(hono@4.13.13)
       '@octokit/auth-app':
         specifier: 8.3.1
         version: 8.3.1
@@ -860,8 +860,8 @@ packages:
     resolution: {gitHosted: true, integrity: sha512-c72czBsjFt/1gidBO6ZCdzmb99QrZ1H1lZttBM/rw79sPqa1UTo5rpdFhnQUWHTqZ1Z5bdtaykhYrg4bObxSDA==, path: packages/wiki-write-core, tarball: https://codeload.github.com/fro-bot/.github/tar.gz/37abb495df047e6b8beb690017ac6d217978fb9c}
     version: 0.0.0
 
-  '@hono/node-server@2.1.4':
-    resolution: {integrity: sha512-2g1qeHl4BduwDn6L8nkAvDrPUWPMlkQ//a5NhP/zIyaXKMjZNRV+cG9Csu+BiJFf6+68pqzjf4Hi5sJGKHuS1g==}
+  '@hono/node-server@2.1.5':
+    resolution: {integrity: sha512-MgP/I06GdvsilDspMk/qmRzpk8LOUStP6jFAbSRi40W09DhoyUn+Mj7eyKICPqeYKybOjVFLVIAQzvu1bfIa7Q==}
     engines: {node: '>=20'}
     peerDependencies:
       hono: ^4 || ^5.0.0-0
@@ -4962,7 +4962,7 @@ snapshots:
       '@octokit/rest': 22.0.1
       yaml: 2.9.1
 
-  '@hono/node-server@2.1.4(hono@4.13.13)':
+  '@hono/node-server@2.1.5(hono@4.13.13)':
     dependencies:
       hono: 4.13.13
 
