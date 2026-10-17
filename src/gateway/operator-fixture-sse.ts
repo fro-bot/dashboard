@@ -133,6 +133,12 @@ export const FIXTURE_SCENARIO_NAMES = {
   waiting_no_output: 'waiting_no_output',
   /** ready → queued status; the run-list row is queued. */
   waiting_queued: 'waiting_queued',
+
+  // -- Markdown output: untrusted model text rendered as a parsed allowlist, never as an HTML string. --
+  /** Output deltas split mid-fence, mid-emphasis and mid-table, then the authoritative final frame and terminal success. */
+  markdown_streamed: 'markdown_streamed',
+  /** Final output made of raw HTML, unsafe link schemes, a same-origin link, userinfo, an image and a spoofed link label. */
+  markdown_malicious: 'markdown_malicious',
 } as const
 
 /** Union of all canonical scenario name values. */
@@ -182,6 +188,9 @@ export type QuestionScenarioName =
   | 'running_after_no_snapshot'
   | 'waiting_no_output'
   | 'waiting_queued'
+
+/** The scenarios that exercise Markdown rendering of run output. */
+export type MarkdownScenarioName = 'markdown_streamed' | 'markdown_malicious'
 
 const FIXTURE_RUN_ID_MALFORMED = 'run-fixture-malformed-001'
 
@@ -1075,6 +1084,104 @@ export function isNoApprovalScenario(scenarioName: string): boolean {
   return isQuestionScenarioName(scenarioName) && QUESTION_SCENARIO_SPECS[scenarioName].noApproval === true
 }
 
+// ---------------------------------------------------------------------------
+// Markdown output scenarios
+//
+// Wire shape is the gateway's: non-final `output` frames are deltas that the reducer appends in strictly
+// increasing `seq` order, and the `final: true` frame carries the whole answer and replaces them. The gateway
+// always sends the terminal output frame before the terminal status. Each row reads `running` before the stream
+// is opened, like a list read just before the run finished, so the card streams live.
+// ---------------------------------------------------------------------------
+
+const MARKDOWN_STARTED_AT = '2026-10-16T10:00:00Z'
+
+/**
+ * The streamed answer as delivered deltas. The splits fall inside a heading marker, a bold span, a fence's
+ * opening line, the fence body, an italic span, a table row, a table cell and a link, so every mid-construct
+ * state is painted while the stream runs. Joined, the chunks are the final text.
+ */
+const MARKDOWN_STREAMED_CHUNKS: readonly string[] = [
+  '## Fixture run sum',
+  'mary\n\nThe run finished with **bold re',
+  'sult**, some *italic det',
+  'ail* and ~~a dropped idea~~.\n\n### Steps taken\n\n- Read the `fixture.config` file\n- Ran the checks\n',
+  '- Wrote the report\n\n1. First numbered step\n2. Second numbered step\n3. Third numbered step\n\n',
+  '> Fixture note: a blockquote carries a quoted remark.\n\n``',
+  '`ts\nconst fixture = {answer: 42}\n',
+  'console.log(fixture.answer)\n```\n\n| Check | Result | Duration | Notes | Owner |\n| --- | --- | --- | --- | --- |\n| lint | pass | 12s | no findings in the ',
+  'synthetic repository tree | fixture-bot |\n| types | pass | 31s | strict mode, no implicit any anywhere | fixture-bot |\n| tests | pa',
+  'ss | 4m 02s | 1,204 synthetic cases across every package | fixture-bot |\n\nSee [the fixture gu',
+  'ide](https://docs.fixture.invalid/guide) or visit https://fixture.invalid/bare-url for more.\n',
+]
+
+/** Pause between delivered frames, so the card paints the in-between states instead of one burst. */
+const MARKDOWN_STREAMED_PACE_MS = 120
+
+const MARKDOWN_MALICIOUS_TEXT = [
+  'Fixture malicious output, rendered as inert text and links.',
+  '<script>alert(1)</script>',
+  '<img src=x onerror=alert(1)>',
+  '[click](javascript:alert(1))',
+  '[x](data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==)',
+  '[cancel the run](/operator/runs/x/cancel)',
+  '[userinfo](https://user:pw@evil.example/login)',
+  '![alt](https://evil.example/p.png)',
+  '[github.com/fro-bot/agent](https://evil.example)',
+].join('\n\n')
+
+function buildMarkdownStreamedScenario(activeRunId: string): string {
+  const deltas = MARKDOWN_STREAMED_CHUNKS.map((chunk, seq) => outputFrame(activeRunId, chunk, false, seq)).join('')
+  return (
+    readyFrame(OPERATOR_CONTRACT_VERSION) +
+    statusFrame(activeRunId, 'running', 'EXECUTING', MARKDOWN_STARTED_AT) +
+    deltas +
+    outputFrame(activeRunId, MARKDOWN_STREAMED_CHUNKS.join(''), true, MARKDOWN_STREAMED_CHUNKS.length) +
+    statusFrame(activeRunId, 'succeeded', 'COMPLETED', MARKDOWN_STARTED_AT)
+  )
+}
+
+function buildMarkdownMaliciousScenario(activeRunId: string): string {
+  return (
+    readyFrame(OPERATOR_CONTRACT_VERSION) +
+    statusFrame(activeRunId, 'running', 'EXECUTING', MARKDOWN_STARTED_AT) +
+    outputFrame(activeRunId, 'Fixture malicious output, rendered as inert text and links.\n\n<scr', false, 0) +
+    outputFrame(activeRunId, MARKDOWN_MALICIOUS_TEXT, true, 1) +
+    statusFrame(activeRunId, 'succeeded', 'COMPLETED', MARKDOWN_STARTED_AT)
+  )
+}
+
+const MARKDOWN_SCENARIO_SPECS: Readonly<
+  Record<MarkdownScenarioName, {readonly paceMs?: number; readonly build: (activeRunId: string) => string}>
+> = {
+  markdown_streamed: {paceMs: MARKDOWN_STREAMED_PACE_MS, build: buildMarkdownStreamedScenario},
+  markdown_malicious: {build: buildMarkdownMaliciousScenario},
+}
+
+/** Rows for the recent-runs list: one per Markdown scenario, both `running` so the card streams live. */
+export const FIXTURE_MARKDOWN_SCENARIO_ROWS: readonly {
+  readonly scenario: MarkdownScenarioName
+  readonly summaryStatus: 'running'
+}[] = (Object.keys(MARKDOWN_SCENARIO_SPECS) as MarkdownScenarioName[]).map(scenario => ({
+  scenario,
+  summaryStatus: 'running',
+}))
+
+function isMarkdownScenarioName(name: string): name is MarkdownScenarioName {
+  return Object.hasOwn(MARKDOWN_SCENARIO_SPECS, name)
+}
+
+/** Milliseconds to wait between frames when the scenario's stream is paced, or undefined when it is sent at once. */
+export function fixtureStreamPaceMs(scenarioName: string): number | undefined {
+  return isMarkdownScenarioName(scenarioName) ? MARKDOWN_SCENARIO_SPECS[scenarioName].paceMs : undefined
+}
+
+const MARKDOWN_SCENARIO_BUILDERS = Object.fromEntries(
+  (Object.keys(MARKDOWN_SCENARIO_SPECS) as MarkdownScenarioName[]).map(scenario => [
+    scenario,
+    MARKDOWN_SCENARIO_SPECS[scenario].build,
+  ]),
+) as Readonly<Record<MarkdownScenarioName, (activeRunId: string) => string>>
+
 const QUESTION_SCENARIO_BUILDERS = Object.fromEntries(
   (Object.keys(QUESTION_SCENARIO_SPECS) as QuestionScenarioName[]).map(scenario => [
     scenario,
@@ -1085,6 +1192,7 @@ const QUESTION_SCENARIO_BUILDERS = Object.fromEntries(
 const SCENARIO_BUILDERS: Readonly<Record<FixtureScenarioName, (activeRunId: string) => string>> = {
   ...CHECKOUT_SCENARIO_BUILDERS,
   ...QUESTION_SCENARIO_BUILDERS,
+  ...MARKDOWN_SCENARIO_BUILDERS,
   [FIXTURE_SCENARIO_NAMES.success]: buildSuccessScenario,
   [FIXTURE_SCENARIO_NAMES.terminal_failure]: buildTerminalFailureScenario,
   [FIXTURE_SCENARIO_NAMES.terminal_failure_known_reason]: buildTerminalFailureKnownReasonScenario,

@@ -27,6 +27,7 @@ import {CHECKOUT_REFUSAL_REASONS, OBSTRUCTION_KINDS, OPERATOR_CONTRACT_VERSION, 
 import {isOperatorFailureKind} from '../src/gateway/operator-contract/run-status.ts'
 import {FIXTURE_OPERATOR_PREFIX} from '../src/gateway/operator-fixture-routes.ts'
 import {
+  FIXTURE_MARKDOWN_SCENARIO_ROWS,
   FIXTURE_QUESTION_SCENARIO_ROWS,
   FIXTURE_SCENARIO_NAMES,
   fixtureQuestionScript,
@@ -2733,12 +2734,12 @@ describe('question fixture scenarios — registry and manifest', () => {
     ])
   })
 
-  it('the scenario select in Operator.tsx lists exactly the manifest\'s question and expired-snapshot scenarios', async () => {
+  it('the scenario select in Operator.tsx lists exactly the manifest\'s question, expired-snapshot and Markdown scenarios', async () => {
     const fs = await import('node:fs/promises')
     const source = await fs.readFile('web/src/views/Operator.tsx', 'utf8')
     const block = source.slice(source.indexOf('QUESTION_FIXTURE_SCENARIOS'), source.indexOf('interface OperatorProps'))
     const values = [...block.matchAll(/value: '([a-z0-9_]+)'/g)].map(match => match[1])
-    expect(values).toEqual(QUESTION_SCENARIO_KEYS)
+    expect(values).toEqual([...QUESTION_SCENARIO_KEYS, ...FIXTURE_MARKDOWN_SCENARIO_ROWS.map(row => row.scenario)])
   })
 })
 
@@ -3606,6 +3607,59 @@ describe('waiting fixture scenarios — production artifacts carry no scenario n
       for (const key of WAITING_SCENARIO_KEYS) {
         expect(src, `${file} must not contain scenario ${key}`).not.toContain(key)
         expect(src, `${file} must not contain ${waitingRunId(key)}`).not.toContain(waitingRunId(key))
+      }
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Markdown output scenarios: registry and production exclusion
+// ---------------------------------------------------------------------------
+
+const MARKDOWN_SCENARIO_KEYS = FIXTURE_MARKDOWN_SCENARIO_ROWS.map(row => row.scenario)
+const markdownRunId = (key: string): string => `run-fixture-index-${key.replaceAll('_', '-')}`
+
+describe('markdown fixture scenarios — registry and manifest', () => {
+  it('registers the streamed and malicious scenarios in the harness list, each with a running fixture-prefixed row', async () => {
+    expect(MARKDOWN_SCENARIO_KEYS).toEqual(['markdown_streamed', 'markdown_malicious'])
+    expect(Object.values(FIXTURE_SCENARIO_NAMES)).toEqual(expect.arrayContaining(MARKDOWN_SCENARIO_KEYS))
+
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const body = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}`)).json() as {scenarios: string[]}
+    for (const key of MARKDOWN_SCENARIO_KEYS) expect(body.scenarios).toContain(key)
+
+    const {fixtureSessionId} = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)).json() as {fixtureSessionId: string}
+    const {runs} = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)).json() as {runs: {runId: string; status: string; repo: string}[]}
+    for (const key of MARKDOWN_SCENARIO_KEYS) {
+      const row = runs.find(candidate => candidate.runId === markdownRunId(key))
+      expect(row, key).toBeDefined()
+      expect(row?.status, key).toBe('running')
+      expect(row?.repo).toMatch(/fixture/)
+    }
+  })
+
+  it('the scenario select in Operator.tsx lists both Markdown scenarios', async () => {
+    const fs = await import('node:fs/promises')
+    const source = await fs.readFile('web/src/views/Operator.tsx', 'utf8')
+    const block = source.slice(source.indexOf('QUESTION_FIXTURE_SCENARIOS'), source.indexOf('interface OperatorProps'))
+    const values = [...block.matchAll(/value: '([a-z0-9_]+)'/g)].map(match => match[1])
+    expect(values.filter(value => value?.startsWith('markdown_'))).toEqual(MARKDOWN_SCENARIO_KEYS)
+  })
+})
+
+describe('markdown fixture scenarios — production artifacts carry no scenario names or row IDs', () => {
+  it('web/dist, the service worker, and the shipped browser modules contain neither', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const files = ['web/dist/sw.js', 'web/dist/index.html', 'public/operator-stream.js', 'public/operator-launch.js', 'public/operator-run-index.js', 'public/operator-time.js']
+    for (const file of await fs.readdir('web/dist/assets')) {
+      if (file.endsWith('.js') || file.endsWith('.css')) files.push(path.join('web/dist/assets', file))
+    }
+    for (const file of files) {
+      const src = await fs.readFile(file, 'utf8')
+      for (const key of MARKDOWN_SCENARIO_KEYS) {
+        expect(src, `${file} must not contain scenario ${key}`).not.toContain(key)
+        expect(src, `${file} must not contain ${markdownRunId(key)}`).not.toContain(markdownRunId(key))
       }
     }
   })

@@ -21,9 +21,11 @@ import {FIXTURE_OPERATOR_PREFIX} from '../gateway/operator-fixture-routes.ts'
 import {
   FIXTURE_APPROVAL_SCENARIO_ROWS,
   FIXTURE_CHECKOUT_SCENARIO_ROWS,
+  FIXTURE_MARKDOWN_SCENARIO_ROWS,
   FIXTURE_QUESTION_SCENARIO_ROWS,
   FIXTURE_SCENARIO_NAMES,
   fixtureQuestionScript,
+  fixtureStreamPaceMs,
   isHeldOpenScenario,
   isNoApprovalScenario,
   serializeScenarioToSse,
@@ -133,6 +135,7 @@ const FIXTURE_SCENARIO_ROWS: readonly FixtureScenarioRow[] = [
   ...FIXTURE_CHECKOUT_SCENARIO_ROWS,
   ...FIXTURE_QUESTION_SCENARIO_ROWS,
   ...FIXTURE_APPROVAL_SCENARIO_ROWS,
+  ...FIXTURE_MARKDOWN_SCENARIO_ROWS,
 ]
 
 const FIXTURE_SCENARIO_RUN_SUMMARIES: readonly RunSummary[] = FIXTURE_SCENARIO_ROWS.map((row, index) => {
@@ -248,6 +251,40 @@ function heldOpenStream(bytes: string, signal: AbortSignal): ReadableStream<Uint
     },
     cancel() {
       closed = true
+      clearTimeout(timer)
+    },
+  })
+}
+
+// The records one at a time, `paceMs` apart, then the end of the stream: a run that streams its answer in pieces.
+// Ends early on client abort. The bytes are the same as when sent at once.
+function pacedStream(bytes: string, paceMs: number, signal: AbortSignal): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+  const records = bytes.split('\n\n').filter(record => record !== '').map(record => `${record}\n\n`)
+  let index = 0
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const record = records[index]
+      if (record === undefined || signal.aborted) {
+        controller.close()
+        return
+      }
+      // The ready and status frames go out at once; every later record waits.
+      if (index > 1) {
+        await new Promise<void>(resolve => {
+          timer = setTimeout(resolve, paceMs)
+          timer.unref()
+        })
+        if (signal.aborted) {
+          controller.close()
+          return
+        }
+      }
+      index++
+      controller.enqueue(encoder.encode(record))
+    },
+    cancel() {
       clearTimeout(timer)
     },
   })
@@ -547,7 +584,11 @@ export function buildFixtureHarnessRouter(): Hono {
     questionRunState.delete(runId)
 
     logger.debug('fixture-harness: GET /runs/:runId/stream', {status: 200})
-    return new Response(isHeldOpenScenario(scenario) ? heldOpenStream(sseBytes, c.req.raw.signal) : sseBytes, {
+    const paceMs = fixtureStreamPaceMs(scenario)
+    let body: string | ReadableStream<Uint8Array> = sseBytes
+    if (isHeldOpenScenario(scenario)) body = heldOpenStream(sseBytes, c.req.raw.signal)
+    else if (paceMs !== undefined) body = pacedStream(sseBytes, paceMs, c.req.raw.signal)
+    return new Response(body, {
       status: 200,
       headers: {
         'content-type': 'text/event-stream; charset=utf-8',

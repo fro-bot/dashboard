@@ -29,7 +29,7 @@ import {navigateToGatewaySignIn} from '../operator/sign-in-recovery.ts'
 import {isActionDisabled} from '../operator/state.ts'
 import type {OperatorState} from '../operator/state.ts'
 
-// Question, expired-snapshot and waiting fixture scenarios. Gated on DEV (replaced at build time) so their
+// Question, expired-snapshot, waiting and Markdown-output fixture scenarios. Gated on DEV (replaced at build time) so their
 // names never reach the production bundle; the fixture build and tests keep them.
 const QUESTION_FIXTURE_SCENARIOS: readonly {readonly value: string; readonly label: string}[] = import.meta.env.DEV
   ? [
@@ -48,6 +48,8 @@ const QUESTION_FIXTURE_SCENARIOS: readonly {readonly value: string; readonly lab
       {value: 'running_after_no_snapshot', label: 'Running run after reset'},
       {value: 'waiting_no_output', label: 'Waiting: running, no output yet'},
       {value: 'waiting_queued', label: 'Waiting: queued'},
+      {value: 'markdown_streamed', label: 'Markdown: streamed in pieces'},
+      {value: 'markdown_malicious', label: 'Markdown: malicious output'},
     ]
   : []
 

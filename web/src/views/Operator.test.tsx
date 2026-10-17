@@ -357,6 +357,8 @@ describe('Operator — fixture scenario selector', () => {
         'running_after_no_snapshot',
         'waiting_no_output',
         'waiting_queued',
+        'markdown_streamed',
+        'markdown_malicious',
       ].sort(),
     )
   })

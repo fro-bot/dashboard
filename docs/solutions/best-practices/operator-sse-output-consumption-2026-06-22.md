@@ -11,9 +11,10 @@ applies_when:
   - Accumulating deltas while allowing a late-subscriber final frame to replace history
   - The same frame type is parsed in two independent code paths (server reader + browser reader)
   - Managing contract-version drift across multiple consumers
-tags: [sse, operator, contract, streaming, no-leak, dual-parser]
+tags: [sse, operator, contract, streaming, no-leak, dual-parser, markdown, untrusted-output]
 related_components:
   - public/operator-stream.js
+  - web/src/operator/markdown-output.ts
   - src/gateway/operator-contract/output.ts
 issue: fro-bot/dashboard#47
 related:
@@ -52,7 +53,7 @@ treat output as a side-channel that may arrive empty:
 // render: show output only when non-empty; an empty final clears any stale text
 const outputText = runEntry?.outputText
 if (typeof outputText === 'string' && outputText !== '') {
-  outputEl.textContent = outputText
+  paintOutput(outputEl, outputText)   // rendered DOM, or textContent when the renderer is absent or throws
   outputEl.hidden = false
 } else {
   outputEl.textContent = ''   // clear any stale text, e.g. after an empty final
@@ -97,16 +98,56 @@ accumulated output. Spread the prior entry:
 This is the trap of adding state to a reducer entry that other event handlers also
 write: every handler that builds that entry must preserve the new fields.
 
-### Render free-form text via textContent only
+### Never an HTML string: build DOM from a parsed allowlist
 
 The `text` field is free-form agent output and is **not** allowlist-gateable, so it
-cannot be sanitized by enumeration like status/phase values. Render it through
-`textContent` / a text node — never HTML interpolation, never `innerHTML`. The SSR
-element ships empty and hidden. Only the stream writes it, and `updateDOM` is the only
-code that unhides it, and only when it has content: expanding a card reveals nothing,
-and each stream attach clears and hides it before the first paint. Never render any other
-frame field (`runId`, `seq`, `droppedCount`) as free text — surface a *fixed* label
-for the coalesced/truncated hint instead of echoing a count.
+cannot be sanitized by enumeration like status/phase values. A model that read
+prompt-injected issue or PR content can emit anything, so the rule is that output is
+never turned into an HTML string. Output is shown as Markdown, and the DOM is built
+from a parsed token stream, not from markup:
+
+- A bundled `markdown-it` instance parses the text with `html: false`, so raw HTML
+  parses as text. Only `md.parse()` tokens are used. `render`, `renderInline` and
+  `renderer.rules` are never called.
+- The renderer walks the tokens and creates elements with `createElement`, setting
+  text only through `textContent`. The elements come from a fixed allowlist: headings
+  (clamped to h4–h6), paragraphs, emphasis, strikethrough, lists, code spans and
+  blocks, blockquotes, horizontal rules, line breaks, tables and links. An unknown
+  token renders as its text, never as a node, and never drops its text.
+- Nothing that loads a resource is created. No `img`, `iframe`, `style`, `script`
+  or `on*` attribute exists in the output. An image renders as its alt text. CSP is
+  unchanged.
+- A link becomes an anchor only when its destination parses as an absolute `http:` or
+  `https:` URL, parsed with no base URL, of at most 2,048 characters, with no userinfo
+  and an origin that differs from the page origin. Relative, `#fragment`,
+  protocol-relative, `mailto:`, `javascript:` and `data:` destinations stay text. Only
+  `href`, `target="_blank"` and `rel="noopener noreferrer"` are set. When the visible
+  text of an accepted link is not its URL, the destination host is shown after it.
+- The renderer returns a `DocumentFragment`, and the stream swaps it in with one
+  `replaceChildren`. A render that throws, or that needs more than 20,000 nodes,
+  paints plain `textContent` for that paint only. The next paint tries the renderer
+  again. With no renderer, the plain path runs unchanged.
+- The innerHTML-family ban (`innerHTML`, `outerHTML`, `insertAdjacentHTML`,
+  `setHTMLUnsafe`, `createContextualFragment`, `parseFromString`, `srcdoc`,
+  `document.write`) covers every shipped module that builds output DOM, including
+  the renderer, and `href` is set only in the renderer.
+
+The inert-output and visibility rules still hold. The SSR element ships empty and
+hidden. Only the stream writes it, and `updateDOM` is the only code that unhides it,
+and only when it has content: expanding a card reveals nothing, and each stream attach
+clears and hides it before the first paint. Never render any other frame field
+(`runId`, `seq`, `droppedCount`) as free text — surface a *fixed* label for the
+coalesced/truncated hint instead of echoing a count.
+
+The raw text stays one click away: each card has a Rendered/Raw toggle, backed by a
+page-wide in-memory preference, and Copy raw copies the run's current `outputText`,
+not the DOM.
+
+**Known limitation: the run card is `role="button"`.** Assistive tech treats the
+contents of a button as flat text, so links, tables and lists inside a card are not
+exposed with their own semantics. The card is the only activation target today. Giving
+card content full semantics needs the header split out as the sole control, which is a
+separate change.
 
 ### Bound cumulative accumulation
 
@@ -147,6 +188,11 @@ together.
 - Test authoritative-final-replaces-regardless-of-seq and late-subscriber-final-only.
 - Test that a status update preserves accumulated output fields.
 - Test the cumulative-growth cap and the empty-final-clears-the-DOM path.
+- Test the renderer against a malicious corpus (raw HTML, `javascript:` and `data:`
+  links, a same-origin link, userinfo, an image, a spoofed link label). Assert an
+  explicit tag set, attribute set and `http(s)` href set over every output, not only
+  the absence of known-bad nodes. The `markdown_malicious` fixture scenario shows the
+  same corpus in the assembled app.
 - Test parser parity: every malformed/edge input rejected by one parser is rejected
   by the other.
 - When bumping the vendored contract version, update both the TypeScript pin and the
