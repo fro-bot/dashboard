@@ -7,7 +7,8 @@ on:
     paths:
       - Dockerfile
       - package.json
-      - pnpm-lock.yaml
+      - bun.lock
+      - bunfig.toml
       - 'tsconfig*.json'
       - 'src/**'
       - 'web/**'
@@ -227,7 +228,7 @@ jobs:
             exit 1
           fi
 
-          for tool in npm npx pnpm pnpx corepack yarn yarnpkg; do
+          for tool in npm npx pnpm pnpx corepack yarn yarnpkg bun bunx; do
             if docker run --rm "$IMG" sh -ec "command -v '$tool' >/dev/null 2>&1"; then
               echo "SMOKE FAILED: package-manager command is present: $tool"
               exit 1
@@ -243,11 +244,14 @@ jobs:
               /usr/local/bin/corepack \
               /usr/local/bin/yarn \
               /usr/local/bin/yarnpkg \
+              /usr/local/bin/bun \
+              /usr/local/bin/bunx \
               /usr/local/lib/node_modules/npm \
               /usr/local/lib/node_modules/corepack \
               /root/.cache \
               /root/.npm \
               /root/.local/share/pnpm \
+              /root/.bun \
               /usr/local/share/.cache; do
               if [ -e "$path" ] || [ -L "$path" ]; then
                 echo "package-manager filesystem path is present: $path" >&2

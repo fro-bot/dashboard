@@ -16,15 +16,16 @@
 //
 // Decision logic:
 //   1. If any changed file matches a "hard release" pattern (src/**, Dockerfile,
-//      .github/workflows/release.yaml, scripts/should-release.ts, tsconfig*.json) => release.
+//      bunfig.toml, .github/workflows/release.yaml, scripts/should-release.ts,
+//      tsconfig*.json) => release.
 //   2. If package.json is in the changed set, diff the runtime fields
-//      (dependencies, engines, packageManager, overrides, pnpm.overrides,
-//       scripts, type, exports, imports) between base and head.
+//      (dependencies, engines, packageManager, overrides, workspaces,
+//       trustedDependencies, scripts, type, exports, imports) between base and head.
 //      If any runtime field changed => release.
 //      If only proven non-artifact devDependencies changed => skip.
 //      Unknown devDependency changes fail open and trigger a release because
 //      Docker installs them before the shipped browser bundle is built.
-//   3. If only pnpm-lock.yaml changed (no package.json diff) => release.
+//   3. If only bun.lock changed (no package.json diff) => release.
 //      Rationale: a lockfile-only update can change the exact package versions
 //      installed into the Docker image even when package.json semver ranges are
 //      unchanged. We cannot cheaply prove the change is dev-only without parsing
@@ -42,17 +43,14 @@ import process from 'node:process'
 // Types
 // ---------------------------------------------------------------------------
 
-interface PnpmConfig {
-  overrides?: Record<string, string>
-}
-
 interface PkgJson {
   dependencies?: Record<string, string>
   devDependencies?: Record<string, string>
   engines?: Record<string, string>
   packageManager?: string
   overrides?: Record<string, string>
-  pnpm?: PnpmConfig
+  workspaces?: unknown
+  trustedDependencies?: unknown
   scripts?: Record<string, string>
   type?: string
   exports?: Record<string, unknown> | string
@@ -153,6 +151,7 @@ function loadPkg(path: string, label: string): LoadResult {
  *   - web/**  (SPA source — built into the image by the builder stage)
  *   - public/**  (static assets copied into the image)
  *   - Dockerfile
+ *   - bunfig.toml
  *   - .github/workflows/release.yaml
  *   - scripts/should-release.ts
  *   - scripts/compute-release-tag.ts
@@ -168,6 +167,9 @@ function isHardReleasePath(filePath: string): boolean {
   // trigger a new image build and release.
   if (filePath.startsWith('public/') || filePath === 'public') return true
   if (filePath === 'Dockerfile') return true
+  // bunfig.toml configures installs (registry, trusted scripts, install policy),
+  // which shape the dependency graph baked into the image.
+  if (filePath === 'bunfig.toml') return true
   if (filePath === '.github/workflows/release.yaml') return true
   if (filePath === 'scripts/should-release.ts') return true
   if (filePath === 'scripts/compute-release-tag.ts') return true
@@ -265,14 +267,17 @@ function changedDevDependencyNames(base: PkgJson, head: PkgJson): string[] {
 /**
  * Returns true if any runtime-affecting field changed between base and head.
  * Runtime fields: dependencies, engines, packageManager, overrides,
- *   pnpm.overrides, scripts, type, exports, imports.
+ *   workspaces, trustedDependencies, scripts, type, exports, imports.
  */
 function runtimeFieldsChanged(base: PkgJson, head: PkgJson): boolean {
   // String-keyed record fields (order-insensitive key/value comparison)
   if (recordsDiffer(base.dependencies, head.dependencies)) return true
   if (recordsDiffer(base.engines, head.engines)) return true
   if (recordsDiffer(base.overrides, head.overrides)) return true
-  if (recordsDiffer(base.pnpm?.overrides, head.pnpm?.overrides)) return true
+  // workspaces (array or {packages, catalog} object) and trustedDependencies
+  // (array) live in package.json and shape the installed image contents.
+  if (canonicalJson(base.workspaces) !== canonicalJson(head.workspaces)) return true
+  if (canonicalJson(base.trustedDependencies) !== canonicalJson(head.trustedDependencies)) return true
   if (recordsDiffer(base.scripts, head.scripts)) return true
 
   // Scalar field
@@ -314,14 +319,14 @@ function decide(
   }
 
   const hasPkgChange = changedFiles.includes('package.json')
-  const hasLockChange = changedFiles.includes('pnpm-lock.yaml')
+  const hasLockChange = changedFiles.includes('bun.lock')
 
   // 2. package.json in changed set — inspect runtime fields
   if (hasPkgChange) {
     if (runtimeFieldsChanged(base, head)) {
       return {
         shouldRelease: true,
-        reason: 'package.json runtime fields changed (dependencies/engines/packageManager/overrides/scripts/type/exports/imports)',
+        reason: 'package.json runtime fields changed (dependencies/engines/packageManager/overrides/workspaces/trustedDependencies/scripts/type/exports/imports)',
       }
     }
 
@@ -343,7 +348,7 @@ function decide(
     }
   }
 
-  // 3. pnpm-lock.yaml only (no package.json diff) — release (fail open)
+  // 3. bun.lock only (no package.json diff) — release (fail open)
   // A lockfile-only update can change the exact package versions installed into
   // the Docker image even when package.json semver ranges are unchanged. We
   // cannot cheaply prove the change is dev-only without parsing the full lockfile
@@ -352,7 +357,7 @@ function decide(
     return {
       shouldRelease: true,
       reason:
-        'pnpm-lock.yaml changed without a package.json runtime diff — releasing ' +
+        'bun.lock changed without a package.json runtime diff — releasing ' +
         '(lockfile-only may affect installed runtime dependency graph)',
     }
   }

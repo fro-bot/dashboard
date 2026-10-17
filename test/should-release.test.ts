@@ -33,7 +33,8 @@
  * - package.json `engines` change => release
  * - package.json `packageManager` change => release
  * - package.json `overrides` change => release
- * - package.json `pnpm.overrides` change => release
+ * - package.json `workspaces` change => release
+ * - package.json `trustedDependencies` change => release
  * - package.json `scripts` change => release
  * - package.json `type` change => release
  * - package.json `exports` change => release
@@ -44,9 +45,11 @@
  * - hard-release path + package.json no-op => release (hard-release wins)
  * - proven non-artifact `devDependencies`-only change => no release
  * - bundled, unknown, added, and removed `devDependencies` changes => release
- * - pnpm-lock.yaml-only change (no package.json diff) => release (fail open: may affect runtime graph)
- * - pnpm-lock.yaml + proven non-artifact devDependency change => no release
- * - pnpm-lock.yaml + dependencies change => release
+ * - bun.lock-only change (no package.json diff) => release (fail open: may affect runtime graph)
+ * - bun.lock + proven non-artifact devDependency change => no release
+ * - bun.lock + dependencies change => release
+ * - bunfig.toml-only change => release
+ * - pnpm-lock.yaml-only change => no release (no longer a tracked lockfile)
  * - no changed files => no release
  * - first-push (empty base {}) with runtime fields in head => release
  * - missing --changed-files flag => error (exit 2)
@@ -76,7 +79,8 @@ interface PkgShape {
   engines?: Record<string, string>
   packageManager?: string
   overrides?: Record<string, string>
-  pnpm?: {overrides?: Record<string, string>}
+  workspaces?: string[] | {packages?: string[]; catalog?: Record<string, string>}
+  trustedDependencies?: string[]
   scripts?: Record<string, string>
   type?: string
   exports?: Record<string, unknown> | string
@@ -136,7 +140,7 @@ const BASE_PKG: PkgShape = {
   dependencies: {hono: '^4.7.11', yaml: '2.9.0'},
   devDependencies: {vitest: '4.1.4', typescript: '6.0.3'},
   engines: {node: '>=24'},
-  packageManager: 'pnpm@11.5.0',
+  packageManager: 'bun@1.3.0',
 }
 
 beforeEach(() => {
@@ -213,19 +217,36 @@ describe('should-release — public/** changes trigger release', () => {
   })
 })
 
+function readPathsFilter(): string {
+  const workflow = readFileSync(resolve(process.cwd(), '.github/workflows/release.yaml'), 'utf8')
+  const start = workflow.indexOf('    paths:')
+  const end = workflow.indexOf('  workflow_dispatch:')
+  expect(start).toBeGreaterThanOrEqual(0)
+  expect(end).toBeGreaterThan(start)
+  return workflow.slice(start, end)
+}
+
 describe('should-release — workflow path filter parity', () => {
   // GitHub Actions filters on.push.paths BEFORE the guard script runs, so any
   // directory that the guard treats as a hard-release path must also appear in
   // the release workflow's paths filter — otherwise the workflow never starts and
   // the guard never executes. This pins the two in sync to prevent drift.
+
   it('release.yaml on.push.paths includes every directory-glob hard-release path', () => {
-    const workflow = readFileSync(
-      resolve(process.cwd(), '.github/workflows/release.yaml'),
-      'utf8',
-    )
+    const filter = readPathsFilter()
     for (const dir of ['src/**', 'web/**', 'public/**']) {
-      expect(workflow).toContain(`'${dir}'`)
+      expect(filter).toContain(`'${dir}'`)
     }
+  })
+
+  it('release.yaml on.push.paths includes the Bun lockfile and config', () => {
+    const filter = readPathsFilter()
+    expect(filter).toMatch(/^\s+- bun\.lock$/m)
+    expect(filter).toMatch(/^\s+- bunfig\.toml$/m)
+  })
+
+  it('release.yaml on.push.paths does not list the pnpm lockfile', () => {
+    expect(readPathsFilter()).not.toContain('pnpm-lock.yaml')
   })
 })
 
@@ -332,7 +353,7 @@ describe('should-release — dependencies change triggers release', () => {
       ...BASE_PKG,
       dependencies: {...BASE_PKG.dependencies, hono: '^4.8.0'},
     })
-    const {exitCode, stdout} = runGuard('package.json\npnpm-lock.yaml', base, head)
+    const {exitCode, stdout} = runGuard('package.json\nbun.lock', base, head)
     expect(exitCode).toBe(0)
     expect(stdout).toMatch(/^release:/)
   })
@@ -394,7 +415,7 @@ describe('should-release — packageManager change triggers release', () => {
     const base = writePkg(tmpDir, 'base.json', BASE_PKG)
     const head = writePkg(tmpDir, 'head.json', {
       ...BASE_PKG,
-      packageManager: 'pnpm@12.0.0',
+      packageManager: 'bun@2.0.0',
     })
     const {exitCode, stdout} = runGuard('package.json', base, head)
     expect(exitCode).toBe(0)
@@ -423,30 +444,61 @@ describe('should-release — overrides change triggers release', () => {
   })
 })
 
-describe('should-release — pnpm.overrides change triggers release', () => {
-  it('releases when pnpm.overrides are added', () => {
-    const base = writePkg(tmpDir, 'base.json', BASE_PKG)
+describe('should-release — workspaces change triggers release', () => {
+  it('releases when only workspaces changes (array form)', () => {
+    const base = writePkg(tmpDir, 'base.json', {...BASE_PKG, workspaces: ['web']})
+    const head = writePkg(tmpDir, 'head.json', {...BASE_PKG, workspaces: ['web', 'wiki-writer']})
+    const {exitCode, stdout} = runGuard('package.json', base, head)
+    expect(exitCode).toBe(0)
+    expect(stdout).toMatch(/^release:/)
+  })
+
+  it('releases when only workspaces.catalog changes (object form)', () => {
+    const base = writePkg(tmpDir, 'base.json', {
+      ...BASE_PKG,
+      workspaces: {packages: ['web'], catalog: {react: '19.2.7'}},
+    })
     const head = writePkg(tmpDir, 'head.json', {
       ...BASE_PKG,
-      pnpm: {overrides: {'some-dep': '1.2.3'}},
+      workspaces: {packages: ['web'], catalog: {react: '19.2.8'}},
     })
     const {exitCode, stdout} = runGuard('package.json', base, head)
     expect(exitCode).toBe(0)
     expect(stdout).toMatch(/^release:/)
   })
 
-  it('releases when pnpm.overrides change value', () => {
-    const base = writePkg(tmpDir, 'base.json', {
-      ...BASE_PKG,
-      pnpm: {overrides: {'some-dep': '1.0.0'}},
-    })
-    const head = writePkg(tmpDir, 'head.json', {
-      ...BASE_PKG,
-      pnpm: {overrides: {'some-dep': '2.0.0'}},
-    })
+  it('does NOT release when workspaces is unchanged', () => {
+    const base = writePkg(tmpDir, 'base.json', {...BASE_PKG, workspaces: ['web']})
+    const head = writePkg(tmpDir, 'head.json', {...BASE_PKG, workspaces: ['web']})
+    const {exitCode, stdout} = runGuard('package.json', base, head)
+    expect(exitCode).toBe(1)
+    expect(stdout).toMatch(/^skip:/)
+  })
+})
+
+describe('should-release — trustedDependencies change triggers release', () => {
+  it('releases when only trustedDependencies is added', () => {
+    const base = writePkg(tmpDir, 'base.json', BASE_PKG)
+    const head = writePkg(tmpDir, 'head.json', {...BASE_PKG, trustedDependencies: ['esbuild']})
     const {exitCode, stdout} = runGuard('package.json', base, head)
     expect(exitCode).toBe(0)
     expect(stdout).toMatch(/^release:/)
+  })
+
+  it('releases when only trustedDependencies entries change', () => {
+    const base = writePkg(tmpDir, 'base.json', {...BASE_PKG, trustedDependencies: ['esbuild']})
+    const head = writePkg(tmpDir, 'head.json', {...BASE_PKG, trustedDependencies: ['esbuild', 'sharp']})
+    const {exitCode, stdout} = runGuard('package.json', base, head)
+    expect(exitCode).toBe(0)
+    expect(stdout).toMatch(/^release:/)
+  })
+
+  it('does NOT release when trustedDependencies is unchanged', () => {
+    const base = writePkg(tmpDir, 'base.json', {...BASE_PKG, trustedDependencies: ['esbuild']})
+    const head = writePkg(tmpDir, 'head.json', {...BASE_PKG, trustedDependencies: ['esbuild']})
+    const {exitCode, stdout} = runGuard('package.json', base, head)
+    expect(exitCode).toBe(1)
+    expect(stdout).toMatch(/^skip:/)
   })
 })
 
@@ -617,7 +669,7 @@ describe('should-release — devDependencies-only changes', () => {
         'react-dom': '19.2.8',
       },
     })
-    const {exitCode, stdout} = runGuard('package.json\npnpm-lock.yaml', base, head)
+    const {exitCode, stdout} = runGuard('package.json\nbun.lock', base, head)
     expect(exitCode).toBe(0)
     expect(stdout).toBe('release: package.json artifact-affecting devDependencies changed: react, react-dom')
   })
@@ -718,43 +770,64 @@ describe('should-release — devDependencies-only changes', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Release: pnpm-lock.yaml-only changes (fail open — may affect runtime graph)
+// Release: bun.lock-only changes (fail open — may affect runtime graph)
 // ---------------------------------------------------------------------------
 
-describe('should-release — pnpm-lock.yaml-only change triggers release (fail open)', () => {
-  it('releases when only pnpm-lock.yaml changed and package.json is identical', () => {
+describe('should-release — bun.lock-only change triggers release (fail open)', () => {
+  it('releases when only bun.lock changed and package.json is identical', () => {
     // A lockfile-only update can change the exact package versions installed into
     // the Docker image even when package.json semver ranges are unchanged. We
     // cannot cheaply prove the change is dev-only, so we fail open and release.
     const base = writePkg(tmpDir, 'base.json', BASE_PKG)
     const head = writePkg(tmpDir, 'head.json', BASE_PKG)
-    const {exitCode, stdout} = runGuard('pnpm-lock.yaml', base, head)
+    const {exitCode, stdout} = runGuard('bun.lock', base, head)
+    expect(exitCode).toBe(0)
+    expect(stdout).toMatch(/^release:/)
+    expect(stdout).toContain('bun.lock')
+  })
+})
+
+describe('should-release — bunfig.toml change triggers release', () => {
+  it('releases when only bunfig.toml changed and package.json is identical', () => {
+    const base = writePkg(tmpDir, 'base.json', BASE_PKG)
+    const head = writePkg(tmpDir, 'head.json', BASE_PKG)
+    const {exitCode, stdout} = runGuard('bunfig.toml', base, head)
     expect(exitCode).toBe(0)
     expect(stdout).toMatch(/^release:/)
   })
 })
 
-describe('should-release — pnpm-lock.yaml + proven non-artifact devDependency change skips release', () => {
+describe('should-release — pnpm-lock.yaml-only change no longer triggers release', () => {
+  it('skips when only pnpm-lock.yaml changed', () => {
+    const base = writePkg(tmpDir, 'base.json', BASE_PKG)
+    const head = writePkg(tmpDir, 'head.json', BASE_PKG)
+    const {exitCode, stdout} = runGuard('pnpm-lock.yaml', base, head)
+    expect(exitCode).toBe(1)
+    expect(stdout).toMatch(/^skip:/)
+  })
+})
+
+describe('should-release — bun.lock + proven non-artifact devDependency change skips release', () => {
   it('skips when lock + devDependencies changed but no runtime fields changed', () => {
     const base = writePkg(tmpDir, 'base.json', BASE_PKG)
     const head = writePkg(tmpDir, 'head.json', {
       ...BASE_PKG,
       devDependencies: {...BASE_PKG.devDependencies, vitest: '4.1.8'},
     })
-    const {exitCode, stdout} = runGuard('package.json\npnpm-lock.yaml', base, head)
+    const {exitCode, stdout} = runGuard('package.json\nbun.lock', base, head)
     expect(exitCode).toBe(1)
     expect(stdout).toMatch(/^skip:/)
   })
 })
 
-describe('should-release — pnpm-lock.yaml + dependencies change triggers release', () => {
+describe('should-release — bun.lock + dependencies change triggers release', () => {
   it('releases when lock changed alongside a runtime dependency bump', () => {
     const base = writePkg(tmpDir, 'base.json', BASE_PKG)
     const head = writePkg(tmpDir, 'head.json', {
       ...BASE_PKG,
       dependencies: {...BASE_PKG.dependencies, hono: '^4.8.0'},
     })
-    const {exitCode, stdout} = runGuard('package.json\npnpm-lock.yaml', base, head)
+    const {exitCode, stdout} = runGuard('package.json\nbun.lock', base, head)
     expect(exitCode).toBe(0)
     expect(stdout).toMatch(/^release:/)
   })
