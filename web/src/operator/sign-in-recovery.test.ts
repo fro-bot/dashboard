@@ -136,6 +136,7 @@ describe('operator sign-in redirect recovery', () => {
       takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns: vi.fn(),
+      resetOutputView: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: vi.fn(async () => outcome),
@@ -166,6 +167,7 @@ describe('operator sign-in redirect recovery', () => {
       takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns: vi.fn(),
+      resetOutputView: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: vi.fn(async () => outcome),

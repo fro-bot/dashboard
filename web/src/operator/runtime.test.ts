@@ -39,6 +39,7 @@ import {
   type OperatorRuntimeHandle,
   type OperatorRuntimeOptions,
 } from './runtime.ts'
+import {renderOutput} from './markdown-output.ts'
 
 // Captured before any test installs fake timers, for polling that must keep running on the real clock.
 const realSetTimeout = globalThis.setTimeout
@@ -741,6 +742,7 @@ describe('defaultRuntimeLoader — production stream wiring', () => {
       takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns: vi.fn(),
+      resetOutputView: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: async (opts: {onSelectRun: (runId: string) => void | Promise<void>}) => {
@@ -816,6 +818,7 @@ describe('defaultRuntimeLoader — question region and summary status wiring', (
       takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns: vi.fn(),
+      resetOutputView: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: async (opts: {onSelectRun: (runId: string) => void | Promise<void>; onRestoreRun: (runId: string, card: Element, status: string) => void}) => {
@@ -1194,6 +1197,7 @@ describe('defaultRuntimeLoader — run-list refresh triggers', () => {
       takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns: vi.fn(),
+      resetOutputView: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: async (opts: {onSelectRun: (runId: string) => void | Promise<void>; onAuthRequired: () => void}) => {
@@ -2342,6 +2346,7 @@ describe('defaultRuntimeLoader — in-page run jump (requestRunJump)', () => {
       takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns: vi.fn(),
+      resetOutputView: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: async (initOpts: InitOpts) => {
@@ -3584,7 +3589,7 @@ describe('defaultRuntimeLoader — finished-run cache', () => {
   function cardHtml(runId: string, opts: {status?: ListStatus; optimistic?: boolean} = {}): string {
     const {status = 'running', optimistic = false} = opts
     const klass = optimistic ? 'status-pending' : STATUS_CLASS_TOKENS[status]
-    return `<div data-run-id="${runId}" data-expanded="false" ${optimistic ? 'data-optimistic="true"' : ''} role="button" tabindex="0"><span data-role="run-status" class="run-status ${klass}">${optimistic ? 'Pending' : STATUS_LABELS[status]}</span><pre data-role="run-output" hidden></pre></div>`
+    return `<div data-run-id="${runId}" data-expanded="false" ${optimistic ? 'data-optimistic="true"' : ''} role="button" tabindex="0"><span data-role="run-status" class="run-status ${klass}">${optimistic ? 'Pending' : STATUS_LABELS[status]}</span><pre data-role="run-output" hidden></pre><div data-role="run-output-tools" hidden></div></div>`
   }
 
   function renderPage(...cards: string[]): void {
@@ -4128,7 +4133,7 @@ describe('defaultRuntimeLoader — finished-run cache', () => {
       expect(mounted.stream().hasUsableFinishedRun('run-c-b', 'succeeded')).toBe(false)
     })
 
-    it('a run still open when the clear lands records nothing when it finishes afterwards', async () => {
+    it('a run still open when the clear lands is closed, so it neither paints nor records what arrives afterwards', async () => {
       const net = stubStreamFetch()
       renderPage(cardHtml('run-c-a'))
       const mounted = await mountCache({server: {'run-c-a': 'running'}})
@@ -4137,9 +4142,91 @@ describe('defaultRuntimeLoader — finished-run cache', () => {
 
       mounted.authRequired()
       net.attachments[0]?.push(frame('output', {runId: 'run-c-a', text: FINAL_TEXT, final: true, seq: 1}) + statusFrame('run-c-a', 'succeeded', 'COMPLETED'))
-      await vi.waitFor(() => expect(statusText('run-c-a')).toBe('Succeeded'))
+      await tick()
 
+      expect(statusText('run-c-a')).toBe('Running')
+      expect(outputEl('run-c-a').textContent).toBe('')
       expect(mounted.stream().hasUsableFinishedRun('run-c-a', 'succeeded')).toBe(false)
+    })
+
+    describe('output rendering', () => {
+      const toggle = (runId: string) => cardEl(runId).querySelector('button.run-output-toggle') as HTMLButtonElement
+      const delta = (runId: string, text: string, seq: number) => frame('output', {runId, text, final: false, seq})
+
+      /** The page-wide preference as a fresh recorded repaint on `runId` would show it. */
+      function viewOfFreshRecord(mounted: Mounted, runId: string): string | null {
+        const targets = discoverCardStreamTargets(runId)
+        const handle = mounted.stream().initOperatorStream({
+          runId,
+          statusEl: cardEl(runId).querySelector('[data-role="run-status"]'),
+          noticeEl: document.createElement('p'),
+          ...targets,
+          renderOutput,
+          finishedRecord: {
+            runId,
+            status: 'succeeded',
+            terminal: true,
+            phase: 'COMPLETED',
+            stale: false,
+            startedAt: '2026-06-20T10:00:00Z',
+            outputText: 'a **record**',
+            outputTruncated: false,
+            outputCoalesced: false,
+          },
+        } as never)
+        const view = outputEl(runId).getAttribute('data-output-view')
+        handle.close()
+        return view
+      }
+
+      it('streams Markdown through the renderer the runtime passes', async () => {
+        const net = stubStreamFetch()
+        renderPage(cardHtml('run-c-a'))
+        const mounted = await mountCache({server: {'run-c-a': 'running'}})
+        await mounted.ready()
+        await openRunning(mounted, net, 'run-c-a')
+
+        net.attachments[0]?.push(delta('run-c-a', 'some **bold** text', 0))
+
+        await vi.waitFor(() => expect(outputEl('run-c-a').querySelector('strong')?.textContent).toBe('bold'))
+      })
+
+      it('stops painting at once: a frame and a toggle click arriving afterwards change nothing, and the preference is Rendered again', async () => {
+        const net = stubStreamFetch()
+        renderPage(cardHtml('run-c-a'), cardHtml('run-c-b'))
+        const mounted = await mountCache({server: {'run-c-a': 'running', 'run-c-b': 'succeeded'}})
+        await mounted.ready()
+        await openRunning(mounted, net, 'run-c-a')
+        net.attachments[0]?.push(delta('run-c-a', 'some **bold** text', 0))
+        await vi.waitFor(() => expect(outputEl('run-c-a').querySelector('strong')).not.toBeNull())
+        toggle('run-c-a').click()
+        expect(outputEl('run-c-a').getAttribute('data-output-view')).toBe('raw')
+
+        mounted.authRequired()
+        const painted = outputEl('run-c-a').innerHTML
+        net.attachments[0]?.push(delta('run-c-a', ' and more', 1))
+        await tick()
+        toggle('run-c-a').click()
+
+        expect(outputEl('run-c-a').innerHTML).toBe(painted)
+        expect(outputEl('run-c-a').getAttribute('data-output-view')).toBe('raw')
+        expect(viewOfFreshRecord(mounted, 'run-c-b')).toBe('rendered')
+      })
+
+      it('clearing the finished runs alone leaves the preference as it was', async () => {
+        const net = stubStreamFetch()
+        renderPage(cardHtml('run-c-a'), cardHtml('run-c-b'))
+        const mounted = await mountCache({server: {'run-c-a': 'running', 'run-c-b': 'succeeded'}})
+        await mounted.ready()
+        await openRunning(mounted, net, 'run-c-a')
+        net.attachments[0]?.push(delta('run-c-a', 'some text', 0))
+        await vi.waitFor(() => expect(outputEl('run-c-a').textContent).toBe('some text'))
+        toggle('run-c-a').click()
+
+        clearFinishedRunCache()
+
+        expect(viewOfFreshRecord(mounted, 'run-c-b')).toBe('raw')
+      })
     })
 
     it('a clear that lands during a miss-path refresh leaves a live attach', async () => {
@@ -4258,5 +4345,178 @@ describe('defaultRuntimeLoader — finished-run cache', () => {
       expect(mounted.refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
       expect(mounted.recordedInitCalls()).toHaveLength(0)
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Output renderer wiring: loaded with the operator modules, passed to every attach
+// ---------------------------------------------------------------------------
+
+describe('defaultRuntimeLoader — output renderer wiring', () => {
+  type AttachOpts = {runId: string; renderOutput?: unknown; finishedRecord?: unknown}
+  const RUN_ID = 'run-render-a'
+  const FINISHED = {runId: RUN_ID, status: 'succeeded', outputText: 'done'}
+
+  /** Earlier suites reset the module registry, so the loaded renderer is a fresh copy: check it by behavior. */
+  function expectRealRenderer(passed: unknown): void {
+    expect(typeof passed).toBe('function')
+    const fragment = (passed as typeof renderOutput)('**bold**', {doc: document, origin: location.origin})
+    expect(fragment.querySelector('strong')?.textContent).toBe('bold')
+  }
+
+  const runtimes: OperatorRuntimeHandle[] = []
+
+  afterEach(() => {
+    for (const runtime of runtimes.splice(0)) runtime.cleanup()
+    document.body.innerHTML = ''
+    if (location.hash !== '') history.replaceState(null, '', location.pathname + location.search)
+    vi.doUnmock('/static/operator-stream.js?manual=1')
+    vi.doUnmock('/static/operator-run-index.js?manual=1')
+    vi.doUnmock('/static/operator-launch.js?manual=1')
+    vi.doUnmock('./markdown-output.ts')
+    vi.restoreAllMocks()
+  })
+
+  /** Mount the real default loader over mocked public modules; a run index that loads, so jumps apply. */
+  async function mountRenderer(options: {finishedRecord?: unknown} = {}) {
+    const handle = {close: vi.fn(), getConnectionStatus: vi.fn(() => 'active')}
+    const initOperatorStream = vi.fn((_opts: AttachOpts) => handle)
+    const resetOutputView = vi.fn()
+    const clearFinishedRuns = vi.fn()
+    let captured: {
+      onSelectRun: (runId: string) => void | Promise<void>
+      onRestoreRun: (runId: string, card: Element, status: string) => void
+      onAuthRequired: () => void
+    } | undefined
+    let onRunLaunched: ((runId: string, card: HTMLElement) => void) | undefined
+    vi.doMock('/static/operator-stream.js?manual=1', () => ({
+      initOperatorStream,
+      bootstrapOperatorStreams: vi.fn(),
+      resetBootstrapState: vi.fn(),
+      takeUsableFinishedRun: vi.fn(() => options.finishedRecord),
+      pruneFinishedRuns: vi.fn(),
+      clearFinishedRuns,
+      resetOutputView,
+    }))
+    vi.doMock('/static/operator-run-index.js?manual=1', () => ({
+      initOperatorRunIndex: async (opts: NonNullable<typeof captured>) => {
+        captured = opts
+        return 'loaded'
+      },
+      refreshOperatorRunIndex: vi.fn(async () => true),
+      resetRunIndexState: vi.fn(),
+      markRunStreamAttached: vi.fn(),
+      markCardExpandedForLaunch: vi.fn(),
+    }))
+    vi.doMock('/static/operator-launch.js?manual=1', () => ({
+      initOperatorLaunch: vi.fn(async (opts: {onRunLaunched: (runId: string, card: HTMLElement) => void}) => {
+        onRunLaunched = opts.onRunLaunched
+      }),
+      resetLaunchState: vi.fn(),
+    }))
+    const onStateChange = vi.fn()
+    const runtime = createOperatorRuntime({container: makeContainer(), onStateChange})
+    runtimes.push(runtime)
+    await vi.waitFor(() => {
+      expect(captured).toBeDefined()
+      expect(onRunLaunched).toBeDefined()
+    })
+    // The loader arms jumps a few microtasks after the launch module's init.
+    await new Promise(resolve => realSetTimeout(resolve, 5))
+    const card = () => document.querySelector(`[data-run-id="${RUN_ID}"]`) as HTMLElement
+    return {
+      runtime,
+      handle,
+      onStateChange,
+      initOperatorStream,
+      resetOutputView,
+      clearFinishedRuns,
+      click: async () => { await captured?.onSelectRun(RUN_ID) },
+      restore: () => captured?.onRestoreRun(RUN_ID, card(), 'running'),
+      launch: () => onRunLaunched?.(RUN_ID, card()),
+      authRequired: () => captured?.onAuthRequired(),
+      lastAttach: () => initOperatorStream.mock.calls.at(-1)?.[0],
+    }
+  }
+
+  function renderPage(): void {
+    document.body.innerHTML = `
+      <div data-run-id="${RUN_ID}" data-expanded="false">
+        <span data-role="run-status" class="run-status status-running"></span>
+        <pre data-role="run-output" hidden></pre>
+        <div data-role="run-output-tools" hidden></div>
+      </div>
+      <div data-role="stream-status"></div>`
+  }
+
+  it.each([
+    ['a click', async (m: Awaited<ReturnType<typeof mountRenderer>>) => m.click()],
+    ['a restore', async (m: Awaited<ReturnType<typeof mountRenderer>>) => m.restore()],
+    ['a launch', async (m: Awaited<ReturnType<typeof mountRenderer>>) => m.launch()],
+    ['a jump', async (m: Awaited<ReturnType<typeof mountRenderer>>) => {
+      requestRunJump(RUN_ID)
+      await vi.waitFor(() => expect(m.initOperatorStream).toHaveBeenCalled())
+    }],
+  ])('%s attaches with the real renderer', async (_name, act) => {
+    renderPage()
+    const mounted = await mountRenderer()
+
+    await act(mounted)
+
+    expect(mounted.initOperatorStream).toHaveBeenCalledTimes(1)
+    expect(mounted.lastAttach()?.runId).toBe(RUN_ID)
+    expectRealRenderer(mounted.lastAttach()?.renderOutput)
+  })
+
+  it('a recorded repaint receives the renderer at init, alongside its record', async () => {
+    renderPage()
+    const mounted = await mountRenderer({finishedRecord: FINISHED})
+
+    await mounted.click()
+
+    expect(mounted.lastAttach()?.finishedRecord).toBe(FINISHED)
+    expectRealRenderer(mounted.lastAttach()?.renderOutput)
+  })
+
+  it('a renderer that fails to load still mounts the runtime, and every attach passes no renderer', async () => {
+    vi.doMock('./markdown-output.ts', () => {
+      throw new Error('chunk missing')
+    })
+    renderPage()
+    const mounted = await mountRenderer()
+
+    await mounted.click()
+    mounted.restore()
+    mounted.launch()
+
+    expect(mounted.onStateChange).not.toHaveBeenCalled()
+    expect(mounted.initOperatorStream).toHaveBeenCalledTimes(3)
+    for (const [attach] of mounted.initOperatorStream.mock.calls) {
+      expect('renderOutput' in attach).toBe(false)
+    }
+  })
+
+  it('auth-required closes the active stream, resets the output view and clears the finished runs', async () => {
+    renderPage()
+    const mounted = await mountRenderer()
+    await mounted.click()
+    expect(mounted.handle.close).not.toHaveBeenCalled()
+
+    mounted.authRequired()
+
+    expect(mounted.handle.close).toHaveBeenCalledTimes(1)
+    expect(mounted.resetOutputView).toHaveBeenCalledTimes(1)
+    expect(mounted.clearFinishedRuns).toHaveBeenCalledTimes(1)
+    expect(mounted.onStateChange).toHaveBeenCalledWith('auth-required')
+  })
+
+  it('auth-required with no stream attached still resets the output view', async () => {
+    renderPage()
+    const mounted = await mountRenderer()
+
+    mounted.authRequired()
+
+    expect(mounted.handle.close).not.toHaveBeenCalled()
+    expect(mounted.resetOutputView).toHaveBeenCalledTimes(1)
   })
 })

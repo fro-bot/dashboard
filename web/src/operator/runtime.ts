@@ -469,10 +469,15 @@ async function defaultRuntimeLoader(opts?: {
   // check-types instead of surfacing as a silently skipped call. Only the members listed are read.
   const streamMod = await import(/* @vite-ignore */ _streamSpecifier) as Pick<
     typeof StreamModule,
-    'initOperatorStream' | 'takeUsableFinishedRun' | 'pruneFinishedRuns' | 'clearFinishedRuns'
+    'initOperatorStream' | 'takeUsableFinishedRun' | 'pruneFinishedRuns' | 'clearFinishedRuns' | 'resetOutputView'
   >
   _clearFinishedRuns = () => streamMod.clearFinishedRuns()
   // Streams attach on expand, launch, restore and jump only; the stream module's own bootstrap is not run here.
+
+  // The renderer loads up front, with the operator modules: a recorded repaint is one synchronous paint
+  // with no later frame to upgrade it, so a lazy load would leave it as plain text. A renderer that is
+  // missing or fails to load is no renderer, and every stream paints plain text.
+  const renderer = (await import('./markdown-output.ts').catch(() => undefined))?.renderOutput
 
   const runIndexMod = await import(/* @vite-ignore */ _runIndexSpecifier) as Pick<
     typeof RunIndexModule,
@@ -526,6 +531,7 @@ async function defaultRuntimeLoader(opts?: {
         questionsEl,
         ...(summaryStatus === undefined ? {} : {summaryStatus}),
         ...(finishedRecord === undefined ? {} : {finishedRecord}),
+        ...(renderer === undefined ? {} : {renderOutput: renderer}),
         endpointBase: opts?.endpointBase,
         fixtureSessionId: opts?.fixtureSessionId,
       })
@@ -806,8 +812,12 @@ async function defaultRuntimeLoader(opts?: {
   // The one place the page learns its session is gone, from either the first load or a refresh. The
   // store is dropped here so a finished result cannot outlive the sign-in it was shown under, and
   // attachments that started earlier can no longer record.
+  // The active stream closes too, so no frame or toggle click paints once the session is gone; DOM that
+  // is already painted stays as it is. The view preference returns to Rendered for the next sign-in.
   const onAuthRequired = () => {
     authRequired = true
+    _closeActiveStream()
+    streamMod.resetOutputView()
     streamMod.clearFinishedRuns()
     stopRefreshTimer()
     // No session: a pending or arriving jump has nothing to open.

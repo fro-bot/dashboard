@@ -22,6 +22,7 @@ async function importLaunchModuleWithStreamMock(): Promise<LaunchModule> {
     takeUsableFinishedRun: vi.fn(() => undefined),
     pruneFinishedRuns: vi.fn(),
     clearFinishedRuns: vi.fn(),
+    resetOutputView: vi.fn(),
   }))
   return import('../../../public/operator-launch.js')
 }

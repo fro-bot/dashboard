@@ -30,6 +30,7 @@ describe('operator auth recovery after a successful initial load', () => {
       takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns,
+      resetOutputView: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: vi.fn(async (options: {onAuthRequired: () => void}) => {
@@ -70,6 +71,7 @@ describe('operator auth recovery after a successful initial load', () => {
       takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns: vi.fn(),
+      resetOutputView: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: vi.fn(async (options: {onAuthRequired: () => void}) => {
@@ -101,6 +103,7 @@ describe('operator auth recovery after a successful initial load', () => {
       takeUsableFinishedRun: vi.fn(() => undefined),
       pruneFinishedRuns: vi.fn(),
       clearFinishedRuns: vi.fn(),
+      resetOutputView: vi.fn(),
     }))
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: vi.fn(async (options: {onAuthRequired: () => void}) => {
