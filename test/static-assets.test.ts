@@ -1198,11 +1198,10 @@ describe('security — operator-stream.js contract pin and checkout-field bounda
     expect(PINNED_CONTRACT_VERSION).toBe(OPERATOR_CONTRACT_VERSION)
   })
 
-  it('renders checkout provenance and preparation through no HTML sink and puts no raw field in a class or CSS variable', async () => {
+  it('puts no raw checkout provenance or preparation field in a class or CSS variable', async () => {
     const fs = await import('node:fs/promises')
     for (const filePath of ['public/operator-stream.js', 'public/operator-run-index.js']) {
       const src = await fs.readFile(filePath, 'utf8')
-      expect(src).not.toMatch(/(?:innerHTML|outerHTML|insertAdjacentHTML)\s*=/)
       expect(src).not.toMatch(/classList\.add\([^)]*checkout(?:Provenance|Preparation)/)
       expect(src).not.toMatch(/className[^;\n]*checkout(?:Provenance|Preparation)/)
       expect(src).not.toMatch(/setProperty\([^)]*checkout(?:Provenance|Preparation)/)
@@ -1214,6 +1213,121 @@ describe('security — operator-stream.js contract pin and checkout-field bounda
     const fs = await import('node:fs/promises')
     const src = await fs.readFile('public/operator-run-index.js', 'utf8')
     expect(src).not.toMatch(/checkout(?:Provenance|Preparation)/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// HTML-sink ban — one scan over every module that builds output DOM
+//
+// Write and call forms only, after comments are stripped, so prose that names a
+// sink cannot trip it and a sink cannot hide behind a bracket or quote.
+// ---------------------------------------------------------------------------
+
+const HTML_SINK_PATTERN = /(?:innerHTML|outerHTML|insertAdjacentHTML|setHTMLUnsafe|createContextualFragment|parseFromString|srcdoc|document\.write)['"\]\s]*(?:\+?=|\()/
+const HREF_SINK_PATTERN = /setAttribute\(\s*['"]href|\.href\s*=(?!=)/
+const MARKDOWN_RENDERER_PATH = 'web/src/operator/markdown-output.ts'
+const SINK_SCAN_DIRS = ['public', 'web/src/operator'] as const
+const SINK_SCAN_EXTENSIONS = /\.(?:js|mjs|ts|tsx)$/
+
+function stripComments(src: string): string {
+  return src.replaceAll(/\/\*[\s\S]*?\*\//g, '').replaceAll(/(^|[^:])\/\/.*$/gm, '$1')
+}
+
+function isSinkScanned(file: string): boolean {
+  return SINK_SCAN_EXTENSIONS.test(file) && !file.includes('.test.')
+}
+
+async function listSinkScanFiles(): Promise<string[]> {
+  const fs = await import('node:fs/promises')
+  const files: string[] = []
+  for (const dir of SINK_SCAN_DIRS) {
+    for (const entry of await fs.readdir(dir, {withFileTypes: true})) {
+      if (entry.isFile() && isSinkScanned(entry.name)) files.push(`${dir}/${entry.name}`)
+    }
+  }
+  return files.toSorted()
+}
+
+describe('security — HTML and href sinks across operator output modules', () => {
+  it.each([
+    ["el['innerHTML'] = x"],
+    ['el.innerHTML = x'],
+    ['el.innerHTML += x'],
+    ['el.outerHTML = x'],
+    ['el.insertAdjacentHTML("beforeend", x)'],
+    ['el.setHTMLUnsafe(x)'],
+    ['setHTMLUnsafe(x)'],
+    ['range.createContextualFragment(x)'],
+    ['new DOMParser().parseFromString(x, "text/html")'],
+    ['frame.srcdoc = x'],
+    ['document.write(x)'],
+    ['el["innerHTML"] += x'],
+  ])('the HTML sink pattern matches %s', fixture => {
+    expect(stripComments(fixture)).toMatch(HTML_SINK_PATTERN)
+  })
+
+  it.each([
+    ["el.setAttribute('href', url)"],
+    ['el.setAttribute("href", url)'],
+    ['a.href = x'],
+    ['a.href=x'],
+  ])('the href pattern matches %s', fixture => {
+    expect(stripComments(fixture)).toMatch(HREF_SINK_PATTERN)
+  })
+
+  it.each([
+    ['// never innerHTML'],
+    ['/* never el.innerHTML = x */'],
+    ['/**\n * textContent only, never innerHTML =\n */'],
+    ['const note = el.textContent'],
+    ['if (a.href === b.href) return'],
+    ['el.setAttribute("data-run-id", id)'],
+  ])('neither pattern matches %s once comments are stripped', fixture => {
+    const code = stripComments(fixture)
+    expect(code).not.toMatch(HTML_SINK_PATTERN)
+    expect(code).not.toMatch(HREF_SINK_PATTERN)
+  })
+
+  it('excludes test files and non-source files from the scan', () => {
+    expect(isSinkScanned('markdown-output.test.ts')).toBe(false)
+    expect(isSinkScanned('runtime-auth-recovery.test.tsx')).toBe(false)
+    expect(isSinkScanned('operator.css')).toBe(false)
+    expect(isSinkScanned('operator-stream.js')).toBe(true)
+    expect(isSinkScanned('markdown-output.ts')).toBe(true)
+  })
+
+  it('the scan covers the renderer module and the shipped browser modules', async () => {
+    const files = await listSinkScanFiles()
+    expect(files).toContain(MARKDOWN_RENDERER_PATH)
+    for (const file of ['public/operator-stream.js', 'public/operator-launch.js', 'public/operator-run-index.js', 'public/operator-time.js']) {
+      expect(files).toContain(file)
+    }
+    expect(files.filter(file => file.includes('.test.'))).toEqual([])
+  })
+
+  it('no scanned module writes an HTML sink', async () => {
+    const fs = await import('node:fs/promises')
+    for (const file of await listSinkScanFiles()) {
+      const code = stripComments(await fs.readFile(file, 'utf8'))
+      expect(code, `${file} must not write or call an HTML sink`).not.toMatch(HTML_SINK_PATTERN)
+    }
+  })
+
+  it('no scanned module sets an href except the renderer, which applies its URL policy first', async () => {
+    const fs = await import('node:fs/promises')
+    for (const file of await listSinkScanFiles()) {
+      if (file === MARKDOWN_RENDERER_PATH) continue
+      const code = stripComments(await fs.readFile(file, 'utf8'))
+      expect(code, `${file} must not set an href`).not.toMatch(HREF_SINK_PATTERN)
+    }
+  })
+
+  it('the renderer module never calls the parser render methods or overrides renderer rules', async () => {
+    const fs = await import('node:fs/promises')
+    const code = stripComments(await fs.readFile(MARKDOWN_RENDERER_PATH, 'utf8'))
+    expect(code).not.toContain('.render(')
+    expect(code).not.toContain('.renderInline(')
+    expect(code).not.toContain('renderer.rules')
   })
 })
 
