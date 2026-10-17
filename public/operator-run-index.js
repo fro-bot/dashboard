@@ -82,6 +82,12 @@ const WAITING_ROLE = 'run-waiting'
 const QUESTIONS_ROLE = 'run-questions'
 
 /**
+ * Output toolbar region (data-role="run-output-tools"): the Rendered/Raw toggle and Copy raw controls,
+ * built by operator-stream.js. It sits right after the output region on every card shape.
+ */
+const OUTPUT_TOOLS_ROLE = 'run-output-tools'
+
+/**
  * The card's hidden substructure regions in DOM order. The checkout-detail region leads the
  * list, so anything inserted "before the first hidden region" lands ahead of it too. The
  * question region sits right after the approvals region on every card shape.
@@ -90,6 +96,7 @@ const SUBSTRUCTURE_ROLES = [
   CHECKOUT_DETAIL_ROLE,
   WAITING_ROLE,
   'run-output',
+  OUTPUT_TOOLS_ROLE,
   'run-output-coalesced',
   'run-approvals',
   QUESTIONS_ROLE,
@@ -940,6 +947,12 @@ function renderRunCard(view, onSelectRun) {
   outputEl.hidden = true
   card.append(outputEl)
 
+  // Output toolbar — directly after run-output. Populated and shown by the stream.
+  const outputToolsEl = document.createElement('div')
+  outputToolsEl.dataset.role = OUTPUT_TOOLS_ROLE
+  outputToolsEl.hidden = true
+  card.append(outputToolsEl)
+
   const coalescedEl = document.createElement('div')
   coalescedEl.dataset.role = 'run-output-coalesced'
   coalescedEl.hidden = true
@@ -997,7 +1010,10 @@ function bindCardActivation(card, runId, onSelectRun) {
   const activate = () => {
     toggleCardExpansion(card, runId, onSelectRun)
   }
-  card.addEventListener('click', activate)
+  card.addEventListener('click', event => {
+    if (clickBelongsToContent(card, event)) return
+    activate()
+  })
   card.addEventListener('keydown', e => {
     // Keys bubbling up from nested controls (e.g. the run-cancel buttons) belong to
     // those controls: only a keydown on the card itself toggles expansion.
@@ -1006,6 +1022,29 @@ function bindCardActivation(card, runId, onSelectRun) {
     if (e.key === ' ') e.preventDefault()
     activate()
   })
+}
+
+/**
+ * Whether a click belongs to the card's content rather than to the card itself: it landed on a link or
+ * a button inside the card, or the reader is selecting text there. Such a click never toggles the card.
+ * This guard is the only mechanism: nothing inside the card stops propagation for it.
+ */
+function clickBelongsToContent(card, event) {
+  const target = event?.target
+  if (target !== card && typeof target?.closest === 'function') {
+    const control = target.closest('a[href], button')
+    if (control !== null && control !== undefined && (typeof card.contains !== 'function' || card.contains(control))) return true
+  }
+  return selectionInside(card)
+}
+
+/** True when a non-collapsed text selection starts or ends inside `card`. */
+function selectionInside(card) {
+  if (typeof card.contains !== 'function') return false
+  const doc = card.ownerDocument ?? globalThis.document
+  const selection = typeof doc?.getSelection === 'function' ? doc.getSelection() : null
+  if (selection === null || selection === undefined || selection.isCollapsed || selection.rangeCount === 0) return false
+  return card.contains(selection.anchorNode) || card.contains(selection.focusNode)
 }
 
 /**
@@ -1067,6 +1106,15 @@ function ensureRunCardAnatomy(card, view, onSelectRun) {
     waitingEl.dataset.role = WAITING_ROLE
     waitingEl.hidden = true
     insertBeforeFirstRole(card, waitingEl, SUBSTRUCTURE_ROLES.filter(role => role !== CHECKOUT_DETAIL_ROLE && role !== WAITING_ROLE))
+  }
+
+  // Output toolbar: same slot renderRunCard gives it (right after run-output, ahead of every later
+  // region). Only created when missing — exactly one per card.
+  if (card.querySelector(`[data-role="${OUTPUT_TOOLS_ROLE}"]`) === null) {
+    const outputToolsEl = document.createElement('div')
+    outputToolsEl.dataset.role = OUTPUT_TOOLS_ROLE
+    outputToolsEl.hidden = true
+    insertBeforeFirstRole(card, outputToolsEl, SUBSTRUCTURE_ROLES.slice(SUBSTRUCTURE_ROLES.indexOf(OUTPUT_TOOLS_ROLE) + 1))
   }
 
   // Question region: same slot renderRunCard gives it (after run-approvals, ahead of the badge

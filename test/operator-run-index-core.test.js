@@ -1803,6 +1803,7 @@ const ALL_STREAM_REGION_ROLES = [
   'run-checkout-detail',
   'run-waiting',
   'run-output',
+  'run-output-tools',
   'run-output-coalesced',
   'run-approvals',
   'run-questions',
@@ -3603,6 +3604,7 @@ const ORDERED_REGION_ROLES = [
   'run-checkout-detail',
   'run-waiting',
   'run-output',
+  'run-output-tools',
   'run-output-coalesced',
   'run-approvals',
   'run-questions',
@@ -4920,5 +4922,160 @@ describe('onListApplied — the run IDs of each applied list', () => {
     await init
 
     expect(onListApplied).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Output toolbar region — one hidden region per card, right after run-output, on every card shape
+// ---------------------------------------------------------------------------
+
+const TOOLS_ROLE = 'run-output-tools'
+
+describe('output toolbar region — fetched and adopted cards', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it('every fetched card has exactly one hidden, empty toolbar div right after the output region', async () => {
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([
+      makeValidSummary({runId: 'run-tools-fetched-1', updatedAt: '2026-06-26T13:00:00.000Z'}),
+      makeValidSummary({runId: 'run-tools-fetched-2'}),
+    ])
+
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards).toHaveLength(2)
+    for (const card of cards) {
+      expect(countRole(card, TOOLS_ROLE)).toBe(1)
+      const region = card.querySelector(`[data-role="${TOOLS_ROLE}"]`)
+      expect(region.hidden).toBe(true)
+      expect(region._children).toHaveLength(0)
+      // Closed attribute set: only the role marker and hidden — nothing run-derived.
+      expect(Object.keys(region.dataset)).toEqual(['role'])
+      expect(Object.keys(region.attributes)).toEqual([])
+      const roles = childRoles(card)
+      expect(roles.indexOf(TOOLS_ROLE)).toBe(roles.indexOf('run-output') + 1)
+    }
+  })
+
+  it('an adopted status-only card gains exactly one toolbar right after the output region, however often it is re-adopted', async () => {
+    const runId = 'run-tools-adopt-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+    expect(optimistic.querySelector(`[data-role="${TOOLS_ROLE}"]`)).toBeNull()
+
+    for (let i = 0; i < 3; i++) {
+      stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+      await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    }
+
+    expect(countRole(optimistic, TOOLS_ROLE)).toBe(1)
+    expect(optimistic.querySelector(`[data-role="${TOOLS_ROLE}"]`).hidden).toBe(true)
+    const roles = childRoles(optimistic)
+    expect(roles.indexOf(TOOLS_ROLE)).toBe(roles.indexOf('run-output') + 1)
+    expect(roles.indexOf(TOOLS_ROLE)).toBeLessThan(roles.indexOf('run-output-coalesced'))
+  })
+
+  it('an optimistic card that already has a toolbar (launch anatomy) is not given a duplicate', async () => {
+    const runId = 'run-tools-launch-anatomy-001'
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    const optimistic = makeStatusOnlyOptimisticCard(cards, runId)
+    const existing = document.createElement('div')
+    existing.dataset.role = TOOLS_ROLE
+    existing.hidden = true
+    optimistic.querySelector('[data-role="run-output-coalesced"]').before(existing)
+
+    stubFetchRuns([makeValidSummary({runId, status: 'running'})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+
+    expect(countRole(optimistic, TOOLS_ROLE)).toBe(1)
+    expect(optimistic.querySelector(`[data-role="${TOOLS_ROLE}"]`)).toBe(existing)
+  })
+
+  it('collapsing a card hides its toolbar like every other stream-owned region', async () => {
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    stubFetchRuns([makeValidSummary({runId: 'run-tools-collapse-001'})])
+    await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
+    const card = cards[0]
+    const region = card.querySelector(`[data-role="${TOOLS_ROLE}"]`)
+
+    card.dispatchEvent({type: 'click'})
+    region.hidden = false // the stream's paint
+    card.dispatchEvent({type: 'click'})
+
+    expect(region.hidden).toBe(true)
+  })
+
+  it('source: SUBSTRUCTURE_ROLES lists the toolbar role right after the output role', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-run-index.js', 'utf8')
+    const list = src.match(/const SUBSTRUCTURE_ROLES = \[([\s\S]*?)\]/)?.[1] ?? ''
+    expect(src).toMatch(/const OUTPUT_TOOLS_ROLE = 'run-output-tools'/)
+    expect(list).toMatch(/'run-output',\s*OUTPUT_TOOLS_ROLE,\s*'run-output-coalesced'/)
+  })
+})
+
+async function oneCard(onSelectRun) {
+  const cards = []
+  stubDOMWithSubstructureCards(cards)
+  stubFetchRuns([makeValidSummary({runId: 'run-guard-001'})])
+  await initOperatorRunIndex({endpointBase: '/operator', onSelectRun})
+  return cards[0]
+}
+
+describe('card click guard — fetched cards', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  /** A click target whose closest() finds the given selector's match, or nothing. */
+  const targetInside = hit => ({closest: selector => (hit.includes(selector) ? {} : null)})
+
+  it('ignores a click whose target sits inside a link or a button, and still toggles for other targets', async () => {
+    const onSelectRun = vi.fn()
+    const card = await oneCard(onSelectRun)
+
+    card.dispatchEvent({type: 'click', target: targetInside(['a[href], button'])})
+    expect(onSelectRun).not.toHaveBeenCalled()
+    expect(card.dataset.expanded).toBeUndefined()
+
+    card.dispatchEvent({type: 'click', target: targetInside([])})
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
+    expect(card.dataset.expanded).toBe('true')
+  })
+
+  it('ignores a click while a non-collapsed selection sits inside the card', async () => {
+    const onSelectRun = vi.fn()
+    const card = await oneCard(onSelectRun)
+    const inside = {}
+    card.contains = node => node === inside || node === card
+    vi.stubGlobal('document', {
+      ...document,
+      getSelection: () => ({isCollapsed: false, rangeCount: 1, anchorNode: inside, focusNode: inside}),
+    })
+
+    card.dispatchEvent({type: 'click'})
+    expect(onSelectRun).not.toHaveBeenCalled()
+
+    vi.stubGlobal('document', {
+      ...document,
+      getSelection: () => ({isCollapsed: false, rangeCount: 1, anchorNode: {}, focusNode: {}}),
+    })
+    card.dispatchEvent({type: 'click'})
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
+  })
+
+  it('never stops propagation: the guard is the only mechanism', async () => {
+    const src = await (await import('node:fs/promises')).readFile('public/operator-run-index.js', 'utf8')
+    const activation = src.match(/function bindCardActivation[\s\S]*?\n\}\n/)?.[0] ?? ''
+    expect(activation).not.toBe('')
+    expect(activation).not.toMatch(/stopPropagation/)
   })
 })

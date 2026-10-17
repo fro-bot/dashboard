@@ -59,6 +59,7 @@ type StreamTargetEl = HTMLElement & {hidden: boolean}
  */
 export function discoverCardStreamTargets(runId: string): {
   outputEl: StreamTargetEl | null
+  toolsEl: StreamTargetEl | null
   coalescedEl: StreamTargetEl | null
   approvalsEl: StreamTargetEl | null
   badgeEl: StreamTargetEl | null
@@ -75,6 +76,7 @@ export function discoverCardStreamTargets(runId: string): {
     : null
   return {
     outputEl: card?.querySelector<StreamTargetEl>('[data-role="run-output"]') ?? null,
+    toolsEl: card?.querySelector<StreamTargetEl>('[data-role="run-output-tools"]') ?? null,
     coalescedEl: card?.querySelector<StreamTargetEl>('[data-role="run-output-coalesced"]') ?? null,
     approvalsEl: card?.querySelector<StreamTargetEl>('[data-role="run-approvals"]') ?? null,
     badgeEl: card?.querySelector<StreamTargetEl>('[data-role="approval-badge"]') ?? null,
@@ -496,7 +498,7 @@ async function defaultRuntimeLoader(opts?: {
 
     // Discover the per-card render targets so live output, coalescing hints,
     // approval prompts, and the approval badge all render — not just status.
-    const {outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, cancelEl, checkoutEl, questionsEl, timeEl, waitingEl} = discoverCardStreamTargets(runId)
+    const {outputEl, toolsEl, coalescedEl, approvalsEl, badgeEl, reasonEl, cancelEl, checkoutEl, questionsEl, timeEl, waitingEl} = discoverCardStreamTargets(runId)
     const summaryStatus = discoverCardSummaryStatus(runId)
     // A run the page already saw finish paints from its record, with no stream. Every other run, and
     // a record that no longer matches what the list shows for the card, attaches live as before.
@@ -512,6 +514,7 @@ async function defaultRuntimeLoader(opts?: {
         statusEl,
         noticeEl,
         outputEl,
+        toolsEl,
         coalescedEl,
         approvalsEl,
         badgeEl,

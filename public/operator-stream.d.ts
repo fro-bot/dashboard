@@ -897,6 +897,11 @@ export interface InitOptions {
    * it is live, the run is not terminal, and no output, open approval or open question is showing.
    */
   readonly waitingEl?: (HTMLElement & {hidden: boolean}) | null
+  /**
+   * Output toolbar region (data-role="run-output-tools"). The stream fills it with the Rendered/Raw
+   * toggle and the Copy raw button, and shows it only while there is output to act on.
+   */
+  readonly toolsEl?: (HTMLElement & {hidden: boolean}) | null
   /** Cancel control container element (data-role="run-cancel"). */
   readonly cancelEl?: (HTMLElement & {hidden: boolean}) | null
   /**

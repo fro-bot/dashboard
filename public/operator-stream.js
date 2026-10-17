@@ -133,6 +133,12 @@ const OUTPUT_PAINT_INTERVAL_MS = 100
 
 /** A box scrolled to within this many pixels of its end counts as at the bottom. */
 const OUTPUT_PIN_TOLERANCE_PX = 8
+
+// Copy raw feedback: "Copied" is a brief confirmation; a failure stays up long enough to read and act on.
+const OUTPUT_COPY_CONFIRM_MS = 1500
+const OUTPUT_COPY_FAILURE_MS = 6000
+const OUTPUT_COPY_LABEL = 'Copy raw'
+const OUTPUT_COPY_FAILED_COPY = 'Copy failed. Select the text and copy it.'
 const WAITING_TO_START_COPY = 'Waiting to start\u2026'
 const WAITING_FOR_OUTPUT_COPY = 'Waiting for output\u2026'
 
@@ -3555,7 +3561,7 @@ function recordedStreamSetup(runId, record) {
  * - Read-only: GET only for stream; approval decisions are operator-forwarded writes.
  */
 export function initOperatorStream(opts) {
-  const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, timeEl, waitingEl, checkoutEl, cancelEl, questionsEl, endpointBase, fixtureSessionId} = opts
+  const {runId, statusEl, noticeEl, outputEl, toolsEl, coalescedEl, approvalsEl, badgeEl, reasonEl, timeEl, waitingEl, checkoutEl, cancelEl, questionsEl, endpointBase, fixtureSessionId} = opts
 
   // Optional (text, {doc, origin}) => DocumentFragment. Without it, output paints as plain text.
   const outputRenderer = typeof opts.renderOutput === 'function' ? opts.renderOutput : undefined
@@ -3584,6 +3590,10 @@ export function initOperatorStream(opts) {
     outputEl.textContent = ''
     outputEl.classList?.remove('run-output-unavailable')
     outputEl.hidden = true
+  }
+  if (toolsEl) {
+    toolsEl.textContent = ''
+    toolsEl.hidden = true
   }
   if (coalescedEl) coalescedEl.hidden = true
   if (badgeEl) {
@@ -4052,6 +4062,109 @@ export function initOperatorStream(opts) {
     if (streaming) startOutputCooldown()
   }
 
+  // The output toolbar: a Rendered/Raw toggle and a Copy raw button, built fresh for each attachment so
+  // handlers never stack, and released in close(). Copy raw reads the run's raw text from state when
+  // clicked, never from the painted DOM, and calls the clipboard synchronously inside the click.
+  let toggleButton = null
+  let copyButton = null
+  let copyStatusEl = null
+  let copyFeedbackTimer = null
+
+  function applyOutputView(view) {
+    outputViewPreference = view
+    paintOutput(true)
+    paintOutputTools()
+  }
+
+  function onToggleClick() {
+    applyOutputView(outputViewPreference === 'raw' ? 'rendered' : 'raw')
+  }
+
+  function clearCopyFeedback() {
+    if (copyFeedbackTimer !== null) {
+      clearTimeout(copyFeedbackTimer)
+      copyFeedbackTimer = null
+    }
+    if (copyStatusEl !== null) copyStatusEl.textContent = ''
+  }
+
+  function showCopyFeedback(message, durationMs) {
+    if (aborted || copyStatusEl === null) return
+    clearCopyFeedback()
+    copyStatusEl.textContent = message
+    copyFeedbackTimer = setTimeout(() => {
+      copyFeedbackTimer = null
+      if (copyStatusEl !== null) copyStatusEl.textContent = ''
+    }, durationMs)
+  }
+
+  function onCopyClick() {
+    if (aborted) return
+    const raw = state.runs[runId]?.outputText
+    let pending
+    try {
+      pending = globalThis.navigator?.clipboard?.writeText(typeof raw === 'string' ? raw : '')
+    } catch {
+      showCopyFeedback(OUTPUT_COPY_FAILED_COPY, OUTPUT_COPY_FAILURE_MS)
+      return
+    }
+    if (pending === null || pending === undefined || typeof pending.then !== 'function') {
+      showCopyFeedback(OUTPUT_COPY_FAILED_COPY, OUTPUT_COPY_FAILURE_MS)
+      return
+    }
+    pending.then(
+      () => showCopyFeedback('Copied', OUTPUT_COPY_CONFIRM_MS),
+      () => showCopyFeedback(OUTPUT_COPY_FAILED_COPY, OUTPUT_COPY_FAILURE_MS),
+    )
+  }
+
+  function buildOutputTools() {
+    const doc = toolsEl.ownerDocument ?? globalThis.document
+    toggleButton = doc.createElement('button')
+    toggleButton.type = 'button'
+    toggleButton.className = 'run-output-toggle'
+    toggleButton.textContent = 'Raw text'
+    toggleButton.setAttribute('aria-pressed', 'false')
+    // Present but hidden without a renderer: there is only one view to show.
+    toggleButton.hidden = outputRenderer === undefined
+    toggleButton.addEventListener('click', onToggleClick)
+
+    copyButton = doc.createElement('button')
+    copyButton.type = 'button'
+    copyButton.className = 'run-output-copy'
+    copyButton.textContent = OUTPUT_COPY_LABEL
+    copyButton.addEventListener('click', onCopyClick)
+
+    copyStatusEl = doc.createElement('span')
+    copyStatusEl.className = 'run-output-copy-status'
+    copyStatusEl.setAttribute('role', 'status')
+    copyStatusEl.setAttribute('aria-live', 'polite')
+
+    toolsEl.append(toggleButton, copyButton, copyStatusEl)
+  }
+
+  function releaseOutputTools() {
+    toggleButton?.removeEventListener('click', onToggleClick)
+    copyButton?.removeEventListener('click', onCopyClick)
+    clearCopyFeedback()
+    toolsEl.hidden = true
+  }
+
+  /** Show the toolbar only while there is output to act on, and keep its controls in step with the state. */
+  function paintOutputTools() {
+    if (!toolsEl || aborted) return
+    const runEntry = state.runs[runId]
+    const hasOutput = runEntry?.outputUnavailable !== true && typeof runEntry?.outputText === 'string' && runEntry.outputText !== ''
+    toolsEl.hidden = !hasOutput
+    toggleButton.setAttribute('aria-pressed', String(outputViewPreference === 'raw'))
+    const copyLabel = runEntry?.outputTruncated === true
+      ? `${OUTPUT_COPY_LABEL} (first ${MAX_OUTPUT_TEXT_CHARS.toLocaleString('en-US')} characters)`
+      : OUTPUT_COPY_LABEL
+    if (copyButton.textContent !== copyLabel) copyButton.textContent = copyLabel
+  }
+
+  if (toolsEl) buildOutputTools()
+
   function updateDOM() {
     // Late-frame guard: after close(), no write of any kind (notice, status,
     // output, coalesced hint, approvals, or badge) may reach the DOM. A late
@@ -4218,6 +4331,8 @@ export function initOperatorStream(opts) {
         coalescedEl.hidden = !flagged
       }
     }
+
+    if (toolsEl) paintOutputTools()
 
     // Approval prompts: render open prompts from getOpenApprovals(runEntry).
     // Uses safe DOM (textContent only — never innerHTML). Prompts are added/removed
@@ -5075,8 +5190,7 @@ export function initOperatorStream(opts) {
     /** Set the page-wide Rendered/Raw preference and repaint this card now. Anything else is ignored. */
     setOutputView(view) {
       if (view !== 'rendered' && view !== 'raw') return
-      outputViewPreference = view
-      paintOutput(true)
+      applyOutputView(view)
     },
     close() {
       aborted = true // prevent late timer from fetching
@@ -5088,6 +5202,7 @@ export function initOperatorStream(opts) {
       clearFirstFrameTimer()
       cancelOutputCooldown()
       stopDeferringOutputPaint()
+      if (toolsEl) releaseOutputTools()
       clearQuestionRechecks()
       if (abortController) {
         abortController.abort()

@@ -103,6 +103,22 @@ describe('optimistic launch card', () => {
     expect(roles[at + 1]).toBe('run-output')
   })
 
+  it('the optimistic card has exactly one hidden, empty run-output-tools region right after run-output', async () => {
+    const card = await launchOptimisticCard()
+
+    const regions = card.querySelectorAll<HTMLElement>('[data-role="run-output-tools"]')
+    expect(regions).toHaveLength(1)
+    const region = regions[0]
+    expect(region?.hidden).toBe(true)
+    expect(region?.childElementCount).toBe(0)
+    expect(region?.parentElement).toBe(card)
+
+    const roles = Array.from(card.children).map(child => (child as HTMLElement).dataset.role)
+    const at = roles.indexOf('run-output-tools')
+    expect(roles[at - 1]).toBe('run-output')
+    expect(roles[at + 1]).toBe('run-output-coalesced')
+  })
+
   it('the optimistic card carries one launch-seeded <time> between the repo label and the first region', async () => {
     const before = Date.now()
     const card = await launchOptimisticCard()

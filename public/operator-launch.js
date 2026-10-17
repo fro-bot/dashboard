@@ -711,6 +711,12 @@ export async function initOperatorLaunch(opts) {
           outputEl.hidden = true
           card.append(outputEl)
 
+          // Output toolbar — same slot as a fetched card: directly after run-output. Built by the stream.
+          const outputToolsEl = document.createElement('div')
+          outputToolsEl.dataset.role = 'run-output-tools'
+          outputToolsEl.hidden = true
+          card.append(outputToolsEl)
+
           const coalescedEl = document.createElement('div')
           coalescedEl.dataset.role = 'run-output-coalesced'
           coalescedEl.hidden = true

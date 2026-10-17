@@ -1736,6 +1736,21 @@ describe('discoverCardStreamTargets', () => {
     expect(result.badgeEl).toBe(badgeEl)
   })
 
+  it('returns the output toolbar region when present, and null when absent', () => {
+    const withRegion = document.createElement('div')
+    withRegion.dataset.runId = 'run-with-tools'
+    const toolsEl = document.createElement('div')
+    toolsEl.dataset.role = 'run-output-tools'
+    withRegion.append(toolsEl)
+    const without = document.createElement('div')
+    without.dataset.runId = 'run-no-tools'
+    document.body.append(withRegion, without)
+
+    expect(discoverCardStreamTargets('run-with-tools').toolsEl).toBe(toolsEl)
+    expect(discoverCardStreamTargets('run-no-tools').toolsEl).toBeNull()
+    expect(discoverCardStreamTargets('no-such-run').toolsEl).toBeNull()
+  })
+
   it('returns the checkout-detail region when present, and null when absent', () => {
     const withRegion = document.createElement('div')
     withRegion.dataset.runId = 'run-with-checkout'

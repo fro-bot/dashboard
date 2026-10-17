@@ -210,7 +210,7 @@ const OUTPUT = frame('output', {runId: RUN_ID, text: 'earlier output', final: fa
 const NO_SNAPSHOT = frame('reset', {runId: RUN_ID, reason: 'no-snapshot'})
 const FAILED = frame('status', {...RUNNING_STATUS, status: 'failed', phase: 'COMPLETED', completedAt: '2026-06-20T10:05:00Z'})
 
-const REGION_ROLES = ['run-checkout-detail', 'run-waiting', 'run-output', 'run-output-coalesced', 'run-approvals', 'run-questions', 'approval-badge', 'run-cancel'] as const
+const REGION_ROLES = ['run-checkout-detail', 'run-waiting', 'run-output', 'run-output-tools', 'run-output-coalesced', 'run-approvals', 'run-questions', 'approval-badge', 'run-cancel'] as const
 
 function makeFullCard() {
   const card = document.createElement('div')

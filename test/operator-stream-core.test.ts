@@ -7351,7 +7351,7 @@ describe('CSS selector ↔ cancel-control state emitter agreement', () => {
 })
 
 describe('CSS: a hidden stream-owned region takes no space', () => {
-  it.each(['run-cancel', 'run-questions', 'run-checkout-detail', 'run-output-coalesced', 'approval-badge', 'run-waiting'])(
+  it.each(['run-cancel', 'run-questions', 'run-checkout-detail', 'run-output-coalesced', 'run-output-tools', 'approval-badge', 'run-waiting'])(
     '[data-role="%s"][hidden] is display: none',
     async role => {
       const fs = await import('node:fs/promises')
@@ -9960,9 +9960,18 @@ describe('question status — label, wire acceptance and styling', () => {
     const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
     expect(css).toMatch(/\.run-card\s+\[data-role="run-waiting"\]:not\(\[hidden\]\)\s*\{[^}]*color:\s*var\(--color-text-muted\);/)
     expect(css).toMatch(/\.run-card\s+\[data-role="run-waiting"\]:not\(\[hidden\]\)\s*\{[^}]*font-size:\s*var\(--text-body-sm\);/)
-    expect(css).toMatch(/\[data-role="run-output"\],\s*\[data-role="run-output-coalesced"\],\s*\[data-role="run-approvals"\],\s*\[data-role="run-waiting"\],\s*\[data-role="approval-badge"\]\s*\{\s*grid-column:\s*1\s*\/\s*-1;/)
+    expect(css).toMatch(/\[data-role="run-output"\],\s*\[data-role="run-output-tools"\],\s*\[data-role="run-output-coalesced"\],\s*\[data-role="run-approvals"\],\s*\[data-role="run-waiting"\],\s*\[data-role="approval-badge"\]\s*\{\s*grid-column:\s*1\s*\/\s*-1;/)
     expect(css).toMatch(/\[data-role="run-waiting"\]\s*\{[^}]*grid-row:\s*5;/)
     expect(css).toMatch(/\.run-card:has\(\[data-role="run-waiting"\]:not\(\[hidden\]\)\)\s+\[data-role="run-output"\]\s*\{[^}]*grid-row:\s*6;/)
+  })
+
+  it('pins the output toolbar to the row right after the output on desktop and on every mobile row', async () => {
+    const fs = await import('node:fs/promises')
+    const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
+    expect(css).toMatch(/\[data-role="run-output"\]\s*\{\s*grid-row:\s*4;\s*\}/)
+    expect(css).toMatch(/\[data-role="run-output-tools"\]\s*\{\s*grid-row:\s*5;\s*\}/)
+    expect(css).toMatch(/\.run-card:has\(\[data-role="run-checkout-detail"\]:not\(\[hidden\]\)\)\s+\[data-role="run-output-tools"\]\s*\{[^}]*grid-row:\s*6;/)
+    expect(css).toMatch(/\.run-card:has\(\[data-role="run-waiting"\]:not\(\[hidden\]\)\)\s+\[data-role="run-output-tools"\]\s*\{[^}]*grid-row:\s*7;/)
   })
 
   it('keeps cancel controls out of the status track and after the mobile waiting line', async () => {

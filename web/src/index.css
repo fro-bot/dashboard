@@ -337,6 +337,7 @@
 }
 
 [data-role="run-output"] { grid-row: 4; }
+[data-role="run-output-tools"] { grid-row: 5; }
 
 [data-role="run-checkout-detail"][hidden] {
   display: none;
@@ -882,6 +883,10 @@
   display: none;
 }
 
+[data-role="run-output-tools"][hidden] {
+  display: none;
+}
+
 /* Approval Microstates */
 .approval-prompt {
   background: var(--color-surface-raised);
@@ -1363,6 +1368,7 @@
 
 /* Responsive and grid auto-layout for expanded components */
 [data-role="run-output"],
+[data-role="run-output-tools"],
 [data-role="run-output-coalesced"],
 [data-role="run-approvals"],
 [data-role="run-waiting"],
@@ -1438,6 +1444,14 @@
 
   .run-card:has([data-role="run-waiting"]:not([hidden])) [data-role="run-output"] {
     grid-row: 6;
+  }
+
+  .run-card:has([data-role="run-checkout-detail"]:not([hidden])) [data-role="run-output-tools"] {
+    grid-row: 6;
+  }
+
+  .run-card:has([data-role="run-waiting"]:not([hidden])) [data-role="run-output-tools"] {
+    grid-row: 7;
   }
 
   .run-card:has([data-role="run-waiting"]:not([hidden])) [data-role="run-cancel"] {
