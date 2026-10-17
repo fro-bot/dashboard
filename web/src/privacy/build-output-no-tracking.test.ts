@@ -66,10 +66,12 @@ describe('built client output — no analytics or advertising', () => {
   // Assert on the list of offending filenames, never on the file text itself:
   // a `not.toContain` against a minified bundle prints the whole bundle on
   // failure, which buries the one fact you need.
+  // Whole-word match: bundler output contains identifiers such as `Symbol.toStringTag`, which hold a
+  // token ("gtag") as a substring without referencing a tracker.
   it.each(TRACKER_TOKENS)('GUARD: no reference to tracker token "%s" in the shipped output', token => {
-    const needle = token.toLowerCase()
+    const needle = new RegExp(`\\b${token.replaceAll('.', '\\.')}\\b`, 'i')
     const offenders = shippedFiles()
-      .filter(([, text]) => text.toLowerCase().includes(needle))
+      .filter(([, text]) => needle.test(text))
       .map(([name]) => name)
 
     expect(offenders, `tracker token "${token}" found in: ${offenders.join(', ')}`).toEqual([])
