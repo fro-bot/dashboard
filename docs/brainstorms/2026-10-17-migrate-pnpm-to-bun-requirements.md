@@ -35,7 +35,7 @@ The Dockerfile's Corepack pnpm version has already drifted from the manifest's p
 
 - R1. Bun is the only package manager, and `bun.lock` is the only lockfile.
   - `wiki-writer` is outside this migration. Bun has no git-subdirectory dependency selector, so `@fro-bot/wiki-write-core` (a `github:…#<sha>&path:` spec) cannot be installed.
-  - `wiki-writer` is not a Bun workspace member. The root tsconfig, ESLint and Vitest gates exclude it, except that Vitest runs `wiki-writer/test/security-boundary.test.ts`. The Dockerfile copies nothing from it.
+  - `wiki-writer` is not a Bun workspace member. The root tsconfig, ESLint and Vitest gates exclude it, except `wiki-writer/test/security-boundary.test.ts`, which all three keep. The Dockerfile copies nothing from it.
   - It returns once the package is published as `@fro.bot/wiki-write-core` (fro-bot/.github#3998).
   - Overrides and trusted dependencies live in `package.json`.
   - The release-age gate and the linker setting live in `bunfig.toml`.

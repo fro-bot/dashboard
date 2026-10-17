@@ -20,7 +20,7 @@ The dashboard is the only active Fro Bot repository still on pnpm. fro-bot/agent
 
 - R1. Bun is the only package manager, and `bun.lock` is the only lockfile.
   - `wiki-writer` is outside this migration. Bun has no git-subdirectory dependency selector, so `@fro-bot/wiki-write-core` (a `github:…#<sha>&path:` spec) cannot be installed.
-  - `wiki-writer` is not a Bun workspace member. The root tsconfig, ESLint and Vitest gates exclude it, except that Vitest runs `wiki-writer/test/security-boundary.test.ts`. The Dockerfile copies nothing from it.
+  - `wiki-writer` is not a Bun workspace member. The root tsconfig, ESLint and Vitest gates exclude it, except `wiki-writer/test/security-boundary.test.ts`, which all three keep. The Dockerfile copies nothing from it.
   - It returns once the package is published as `@fro.bot/wiki-write-core` (fro-bot/.github#3998).
   - Overrides and trusted dependencies live in `package.json`. The age gate and linker live in `bunfig.toml`.
 - R2. CI and Docker installs are frozen. Renovate's post-upgrade install runs unfrozen, and CI's frozen install verifies the result.
@@ -156,7 +156,7 @@ flowchart LR
   - Set `packageManager` and `overrides`.
   - Set `trustedDependencies`.
   - Change scripts `bootstrap`, `dev:fixture` and `pretest`.
-- Modify: `tsconfig.json`, `eslint.config.ts` and `vitest.config.ts` to exclude `wiki-writer`, except that Vitest runs `wiki-writer/test/security-boundary.test.ts`.
+- Modify: `tsconfig.json`, `eslint.config.ts` and `vitest.config.ts` to exclude `wiki-writer`, except `wiki-writer/test/security-boundary.test.ts`, which all three keep.
 - Create: `bunfig.toml`, `bun.lock`.
 - Delete: `pnpm-workspace.yaml`, `pnpm-lock.yaml`.
 

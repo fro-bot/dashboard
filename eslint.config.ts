@@ -12,7 +12,7 @@ export default defineConfig(
     // third-party .mjs/.md files — not our source; linting it reports tens of thousands
     // of errors.
     // wiki-writer is not installed: its @fro-bot/wiki-write-core git dependency can't resolve
-    // under Bun. Vitest still runs its security-boundary test.
+    // under Bun. Its security-boundary test stays in the gates.
     ignores: [
       'docs/plans/**',
       'docs/solutions/**',
@@ -20,7 +20,8 @@ export default defineConfig(
       'web/**',
       '.agents/**',
       '.opencode/**',
-      'wiki-writer/**',
+      'wiki-writer/src/**',
+      'wiki-writer/test/!(security-boundary).test.ts',
     ],
     typescript: {
       tsconfigPath: './tsconfig.json',

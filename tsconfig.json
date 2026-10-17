@@ -6,6 +6,7 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
+  "files": ["wiki-writer/test/security-boundary.test.ts"],
   "include": ["**/*.ts"],
   "exclude": [
     "node_modules",
