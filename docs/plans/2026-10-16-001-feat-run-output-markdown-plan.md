@@ -1,7 +1,7 @@
 ---
 title: "feat: Render run output as Markdown"
 type: feat
-status: active
+status: completed
 date: 2026-10-16
 ---
 
@@ -249,7 +249,7 @@ sequenceDiagram
 
 ## Implementation Units
 
-- [ ] **Unit 1: Renderer module and dependency**
+- [x] **Unit 1: Renderer module and dependency**
 
 **Goal:** a pure, tested token-to-DOM renderer that meets P1, P3 and P5.
 
@@ -305,7 +305,7 @@ sequenceDiagram
 
 **Verification:** renderer tests pass under jsdom. The corpus fails if `html` is flipped to true.
 
-- [ ] **Unit 2: Stream painting, throttle and fallback**
+- [x] **Unit 2: Stream painting, throttle and fallback**
 
 **Goal:** `operator-stream.js` paints through an optional renderer with memo, throttle, scroll and selection handling, and plain-text fallback.
 
@@ -366,7 +366,7 @@ sequenceDiagram
 
 **Verification:** stream-core tests pass, and all existing output tests are unchanged.
 
-- [ ] **Unit 3: Output toolbar and card click guard**
+- [x] **Unit 3: Output toolbar and card click guard**
 
 **Goal:** the toggle and Copy raw controls exist on every card shape, and interacting with links, buttons or a text selection never collapses the card.
 
@@ -422,7 +422,7 @@ sequenceDiagram
 
 **Verification:** jsdom and parity tests pass, and existing anatomy pins are updated on purpose rather than loosened.
 
-- [ ] **Unit 4: Runtime wiring**
+- [x] **Unit 4: Runtime wiring**
 
 **Goal:** the runtime loads the renderer with the operator modules, passes it to every attach, and closes the stream at the auth boundary.
 
@@ -452,7 +452,7 @@ sequenceDiagram
 
 **Verification:** runtime tests pass. `web/dist/sw.js` lists the new chunk after `pnpm build:web`.
 
-- [ ] **Unit 5: Static guards**
+- [x] **Unit 5: Static guards**
 
 **Goal:** the HTML-sink ban enforces P2 across every module that builds output DOM.
 
@@ -475,7 +475,7 @@ sequenceDiagram
 
 **Verification:** the scan covers the renderer module and passes on the tree, and every fixture sink form matches.
 
-- [ ] **Unit 6: Styling (designer)**
+- [x] **Unit 6: Styling (designer)**
 
 **Goal:** rendered output reads as prose in both themes and at 390px, and the toolbar looks right in its pinned row.
 
@@ -501,7 +501,7 @@ sequenceDiagram
 
 **Verification:** a designer browser pass on the fixture server, in dark, light and 390px. The CI Design Check passes.
 
-- [ ] **Unit 7: Fixtures, docs and browser verification**
+- [x] **Unit 7: Fixtures, docs and browser verification**
 
 **Goal:** the assembled app proves streaming, recorded and malicious-input behavior, and the docs match.
 
