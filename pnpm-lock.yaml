@@ -61,7 +61,7 @@ importers:
         version: 6.9.1
       '@testing-library/react':
         specifier: 16.3.3
-        version: 16.3.3(@testing-library/dom@10.4.1)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
+        version: 16.3.3(@testing-library/dom@10.4.1)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       '@types/node':
         specifier: 24.19.2
         version: 24.19.2
@@ -90,11 +90,11 @@ importers:
         specifier: 15.0.3
         version: 15.0.3
       react:
-        specifier: 19.3.0
-        version: 19.3.0
+        specifier: 19.3.1
+        version: 19.3.1
       react-dom:
-        specifier: 19.3.0
-        version: 19.3.0(react@19.3.0)
+        specifier: 19.3.1
+        version: 19.3.1(react@19.3.1)
       tailwindcss:
         specifier: 4.3.3
         version: 4.3.3
@@ -2176,10 +2176,6 @@ packages:
     resolution: {integrity: sha512-rpsZEGT1jFuve6QlpyRp9ckQ+kN61hvF9BzCPyMdaKTm8UJce96KBn3sorXOFXlzjPrs3Vc4T1NsSroZ3PxlFw==}
     engines: {node: '>=10.13.0'}
 
-  entities@8.0.0:
-    resolution: {integrity: sha512-zwfzJecQ/Uej6tusMqwAqU/6KL2XaB2VZ2Jg54Je6ahNBGNH6Ek6g3jjNCF0fG9EWQKGZNddNjU5F1ZQn/sBnA==}
-    engines: {node: '>=20.19.0'}
-
   entities@8.1.0:
     resolution: {integrity: sha512-kxL7msIffSuh9aaFAMD7rxAIuTRMAHMeBtgHW2yUdWw732ZNh4MehkF2gdjvtdmikkaIP9bFDDJOPlsvm7avrA==}
     engines: {node: '>=20.19.0'}
@@ -3414,16 +3410,16 @@ packages:
     resolution: {integrity: sha512-Y3NoRtprEEZQD8RfxMCfS0ZTqc4e+i18OrXEXAvpM6TfC/3y+0L5rNbZiSnbBBEkDfFzbpd8o+cE8q3/anjMGA==}
     engines: {node: '>=22'}
 
-  react-dom@19.3.0:
-    resolution: {integrity: sha512-JDk8dgif51OjFoDE70+OT9ICyYr+69HlmihNwp1+Nsfbna3t5sIiCa9ZJktDmQ4/1b/rn26hIAR2uYXDMr5r0Q==}
+  react-dom@19.3.1:
+    resolution: {integrity: sha512-Y0bARz53lhEC1NMCASs0/j+faB/zqt3R8hpvg1e8+61ZVJ4UL0UdC4cBbXfZMcIuhrfgeILTLe+ZeBCavQPtKQ==}
     peerDependencies:
-      react: ^19.3.0
+      react: ^19.3.1
 
   react-is@17.0.2:
     resolution: {integrity: sha512-w2GsyukL62IJnlaff/nRegPQR94C/XXamvMWmSHRJ4y7Ts/4ocGRmTHvOs8PSE6pB3dWOrD/nueuU5sduBsQ4w==}
 
-  react@19.3.0:
-    resolution: {integrity: sha512-E8LUcbtBWt20bbl2YoHfx4ZDBdxVTfOKtCZn9cDSJ4l6/nuoApcpIBcj47t2wZoVX8g2ZHuMHbiShgCR1T5Sog==}
+  react@19.3.1:
+    resolution: {integrity: sha512-QNhWdt7nrgVWWQG58QuGsAR3jv3Hbe4mb4vz7w2csnHavciZJgda1CPNaldF6eVxv90ud3jUXpKlHL69gO38yw==}
     engines: {node: '>=0.10.0'}
 
   redent@3.0.0:
@@ -5543,12 +5539,12 @@ snapshots:
       picocolors: 1.1.1
       redent: 3.0.0
 
-  '@testing-library/react@16.3.3(@testing-library/dom@10.4.1)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)':
+  '@testing-library/react@16.3.3(@testing-library/dom@10.4.1)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)':
     dependencies:
       '@babel/runtime': 7.29.7
       '@testing-library/dom': 10.4.1
-      react: 19.3.0
-      react-dom: 19.3.0(react@19.3.0)
+      react: 19.3.1
+      react-dom: 19.3.1(react@19.3.1)
     optionalDependencies:
       '@types/react': 19.3.0
       '@types/react-dom': 19.3.0(@types/react@19.3.0)
@@ -6122,8 +6118,6 @@ snapshots:
       graceful-fs: 4.2.11
       tapable: 2.3.3
 
-  entities@8.0.0: {}
-
   entities@8.1.0: {}
 
   es-abstract-get@1.0.0:
@@ -6407,7 +6401,7 @@ snapshots:
       ci-info: 4.4.0
       core-js-compat: 3.50.0
       detect-indent: 7.0.2
-      entities: 8.0.0
+      entities: 8.1.0
       eslint: 10.12.0(jiti@2.7.0)
       find-up-simple: 1.0.1
       globals: 17.12.0
@@ -7553,7 +7547,7 @@ snapshots:
 
   parse5@8.0.1:
     dependencies:
-      entities: 8.0.0
+      entities: 8.1.0
 
   path-exists@4.0.0: {}
 
@@ -7620,14 +7614,14 @@ snapshots:
 
   quote-js-string@0.1.0: {}
 
-  react-dom@19.3.0(react@19.3.0):
+  react-dom@19.3.1(react@19.3.1):
     dependencies:
-      react: 19.3.0
+      react: 19.3.1
       scheduler: 0.28.0
 
   react-is@17.0.2: {}
 
-  react@19.3.0: {}
+  react@19.3.1: {}
 
   redent@3.0.0:
     dependencies:
