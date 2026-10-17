@@ -836,7 +836,21 @@ export interface StreamHandle {
   getQuestionNotes: () => readonly QuestionNote[]
   /** The status of one request, or null when the stream knows nothing about it. */
   getQuestionStatus: (requestID: string) => QuestionRequestStatus | null
+  /**
+   * Set the page-wide Rendered/Raw output preference and repaint this card now, even over a text
+   * selection. Any other value is ignored. A closed handle updates the preference but paints nothing.
+   */
+  setOutputView: (view: OutputView) => void
 }
+
+/** The page-wide output display preference: Markdown rendered as DOM, or the raw text. */
+export type OutputView = 'rendered' | 'raw'
+
+/**
+ * Builds the DOM for run output. It receives the stream's document and the page origin, and returns a
+ * fragment. It may throw; that paint falls back to plain text and the next paint tries again.
+ */
+export type RenderOutput = (text: string, context: {readonly doc: Document; readonly origin: string}) => DocumentFragment
 
 /** Browser-direct approval client interface (for testing injection). */
 export interface ApprovalClient {
@@ -913,7 +927,16 @@ export interface InitOptions {
    * attaches normally.
    */
   readonly finishedRecord?: FinishedRunRecord
+  /**
+   * Optional renderer for output text. With it, streaming output paints through the renderer, throttled
+   * to about every 100 ms, with a final frame or terminal status flushing at once. Without it, output
+   * paints as plain text exactly as before.
+   */
+  readonly renderOutput?: RenderOutput
 }
+
+/** Return the page-wide output preference to Rendered. It does not touch the finished-run store. */
+export declare function resetOutputView(): void
 
 export declare function initOperatorStream(opts: InitOptions): StreamHandle
 

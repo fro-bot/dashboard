@@ -127,6 +127,12 @@ const SUMMARY_STATUSES = new Set([
 
 /** In-card copy for an expired run snapshot. Dashboard-owned; never wire text. */
 const OUTPUT_UNAVAILABLE_COPY = 'Output no longer available.'
+
+/** Shortest gap between two rendered paints of streaming output. */
+const OUTPUT_PAINT_INTERVAL_MS = 100
+
+/** A box scrolled to within this many pixels of its end counts as at the bottom. */
+const OUTPUT_PIN_TOLERANCE_PX = 8
 const WAITING_TO_START_COPY = 'Waiting to start\u2026'
 const WAITING_FOR_OUTPUT_COPY = 'Waiting for output\u2026'
 
@@ -1081,6 +1087,14 @@ export function pruneFinishedRuns(runIds, fixtureSessionId) {
   for (const key of [...finishedRunStore.keys()]) {
     if (!keep.has(key)) deleteFinishedRun(key)
   }
+}
+
+// The page-wide Rendered/Raw preference. One in-memory value read at paint time; no storage.
+let outputViewPreference = 'rendered'
+
+/** Return the Rendered/Raw preference to Rendered. The runtime calls it when auth is required. */
+export function resetOutputView() {
+  outputViewPreference = 'rendered'
 }
 
 /**
@@ -3543,6 +3557,9 @@ function recordedStreamSetup(runId, record) {
 export function initOperatorStream(opts) {
   const {runId, statusEl, noticeEl, outputEl, coalescedEl, approvalsEl, badgeEl, reasonEl, timeEl, waitingEl, checkoutEl, cancelEl, questionsEl, endpointBase, fixtureSessionId} = opts
 
+  // Optional (text, {doc, origin}) => DocumentFragment. Without it, output paints as plain text.
+  const outputRenderer = typeof opts.renderOutput === 'function' ? opts.renderOutput : undefined
+
   // The finished-run store generation this attachment started under: a clear since then retires its writes.
   const attachGeneration = finishedRunGeneration
 
@@ -3889,6 +3906,152 @@ export function initOperatorStream(opts) {
   // Latest valid startedAt from a status frame; never reset to blank. A recorded run seeds it so the first paint has it.
   let latestStartedAt = initialStartedAt
 
+  // The output painter. paintOutput is the only writer of outputEl after attach. It skips the write when
+  // nothing it shows has changed, throttles streaming text when a renderer is injected, and yields to a
+  // text selection inside the output. It reads current state every time it runs.
+  let paintedOutput = null // {text, unavailable, view} of the last successful write; null when none or a fallback
+  let outputCooldownTimer = null // armed after a throttled paint; a paint that lands while it runs waits for it
+  let outputPaintWaiting = false
+  let outputSelectionListening = false
+
+  function outputDocument() {
+    return outputEl.ownerDocument ?? globalThis.document
+  }
+
+  function selectionInsideOutput() {
+    const selection = outputDocument()?.getSelection?.()
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0 || typeof outputEl.contains !== 'function') return false
+    return outputEl.contains(selection.anchorNode) || outputEl.contains(selection.focusNode)
+  }
+
+  function stopDeferringOutputPaint() {
+    if (!outputSelectionListening) return
+    outputSelectionListening = false
+    outputDocument()?.removeEventListener?.('selectionchange', onOutputSelectionChange)
+  }
+
+  function deferOutputPaint() {
+    if (outputSelectionListening) return
+    outputSelectionListening = true
+    outputDocument()?.addEventListener?.('selectionchange', onOutputSelectionChange)
+  }
+
+  function onOutputSelectionChange() {
+    if (aborted || selectionInsideOutput()) return
+    stopDeferringOutputPaint()
+    paintOutput(false)
+  }
+
+  function cancelOutputCooldown() {
+    if (outputCooldownTimer !== null) {
+      clearTimeout(outputCooldownTimer)
+      outputCooldownTimer = null
+    }
+    outputPaintWaiting = false
+  }
+
+  function startOutputCooldown() {
+    outputCooldownTimer = setTimeout(() => {
+      outputCooldownTimer = null
+      if (aborted) return
+      if (outputPaintWaiting) {
+        outputPaintWaiting = false
+        paintOutput(false)
+      }
+    }, OUTPUT_PAINT_INTERVAL_MS)
+  }
+
+  function setOutputViewAttribute(view) {
+    outputEl.setAttribute?.('data-output-view', view)
+  }
+
+  /**
+   * Replace the output with the renderer's fragment in one swap, keeping the reader's place. Returns false
+   * when the renderer throws or returns no node; the old DOM is then left as it was.
+   */
+  function swapRenderedOutput(text) {
+    const trackScroll = typeof outputEl.scrollTop === 'number'
+    const previousTop = trackScroll ? outputEl.scrollTop : 0
+    const atBottom = trackScroll && outputEl.scrollHeight - previousTop - outputEl.clientHeight <= OUTPUT_PIN_TOLERANCE_PX
+    try {
+      const fragment = outputRenderer(text, {doc: outputDocument(), origin: globalThis.location?.origin ?? ''})
+      if (fragment === null || typeof fragment !== 'object') return false
+      outputEl.replaceChildren(fragment)
+    } catch {
+      return false
+    }
+    if (trackScroll) {
+      outputEl.scrollTop = atBottom
+        ? outputEl.scrollHeight
+        : Math.min(previousTop, Math.max(0, outputEl.scrollHeight - outputEl.clientHeight))
+    }
+    return true
+  }
+
+  /** Write one output state. Returns false when the write was a plain-text fallback for a failed render. */
+  function writeOutput(text, unavailable, view) {
+    if (unavailable) {
+      // Expired snapshot: fixed dashboard copy as a single text node, never wire text.
+      outputEl.textContent = OUTPUT_UNAVAILABLE_COPY
+      outputEl.hidden = false
+      outputEl.classList?.add('run-output-unavailable')
+      setOutputViewAttribute('unavailable')
+      return true
+    }
+    outputEl.classList?.remove('run-output-unavailable')
+    if (text === '') {
+      // No output (or an authoritative empty final): clear any stale text and re-hide.
+      outputEl.textContent = ''
+      outputEl.hidden = true
+      setOutputViewAttribute(view)
+      return true
+    }
+    if (view === 'rendered' && swapRenderedOutput(text)) {
+      outputEl.hidden = false
+      setOutputViewAttribute('rendered')
+      return true
+    }
+    outputEl.textContent = text
+    outputEl.hidden = false
+    setOutputViewAttribute('raw')
+    return view !== 'rendered'
+  }
+
+  function paintOutput(force) {
+    if (!outputEl || aborted) return
+    const runEntry = state.runs[runId]
+    const unavailable = runEntry?.outputUnavailable === true
+    const text = !unavailable && typeof runEntry?.outputText === 'string' ? runEntry.outputText : ''
+    let view = 'raw'
+    if (unavailable) view = 'unavailable'
+    else if (outputRenderer !== undefined && outputViewPreference === 'rendered') view = 'rendered'
+
+    if (paintedOutput !== null && paintedOutput.text === text && paintedOutput.unavailable === unavailable && paintedOutput.view === view) return
+
+    // Only streaming text with a renderer is throttled and deferred. A final frame, a terminal status, a
+    // view change, an empty or unavailable result, and every paint without a renderer go straight through.
+    const streaming = outputRenderer !== undefined && !force && text !== '' &&
+      runEntry?.outputFinal !== true && runEntry?.terminal !== true
+    if (streaming) {
+      if (outputCooldownTimer !== null) {
+        outputPaintWaiting = true
+        return
+      }
+      if (selectionInsideOutput()) {
+        deferOutputPaint()
+        return
+      }
+    } else {
+      cancelOutputCooldown()
+    }
+    stopDeferringOutputPaint()
+
+    const wrote = writeOutput(text, unavailable, view)
+    // A fallback leaves the key unrecorded, so the next paint tries the renderer again.
+    paintedOutput = wrote ? {text, unavailable, view} : null
+    if (streaming) startOutputCooldown()
+  }
+
   function updateDOM() {
     // Late-frame guard: after close(), no write of any kind (notice, status,
     // output, coalesced hint, approvals, or badge) may reach the DOM. A late
@@ -4042,30 +4205,15 @@ export function initOperatorStream(opts) {
 
     if (checkoutEl) renderCheckoutDetail(checkoutEl, state.runs[runId], paintedPreparationHeadline || failureLabelStatesPreparation)
 
-    // Run output: render the accumulated answer via textContent only — `text` is
-    // free-form agent output and must NEVER be interpolated as HTML. droppedCount is
+    // Run output: `text` is free-form agent output and must NEVER be interpolated as HTML.
+    // paintOutput writes it as text, or as DOM the injected renderer built. droppedCount is
     // never echoed; a fixed-label hint is toggled instead. Other output-frame fields
     // are not rendered.
     if (outputEl) {
-      const runEntry = state.runs[runId]
-      const outputText = runEntry?.outputText
-      if (runEntry?.outputUnavailable === true) {
-        // Expired snapshot: fixed dashboard copy as a single text node, never wire text.
-        outputEl.textContent = OUTPUT_UNAVAILABLE_COPY
-        outputEl.hidden = false
-        outputEl.classList?.add('run-output-unavailable')
-      } else if (typeof outputText === 'string' && outputText !== '') {
-        outputEl.textContent = outputText
-        outputEl.hidden = false
-        outputEl.classList?.remove('run-output-unavailable')
-      } else {
-        outputEl.classList?.remove('run-output-unavailable')
-        // No output (or an authoritative empty final): clear any stale text and re-hide.
-        outputEl.textContent = ''
-        outputEl.hidden = true
-      }
+      paintOutput(false)
       if (coalescedEl) {
         // Show the fixed hint when output was coalesced or truncated — never an echoed count.
+        const runEntry = state.runs[runId]
         const flagged = runEntry?.outputCoalesced === true || runEntry?.outputTruncated === true
         coalescedEl.hidden = !flagged
       }
@@ -4924,6 +5072,12 @@ export function initOperatorStream(opts) {
     getQuestions,
     getQuestionNotes,
     getQuestionStatus,
+    /** Set the page-wide Rendered/Raw preference and repaint this card now. Anything else is ignored. */
+    setOutputView(view) {
+      if (view !== 'rendered' && view !== 'raw') return
+      outputViewPreference = view
+      paintOutput(true)
+    },
     close() {
       aborted = true // prevent late timer from fetching
       // Clear any pending timers
@@ -4932,6 +5086,8 @@ export function initOperatorStream(opts) {
         reconnectTimer = null
       }
       clearFirstFrameTimer()
+      cancelOutputCooldown()
+      stopDeferringOutputPaint()
       clearQuestionRechecks()
       if (abortController) {
         abortController.abort()

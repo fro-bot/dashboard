@@ -70,6 +70,7 @@ import {
   renderApprovalPrompt,
   renderCancelControl,
   resetBootstrapState,
+  resetOutputView,
   resetQuestionPageStore,
   RETRY_BASE_MS,
   RETRY_FACTOR,
@@ -2405,6 +2406,8 @@ interface FakeElement {
   querySelector: (sel: string) => FakeElement | null
   querySelectorAll: (sel: string) => FakeElement[]
   append: (...nodes: FakeElement[]) => void
+  replaceChildren: (...nodes: FakeElement[]) => void
+  contains: (node: unknown) => boolean
   remove: () => void
   setAttribute: (name: string, value: string) => void
   getAttribute: (name: string) => string | null
@@ -2475,6 +2478,14 @@ function makeFakeEl(tagName = 'div'): FakeElement {
         el.children.push(node)
         node.parent = el
       }
+    },
+    // Like the DOM, it swaps every child at once; the text then reads as the children's text.
+    replaceChildren(...nodes: FakeElement[]) {
+      el.children = nodes
+      textContentValue = nodes.map(node => node.textContent).join('')
+    },
+    contains(node: unknown): boolean {
+      return node === el || el.children.some(child => child.contains(node))
     },
     remove() {
       if (el.parent !== undefined) {
@@ -12846,5 +12857,811 @@ describe('finished-run store — recorded init', () => {
 
     expect(fetchSpy).toHaveBeenCalledTimes(1)
     expect(handle.getConnectionStatus()).toBe('active')
+  })
+})
+
+// ===========================================================================
+// Output painting — optional renderer, memo, throttle, fallback, scroll, selection
+// ===========================================================================
+
+const OP_RUN = 'run-op-001'
+const OP_INTERVAL_MS = 100
+
+/** The renderer's sentinel fragment: a fake element whose text is the source behind an `R:` marker. */
+function opRenderer(behaviour: (text: string, callIndex: number) => void = () => {}) {
+  let calls = 0
+  return vi.fn((text: string, _context: {doc: unknown; origin: string}) => {
+    behaviour(text, calls++)
+    const fragment = makeFakeEl('#fragment')
+    fragment.textContent = `R:${text}`
+    return fragment
+  })
+}
+
+/** An output region with the scroll metrics a browser would report. */
+function opOutputEl() {
+  const el = makeFakeEl('div') as FakeElement & {scrollTop: number; scrollHeight: number; clientHeight: number}
+  el.hidden = true
+  el.scrollTop = 0
+  el.scrollHeight = 0
+  el.clientHeight = 0
+  return el
+}
+
+/** A document stub with a selection the test drives and a record of the `selectionchange` listeners. */
+function opStubDocument() {
+  const listeners = new Set<() => void>()
+  const selection: {isCollapsed: boolean; rangeCount: number; anchorNode: unknown; focusNode: unknown} = {
+    isCollapsed: true,
+    rangeCount: 0,
+    anchorNode: null,
+    focusNode: null,
+  }
+  const doc = {
+    createElement: (tag: string) => makeFakeEl(tag),
+    createTextNode: (text: string) => {
+      const node = makeFakeEl('#text')
+      node.textContent = text
+      return node
+    },
+    getSelection: () => selection,
+    addEventListener: (type: string, listener: () => void) => {
+      if (type === 'selectionchange') listeners.add(listener)
+    },
+    removeEventListener: (type: string, listener: () => void) => {
+      if (type === 'selectionchange') listeners.delete(listener)
+    },
+  }
+  vi.stubGlobal('document', doc)
+  const fire = () => {
+    for (const listener of [...listeners]) listener()
+  }
+  return {
+    doc,
+    listenerCount: () => listeners.size,
+    select(node: unknown) {
+      selection.isCollapsed = false
+      selection.rangeCount = 1
+      selection.anchorNode = node
+      selection.focusNode = node
+      fire()
+    },
+    clear() {
+      selection.isCollapsed = true
+      selection.rangeCount = 0
+      selection.anchorNode = null
+      selection.focusNode = null
+      fire()
+    },
+  }
+}
+
+const opDelta = (text: string, seq: number) => fcOutput(OP_RUN, text, {final: false, seq})
+
+/** Stream a run to its terminal result with no renderer, then return its finished record. */
+async function opFinishRun(text: string) {
+  const live = await fcOpen(OP_RUN)
+  await live.push(fcOutput(OP_RUN, text), fcStatus(OP_RUN, 'succeeded'))
+  live.handle.close()
+  const record = takeUsableFinishedRun(OP_RUN, 'succeeded')
+  expect(record).toBeDefined()
+  return record
+}
+
+/** Make the next swap behave like a browser: content replaced, new height, scroll position reset. */
+function opWithSwap(out: ReturnType<typeof opOutputEl>, scrollHeight: number) {
+  const original = out.replaceChildren.bind(out)
+  out.replaceChildren = (...nodes) => {
+    original(...nodes)
+    out.scrollHeight = scrollHeight
+    out.scrollTop = 0
+  }
+}
+
+async function opOpen(outputEl: FakeElement, renderOutput?: unknown, runId = OP_RUN) {
+  return fcOpen(runId, {elements: {outputEl, ...(renderOutput === undefined ? {} : {renderOutput})}})
+}
+
+describe('initOperatorStream — output painting', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    clearFinishedRuns()
+    resetOutputView()
+  })
+  afterEach(() => {
+    for (const handle of fcHandles.splice(0)) handle.close()
+    clearFinishedRuns()
+    resetOutputView()
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  describe('without a renderer', () => {
+    it('paints textContent on every frame, as before, and marks the view raw', async () => {
+      opStubDocument()
+      const out = opOutputEl()
+      const replaceChildren = vi.spyOn(out, 'replaceChildren')
+      const h = await opOpen(out)
+
+      await h.push(opDelta('a', 1))
+      expect(out.textContent).toBe('a')
+      expect(out.hidden).toBe(false)
+      await h.push(opDelta('b', 2))
+      expect(out.textContent).toBe('ab')
+      expect(out.attributes['data-output-view']).toBe('raw')
+      expect(replaceChildren).not.toHaveBeenCalled()
+    })
+
+    it('does not throttle: no timer is armed by a burst', async () => {
+      opStubDocument()
+      const out = opOutputEl()
+      const h = await opOpen(out)
+      const baseline = vi.getTimerCount()
+
+      await h.push(...Array.from({length: 5}, (_, index) => opDelta(String(index), index + 1)))
+
+      expect(out.textContent).toBe('01234')
+      expect(vi.getTimerCount()).toBe(baseline)
+    })
+
+    it('reads Raw without changing the page preference: a later renderer still paints Rendered', async () => {
+      opStubDocument()
+      const first = opOutputEl()
+      const a = await opOpen(first, undefined, 'run-op-a')
+      await a.push(fcOutput('run-op-a', 'plain'))
+      expect(first.attributes['data-output-view']).toBe('raw')
+      a.handle.close()
+
+      const second = opOutputEl()
+      const renderer = opRenderer()
+      const b = await opOpen(second, renderer, 'run-op-b')
+      await b.push(fcOutput('run-op-b', 'rich'))
+
+      expect(second.attributes['data-output-view']).toBe('rendered')
+      expect(second.textContent).toBe('R:rich')
+    })
+  })
+
+  describe('with a renderer', () => {
+    it('passes the stream document and the page origin to the renderer', async () => {
+      const {doc} = opStubDocument()
+      vi.stubGlobal('location', {origin: 'https://dash.example'})
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+
+      await h.push(opDelta('a', 1))
+
+      expect(renderer).toHaveBeenCalledWith('a', {doc, origin: 'https://dash.example'})
+    })
+
+    it('paints the first output immediately and a trailing paint around 100 ms later', async () => {
+      opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+
+      await h.push(opDelta('a', 1))
+      expect(renderer).toHaveBeenCalledTimes(1)
+      expect(out.textContent).toBe('R:a')
+      expect(out.hidden).toBe(false)
+      expect(out.attributes['data-output-view']).toBe('rendered')
+
+      await h.push(opDelta('b', 2))
+      expect(renderer).toHaveBeenCalledTimes(1)
+      expect(out.textContent).toBe('R:a')
+
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS - 1)
+      expect(renderer).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(renderer).toHaveBeenCalledTimes(2)
+      expect(out.textContent).toBe('R:ab')
+    })
+
+    it('the trailing paint reads the current state, not the state at the first deferral', async () => {
+      opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+
+      await h.push(opDelta('a', 1))
+      await h.push(opDelta('b', 2))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS / 2)
+      await h.push(opDelta('c', 3))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+
+      expect(renderer.mock.calls.map(call => call[0])).toEqual(['a', 'abc'])
+      expect(out.textContent).toBe('R:abc')
+    })
+
+    it('renders a burst of 20 output frames at most twice', async () => {
+      opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+
+      await h.push(...Array.from({length: 20}, (_, index) => opDelta('x', index + 1)))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+
+      expect(renderer).toHaveBeenCalledTimes(2)
+      expect(out.textContent).toBe(`R:${'x'.repeat(20)}`)
+    })
+
+    it('a final frame flushes synchronously and leaves no pending paint timer', async () => {
+      opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      const baseline = vi.getTimerCount()
+
+      await h.push(opDelta('a', 1), opDelta('b', 2), fcOutput(OP_RUN, 'whole answer', {seq: 3}))
+
+      expect(out.textContent).toBe('R:whole answer')
+      expect(vi.getTimerCount()).toBe(baseline)
+      const callsAfterFinal = renderer.mock.calls.length
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+      expect(renderer).toHaveBeenCalledTimes(callsAfterFinal)
+    })
+
+    it('a terminal status flushes the pending trailing text without waiting for the timer', async () => {
+      opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+
+      await h.push(opDelta('a', 1), opDelta('b', 2), fcStatus(OP_RUN, 'cancelled'))
+
+      expect(out.textContent).toBe('R:ab')
+    })
+
+    it('a terminal flush renders before the finished record is written', async () => {
+      opStubDocument()
+      const recordedAtRender: boolean[] = []
+      // The final frame's paint throws (plain text, no memo); the terminal flush is the paint that succeeds.
+      const renderer = opRenderer((_text, callIndex) => {
+        recordedAtRender.push(hasUsableFinishedRun(OP_RUN, 'succeeded'))
+        if (callIndex === 0) throw new Error('render failed')
+      })
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+
+      await h.push(fcOutput(OP_RUN, 'answer'), fcStatus(OP_RUN, 'succeeded'))
+
+      expect(renderer).toHaveBeenCalledTimes(2)
+      expect(recordedAtRender).toEqual([false, false])
+      expect(out.textContent).toBe('R:answer')
+      expect(hasUsableFinishedRun(OP_RUN, 'succeeded')).toBe(true)
+    })
+
+    it('does not call the renderer for status, heartbeat or approval frames', async () => {
+      opStubDocument()
+      const renderer = opRenderer()
+      const el = opOutputEl()
+      const h = await opOpen(el, renderer)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 2)
+      expect(renderer).toHaveBeenCalledTimes(1)
+
+      const approval = `event: approval\ndata: ${JSON.stringify({runId: OP_RUN, requestID: 'req-op-1', permission: 'shell', command: 'ls', settled: false})}\n\n`
+      await h.push(fcStatus(OP_RUN, 'running'))
+      await h.push(': heartbeat\n\n')
+      await h.push(approval)
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+
+      expect(renderer).toHaveBeenCalledTimes(1)
+      expect(el.textContent).toBe('R:a')
+    })
+
+    it('a replayed final frame with unchanged text does not render again', async () => {
+      opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+
+      await h.push(fcOutput(OP_RUN, 'answer', {seq: 4}))
+      await h.push(fcOutput(OP_RUN, 'answer', {seq: 4}))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+
+      expect(renderer).toHaveBeenCalledTimes(1)
+    })
+
+    it('an authoritative empty final hides the region and never calls the renderer for it', async () => {
+      opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('draft', 1))
+      expect(out.hidden).toBe(false)
+
+      await h.push(fcOutput(OP_RUN, '', {seq: 2}))
+
+      expect(out.hidden).toBe(true)
+      expect(out.textContent).toBe('')
+      expect(renderer).toHaveBeenCalledTimes(1)
+    })
+
+    it('marks the expired-snapshot result unavailable, keeps its class, and does not render it', async () => {
+      opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await fcOpen(OP_RUN, {summaryStatus: 'succeeded', elements: {outputEl: out, renderOutput: renderer}})
+
+      await h.push(fcReset(OP_RUN, 'no-snapshot'))
+
+      expect(out.textContent).toBe('Output no longer available.')
+      expect(out.attributes['data-output-view']).toBe('unavailable')
+      expect(out.className).toContain('run-output-unavailable')
+      expect(renderer).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('recorded repaint', () => {
+    it('renders once, synchronously, with no timer left behind', async () => {
+      opStubDocument()
+      const record = await opFinishRun('# done')
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const baseline = vi.getTimerCount()
+
+      fcHandles.push(initOperatorStream({
+        runId: OP_RUN,
+        finishedRecord: record,
+        statusEl: makeFakeEl('span') as never,
+        noticeEl: makeFakeEl('div') as never,
+        outputEl: out as never,
+        renderOutput: renderer as never,
+      }))
+
+      expect(renderer).toHaveBeenCalledTimes(1)
+      expect(out.textContent).toBe('R:# done')
+      expect(vi.getTimerCount()).toBe(baseline)
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+      expect(renderer).toHaveBeenCalledTimes(1)
+    })
+
+    it('honors a Raw preference: plain text, no renderer call', async () => {
+      opStubDocument()
+      const record = await opFinishRun('# done')
+      const holder = await opOpen(opOutputEl(), opRenderer(), 'run-op-holder')
+      holder.handle.setOutputView('raw')
+      const renderer = opRenderer()
+      const out = opOutputEl()
+
+      fcHandles.push(initOperatorStream({
+        runId: OP_RUN,
+        finishedRecord: record,
+        statusEl: makeFakeEl('span') as never,
+        noticeEl: makeFakeEl('div') as never,
+        outputEl: out as never,
+        renderOutput: renderer as never,
+      }))
+
+      expect(renderer).not.toHaveBeenCalled()
+      expect(out.textContent).toBe('# done')
+      expect(out.attributes['data-output-view']).toBe('raw')
+    })
+  })
+
+  describe('render failure', () => {
+    it('paints plain text for that paint, and the next paint calls the renderer again', async () => {
+      opStubDocument()
+      const renderer = opRenderer((_text, callIndex) => {
+        if (callIndex === 0) throw new Error('render failed')
+      })
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+
+      await h.push(opDelta('a', 1))
+      expect(out.textContent).toBe('a')
+      expect(out.hidden).toBe(false)
+      expect(out.attributes['data-output-view']).toBe('raw')
+
+      await h.push(opDelta('b', 2))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+
+      expect(renderer).toHaveBeenCalledTimes(2)
+      expect(out.textContent).toBe('R:ab')
+      expect(out.attributes['data-output-view']).toBe('rendered')
+    })
+
+    it('does not record the memo key: an unchanged state retries the renderer on the next paint', async () => {
+      opStubDocument()
+      const renderer = opRenderer((_text, callIndex) => {
+        if (callIndex === 0) throw new Error('render failed')
+      })
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      expect(out.textContent).toBe('a')
+
+      // A status frame changes no output, yet the failed paint left the key unrecorded.
+      await h.push(fcStatus(OP_RUN, 'running'))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+
+      expect(renderer).toHaveBeenCalledTimes(2)
+      expect(out.textContent).toBe('R:a')
+    })
+
+    it('a renderer that returns nothing falls back to plain text', async () => {
+      opStubDocument()
+      const renderer = vi.fn(() => undefined)
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+
+      await h.push(opDelta('a', 1))
+
+      expect(out.textContent).toBe('a')
+      expect(out.attributes['data-output-view']).toBe('raw')
+    })
+
+    it('a throw keeps the old DOM until the fallback replaces it, and never logs the error or the text', async () => {
+      opStubDocument()
+      const consoleSpies = (['log', 'info', 'warn', 'error', 'debug', 'trace'] as const).map(method => vi.spyOn(console, method).mockImplementation(() => {}))
+      const renderer = opRenderer((text, callIndex) => {
+        if (callIndex === 1) throw new Error(`boom ${text}`)
+      })
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('secret-one', 1))
+      await h.push(fcOutput(OP_RUN, 'secret-two', {seq: 2}))
+
+      expect(out.textContent).toBe('secret-two')
+      for (const spy of consoleSpies) expect(spy).not.toHaveBeenCalled()
+    })
+
+    it('does not change the page preference: the next attach still renders', async () => {
+      opStubDocument()
+      const failing = opRenderer(() => {
+        throw new Error('render failed')
+      })
+      const first = await opOpen(opOutputEl(), failing, 'run-op-a')
+      await first.push(fcOutput('run-op-a', 'x'))
+      first.handle.close()
+
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const second = await opOpen(out, renderer, 'run-op-b')
+      await second.push(fcOutput('run-op-b', 'y'))
+
+      expect(out.textContent).toBe('R:y')
+    })
+  })
+
+  describe('lifecycle', () => {
+    it('close() cancels the pending paint timer', async () => {
+      opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      const baseline = vi.getTimerCount()
+      await h.push(opDelta('a', 1), opDelta('b', 2))
+      expect(out.textContent).toBe('R:a')
+      expect(vi.getTimerCount()).toBeGreaterThan(baseline)
+
+      h.handle.close()
+      expect(vi.getTimerCount()).toBe(baseline)
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+
+      expect(renderer).toHaveBeenCalledTimes(1)
+      expect(out.textContent).toBe('R:a')
+    })
+
+    it('a late timer callback from a closed attachment writes nothing into a reused output region', async () => {
+      opStubDocument()
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const a = await opOpen(out, renderer, 'run-op-a')
+      await a.push(fcOutput('run-op-a', 'a1', {final: false, seq: 1}), fcOutput('run-op-a', 'a2', {final: false, seq: 2}))
+      const paintTimer = setTimeoutSpy.mock.calls.find(([, delay]) => delay === OP_INTERVAL_MS)
+      expect(paintTimer).toBeDefined()
+      a.handle.close()
+
+      const rendererB = opRenderer()
+      const b = await opOpen(out, rendererB, 'run-op-b')
+      await b.push(fcOutput('run-op-b', 'bee'))
+      expect(out.textContent).toBe('R:bee')
+
+      // Fire the stale callback by hand: the aborted check, not the cleared timer, must stop it.
+      ;(paintTimer?.[0] as () => void)()
+
+      expect(out.textContent).toBe('R:bee')
+      expect(renderer).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('page-wide preference', () => {
+    it('flipping it repaints the attached card without waiting for a frame', async () => {
+      opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(fcOutput(OP_RUN, 'abc', {final: false, seq: 1}))
+      expect(out.textContent).toBe('R:abc')
+
+      h.handle.setOutputView('raw')
+      expect(out.textContent).toBe('abc')
+      expect(out.attributes['data-output-view']).toBe('raw')
+      expect(renderer).toHaveBeenCalledTimes(1)
+
+      h.handle.setOutputView('rendered')
+      expect(out.textContent).toBe('R:abc')
+      expect(out.attributes['data-output-view']).toBe('rendered')
+      expect(renderer).toHaveBeenCalledTimes(2)
+    })
+
+    it('ignores a value that is neither view', async () => {
+      opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(fcOutput(OP_RUN, 'abc', {final: false, seq: 1}))
+
+      h.handle.setOutputView('sideways' as never)
+
+      expect(out.attributes['data-output-view']).toBe('rendered')
+      expect(renderer).toHaveBeenCalledTimes(1)
+    })
+
+    it('resetOutputView() returns it to Rendered', async () => {
+      opStubDocument()
+      const holder = await opOpen(opOutputEl(), opRenderer(), 'run-op-holder')
+      holder.handle.setOutputView('raw')
+      resetOutputView()
+
+      const out = opOutputEl()
+      const next = await opOpen(out, opRenderer(), 'run-op-next')
+      await next.push(fcOutput('run-op-next', 'abc'))
+
+      expect(out.textContent).toBe('R:abc')
+    })
+
+    it('clearFinishedRuns() leaves it unchanged', async () => {
+      opStubDocument()
+      const holder = await opOpen(opOutputEl(), opRenderer(), 'run-op-holder')
+      holder.handle.setOutputView('raw')
+      clearFinishedRuns()
+
+      const out = opOutputEl()
+      const next = await opOpen(out, opRenderer(), 'run-op-next')
+      await next.push(fcOutput('run-op-next', 'abc'))
+
+      expect(out.textContent).toBe('abc')
+      expect(out.attributes['data-output-view']).toBe('raw')
+    })
+
+    it('a closed handle ignores the flip', async () => {
+      opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(fcOutput(OP_RUN, 'abc', {final: false, seq: 1}))
+      h.handle.close()
+
+      h.handle.setOutputView('raw')
+
+      expect(out.textContent).toBe('R:abc')
+    })
+  })
+
+  describe('scroll', () => {
+    it('keeps a box scrolled to the bottom pinned to the bottom', async () => {
+      opStubDocument()
+      const out = opOutputEl()
+      const h = await opOpen(out, opRenderer())
+      out.clientHeight = 400
+      out.scrollHeight = 1000
+      out.scrollTop = 596 // within 8px of the bottom
+      opWithSwap(out, 1500)
+
+      await h.push(opDelta('a', 1))
+
+      expect(out.scrollTop).toBe(1500)
+    })
+
+    it('restores a mid-scroll position', async () => {
+      opStubDocument()
+      const out = opOutputEl()
+      const h = await opOpen(out, opRenderer())
+      out.clientHeight = 400
+      out.scrollHeight = 2000
+      out.scrollTop = 100
+      opWithSwap(out, 2500)
+
+      await h.push(opDelta('a', 1))
+
+      expect(out.scrollTop).toBe(100)
+    })
+
+    it('clamps the restored position to the new height', async () => {
+      opStubDocument()
+      const out = opOutputEl()
+      const h = await opOpen(out, opRenderer())
+      out.clientHeight = 400
+      out.scrollHeight = 2000
+      out.scrollTop = 900
+      opWithSwap(out, 600)
+
+      await h.push(opDelta('a', 1))
+
+      expect(out.scrollTop).toBe(200)
+    })
+  })
+
+  describe('selection', () => {
+    it('a selection inside the output defers streaming repaints', async () => {
+      const dom = opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+
+      dom.select(out)
+      await h.push(opDelta('b', 2))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+
+      expect(renderer).toHaveBeenCalledTimes(1)
+      expect(out.textContent).toBe('R:a')
+    })
+
+    it('repaints from current state once the selection clears, even after the stream went quiet', async () => {
+      const dom = opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      dom.select(out)
+      await h.push(opDelta('b', 2))
+      await h.push(opDelta('c', 3))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 10)
+
+      dom.clear()
+
+      expect(out.textContent).toBe('R:abc')
+      expect(renderer.mock.calls.map(call => call[0])).toEqual(['a', 'abc'])
+    })
+
+    it('a timer that fires during the selection stays deferred', async () => {
+      const dom = opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      dom.select(out)
+      await h.push(opDelta('b', 2))
+
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      expect(out.textContent).toBe('R:a')
+      expect(dom.listenerCount()).toBe(1)
+
+      dom.clear()
+      expect(out.textContent).toBe('R:ab')
+    })
+
+    it('a selection outside the output does not defer', async () => {
+      const dom = opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+
+      dom.select(makeFakeEl('div'))
+      await h.push(opDelta('b', 2))
+
+      expect(out.textContent).toBe('R:ab')
+      expect(dom.listenerCount()).toBe(0)
+    })
+
+    it('the selectionchange listener exists only while a paint is deferred', async () => {
+      const dom = opStubDocument()
+      const out = opOutputEl()
+      const h = await opOpen(out, opRenderer())
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      expect(dom.listenerCount()).toBe(0)
+
+      dom.select(out)
+      expect(dom.listenerCount()).toBe(0)
+      await h.push(opDelta('b', 2))
+      expect(dom.listenerCount()).toBe(1)
+      await h.push(opDelta('c', 3))
+      expect(dom.listenerCount()).toBe(1)
+
+      dom.clear()
+      expect(dom.listenerCount()).toBe(0)
+    })
+
+    it('a selection that is still non-collapsed keeps the deferral', async () => {
+      const dom = opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      dom.select(out)
+      await h.push(opDelta('b', 2))
+
+      dom.select(out) // extended, still inside the output
+
+      expect(renderer).toHaveBeenCalledTimes(1)
+      expect(dom.listenerCount()).toBe(1)
+    })
+
+    it('close() removes the listener', async () => {
+      const dom = opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      dom.select(out)
+      await h.push(opDelta('b', 2))
+      expect(dom.listenerCount()).toBe(1)
+
+      h.handle.close()
+      expect(dom.listenerCount()).toBe(0)
+
+      dom.clear()
+      expect(renderer).toHaveBeenCalledTimes(1)
+    })
+
+    it('a final paint proceeds despite a selection and drops the listener', async () => {
+      const dom = opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      dom.select(out)
+      await h.push(opDelta('b', 2))
+      expect(dom.listenerCount()).toBe(1)
+
+      await h.push(fcOutput(OP_RUN, 'final answer', {seq: 3}))
+
+      expect(out.textContent).toBe('R:final answer')
+      expect(dom.listenerCount()).toBe(0)
+    })
+
+    it('a terminal status paints the pending text despite a selection', async () => {
+      const dom = opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      dom.select(out)
+      await h.push(opDelta('b', 2))
+
+      await h.push(fcStatus(OP_RUN, 'failed'))
+
+      expect(out.textContent).toBe('R:ab')
+    })
+
+    it('flipping the view paints despite a selection', async () => {
+      const dom = opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('abc', 1))
+      dom.select(out)
+
+      h.handle.setOutputView('raw')
+
+      expect(out.textContent).toBe('abc')
+    })
+  })
+})
+
+describe('operator-stream.js — output painting sinks', () => {
+  it('imports only operator-time.js and builds no HTML string', async () => {
+    const fs = await import('node:fs/promises')
+    const src = await fs.readFile('public/operator-stream.js', 'utf8')
+    const imports = [...src.matchAll(/^import\s.*\sfrom\s+['"]([^'"]+)['"]/gm)].map(match => match[1])
+    expect(imports).toEqual(['./operator-time.js'])
+    expect(src).not.toMatch(/(?:innerHTML|outerHTML|insertAdjacentHTML|document\.write)\s*(?:=|\()/)
   })
 })
