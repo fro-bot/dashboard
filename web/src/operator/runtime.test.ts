@@ -40,6 +40,7 @@ import {
   type OperatorRuntimeOptions,
 } from './runtime.ts'
 import {renderOutput} from './markdown-output.ts'
+import {type OutputRenderer, setOutputRendererLoader} from './renderer-source.ts'
 
 // Captured before any test installs fake timers, for polling that must keep running on the real clock.
 const realSetTimeout = globalThis.setTimeout
@@ -4164,6 +4165,11 @@ describe('defaultRuntimeLoader — finished-run cache', () => {
     })
 
     describe('output rendering', () => {
+      // These cases assert on the Markdown the runtime's renderer produces.
+      beforeEach(() => {
+        setOutputRendererLoader(async () => renderOutput)
+      })
+
       const toggle = (runId: string) => cardEl(runId).querySelector('button.run-output-toggle') as HTMLButtonElement
       const delta = (runId: string, text: string, seq: number) => frame('output', {runId, text, final: false, seq})
 
@@ -4381,6 +4387,11 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
 
   const runtimes: OperatorRuntimeHandle[] = []
 
+  // The real renderer, already resolved, unless a case installs another source.
+  beforeEach(() => {
+    setOutputRendererLoader(async () => renderOutput)
+  })
+
   afterEach(() => {
     for (const runtime of runtimes.splice(0)) runtime.cleanup()
     document.body.innerHTML = ''
@@ -4388,12 +4399,11 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
     vi.doUnmock('/static/operator-stream.js?manual=1')
     vi.doUnmock('/static/operator-run-index.js?manual=1')
     vi.doUnmock('/static/operator-launch.js?manual=1')
-    vi.doUnmock('./markdown-output.ts')
     vi.restoreAllMocks()
   })
 
   /** Mount the real default loader over mocked public modules; a run index that loads, so jumps apply. */
-  async function mountRenderer(options: {finishedRecord?: unknown} = {}) {
+  async function mountRenderer(options: {finishedRecord?: unknown; streamGate?: Promise<void>} = {}) {
     const handle = {close: vi.fn(), getConnectionStatus: vi.fn(() => 'active')}
     const initOperatorStream = vi.fn((_opts: AttachOpts) => handle)
     const resetOutputView = vi.fn()
@@ -4404,15 +4414,19 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
       onAuthRequired: () => void
     } | undefined
     let onRunLaunched: ((runId: string, card: HTMLElement) => void) | undefined
-    vi.doMock('/static/operator-stream.js?manual=1', () => ({
-      initOperatorStream,
-      bootstrapOperatorStreams: vi.fn(),
-      resetBootstrapState: vi.fn(),
-      takeUsableFinishedRun: vi.fn(() => options.finishedRecord),
-      pruneFinishedRuns: vi.fn(),
-      clearFinishedRuns,
-      resetOutputView,
-    }))
+    vi.doMock('/static/operator-stream.js?manual=1', async () => {
+      // A gate holds the stream module's import, as a slow network would.
+      await options.streamGate
+      return {
+        initOperatorStream,
+        bootstrapOperatorStreams: vi.fn(),
+        resetBootstrapState: vi.fn(),
+        takeUsableFinishedRun: vi.fn(() => options.finishedRecord),
+        pruneFinishedRuns: vi.fn(),
+        clearFinishedRuns,
+        resetOutputView,
+      }
+    })
     vi.doMock('/static/operator-run-index.js?manual=1', () => ({
       initOperatorRunIndex: async (opts: NonNullable<typeof captured>) => {
         captured = opts
@@ -4432,14 +4446,18 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
     const onStateChange = vi.fn()
     const runtime = createOperatorRuntime({container: makeContainer(), onStateChange})
     runtimes.push(runtime)
-    await vi.waitFor(() => {
-      expect(captured).toBeDefined()
-      expect(onRunLaunched).toBeDefined()
-    })
-    // The loader arms jumps a few microtasks after the launch module's init.
-    await new Promise(resolve => realSetTimeout(resolve, 5))
+    const awaitInit = async () => {
+      await vi.waitFor(() => {
+        expect(captured).toBeDefined()
+        expect(onRunLaunched).toBeDefined()
+      })
+      // The loader arms jumps a few microtasks after the launch module's init.
+      await new Promise(resolve => realSetTimeout(resolve, 5))
+    }
+    if (options.streamGate === undefined) await awaitInit()
     const card = () => document.querySelector(`[data-run-id="${RUN_ID}"]`) as HTMLElement
     return {
+      awaitInit,
       runtime,
       handle,
       onStateChange,
@@ -4493,10 +4511,14 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
     expectRealRenderer(mounted.lastAttach()?.renderOutput)
   })
 
-  it('a renderer that fails to load still mounts the runtime, and every attach passes no renderer', async () => {
-    vi.doMock('./markdown-output.ts', () => {
+  it.each([
+    ['rejects', () => Promise.reject(new Error('chunk missing'))],
+    ['throws', () => {
       throw new Error('chunk missing')
-    })
+    }],
+    ['resolves to nothing', async () => undefined],
+  ])('a renderer source that %s still mounts the runtime, and every attach passes no renderer', async (_name, source) => {
+    setOutputRendererLoader(source)
     renderPage()
     const mounted = await mountRenderer()
 
@@ -4512,22 +4534,18 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
   })
 
   describe('a renderer import that is slow to settle', () => {
-    // A mocked import left pending would leak into the next case, so every case's import is released at the end.
-    const releases: Array<() => Promise<void>> = []
-    afterEach(async () => {
+    afterEach(() => {
       vi.useRealTimers()
-      for (const release of releases.splice(0)) await release()
     })
 
-    /** Mock the renderer module so its import stays pending until the returned function releases it. */
-    function mockPendingRenderer(): () => Promise<void> {
-      let settle: ((module: object) => void) | undefined
-      vi.doMock('./markdown-output.ts', () => new Promise<object>(resolve => {
+    /** A renderer source that stays pending until the returned function loads the real renderer. */
+    function mockPendingRenderer(): () => void {
+      let settle: ((loaded: OutputRenderer) => void) | undefined
+      const pending = new Promise<OutputRenderer>(resolve => {
         settle = resolve
-      }))
-      const release = async () => settle?.(await vi.importActual<object>('./markdown-output.ts'))
-      releases.push(release)
-      return release
+      })
+      setOutputRendererLoader(() => pending)
+      return () => settle?.(renderOutput)
     }
 
     it('never stops the run index and launch from initializing', async () => {
@@ -4548,7 +4566,7 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
       await mounted.click()
       expect(mounted.initOperatorStream).not.toHaveBeenCalled()
 
-      await release()
+      release()
       await vi.waitFor(() => expect(mounted.initOperatorStream).toHaveBeenCalledTimes(1))
 
       expectRealRenderer(mounted.lastAttach()?.renderOutput)
@@ -4560,7 +4578,7 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
       const mounted = await mountRenderer({finishedRecord: FINISHED})
 
       await mounted.click()
-      await release()
+      release()
       await vi.waitFor(() => expect(mounted.initOperatorStream).toHaveBeenCalledTimes(1))
 
       expect(mounted.lastAttach()?.finishedRecord).toBe(FINISHED)
@@ -4584,6 +4602,60 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
       // The stalled import is no longer waited on: the next attach is immediate.
       mounted.restore()
       expect(mounted.initOperatorStream).toHaveBeenCalledTimes(2)
+    })
+
+    it('a slow stream-module import does not add its delay to the renderer cap', async () => {
+      vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']})
+      mockPendingRenderer()
+      let openStream: () => void = () => {}
+      const streamGate = new Promise<void>(resolve => {
+        openStream = resolve
+      })
+      renderPage()
+      const mounted = await mountRenderer({streamGate})
+
+      await vi.advanceTimersByTimeAsync(1000)
+      openStream()
+      await mounted.awaitInit()
+      await mounted.click()
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(500)
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+
+      // The cap counts from the loader's start (about 1.1 s ago), not from the end of the stream import.
+      await vi.advanceTimersByTimeAsync(500)
+      expect(mounted.initOperatorStream).toHaveBeenCalledTimes(1)
+      expect('renderOutput' in (mounted.lastAttach() as object)).toBe(false)
+    })
+
+    it('collapsing the card before the renderer settles attaches nothing and clears the hash', async () => {
+      const release = mockPendingRenderer()
+      renderPage()
+      const mounted = await mountRenderer()
+
+      await mounted.click()
+      expect(location.hash).toBe(`#${RUN_ID}`)
+      await mounted.click() // the second activation is a collapse
+      expect(location.hash).toBe('')
+
+      release()
+      await new Promise(resolve => realSetTimeout(resolve, 10))
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+    })
+
+    it('a card the list drops while the first attach waits gets no stream', async () => {
+      const release = mockPendingRenderer()
+      renderPage()
+      const mounted = await mountRenderer()
+
+      await mounted.click()
+      document.querySelector(`[data-run-id="${RUN_ID}"]`)?.remove()
+      release()
+      await new Promise(resolve => realSetTimeout(resolve, 10))
+
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+      expect(location.hash).toBe('')
     })
 
     it('signing out while the first attach waits cancels that attach', async () => {

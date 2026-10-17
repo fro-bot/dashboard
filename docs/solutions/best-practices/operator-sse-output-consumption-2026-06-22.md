@@ -131,7 +131,7 @@ from a parsed token stream, not from markup:
   terminal status, which allows one retry. If the retry throws, the latch stays set.
   With no renderer, the plain path runs unchanged.
 - Streaming repaints yield to a text selection, a pointer press, or focus inside the
-  output, so links stay clickable mid-stream. A selection yields for at most three
+  output, so links stay clickable mid-stream. Each yields for at most three
   seconds before the paint proceeds. A final frame or terminal status always paints.
 - The innerHTML-family ban (`innerHTML`, `outerHTML`, `insertAdjacentHTML`,
   `setHTMLUnsafe`, `createContextualFragment`, `parseFromString`, `srcdoc`,

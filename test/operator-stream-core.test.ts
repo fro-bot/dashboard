@@ -12917,6 +12917,7 @@ describe('finished-run store — recorded init', () => {
 
 const OP_RUN = 'run-op-001'
 const OP_INTERVAL_MS = 100
+const OP_HOLD_MS = 3000
 
 /** The renderer's sentinel fragment: a fake element whose text is the source behind an `R:` marker. */
 function opRenderer(behaviour: (text: string, callIndex: number) => void = () => {}) {
@@ -13856,8 +13857,6 @@ describe('initOperatorStream — output painting', () => {
   })
 
   describe('selection hold limit', () => {
-    const OP_HOLD_MS = 3000
-
     it('a held selection repaints after the hold, though the selection never changed', async () => {
       const dom = opStubDocument()
       const renderer = opRenderer()
@@ -14080,6 +14079,93 @@ describe('initOperatorStream — output painting', () => {
       expect(out.textContent).toBe('R:ab')
     })
 
+    it('a focused link holds a streaming paint for the hold limit, then paints through', async () => {
+      const dom = opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const link = makeFakeEl('a')
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      out.append(link)
+      dom.focus(link)
+      opFire(out, 'focusin')
+      await h.push(opDelta('b', 2))
+
+      await vi.advanceTimersByTimeAsync(OP_HOLD_MS - 1)
+      expect(out.textContent).toBe('R:a')
+      expect(renderer).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(out.textContent).toBe('R:ab')
+      expect(renderer).toHaveBeenCalledTimes(2)
+    })
+
+    it('a focus that returns with the window (focusout, then focusin) does not hold past the bound', async () => {
+      const dom = opStubDocument()
+      const out = opOutputEl()
+      const link = makeFakeEl('a')
+      const h = await opOpen(out, opRenderer())
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      out.append(link)
+      dom.focus(link)
+      opFire(out, 'focusin')
+      await h.push(opDelta('b', 2))
+
+      opFire(out, 'focusout', {relatedTarget: null}) // the window lost focus
+      expect(out.textContent).toBe('R:ab')
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      out.append(link)
+      opFire(out, 'focusin') // and got it back, with the link still the active element
+      await h.push(opDelta('c', 3))
+      await vi.advanceTimersByTimeAsync(OP_HOLD_MS - 1)
+      expect(out.textContent).toBe('R:ab')
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(out.textContent).toBe('R:abc')
+    })
+
+    it('a pointer press with no release paints after the hold, and holds again for the next paint', async () => {
+      opStubDocument()
+      const out = opOutputEl()
+      const h = await opOpen(out, opRenderer())
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      opFire(out, 'pointerdown') // the release is lost, for example on alt-tab
+      await h.push(opDelta('b', 2))
+
+      await vi.advanceTimersByTimeAsync(OP_HOLD_MS - 1)
+      expect(out.textContent).toBe('R:a')
+      await vi.advanceTimersByTimeAsync(1)
+      expect(out.textContent).toBe('R:ab')
+
+      await h.push(opDelta('c', 3))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+      expect(out.textContent).toBe('R:ab')
+      await vi.advanceTimersByTimeAsync(OP_HOLD_MS)
+      expect(out.textContent).toBe('R:abc')
+    })
+
+    it('a released press cancels the hold timer', async () => {
+      opStubDocument()
+      const out = opOutputEl()
+      const h = await opOpen(out, opRenderer())
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      const baseline = vi.getTimerCount()
+      opFire(out, 'pointerdown')
+      await h.push(opDelta('b', 2))
+      expect(vi.getTimerCount()).toBe(baseline + 1)
+
+      opFire(out, 'pointerup')
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(out.textContent).toBe('R:ab')
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      expect(vi.getTimerCount()).toBe(baseline)
+    })
+
     it('close() removes every listener and clears the pending resume', async () => {
       const dom = opStubDocument()
       const renderer = opRenderer()
@@ -14097,8 +14183,8 @@ describe('initOperatorStream — output painting', () => {
 
       expect(opListenerCount(out)).toBe(0)
       expect(dom.otherListenerCount()).toBe(0)
-      expect(vi.getTimerCount()).toBe(baseline - 1)
-      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+      expect(vi.getTimerCount()).toBe(baseline - 2) // the resume timer and the hold timer
+      await vi.advanceTimersByTimeAsync(OP_HOLD_MS * 2)
       expect(renderer).toHaveBeenCalledTimes(1)
     })
 

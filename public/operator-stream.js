@@ -131,7 +131,7 @@ const OUTPUT_UNAVAILABLE_COPY = 'Output no longer available.'
 /** Shortest gap between two rendered paints of streaming output. */
 const OUTPUT_PAINT_INTERVAL_MS = 100
 
-/** A selection inside the output defers streaming repaints for at most this long, then the paint proceeds. */
+/** A selection, pointer press or focus inside the output defers streaming repaints for at most this long, then the paint proceeds. */
 const OUTPUT_SELECTION_HOLD_MS = 3000
 
 /** A box scrolled to within this many pixels of its end counts as at the bottom. */
@@ -3944,7 +3944,7 @@ export function initOperatorStream(opts) {
   let outputCooldownTimer = null // armed after a throttled paint; a paint that lands while it runs waits for it
   let outputPaintWaiting = false
   let outputSelectionListening = false
-  let outputHoldTimer = null // armed while a selection defers a paint; ends the deferral after the hold limit
+  let outputHoldTimer = null // armed while a selection, pointer press or focus defers a paint; ends the deferral after the hold limit
   let outputPaintDeferred = false // a streaming paint is waiting on a selection, a pointer press or focus
   let outputPointerDown = false
   let outputFocusLeft = false // focus left the output; activeElement may lag the event, so this wins until focusin
@@ -3987,13 +3987,21 @@ export function initOperatorStream(opts) {
     outputDocument()?.removeEventListener?.('selectionchange', onOutputSelectionChange)
   }
 
-  // A selection defers until it changes or the hold limit passes, whichever comes first.
-  function deferOutputPaintForSelection() {
+  // Every deferral is bounded: a selection, a pointer press and a focus each yield until they end or the
+  // hold limit passes, whichever comes first. A release or a focusout can be lost (alt-tab, say), and an
+  // output that yields forever is frozen.
+  function deferOutputPaint() {
     outputPaintDeferred = true
-    if (outputSelectionListening) return
-    outputSelectionListening = true
-    outputDocument()?.addEventListener?.('selectionchange', onOutputSelectionChange)
-    outputHoldTimer = setTimeout(onOutputHoldExpired, OUTPUT_SELECTION_HOLD_MS)
+    if (outputHoldTimer === null) outputHoldTimer = setTimeout(onOutputHoldExpired, OUTPUT_SELECTION_HOLD_MS)
+  }
+
+  // A selection also resumes as soon as it changes.
+  function deferOutputPaintForSelection() {
+    if (!outputSelectionListening) {
+      outputSelectionListening = true
+      outputDocument()?.addEventListener?.('selectionchange', onOutputSelectionChange)
+    }
+    deferOutputPaint()
   }
 
   function onOutputSelectionChange() {
@@ -4156,7 +4164,7 @@ export function initOperatorStream(opts) {
 
   /**
    * Paint the output from current state. `force` bypasses the memo's throttle and deferral (a view change);
-   * `holdExpired` lets a paint through a selection that has held for the limit.
+   * `holdExpired` lets a paint through a selection, press or focus that has held for the limit.
    */
   function paintOutput(force, holdExpired = false) {
     if (!outputEl || aborted) return
@@ -4185,8 +4193,8 @@ export function initOperatorStream(opts) {
         outputPaintWaiting = true
         return
       }
-      if (outputPointerDown || focusInsideOutput()) {
-        outputPaintDeferred = true
+      if (!holdExpired && (outputPointerDown || focusInsideOutput())) {
+        deferOutputPaint()
         return
       }
       if (!holdExpired && selectionInsideOutput()) {

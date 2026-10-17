@@ -30,7 +30,7 @@ import type * as LaunchModule from '../../../public/operator-launch.js'
 import type * as RunIndexModule from '../../../public/operator-run-index.js'
 import type * as StreamModule from '../../../public/operator-stream.js'
 import type {FinishedRunRecord, RunSummaryStatus, StreamHandle} from '../../../public/operator-stream.js'
-import type {renderOutput} from './markdown-output.ts'
+import {loadOutputRenderer, type OutputRenderer} from './renderer-source.ts'
 import type {OperatorState} from './state.ts'
 import {clearGatewaySignInRedirectGuard, maybeAutoRedirectToGatewaySignIn} from './sign-in-recovery.ts'
 
@@ -383,6 +383,11 @@ function _activeStreamServes(runId: string): boolean {
   return handle.getConnectionStatus() !== 'inactive'
 }
 
+/** Whether the list still has a card for `runId`. */
+function _cardIsListed(runId: string): boolean {
+  return typeof document !== 'undefined' && document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`) !== null
+}
+
 /** Fixed copy: the run ID is never echoed. */
 const JUMP_MISS_COPY = "That run isn't in your recent runs."
 
@@ -441,8 +446,12 @@ const RENDERER_LOAD_CAP_MS = 2000
 /** The attach waiting for the renderer, if any. Closing the active stream cancels it. */
 let _deferredAttach: object | null = null
 
+/** The run whose attach is waiting. Cleared with `_deferredAttach`; a second click on its card is a collapse. */
+let _parkedRunId: string | null = null
+
 function _closeActiveStream(): void {
   _deferredAttach = null
+  _parkedRunId = null
   if (_activeStreamHandle !== null) {
     try {
       _activeStreamHandle.close()
@@ -476,21 +485,13 @@ async function defaultRuntimeLoader(opts?: {
   const epoch = ++_loaderEpoch
   _setJumpSlot(epoch, {mode: 'queue', pending: _pendingRunJump()})
 
-  // The casts name the sidecar types, so renaming or retyping a member the runtime uses fails
-  // check-types instead of surfacing as a silently skipped call. Only the members listed are read.
-  const streamMod = await import(/* @vite-ignore */ _streamSpecifier) as Pick<
-    typeof StreamModule,
-    'initOperatorStream' | 'takeUsableFinishedRun' | 'pruneFinishedRuns' | 'clearFinishedRuns' | 'resetOutputView'
-  >
-  _clearFinishedRuns = () => streamMod.clearFinishedRuns()
-  // Streams attach on expand, launch, restore and jump only; the stream module's own bootstrap is not run here.
-
   // The renderer imports alongside the operator modules and is not awaited here, so a stalled import
-  // cannot hold up the run index or launch. A recorded repaint is one synchronous paint with no later
+  // cannot hold up the run index or launch. It starts first, before any module import, so its cap counts
+  // from the loader's start and a slow module import does not add to it. A recorded repaint is one synchronous paint with no later
   // frame to upgrade it, so the first attach waits for the import to settle (see _attachStream), at most
   // RENDERER_LOAD_CAP_MS. A renderer that is missing, fails to load or is too slow is no renderer, and
   // that stream paints plain text.
-  let renderer: typeof renderOutput | undefined
+  let renderer: OutputRenderer | undefined
   let rendererSettled = false
   let rendererCapTimer: ReturnType<typeof setTimeout> | undefined
   const rendererReady = new Promise<void>(resolve => {
@@ -502,14 +503,29 @@ async function defaultRuntimeLoader(opts?: {
     }
     rendererCapTimer = setTimeout(settle, RENDERER_LOAD_CAP_MS)
     // A late renderer is still kept: only the attaches that already went ahead lack it.
-    import('./markdown-output.ts').then(
-      module => {
-        renderer = module.renderOutput
+    let loading: Promise<OutputRenderer | undefined>
+    try {
+      loading = loadOutputRenderer()
+    } catch {
+      loading = Promise.resolve(undefined)
+    }
+    loading.then(
+      loaded => {
+        renderer = loaded
         settle()
       },
       settle,
     )
   })
+
+  // The casts name the sidecar types, so renaming or retyping a member the runtime uses fails
+  // check-types instead of surfacing as a silently skipped call. Only the members listed are read.
+  const streamMod = await import(/* @vite-ignore */ _streamSpecifier) as Pick<
+    typeof StreamModule,
+    'initOperatorStream' | 'takeUsableFinishedRun' | 'pruneFinishedRuns' | 'clearFinishedRuns' | 'resetOutputView'
+  >
+  _clearFinishedRuns = () => streamMod.clearFinishedRuns()
+  // Streams attach on expand, launch, restore and jump only; the stream module's own bootstrap is not run here.
 
   const runIndexMod = await import(/* @vite-ignore */ _runIndexSpecifier) as Pick<
     typeof RunIndexModule,
@@ -540,10 +556,17 @@ async function defaultRuntimeLoader(opts?: {
     // Only the attaches before the renderer settles wait; closing the active stream cancels the wait.
     const token = {}
     _deferredAttach = token
+    _parkedRunId = runId
     void rendererReady.then(() => {
       if (_deferredAttach !== token) return
       _deferredAttach = null
+      _parkedRunId = null
       if (disposed || authRequired) return
+      // The list may have dropped the card while the attach waited; there is nothing left to stream into.
+      if (!_cardIsListed(runId)) {
+        _clearRunHash()
+        return
+      }
       _attachStreamNow(runId, statusEl, noticeEl, takenRecord)
     })
   }
@@ -751,7 +774,8 @@ async function defaultRuntimeLoader(opts?: {
   // _attachStream makes the same check, so the record is also used after a refresh lands.
   const onSelectRun = (runId: string): Promise<void> | void => {
     cancelPendingCardReveal()
-    if (_activeStreamRunId === runId) {
+    if (_activeStreamRunId === runId || _parkedRunId === runId) {
+      // The active stream, or the attach still waiting on the renderer: either way this is a collapse.
       _cancelPendingExpand()
       _closeActiveStream()
       _clearRunHash()
@@ -797,9 +821,7 @@ async function defaultRuntimeLoader(opts?: {
       if (disposed || authRequired || _pendingExpand !== pending) return
       _pendingExpand = null
       // The refresh may have dropped the run from the list; there is nothing left to stream into.
-      const stillListed = typeof document !== 'undefined'
-        && document.querySelector(`[data-run-id="${CSS.escape(runId)}"]`) !== null
-      if (!stillListed) {
+      if (!_cardIsListed(runId)) {
         _clearRunHash()
         return
       }
