@@ -7389,6 +7389,48 @@ describe('CSS selector ↔ checkout-detail emitter agreement', () => {
   })
 })
 
+describe('CSS selector ↔ run-output emitter agreement', () => {
+  it('styles every emitted output class and view value', async () => {
+    const fs = await import('node:fs/promises')
+    const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
+    const renderer = await fs.readFile(new URL('../web/src/operator/markdown-output.ts', import.meta.url).pathname, 'utf8')
+    const stream = await fs.readFile(new URL('../public/operator-stream.js', import.meta.url).pathname, 'utf8')
+
+    const emittedClasses = [...new Set([
+      ...[...renderer.matchAll(/(?:_CLASS\s*=\s*|setAttribute\('class',\s*)'([^']+)'/g)].map(match => match[1]),
+      ...[...stream.matchAll(/(?:className\s*=\s*|classList\??\.(?:add|remove)\()'([^']+)'/g)].map(match => match[1]),
+    ].filter((className): className is string => className?.startsWith('run-output-') === true))]
+    expect(emittedClasses).toEqual(expect.arrayContaining([
+      'run-output-table',
+      'run-output-link-host',
+      'run-output-unavailable',
+      'run-output-toggle',
+      'run-output-copy',
+      'run-output-copy-status',
+    ]))
+    for (const className of emittedClasses) {
+      expect(css, `no CSS rule for .${className}`).toMatch(new RegExp(String.raw`\.${className}(?![\w-])`))
+    }
+
+    const viewValues = new Set([
+      ...[...stream.matchAll(/outputViewPreference\s*=\s*'([^']+)'/g)].map(match => match[1]),
+      ...[...stream.matchAll(/view\s*=\s*'(rendered|raw)'/g)].map(match => match[1]),
+      ...[...stream.matchAll(/setOutputViewAttribute\('([^']+)'\)/g)].map(match => match[1]),
+    ])
+    expect(viewValues).toEqual(new Set(['rendered', 'raw', 'unavailable']))
+    for (const view of viewValues) {
+      expect(css, `no CSS rule for data-output-view="${view}"`).toMatch(
+        new RegExp(String.raw`\[data-output-view=["']${view}["']\]`),
+      )
+    }
+
+    expect(css).toMatch(/\[data-output-view="rendered"\]\s+ul\s*\{[^}]*list-style-type:\s*disc/)
+    expect(css).toMatch(/\[data-output-view="rendered"\]\s+ol\s*\{[^}]*list-style-type:\s*decimal/)
+    expect(css).toMatch(/\[data-output-view="rendered"\]\s+ul\s+ul\s*\{[^}]*list-style-type:\s*circle/)
+    expect(renderer).toMatch(/setAttribute\('start',\s*start\)/)
+  })
+})
+
 describe('CSS selector ↔ question-region emitter agreement', () => {
   it('has a CSS rule for every class token emitted by the question renderer', async () => {
     const fs = await import('node:fs/promises')
