@@ -4511,6 +4511,96 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
     }
   })
 
+  describe('a renderer import that is slow to settle', () => {
+    // A mocked import left pending would leak into the next case, so every case's import is released at the end.
+    const releases: Array<() => Promise<void>> = []
+    afterEach(async () => {
+      vi.useRealTimers()
+      for (const release of releases.splice(0)) await release()
+    })
+
+    /** Mock the renderer module so its import stays pending until the returned function releases it. */
+    function mockPendingRenderer(): () => Promise<void> {
+      let settle: ((module: object) => void) | undefined
+      vi.doMock('./markdown-output.ts', () => new Promise<object>(resolve => {
+        settle = resolve
+      }))
+      const release = async () => settle?.(await vi.importActual<object>('./markdown-output.ts'))
+      releases.push(release)
+      return release
+    }
+
+    it('never stops the run index and launch from initializing', async () => {
+      mockPendingRenderer()
+      renderPage()
+
+      const mounted = await mountRenderer()
+
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+      expect(mounted.onStateChange).not.toHaveBeenCalled()
+    })
+
+    it('holds the first attach until the renderer loads, then passes it', async () => {
+      const release = mockPendingRenderer()
+      renderPage()
+      const mounted = await mountRenderer()
+
+      await mounted.click()
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+
+      await release()
+      await vi.waitFor(() => expect(mounted.initOperatorStream).toHaveBeenCalledTimes(1))
+
+      expectRealRenderer(mounted.lastAttach()?.renderOutput)
+    })
+
+    it('a recorded repaint gets the renderer when it loads in time', async () => {
+      const release = mockPendingRenderer()
+      renderPage()
+      const mounted = await mountRenderer({finishedRecord: FINISHED})
+
+      await mounted.click()
+      await release()
+      await vi.waitFor(() => expect(mounted.initOperatorStream).toHaveBeenCalledTimes(1))
+
+      expect(mounted.lastAttach()?.finishedRecord).toBe(FINISHED)
+      expectRealRenderer(mounted.lastAttach()?.renderOutput)
+    })
+
+    it('waits for the renderer for about 2 s at most, then attaches without it', async () => {
+      vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']})
+      mockPendingRenderer()
+      renderPage()
+      const mounted = await mountRenderer()
+
+      await mounted.click()
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(mounted.initOperatorStream).toHaveBeenCalledTimes(1)
+      expect('renderOutput' in (mounted.lastAttach() as object)).toBe(false)
+
+      // The stalled import is no longer waited on: the next attach is immediate.
+      mounted.restore()
+      expect(mounted.initOperatorStream).toHaveBeenCalledTimes(2)
+    })
+
+    it('signing out while the first attach waits cancels that attach', async () => {
+      vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']})
+      mockPendingRenderer()
+      renderPage()
+      const mounted = await mountRenderer()
+      await mounted.click()
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+
+      mounted.authRequired()
+      await vi.advanceTimersByTimeAsync(3000)
+
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+    })
+  })
+
   it('auth-required closes the active stream, resets the output view and clears the finished runs', async () => {
     renderPage()
     const mounted = await mountRenderer()

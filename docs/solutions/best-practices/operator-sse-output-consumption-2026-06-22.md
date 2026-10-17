@@ -124,9 +124,15 @@ from a parsed token stream, not from markup:
   `href`, `target="_blank"` and `rel="noopener noreferrer"` are set. When the visible
   text of an accepted link is not its URL, the destination host is shown after it.
 - The renderer returns a `DocumentFragment`, and the stream swaps it in with one
-  `replaceChildren`. A render that throws, or that needs more than 20,000 nodes,
-  paints plain `textContent` for that paint only. The next paint tries the renderer
-  again. With no renderer, the plain path runs unchanged.
+  `replaceChildren`. A render that throws, returns no node, or needs more than 20,000
+  nodes paints plain `textContent` and latches that attachment to plain text: the
+  renderer is not called again, and status frames do not rewrite the output. The latch
+  clears when the Rendered/Raw preference changes, and once on the final frame or a
+  terminal status, which allows one retry. If the retry throws, the latch stays set.
+  With no renderer, the plain path runs unchanged.
+- Streaming repaints yield to a text selection, a pointer press, or focus inside the
+  output, so links stay clickable mid-stream. A selection yields for at most three
+  seconds before the paint proceeds. A final frame or terminal status always paints.
 - The innerHTML-family ban (`innerHTML`, `outerHTML`, `insertAdjacentHTML`,
   `setHTMLUnsafe`, `createContextualFragment`, `parseFromString`, `srcdoc`,
   `document.write`) covers every shipped module that builds output DOM, including

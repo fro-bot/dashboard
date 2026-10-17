@@ -30,6 +30,7 @@ import type * as LaunchModule from '../../../public/operator-launch.js'
 import type * as RunIndexModule from '../../../public/operator-run-index.js'
 import type * as StreamModule from '../../../public/operator-stream.js'
 import type {FinishedRunRecord, RunSummaryStatus, StreamHandle} from '../../../public/operator-stream.js'
+import type {renderOutput} from './markdown-output.ts'
 import type {OperatorState} from './state.ts'
 import {clearGatewaySignInRedirectGuard, maybeAutoRedirectToGatewaySignIn} from './sign-in-recovery.ts'
 
@@ -431,7 +432,17 @@ function _clearRunHash(): void {
   }
 }
 
+/**
+ * The first attach waits for the output renderer's import to settle, but never longer than this since the
+ * loader started. A stalled import then costs one short delay, and every stream attaches as plain text.
+ */
+const RENDERER_LOAD_CAP_MS = 2000
+
+/** The attach waiting for the renderer, if any. Closing the active stream cancels it. */
+let _deferredAttach: object | null = null
+
 function _closeActiveStream(): void {
+  _deferredAttach = null
   if (_activeStreamHandle !== null) {
     try {
       _activeStreamHandle.close()
@@ -474,10 +485,31 @@ async function defaultRuntimeLoader(opts?: {
   _clearFinishedRuns = () => streamMod.clearFinishedRuns()
   // Streams attach on expand, launch, restore and jump only; the stream module's own bootstrap is not run here.
 
-  // The renderer loads up front, with the operator modules: a recorded repaint is one synchronous paint
-  // with no later frame to upgrade it, so a lazy load would leave it as plain text. A renderer that is
-  // missing or fails to load is no renderer, and every stream paints plain text.
-  const renderer = (await import('./markdown-output.ts').catch(() => undefined))?.renderOutput
+  // The renderer imports alongside the operator modules and is not awaited here, so a stalled import
+  // cannot hold up the run index or launch. A recorded repaint is one synchronous paint with no later
+  // frame to upgrade it, so the first attach waits for the import to settle (see _attachStream), at most
+  // RENDERER_LOAD_CAP_MS. A renderer that is missing, fails to load or is too slow is no renderer, and
+  // that stream paints plain text.
+  let renderer: typeof renderOutput | undefined
+  let rendererSettled = false
+  let rendererCapTimer: ReturnType<typeof setTimeout> | undefined
+  const rendererReady = new Promise<void>(resolve => {
+    const settle = () => {
+      if (rendererSettled) return
+      rendererSettled = true
+      clearTimeout(rendererCapTimer)
+      resolve()
+    }
+    rendererCapTimer = setTimeout(settle, RENDERER_LOAD_CAP_MS)
+    // A late renderer is still kept: only the attaches that already went ahead lack it.
+    import('./markdown-output.ts').then(
+      module => {
+        renderer = module.renderOutput
+        settle()
+      },
+      settle,
+    )
+  })
 
   const runIndexMod = await import(/* @vite-ignore */ _runIndexSpecifier) as Pick<
     typeof RunIndexModule,
@@ -501,6 +533,27 @@ async function defaultRuntimeLoader(opts?: {
     _cancelPendingExpand()
     _closeActiveStream()
 
+    if (rendererSettled) {
+      _attachStreamNow(runId, statusEl, noticeEl, takenRecord)
+      return
+    }
+    // Only the attaches before the renderer settles wait; closing the active stream cancels the wait.
+    const token = {}
+    _deferredAttach = token
+    void rendererReady.then(() => {
+      if (_deferredAttach !== token) return
+      _deferredAttach = null
+      if (disposed || authRequired) return
+      _attachStreamNow(runId, statusEl, noticeEl, takenRecord)
+    })
+  }
+
+  function _attachStreamNow(
+    runId: string,
+    statusEl: Element | null,
+    noticeEl: Element | null,
+    takenRecord?: FinishedRunRecord,
+  ): void {
     // Discover the per-card render targets so live output, coalescing hints,
     // approval prompts, and the approval badge all render — not just status.
     const {outputEl, toolsEl, coalescedEl, approvalsEl, badgeEl, reasonEl, cancelEl, checkoutEl, questionsEl, timeEl, waitingEl} = discoverCardStreamTargets(runId)
@@ -981,6 +1034,7 @@ async function defaultRuntimeLoader(opts?: {
 
   return () => {
     disposed = true
+    clearTimeout(rendererCapTimer)
     cancelPendingCardReveal()
     jumpsRecoverable = false
     _setJumpSlot(epoch, {mode: 'queue', pending: null})

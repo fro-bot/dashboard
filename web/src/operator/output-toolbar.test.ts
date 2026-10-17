@@ -271,6 +271,76 @@ describe('Rendered/Raw toggle', () => {
   })
 })
 
+describe('Rendered/Raw toggle across attachments and render failure', () => {
+  const failingRenderer = () => {
+    throw new Error('render failed')
+  }
+
+  it('repaints every attached card, aria-pressed included, and leaves a closed one alone', async () => {
+    const {cards} = await mountListCards([RUN_ID, OTHER_RUN_ID])
+    const first = cards.get(RUN_ID) as HTMLElement
+    const second = cards.get(OTHER_RUN_ID) as HTMLElement
+    const firstHandle = attach(first, RUN_ID)
+    attach(second, OTHER_RUN_ID, {finishedRecord: record(OTHER_RUN_ID)})
+
+    click(toggleButton(first))
+
+    expect(toggleButton(second).getAttribute('aria-pressed')).toBe('true')
+    expect(region(second, 'run-output').getAttribute('data-output-view')).toBe('raw')
+    expect(region(second, 'run-output').textContent).toBe('final **answer**')
+
+    firstHandle.close()
+    const staleOutput = region(first, 'run-output').getAttribute('data-output-view')
+    click(toggleButton(second))
+
+    expect(toggleButton(second).getAttribute('aria-pressed')).toBe('false')
+    expect(region(second, 'run-output').getAttribute('data-output-view')).toBe('rendered')
+    expect(region(first, 'run-output').getAttribute('data-output-view')).toBe(staleOutput)
+  })
+
+  it('hides the toggle while the renderer failure is latched, keeps Copy raw, and reports the painted view', async () => {
+    const {cards} = await mountListCards()
+    const card = cards.get(RUN_ID) as HTMLElement
+    attach(card, RUN_ID, {renderOutput: failingRenderer})
+
+    expect(region(card, 'run-output').getAttribute('data-output-view')).toBe('raw')
+    expect(region(card, 'run-output').textContent).toBe('final **answer**')
+    expect(toggleButton(card).hidden).toBe(true)
+    expect(toggleButton(card).getAttribute('aria-pressed')).toBe('true')
+    expect(copyButton(card).hidden).toBe(false)
+    expect(tools(card).hidden).toBe(false)
+  })
+
+  it('shows the toggle again once the view changes, and hides it again if the renderer keeps failing', async () => {
+    const {cards} = await mountListCards()
+    const card = cards.get(RUN_ID) as HTMLElement
+    const handle = attach(card, RUN_ID, {renderOutput: failingRenderer})
+    expect(toggleButton(card).hidden).toBe(true)
+
+    handle.setOutputView('raw')
+    expect(toggleButton(card).hidden).toBe(false)
+    expect(toggleButton(card).getAttribute('aria-pressed')).toBe('true')
+
+    handle.setOutputView('rendered')
+    expect(toggleButton(card).hidden).toBe(true)
+    expect(toggleButton(card).getAttribute('aria-pressed')).toBe('true')
+    expect(region(card, 'run-output').getAttribute('data-output-view')).toBe('raw')
+  })
+
+  it('a card whose render succeeds is untouched by another card latching', async () => {
+    const {cards} = await mountListCards([RUN_ID, OTHER_RUN_ID])
+    const healthy = cards.get(RUN_ID) as HTMLElement
+    const failing = cards.get(OTHER_RUN_ID) as HTMLElement
+    attach(healthy, RUN_ID)
+    attach(failing, OTHER_RUN_ID, {finishedRecord: record(OTHER_RUN_ID), renderOutput: failingRenderer})
+
+    expect(toggleButton(failing).hidden).toBe(true)
+    expect(toggleButton(healthy).hidden).toBe(false)
+    expect(toggleButton(healthy).getAttribute('aria-pressed')).toBe('false')
+    expect(region(healthy, 'run-output').getAttribute('data-output-view')).toBe('rendered')
+  })
+})
+
 describe('Copy raw', () => {
   it('writes the raw output text synchronously inside the click, then says "Copied" for about 1.5 s', async () => {
     vi.useFakeTimers()

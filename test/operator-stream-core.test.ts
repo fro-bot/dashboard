@@ -12931,13 +12931,27 @@ function opRenderer(behaviour: (text: string, callIndex: number) => void = () =>
 
 /** An output region with the scroll metrics a browser would report. */
 function opOutputEl() {
-  const el = makeFakeEl('div') as FakeElement & {scrollTop: number; scrollHeight: number; clientHeight: number}
+  const el = makeFakeEl('div') as FakeElement & {
+    scrollTop: number
+    scrollHeight: number
+    clientHeight: number
+    removeEventListener: (event: string, handler: (...args: unknown[]) => void) => void
+  }
   el.hidden = true
   el.scrollTop = 0
   el.scrollHeight = 0
   el.clientHeight = 0
+  el.removeEventListener = (event, handler) => {
+    el.eventListeners[event] = (el.eventListeners[event] ?? []).filter(registered => registered !== handler)
+  }
   return el
 }
+
+/** How many listeners are registered on the element, across every event type. */
+const opListenerCount = (el: FakeElement) => Object.values(el.eventListeners).reduce((total, handlers) => total + handlers.length, 0)
+
+/** Dispatch an event with extra fields (a `relatedTarget`, say) that the fake's typed signature omits. */
+const opFire = (el: FakeElement, type: string, extra: Record<string, unknown> = {}) => el.dispatchEvent({type, ...extra})
 
 /** A document stub with a selection the test drives and a record of the `selectionchange` listeners. */
 function opStubDocument() {
@@ -12948,7 +12962,9 @@ function opStubDocument() {
     anchorNode: null,
     focusNode: null,
   }
+  const otherListeners = new Map<string, Set<() => void>>()
   const doc = {
+    activeElement: null as unknown,
     createElement: (tag: string) => makeFakeEl(tag),
     createTextNode: (text: string) => {
       const node = makeFakeEl('#text')
@@ -12958,9 +12974,11 @@ function opStubDocument() {
     getSelection: () => selection,
     addEventListener: (type: string, listener: () => void) => {
       if (type === 'selectionchange') listeners.add(listener)
+      else otherListeners.set(type, (otherListeners.get(type) ?? new Set()).add(listener))
     },
     removeEventListener: (type: string, listener: () => void) => {
       if (type === 'selectionchange') listeners.delete(listener)
+      else otherListeners.get(type)?.delete(listener)
     },
   }
   vi.stubGlobal('document', doc)
@@ -12970,6 +12988,14 @@ function opStubDocument() {
   return {
     doc,
     listenerCount: () => listeners.size,
+    /** Listeners on the document for any event other than `selectionchange`. */
+    otherListenerCount: () => [...otherListeners.values()].reduce((total, set) => total + set.size, 0),
+    fireDocument(type: string) {
+      for (const listener of [...(otherListeners.get(type) ?? [])]) listener()
+    },
+    focus(node: unknown) {
+      doc.activeElement = node
+    },
     select(node: unknown) {
       selection.isCollapsed = false
       selection.rangeCount = 1
@@ -13295,11 +13321,13 @@ describe('initOperatorStream — output painting', () => {
   })
 
   describe('render failure', () => {
-    it('paints plain text for that paint, and the next paint calls the renderer again', async () => {
+    const alwaysThrows = () => opRenderer(() => {
+      throw new Error('render failed')
+    })
+
+    it('latches on the first failure: plain text now, and the renderer is not called again while streaming', async () => {
       opStubDocument()
-      const renderer = opRenderer((_text, callIndex) => {
-        if (callIndex === 0) throw new Error('render failed')
-      })
+      const renderer = alwaysThrows()
       const out = opOutputEl()
       const h = await opOpen(out, renderer)
 
@@ -13310,13 +13338,64 @@ describe('initOperatorStream — output painting', () => {
 
       await h.push(opDelta('b', 2))
       await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      await h.push(opDelta('c', 3))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
 
-      expect(renderer).toHaveBeenCalledTimes(2)
-      expect(out.textContent).toBe('R:ab')
-      expect(out.attributes['data-output-view']).toBe('rendered')
+      expect(renderer).toHaveBeenCalledTimes(1)
+      expect(out.textContent).toBe('abc')
+      expect(out.attributes['data-output-view']).toBe('raw')
     })
 
-    it('does not record the memo key: an unchanged state retries the renderer on the next paint', async () => {
+    it('records the plain-text write in the memo key: a status frame neither renders nor rewrites', async () => {
+      opStubDocument()
+      const renderer = alwaysThrows()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      const writes: string[] = []
+      let value = out.textContent
+      Object.defineProperty(out, 'textContent', {
+        get: () => value,
+        set: (next: string) => {
+          writes.push(next)
+          value = next
+        },
+        configurable: true,
+      })
+
+      await h.push(fcStatus(OP_RUN, 'running'))
+      await h.push(': heartbeat\n\n')
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+
+      expect(renderer).toHaveBeenCalledTimes(1)
+      expect(writes).toEqual([])
+    })
+
+    it('a renderer that always throws is called at most twice across a long stream', async () => {
+      opStubDocument()
+      const renderer = alwaysThrows()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+
+      for (let index = 1; index <= 30; index++) {
+        await h.push(opDelta('x', index))
+        await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      }
+      expect(renderer).toHaveBeenCalledTimes(1)
+
+      await h.push(fcOutput(OP_RUN, 'the answer', {seq: 31}))
+      expect(renderer).toHaveBeenCalledTimes(2)
+      expect(out.textContent).toBe('the answer')
+
+      await h.push(fcStatus(OP_RUN, 'succeeded'))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+
+      expect(renderer).toHaveBeenCalledTimes(2)
+      expect(out.textContent).toBe('the answer')
+      expect(out.attributes['data-output-view']).toBe('raw')
+    })
+
+    it('the final frame retries once, and a success clears the latch', async () => {
       opStubDocument()
       const renderer = opRenderer((_text, callIndex) => {
         if (callIndex === 0) throw new Error('render failed')
@@ -13326,12 +13405,82 @@ describe('initOperatorStream — output painting', () => {
       await h.push(opDelta('a', 1))
       expect(out.textContent).toBe('a')
 
-      // A status frame changes no output, yet the failed paint left the key unrecorded.
-      await h.push(fcStatus(OP_RUN, 'running'))
-      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      await h.push(fcOutput(OP_RUN, 'answer', {seq: 2}))
+
+      expect(renderer).toHaveBeenCalledTimes(2)
+      expect(out.textContent).toBe('R:answer')
+      expect(out.attributes['data-output-view']).toBe('rendered')
+    })
+
+    it('a terminal status alone also retries once', async () => {
+      opStubDocument()
+      const renderer = opRenderer((_text, callIndex) => {
+        if (callIndex === 0) throw new Error('render failed')
+      })
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+
+      await h.push(fcStatus(OP_RUN, 'cancelled'))
 
       expect(renderer).toHaveBeenCalledTimes(2)
       expect(out.textContent).toBe('R:a')
+      expect(out.attributes['data-output-view']).toBe('rendered')
+    })
+
+    it('a retry that throws keeps the latch: nothing renders again until the view changes', async () => {
+      opStubDocument()
+      const renderer = alwaysThrows()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      await h.push(fcOutput(OP_RUN, 'answer', {seq: 2}))
+      await h.push(fcStatus(OP_RUN, 'succeeded'))
+      expect(renderer).toHaveBeenCalledTimes(2)
+
+      await h.push(fcStatus(OP_RUN, 'succeeded'))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+
+      expect(renderer).toHaveBeenCalledTimes(2)
+      expect(out.textContent).toBe('answer')
+      expect(out.attributes['data-output-view']).toBe('raw')
+
+      h.handle.setOutputView('raw')
+      h.handle.setOutputView('rendered')
+      expect(renderer).toHaveBeenCalledTimes(3)
+    })
+
+    it('a changed view clears the latch', async () => {
+      opStubDocument()
+      const renderer = opRenderer((_text, callIndex) => {
+        if (callIndex === 0) throw new Error('render failed')
+      })
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      expect(out.attributes['data-output-view']).toBe('raw')
+
+      h.handle.setOutputView('raw')
+      expect(renderer).toHaveBeenCalledTimes(1)
+      expect(out.attributes['data-output-view']).toBe('raw')
+
+      h.handle.setOutputView('rendered')
+      expect(renderer).toHaveBeenCalledTimes(2)
+      expect(out.textContent).toBe('R:a')
+      expect(out.attributes['data-output-view']).toBe('rendered')
+    })
+
+    it('setting the view it already has does not clear the latch', async () => {
+      opStubDocument()
+      const renderer = alwaysThrows()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+
+      h.handle.setOutputView('rendered')
+
+      expect(renderer).toHaveBeenCalledTimes(1)
+      expect(out.attributes['data-output-view']).toBe('raw')
     })
 
     it('a renderer that returns nothing falls back to plain text', async () => {
@@ -13703,6 +13852,327 @@ describe('initOperatorStream — output painting', () => {
       h.handle.setOutputView('raw')
 
       expect(out.textContent).toBe('abc')
+    })
+  })
+
+  describe('selection hold limit', () => {
+    const OP_HOLD_MS = 3000
+
+    it('a held selection repaints after the hold, though the selection never changed', async () => {
+      const dom = opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      dom.select(out)
+      await h.push(opDelta('b', 2))
+
+      await vi.advanceTimersByTimeAsync(OP_HOLD_MS - 1)
+      expect(out.textContent).toBe('R:a')
+      expect(renderer).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(out.textContent).toBe('R:ab')
+      expect(renderer).toHaveBeenCalledTimes(2)
+      expect(dom.listenerCount()).toBe(0)
+    })
+
+    it('a selection that is still held defers the next streaming paint and holds again', async () => {
+      const dom = opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      dom.select(out)
+      await h.push(opDelta('b', 2))
+      await vi.advanceTimersByTimeAsync(OP_HOLD_MS)
+      expect(out.textContent).toBe('R:ab')
+
+      await h.push(opDelta('c', 3))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+      expect(out.textContent).toBe('R:ab')
+
+      await vi.advanceTimersByTimeAsync(OP_HOLD_MS)
+      expect(out.textContent).toBe('R:abc')
+    })
+
+    it('clearing the selection cancels the hold timer', async () => {
+      const dom = opStubDocument()
+      const out = opOutputEl()
+      const h = await opOpen(out, opRenderer())
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      const baseline = vi.getTimerCount()
+      dom.select(out)
+      await h.push(opDelta('b', 2))
+      expect(vi.getTimerCount()).toBe(baseline + 1)
+
+      dom.clear()
+
+      expect(out.textContent).toBe('R:ab')
+      expect(vi.getTimerCount()).toBe(baseline + 1) // only the post-paint cooldown timer remains
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      expect(vi.getTimerCount()).toBe(baseline)
+    })
+
+    it('close() clears the hold timer', async () => {
+      const dom = opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      const baseline = vi.getTimerCount()
+      dom.select(out)
+      await h.push(opDelta('b', 2))
+      expect(vi.getTimerCount()).toBe(baseline + 1)
+
+      h.handle.close()
+
+      expect(vi.getTimerCount()).toBe(baseline)
+      await vi.advanceTimersByTimeAsync(OP_HOLD_MS * 2)
+      expect(renderer).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('pointer and focus', () => {
+    it('a pointerdown inside the output defers a streaming paint', async () => {
+      opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+
+      opFire(out, 'pointerdown')
+      await h.push(opDelta('b', 2))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+
+      expect(renderer).toHaveBeenCalledTimes(1)
+      expect(out.textContent).toBe('R:a')
+    })
+
+    it('a pointerup resumes it, after the click that follows has been delivered', async () => {
+      opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      opFire(out, 'pointerdown')
+      await h.push(opDelta('b', 2))
+
+      opFire(out, 'pointerup')
+      expect(out.textContent).toBe('R:a')
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(out.textContent).toBe('R:ab')
+    })
+
+    it('a pointercancel resumes it', async () => {
+      opStubDocument()
+      const out = opOutputEl()
+      const h = await opOpen(out, opRenderer())
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      opFire(out, 'pointerdown')
+      await h.push(opDelta('b', 2))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+      expect(out.textContent).toBe('R:a')
+
+      opFire(out, 'pointercancel')
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(out.textContent).toBe('R:ab')
+    })
+
+    it('a pointer released outside the output (seen on the document) resumes it', async () => {
+      const dom = opStubDocument()
+      const out = opOutputEl()
+      const h = await opOpen(out, opRenderer())
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      opFire(out, 'pointerdown')
+      await h.push(opDelta('b', 2))
+      expect(dom.otherListenerCount()).toBeGreaterThan(0)
+
+      dom.fireDocument('pointerup')
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(out.textContent).toBe('R:ab')
+      expect(dom.otherListenerCount()).toBe(0)
+    })
+
+    it('a focused link inside the output defers the paint, and focus leaving resumes it', async () => {
+      const dom = opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const link = makeFakeEl('a')
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+
+      out.append(link) // the link a reader tabbed to in the painted output
+      dom.focus(link)
+      opFire(out, 'focusin')
+      await h.push(opDelta('b', 2))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+      expect(renderer).toHaveBeenCalledTimes(1)
+
+      dom.focus(null)
+      opFire(out, 'focusout', {relatedTarget: null})
+
+      expect(out.textContent).toBe('R:ab')
+    })
+
+    it('focus moving to another element inside the output keeps the deferral', async () => {
+      const dom = opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const first = makeFakeEl('a')
+      const second = makeFakeEl('a')
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      out.append(first, second)
+      dom.focus(first)
+      await h.push(opDelta('b', 2))
+
+      dom.focus(second)
+      opFire(out, 'focusout', {relatedTarget: second})
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+
+      expect(renderer).toHaveBeenCalledTimes(1)
+    })
+
+    it('a final paint proceeds despite a pointer press and a focused link', async () => {
+      const dom = opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const link = makeFakeEl('a')
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      out.append(link)
+      dom.focus(link)
+      opFire(out, 'pointerdown')
+      await h.push(opDelta('b', 2))
+      expect(out.textContent).toBe('R:a')
+
+      await h.push(fcOutput(OP_RUN, 'final answer', {seq: 3}))
+
+      expect(out.textContent).toBe('R:final answer')
+    })
+
+    it('a terminal status paints the pending text despite a pointer press', async () => {
+      opStubDocument()
+      const out = opOutputEl()
+      const h = await opOpen(out, opRenderer())
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      opFire(out, 'pointerdown')
+      await h.push(opDelta('b', 2))
+
+      await h.push(fcStatus(OP_RUN, 'failed'))
+
+      expect(out.textContent).toBe('R:ab')
+    })
+
+    it('close() removes every listener and clears the pending resume', async () => {
+      const dom = opStubDocument()
+      const renderer = opRenderer()
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      expect(opListenerCount(out)).toBeGreaterThan(0)
+      await h.push(opDelta('a', 1))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      opFire(out, 'pointerdown')
+      await h.push(opDelta('b', 2))
+      opFire(out, 'pointerup')
+      const baseline = vi.getTimerCount()
+
+      h.handle.close()
+
+      expect(opListenerCount(out)).toBe(0)
+      expect(dom.otherListenerCount()).toBe(0)
+      expect(vi.getTimerCount()).toBe(baseline - 1)
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS * 5)
+      expect(renderer).toHaveBeenCalledTimes(1)
+    })
+
+    it('adds no listener to an output that has no renderer', async () => {
+      opStubDocument()
+      const out = opOutputEl()
+      await opOpen(out)
+
+      expect(opListenerCount(out)).toBe(0)
+    })
+  })
+
+  describe('every attachment follows the page-wide preference', () => {
+    it('toggling on one attachment repaints the other, and the next attach starts from it', async () => {
+      opStubDocument()
+      const rendererA = opRenderer()
+      const rendererB = opRenderer()
+      const outA = opOutputEl()
+      const outB = opOutputEl()
+      const a = await opOpen(outA, rendererA, 'run-op-a')
+      const b = await opOpen(outB, rendererB, 'run-op-b')
+      await a.push(fcOutput('run-op-a', 'alpha'))
+      await b.push(fcOutput('run-op-b', 'beta'))
+      expect(outB.textContent).toBe('R:beta')
+
+      a.handle.setOutputView('raw')
+
+      expect(outA.textContent).toBe('alpha')
+      expect(outB.textContent).toBe('beta')
+      expect(outB.attributes['data-output-view']).toBe('raw')
+
+      a.handle.setOutputView('rendered')
+
+      expect(outB.textContent).toBe('R:beta')
+      expect(outB.attributes['data-output-view']).toBe('rendered')
+    })
+
+    it('a closed attachment is not repainted', async () => {
+      opStubDocument()
+      const rendererA = opRenderer()
+      const rendererB = opRenderer()
+      const outA = opOutputEl()
+      const outB = opOutputEl()
+      const a = await opOpen(outA, rendererA, 'run-op-a')
+      const b = await opOpen(outB, rendererB, 'run-op-b')
+      await a.push(fcOutput('run-op-a', 'alpha'))
+      await b.push(fcOutput('run-op-b', 'beta'))
+      a.handle.close()
+
+      b.handle.setOutputView('raw')
+
+      expect(outA.textContent).toBe('R:alpha')
+      expect(outA.attributes['data-output-view']).toBe('rendered')
+      expect(rendererA).toHaveBeenCalledTimes(1)
+      expect(outB.textContent).toBe('beta')
+    })
+
+    it('a latched attachment clears its latch when another attachment changes the view', async () => {
+      opStubDocument()
+      const failing = opRenderer((_text, callIndex) => {
+        if (callIndex === 0) throw new Error('render failed')
+      })
+      const outA = opOutputEl()
+      const outB = opOutputEl()
+      const a = await opOpen(outA, failing, 'run-op-a')
+      const b = await opOpen(outB, opRenderer(), 'run-op-b')
+      await a.push(fcOutput('run-op-a', 'alpha', {final: false}))
+      expect(outA.attributes['data-output-view']).toBe('raw')
+
+      b.handle.setOutputView('raw')
+      b.handle.setOutputView('rendered')
+
+      expect(outA.textContent).toBe('R:alpha')
+      expect(outA.attributes['data-output-view']).toBe('rendered')
     })
   })
 })

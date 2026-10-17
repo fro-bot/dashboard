@@ -131,6 +131,9 @@ const OUTPUT_UNAVAILABLE_COPY = 'Output no longer available.'
 /** Shortest gap between two rendered paints of streaming output. */
 const OUTPUT_PAINT_INTERVAL_MS = 100
 
+/** A selection inside the output defers streaming repaints for at most this long, then the paint proceeds. */
+const OUTPUT_SELECTION_HOLD_MS = 3000
+
 /** A box scrolled to within this many pixels of its end counts as at the bottom. */
 const OUTPUT_PIN_TOLERANCE_PX = 8
 
@@ -1098,9 +1101,26 @@ export function pruneFinishedRuns(runIds, fixtureSessionId) {
 // The page-wide Rendered/Raw preference. One in-memory value read at paint time; no storage.
 let outputViewPreference = 'rendered'
 
+// One repaint callback per live attachment. A view change repaints every card that is still attached.
+const outputViewRepainters = new Set()
+
 /** Return the Rendered/Raw preference to Rendered. The runtime calls it when auth is required. */
 export function resetOutputView() {
   outputViewPreference = 'rendered'
+}
+
+/**
+ * Set the page-wide preference, then repaint every live attachment. `changed` tells each one whether the
+ * preference actually moved, which is what clears a render failure.
+ */
+function applyOutputView(view) {
+  const changed = view !== outputViewPreference
+  outputViewPreference = view
+  for (const repaint of [...outputViewRepainters]) repaint(changed)
+}
+
+function onToggleClick() {
+  applyOutputView(outputViewPreference === 'raw' ? 'rendered' : 'raw')
 }
 
 /**
@@ -3918,11 +3938,24 @@ export function initOperatorStream(opts) {
 
   // The output painter. paintOutput is the only writer of outputEl after attach. It skips the write when
   // nothing it shows has changed, throttles streaming text when a renderer is injected, and yields to a
-  // text selection inside the output. It reads current state every time it runs.
-  let paintedOutput = null // {text, unavailable, view} of the last successful write; null when none or a fallback
+  // text selection, a pointer press or focus inside the output. It reads current state every time it runs.
+  let paintedOutput = null // {text, unavailable, view} of the last write; null before the first
+  let paintedView = null // the data-output-view last set: what the reader sees, whatever the preference says
   let outputCooldownTimer = null // armed after a throttled paint; a paint that lands while it runs waits for it
   let outputPaintWaiting = false
   let outputSelectionListening = false
+  let outputHoldTimer = null // armed while a selection defers a paint; ends the deferral after the hold limit
+  let outputPaintDeferred = false // a streaming paint is waiting on a selection, a pointer press or focus
+  let outputPointerDown = false
+  let outputFocusLeft = false // focus left the output; activeElement may lag the event, so this wins until focusin
+  let outputResumeTimer = null // armed by a pointer release: the paint waits out the click that follows
+  let outputInteractionListening = false
+  let outputPointerReleaseListening = false
+  // Set when the renderer throws or returns no node. While set, paints write plain text and the renderer
+  // is not called. It clears when the view preference changes, and once more on the final frame or a
+  // terminal status (renderRetryUsed), which allows one retry; a retry that fails leaves it set.
+  let renderFailed = false
+  let renderRetryUsed = false
 
   function outputDocument() {
     return outputEl.ownerDocument ?? globalThis.document
@@ -3934,16 +3967,33 @@ export function initOperatorStream(opts) {
     return outputEl.contains(selection.anchorNode) || outputEl.contains(selection.focusNode)
   }
 
+  function focusInsideOutput() {
+    if (outputFocusLeft || typeof outputEl.contains !== 'function') return false
+    const active = outputDocument()?.activeElement
+    return active !== null && active !== undefined && active !== outputEl && outputEl.contains(active)
+  }
+
+  function clearOutputHoldTimer() {
+    if (outputHoldTimer !== null) {
+      clearTimeout(outputHoldTimer)
+      outputHoldTimer = null
+    }
+  }
+
   function stopDeferringOutputPaint() {
+    clearOutputHoldTimer()
     if (!outputSelectionListening) return
     outputSelectionListening = false
     outputDocument()?.removeEventListener?.('selectionchange', onOutputSelectionChange)
   }
 
-  function deferOutputPaint() {
+  // A selection defers until it changes or the hold limit passes, whichever comes first.
+  function deferOutputPaintForSelection() {
+    outputPaintDeferred = true
     if (outputSelectionListening) return
     outputSelectionListening = true
     outputDocument()?.addEventListener?.('selectionchange', onOutputSelectionChange)
+    outputHoldTimer = setTimeout(onOutputHoldExpired, OUTPUT_SELECTION_HOLD_MS)
   }
 
   function onOutputSelectionChange() {
@@ -3951,6 +4001,82 @@ export function initOperatorStream(opts) {
     stopDeferringOutputPaint()
     paintOutput(false)
   }
+
+  function onOutputHoldExpired() {
+    outputHoldTimer = null
+    if (aborted) return
+    stopDeferringOutputPaint()
+    paintOutput(false, true)
+  }
+
+  function onOutputPointerDown() {
+    outputPointerDown = true
+    if (outputPointerReleaseListening) return
+    outputPointerReleaseListening = true
+    // A press can end outside the output, where outputEl never hears it.
+    const doc = outputDocument()
+    doc?.addEventListener?.('pointerup', onOutputPointerRelease)
+    doc?.addEventListener?.('pointercancel', onOutputPointerRelease)
+  }
+
+  function stopListeningForPointerRelease() {
+    if (!outputPointerReleaseListening) return
+    outputPointerReleaseListening = false
+    const doc = outputDocument()
+    doc?.removeEventListener?.('pointerup', onOutputPointerRelease)
+    doc?.removeEventListener?.('pointercancel', onOutputPointerRelease)
+  }
+
+  // The paint resumes on the next task, not inside the event: the click that follows pointerup must still
+  // find the link it was aimed at.
+  function onOutputPointerRelease() {
+    outputPointerDown = false
+    stopListeningForPointerRelease()
+    if (aborted || outputResumeTimer !== null) return
+    outputResumeTimer = setTimeout(() => {
+      outputResumeTimer = null
+      if (!aborted && outputPaintDeferred) paintOutput(false)
+    }, 0)
+  }
+
+  function onOutputFocusIn() {
+    outputFocusLeft = false
+  }
+
+  function onOutputFocusOut(event) {
+    if (typeof outputEl.contains === 'function' && event?.relatedTarget && outputEl.contains(event.relatedTarget)) return
+    outputFocusLeft = true
+    if (!aborted && outputPaintDeferred) paintOutput(false)
+  }
+
+  function listenForOutputInteraction() {
+    if (outputInteractionListening || typeof outputEl.addEventListener !== 'function') return
+    outputInteractionListening = true
+    outputEl.addEventListener('pointerdown', onOutputPointerDown)
+    outputEl.addEventListener('pointerup', onOutputPointerRelease)
+    outputEl.addEventListener('pointercancel', onOutputPointerRelease)
+    outputEl.addEventListener('focusin', onOutputFocusIn)
+    outputEl.addEventListener('focusout', onOutputFocusOut)
+  }
+
+  function releaseOutputInteraction() {
+    stopListeningForPointerRelease()
+    if (outputResumeTimer !== null) {
+      clearTimeout(outputResumeTimer)
+      outputResumeTimer = null
+    }
+    outputPointerDown = false
+    if (!outputInteractionListening) return
+    outputInteractionListening = false
+    outputEl.removeEventListener?.('pointerdown', onOutputPointerDown)
+    outputEl.removeEventListener?.('pointerup', onOutputPointerRelease)
+    outputEl.removeEventListener?.('pointercancel', onOutputPointerRelease)
+    outputEl.removeEventListener?.('focusin', onOutputFocusIn)
+    outputEl.removeEventListener?.('focusout', onOutputFocusOut)
+  }
+
+  // Only streaming paints with a renderer are ever deferred, so only then is there anything to listen for.
+  if (outputEl && outputRenderer !== undefined) listenForOutputInteraction()
 
   function cancelOutputCooldown() {
     if (outputCooldownTimer !== null) {
@@ -3972,6 +4098,7 @@ export function initOperatorStream(opts) {
   }
 
   function setOutputViewAttribute(view) {
+    paintedView = view
     outputEl.setAttribute?.('data-output-view', view)
   }
 
@@ -4027,38 +4154,55 @@ export function initOperatorStream(opts) {
     return view !== 'rendered'
   }
 
-  function paintOutput(force) {
+  /**
+   * Paint the output from current state. `force` bypasses the memo's throttle and deferral (a view change);
+   * `holdExpired` lets a paint through a selection that has held for the limit.
+   */
+  function paintOutput(force, holdExpired = false) {
     if (!outputEl || aborted) return
     const runEntry = state.runs[runId]
     const unavailable = runEntry?.outputUnavailable === true
     const text = !unavailable && typeof runEntry?.outputText === 'string' ? runEntry.outputText : ''
+    // A final frame and a terminal status settle the output: they are never throttled or deferred, and the
+    // first of them after a render failure gets one retry.
+    const settled = runEntry?.outputFinal === true || runEntry?.terminal === true
+    const wantsRendered = !unavailable && text !== '' && outputRenderer !== undefined && outputViewPreference === 'rendered'
+    if (renderFailed && settled && !renderRetryUsed && wantsRendered) {
+      renderFailed = false
+      renderRetryUsed = true
+    }
     let view = 'raw'
     if (unavailable) view = 'unavailable'
-    else if (outputRenderer !== undefined && outputViewPreference === 'rendered') view = 'rendered'
+    else if (outputRenderer !== undefined && outputViewPreference === 'rendered' && !renderFailed) view = 'rendered'
 
     if (paintedOutput !== null && paintedOutput.text === text && paintedOutput.unavailable === unavailable && paintedOutput.view === view) return
 
     // Only streaming text with a renderer is throttled and deferred. A final frame, a terminal status, a
     // view change, an empty or unavailable result, and every paint without a renderer go straight through.
-    const streaming = outputRenderer !== undefined && !force && text !== '' &&
-      runEntry?.outputFinal !== true && runEntry?.terminal !== true
+    const streaming = outputRenderer !== undefined && !force && text !== '' && !settled
     if (streaming) {
       if (outputCooldownTimer !== null) {
         outputPaintWaiting = true
         return
       }
-      if (selectionInsideOutput()) {
-        deferOutputPaint()
+      if (outputPointerDown || focusInsideOutput()) {
+        outputPaintDeferred = true
+        return
+      }
+      if (!holdExpired && selectionInsideOutput()) {
+        deferOutputPaintForSelection()
         return
       }
     } else {
       cancelOutputCooldown()
     }
     stopDeferringOutputPaint()
+    outputPaintDeferred = false
 
     const wrote = writeOutput(text, unavailable, view)
-    // A fallback leaves the key unrecorded, so the next paint tries the renderer again.
-    paintedOutput = wrote ? {text, unavailable, view} : null
+    if (!wrote) renderFailed = true
+    // A failed render left plain text, and the key says so: an unchanged state does not try the renderer again.
+    paintedOutput = {text, unavailable, view: wrote ? view : 'raw'}
     if (streaming) startOutputCooldown()
   }
 
@@ -4070,14 +4214,15 @@ export function initOperatorStream(opts) {
   let copyStatusEl = null
   let copyFeedbackTimer = null
 
-  function applyOutputView(view) {
-    outputViewPreference = view
+  // Registered for the life of the attachment: a view change anywhere repaints this card too.
+  function repaintForOutputView(changed) {
+    if (aborted) return
+    if (changed) {
+      renderFailed = false
+      renderRetryUsed = false
+    }
     paintOutput(true)
     paintOutputTools()
-  }
-
-  function onToggleClick() {
-    applyOutputView(outputViewPreference === 'raw' ? 'rendered' : 'raw')
   }
 
   function clearCopyFeedback() {
@@ -4156,7 +4301,9 @@ export function initOperatorStream(opts) {
     const runEntry = state.runs[runId]
     const hasOutput = runEntry?.outputUnavailable !== true && typeof runEntry?.outputText === 'string' && runEntry.outputText !== ''
     toolsEl.hidden = !hasOutput
-    toggleButton.setAttribute('aria-pressed', String(outputViewPreference === 'raw'))
+    // What the reader sees, not what the preference asks for: they differ while a render failure is latched.
+    toggleButton.hidden = outputRenderer === undefined || renderFailed
+    toggleButton.setAttribute('aria-pressed', String(paintedView === 'raw'))
     const copyLabel = runEntry?.outputTruncated === true
       ? `${OUTPUT_COPY_LABEL} (first ${MAX_OUTPUT_TEXT_CHARS.toLocaleString('en-US')} characters)`
       : OUTPUT_COPY_LABEL
@@ -4164,6 +4311,7 @@ export function initOperatorStream(opts) {
   }
 
   if (toolsEl) buildOutputTools()
+  outputViewRepainters.add(repaintForOutputView)
 
   function updateDOM() {
     // Late-frame guard: after close(), no write of any kind (notice, status,
@@ -5200,8 +5348,10 @@ export function initOperatorStream(opts) {
         reconnectTimer = null
       }
       clearFirstFrameTimer()
+      outputViewRepainters.delete(repaintForOutputView)
       cancelOutputCooldown()
       stopDeferringOutputPaint()
+      releaseOutputInteraction()
       if (toolsEl) releaseOutputTools()
       clearQuestionRechecks()
       if (abortController) {

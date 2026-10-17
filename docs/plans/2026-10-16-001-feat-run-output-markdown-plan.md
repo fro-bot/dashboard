@@ -25,7 +25,7 @@ The July 2026 redesign put a gate on any richer renderer: P1–P7 in `docs/plans
 - R4. A link becomes an anchor only when its destination parses as an absolute `http:` or `https:` URL of at most 2,048 characters, with no userinfo and an origin that differs from the page origin. It opens in a new tab with `rel="noopener noreferrer"`. Bare http(s) URLs are linkified under the same rule. When an accepted link's visible text is not its URL, the destination host is shown as muted text right after the anchor.
 - R5. Streaming rendering is throttled. It tolerates unfinished Markdown and never lets the final answer lag.
 - R6. Each card has a Rendered/Raw toggle and a Copy raw button. The toggle sets one page-wide, in-memory preference. Copy raw copies the run's current raw text.
-- R7. Plain text remains the fallback when the renderer is missing, fails to load, or throws. A throw affects that paint only.
+- R7. Plain text remains the fallback when the renderer is missing, fails to load, is too slow to load, or throws. A throw switches that attachment to plain text until the view changes, with one retry on its final frame or terminal status.
 - R8. The innerHTML-family ban covers the renderer module, and CSP is unchanged.
 - R9. Selecting text or clicking a link inside the output does not collapse the card.
 - R10. `docs/solutions/best-practices/operator-sse-output-consumption-2026-06-22.md` documents the new rendering rule.
@@ -163,7 +163,11 @@ The July 2026 redesign put a gate on any richer renderer: P1–P7 in `docs/plans
   - `public/operator-stream.js` stays no-build and dependency-free. It owns mounting, throttling, scroll, selection and fallback.
   - With no renderer, the existing `textContent` path runs unchanged.
   - The renderer counts the nodes it creates and throws past 20,000, so that paint falls back to plain text. No adaptive interval is built.
-- **The renderer loads up front, not lazily on first paint.** A recorded repaint is a single synchronous paint with no later frame to upgrade it. So the loader awaits the renderer in the same module step as the operator modules, using a literal-path dynamic import with `.catch(() => undefined)`. A missing or failed renderer means no renderer, and the stream paints plain text. A stale shell that predates the renderer passes no renderer and degrades the same way.
+- **The renderer loads in parallel with the operator modules, and the first attach waits for it, bounded.**
+  - A recorded repaint is a single synchronous paint with no later frame to upgrade it, so the renderer must be known before the first attach. The loader starts a literal-path dynamic import of the renderer first and does not await it before the run index and launch initialize. A stalled renderer import therefore never stops those from initializing.
+  - Only the attaches that happen before the import settles wait for it: `_attachStream` defers the attach until the import settles or `RENDERER_LOAD_CAP_MS` (2,000 ms, counted from the loader's start) passes. Once settled, attaches are synchronous.
+  - A rejected import, a missing chunk and a timeout all mean no renderer: that stream paints plain text. A renderer that arrives after the cap is kept for later attaches.
+  - Closing the active stream, auth-required and cleanup cancel a waiting attach. A stale shell that predates the renderer passes no renderer and degrades the same way.
 - **Links.**
   - A destination is parsed with `new URL(href)` and no base URL, so relative, `#fragment`, protocol-relative and `mailto:` destinations stay text. This also keeps same-origin paths such as `/operator/...` and the `#<runId>` jump hashes inert.
   - An anchor is created only for `http:` or `https:` destinations of at most 2,048 characters. Its `href` is set to the normalized `url.href`.
@@ -176,20 +180,25 @@ The July 2026 redesign put a gate on any richer renderer: P1–P7 in `docs/plans
 - **Images render as their alt text,** or `[image]` when the alt is empty. Inside a link, the alt text becomes the link label.
 - **Tables are wrapped.** The renderer wraps each `table` in a `div` with a class. Unit 6 styles the wrapper with `overflow-x: auto`.
 - **One painter, memoized.**
-  - `paintOutput` is a closure inside `initOperatorStream`, called from `updateDOM`. Tests drive it through `initOperatorStream`. It skips the DOM write when the key `(outputText, outputUnavailable, effective view)` is unchanged, so status, heartbeat, approval and question frames never re-render output. The key is recorded only after a successful write, so a plain-text fallback never blocks the next attempt.
-  - The rendered fragment replaces the old content in one `replaceChildren` swap. A throw mid-build leaves the old DOM in place, and that paint falls back to plain text.
+  - `paintOutput` is a closure inside `initOperatorStream`, called from `updateDOM`. Tests drive it through `initOperatorStream`. It skips the DOM write when the key `(outputText, outputUnavailable, effective view)` is unchanged, so status, heartbeat, approval and question frames never re-render output. A plain-text fallback records the key with the plain view, so status, heartbeat and approval frames never re-render a latched attachment.
+  - The rendered fragment replaces the old content in one `replaceChildren` swap. A throw mid-build leaves the old DOM in place, and that paint falls back to plain text and sets the render-failure latch.
 - **Throttle with `setTimeout` only, around 100 ms.**
   - The first non-empty output paints immediately.
   - A final output frame and a terminal status flush synchronously.
   - The timer callback checks `aborted` and reads current state when it fires.
   - `close()` cancels it.
   - `requestAnimationFrame` is not used, because it pauses in background tabs.
-- **Render failure has no latch.** A throw paints plain text for that paint only, and the next paint tries again. Neither the error nor the text is logged.
+- **Render failure latches per attachment.**
+  - When the renderer throws or returns no node, the attachment sets `renderFailed`. While it is set, every paint writes plain text, the renderer is not called, and the memo key records the plain-text write.
+  - The latch clears when the view preference changes.
+  - It also clears exactly once when a final output frame or a terminal status arrives, which allows one retry. If that retry throws, the latch stays set. A renderer that always throws is therefore called at most twice across a stream.
+  - The toggle is hidden while the latch is set. Copy raw stays visible.
+  - Neither the error nor the text is logged.
 - **Page-wide view preference.** It is one module-level in-memory variable in `public/operator-stream.js`, defaulting to Rendered, read at paint time.
-  - The toggle sets it and repaints the active handle. Only one stream is active at a time, and collapsed cards hide their toolbar.
+  - The toggle sets it and repaints every attachment. A module-level `Set` holds one repaint callback per live attachment: each registers when it is created and unregisters in `close()`. Setting the preference calls each callback, which force-paints that attachment's output and toolbar, skips an aborted attachment, and respects its latch.
   - A separate `resetOutputView()` export resets it to Rendered. `onAuthRequired` calls it. `clearFinishedRuns` does not reset it, because `clearFinishedRuns` also runs on fixture scenario change (`web/src/views/Operator.tsx`).
   - The effective view is Raw when the preference is Raw or when no renderer exists.
-  - A fallback never rewrites the preference, and the toggle's `aria-pressed` state reflects the preference.
+  - A fallback never rewrites the preference. The toggle's `aria-pressed` state reflects the view actually painted (`data-output-view`), which differs from the preference while a render failure is latched.
 - **Toolbar.**
   - It is a new card region `run-output-tools`, placed after `run-output` in all three card shapes and in `SUBSTRUCTURE_ROLES`. It is hidden on collapse, for the unavailable result, and for empty output.
   - It has its own grid row next to the output row in `web/src/index.css`.
@@ -203,8 +212,10 @@ The July 2026 redesign put a gate on any richer renderer: P1–P7 in `docs/plans
 - **Card click guard.** The target guard in `bindCardActivation` is the only mechanism. It ignores clicks whose target is inside an `a[href]` or a `button` within the card, and clicks made while a non-collapsed text selection sits inside the card. Plain clicks on output text still toggle the card. Keydown already ignores non-card targets. Neither the toolbar nor links stop propagation.
 - **Scroll and selection.**
   - Before a swap, if the output box is scrolled to the bottom (within 8px), it is pinned to the bottom after the swap. Otherwise the previous `scrollTop` is restored, clamped to the new height.
-  - While a run streams and a non-collapsed selection is inside the output, repaints are deferred.
-  - A `selectionchange` listener resumes them from current state. It is added only while a paint is deferred and is removed in `close()`.
+  - While a run streams, repaints are deferred in three cases: a non-collapsed selection inside the output, a pointer pressed inside the output, and `document.activeElement` inside the output. A focused link or a mid-click press keeps its target in the DOM.
+  - A selection deferral resumes from current state on `selectionchange`, and ends on its own after `OUTPUT_SELECTION_HOLD_MS` (3,000 ms) even if the selection has not changed, so a stale selection cannot freeze the output. The paint then proceeds, and a still-held selection defers the next streaming paint for another hold.
+  - A pointer deferral resumes on `pointerup` or `pointercancel`. The paint runs on the next task, after the click that follows `pointerup` has been delivered. A press that ends outside the output is caught by document-level listeners that exist only during the press. A focus deferral resumes on `focusout` that leaves the output.
+  - The `selectionchange` listener and the hold timer exist only while a selection defers a paint. The pointer and focus listeners on the output exist only when a renderer is injected. The resume timer and every listener are removed in `close()`.
   - A final or terminal paint always proceeds.
 - **One view attribute drives CSS.** `data-output-view` is set to `rendered`, `raw` or `unavailable` on each paint. The `.run-output-unavailable` class is kept alongside it, so existing pins hold.
   - rendered prose uses the body font, `white-space: normal` and `overflow-wrap: anywhere`;
@@ -218,7 +229,7 @@ The July 2026 redesign put a gate on any richer renderer: P1–P7 in `docs/plans
 - **Parser choice and dependency approval:** `markdown-it` 15.0.3, approved by Marcus.
 - **Gate P2 and R15 wording:** amended as described above. The Oracle review plus Marcus's sign-off satisfy P7.
 - **Link-host display:** shown as muted text after an anchor whose visible text is not its URL. Bare and autolinked URLs show nothing extra.
-- **Scope of the toggle:** a page-wide in-memory preference, read at paint time.
+- **Scope of the toggle:** a page-wide in-memory preference, read at paint time, applied to every live attachment.
 - **Bare URLs:** linkified, under the same http(s) check.
 - **P6 at the auth boundary:** `onAuthRequired` closes the active stream, resets the view preference and clears the stores. Already-painted DOM is not reverted.
 
@@ -236,7 +247,7 @@ sequenceDiagram
   participant MD as markdown-output (Vite chunk)
   participant ST as operator-stream.js
   participant DOM as run-output region
-  RT->>MD: import (fail soft → undefined)
+  RT->>MD: import in parallel (fail soft → undefined)
   RT->>ST: initOperatorStream({..., renderOutput})
   ST->>ST: SSE record → reducer → updateDOM
   ST->>ST: paintOutput memo key unchanged? → no-op
@@ -244,7 +255,7 @@ sequenceDiagram
   ST->>MD: renderOutput(outputText, {doc, origin})
   MD-->>ST: DocumentFragment (allowlisted nodes only)
   ST->>DOM: replaceChildren(fragment), restore scroll
-  Note over ST,DOM: throw → textContent paint for this paint only, next paint retries
+  Note over ST,DOM: throw → latch: plain text until the view changes, one retry on final/terminal
 ```
 
 ## Implementation Units
@@ -320,9 +331,9 @@ sequenceDiagram
 **Approach:**
 - Extract `paintOutput` from the output block of `updateDOM` as a closure inside `initOperatorStream`. Tests drive it through `initOperatorStream`.
 - Add the memo key, the throttle timer, and the page-wide preference with its `resetOutputView()` export. `clearFinishedRuns` does not touch the preference.
-- On a renderer throw, paint plain text for that paint only and leave the memo key unrecorded.
+- On a renderer throw, set the per-attachment render-failure latch: paint plain text, record the memo key for the plain write, and call the renderer again only after a view change or once on the final frame or terminal status.
 - Add the `data-output-view` attribute (keeping the `.run-output-unavailable` class) and the scroll handling.
-- While a non-collapsed selection is inside streaming output, defer repaints. Add a `selectionchange` listener only while a paint is deferred, remove it when the deferral ends and in `close()`, and repaint from current state when the selection clears. A final or terminal paint always proceeds.
+- While a non-collapsed selection, a pointer press or focus is inside streaming output, defer repaints. Add the `selectionchange` listener and the hold timer only while a selection defers a paint, end that deferral after `OUTPUT_SELECTION_HOLD_MS`, and remove every listener and timer in `close()`. A final or terminal paint always proceeds.
 - The recorded repaint goes through the same painter.
 - Tests use a fake renderer that returns a sentinel `DocumentFragment`. The plain-object fakes may gain `replaceChildren` and any other method the painter needs.
 
@@ -343,8 +354,10 @@ sequenceDiagram
   - the timer reads current state when it fires;
   - a recorded repaint renders once, synchronously, and honors a Raw preference.
 - Error path:
-  - a renderer throw paints plain text for that paint, and the next paint calls the renderer again;
-  - a failed paint does not record the memo key;
+  - a renderer throw latches: later paints write plain text without calling the renderer, and status frames neither render nor rewrite;
+  - a renderer that always throws is called at most twice across a long stream;
+  - the final frame or a terminal status retries once, a success clears the latch, and a failed retry keeps it;
+  - a changed view clears the latch, and an unchanged one does not;
   - neither the error nor the text is logged.
 - Lifecycle:
   - `close()` cancels the timer;
@@ -352,7 +365,7 @@ sequenceDiagram
   - `aborted` is checked inside the callback;
   - a replay burst after reconnect is absorbed.
 - Preference:
-  - flipping it repaints the attached card;
+  - flipping it repaints every attached card, and a closed attachment is not repainted;
   - `resetOutputView()` resets it to Rendered;
   - `clearFinishedRuns` leaves it unchanged;
   - the effective view is Raw when no renderer exists, without changing the preference.
@@ -362,7 +375,9 @@ sequenceDiagram
   - a selection inside the output defers streaming repaints;
   - selecting text, the stream going quiet, then clearing the selection repaints from current state;
   - the `selectionchange` listener exists only while a paint is deferred and is removed on `close()`;
-  - a final paint proceeds despite a selection.
+  - a final paint proceeds despite a selection;
+  - a held selection repaints after the hold limit, and `close()` clears the hold timer;
+  - a pointer press or a focused link inside the output defers a streaming paint, release or focus leaving resumes it, a final paint proceeds anyway, and `close()` removes the listeners.
 
 **Verification:** stream-core tests pass, and all existing output tests are unchanged.
 
@@ -404,7 +419,7 @@ sequenceDiagram
 - Happy path:
   - Copy raw writes the current `outputText`, read at click time;
   - the toggle flips the page preference and repaints the active handle;
-  - `aria-pressed` reflects the preference.
+  - `aria-pressed` reflects the painted view, and the toggle is hidden while a render failure is latched, with Copy raw still visible.
 - Edge cases:
   - the truncated label appears only when `outputTruncated` is set;
   - the toolbar is hidden on collapse, for the unavailable result, and for empty output;
