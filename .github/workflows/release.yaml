@@ -228,12 +228,17 @@ jobs:
             exit 1
           fi
 
-          for tool in npm npx pnpm pnpx corepack yarn yarnpkg bun bunx; do
-            if docker run --rm "$IMG" sh -ec "command -v '$tool' >/dev/null 2>&1"; then
-              echo "SMOKE FAILED: package-manager command is present: $tool"
-              exit 1
-            fi
-          done
+          if ! docker run --rm --entrypoint sh "$IMG" -ec '
+            for tool in npm npx pnpm pnpx corepack yarn yarnpkg bun bunx; do
+              if command -v "$tool" >/dev/null 2>&1; then
+                echo "package-manager command is present: $tool" >&2
+                exit 1
+              fi
+            done
+          '; then
+            echo "SMOKE FAILED: package-manager command is present"
+            exit 1
+          fi
 
           if ! docker run --rm --user 0 --entrypoint sh "$IMG" -ec '
             for path in \

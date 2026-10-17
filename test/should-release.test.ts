@@ -49,7 +49,7 @@
  * - bun.lock + proven non-artifact devDependency change => no release
  * - bun.lock + dependencies change => release
  * - bunfig.toml-only change => release
- * - pnpm-lock.yaml-only change => no release (no longer a tracked lockfile)
+ * - pnpm-lock.yaml-only change => no release
  * - no changed files => no release
  * - first-push (empty base {}) with runtime fields in head => release
  * - missing --changed-files flag => error (exit 2)
@@ -797,7 +797,7 @@ describe('should-release — bunfig.toml change triggers release', () => {
   })
 })
 
-describe('should-release — pnpm-lock.yaml-only change no longer triggers release', () => {
+describe('should-release — pnpm-lock.yaml-only change does not trigger release', () => {
   it('skips when only pnpm-lock.yaml changed', () => {
     const base = writePkg(tmpDir, 'base.json', BASE_PKG)
     const head = writePkg(tmpDir, 'head.json', BASE_PKG)
