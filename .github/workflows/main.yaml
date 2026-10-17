@@ -42,7 +42,7 @@ jobs:
       - env:
           TIMING: 1
         name: 💅🏽 Lint
-        run: pnpm lint
+        run: bun run lint
 
   design-check:
     name: Design Check
@@ -90,7 +90,7 @@ jobs:
         uses: ./.github/actions/setup
 
       - name: ✅ Validate Types
-        run: pnpm check-types
+        run: bun run check-types
 
   test:
     name: Test
@@ -110,10 +110,10 @@ jobs:
         uses: ./.github/actions/setup
 
       - name: 🏗 Build web
-        run: pnpm build:web
+        run: bun run build:web
 
       - name: 🧪 Run Tests
-        run: pnpm test
+        run: bun run test
 
   check-workflows:
     name: Check Workflows

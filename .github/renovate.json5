@@ -1,8 +1,30 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["github>fro-bot/.github", "github>microsoft/m365-renovate-config:groupReact#v2.8.4"],
+  // Renovate's built-in Bun artifact update can't run here; postUpgradeTasks regenerates bun.lock.
+  "packageRules": [
+    {
+      "matchManagers": ["bun"],
+      "skipArtifactsUpdate": true
+    },
+    {
+      // The packageManager pin, the Dockerfile oven/bun image and its digest move together.
+      "matchDepNames": ["bun", "oven/bun"],
+      "groupName": "Bun"
+    }
+  ],
+  "customManagers": [
+    {
+      // Tracks the `packageManager` pin in package.json.
+      "customType": "regex",
+      "managerFilePatterns": ["/^package\\.json$/"],
+      "matchStrings": ["\"packageManager\":\\s*\"bun@(?<currentValue>[^\"]+)\""],
+      "depNameTemplate": "bun",
+      "datasourceTemplate": "npm"
+    }
+  ],
   "postUpgradeTasks": {
-    "commands": ["pnpm install", "pnpm fix"],
+    "commands": ["bun install", "bun run fix"],
     "executionMode": "branch"
   }
 }

@@ -44,7 +44,7 @@ env:
   PR_REVIEW_PROMPT: |
     You are a skeptical reviewer for fro-bot/dashboard — a TypeScript Hono
     read-only-by-default monitoring dashboard with one isolated wiki-write capability
-    (Node 24 native TS, pnpm, no build step).
+    (Node 24 native TS, Bun, no build step).
     Focus on correctness, security, and breaking changes. Prefer false positives
     over false negatives for security issues.
 
@@ -102,7 +102,7 @@ env:
   SCHEDULE_PROMPT: |
     Run the daily Fro Bot pass for fro-bot/dashboard — a TypeScript Hono
     read-only-by-default monitoring dashboard with one isolated wiki-write capability
-    (Node 24 native TS, pnpm, no build step).
+    (Node 24 native TS, Bun, no build step).
     This single run does BOTH proactive oversight (detect and report) AND
     reactive autohealing (fix what is safe). Prioritize minimal, reversible
     changes. Read the canonical context first: README.md,
@@ -162,10 +162,10 @@ env:
 
     3. CODE QUALITY
        Run the repository's own validation gates in order:
-         pnpm bootstrap
-         pnpm check-types
-         pnpm lint
-         pnpm test
+         bun run bootstrap
+         bun run check-types
+         bun run lint
+         bun run test
        Also run the Node strip-only load check over src/**/*.ts (excluding
        *.test.ts) — Node 24's strip-only TypeScript execution does not transform
        TS-specific constructs (enum, namespace, parameter properties, import
