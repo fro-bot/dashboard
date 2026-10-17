@@ -11,7 +11,17 @@ export default defineConfig(
     // .agents/ is a vendored shared-skill bundle (e.g. .agents/skills/impeccable) of
     // third-party .mjs/.md files — not our source; linting it reports tens of thousands
     // of errors.
-    ignores: ['docs/plans/**', 'docs/solutions/**', 'docs/brainstorms/**', 'web/**', '.agents/**', '.opencode/**'],
+    // wiki-writer is not installed: its @fro-bot/wiki-write-core git dependency can't resolve
+    // under Bun. Vitest still runs its security-boundary test.
+    ignores: [
+      'docs/plans/**',
+      'docs/solutions/**',
+      'docs/brainstorms/**',
+      'web/**',
+      '.agents/**',
+      '.opencode/**',
+      'wiki-writer/**',
+    ],
     typescript: {
       tsconfigPath: './tsconfig.json',
       // Enforce Node 24 strip-only TypeScript compatibility: rejects parameter properties,

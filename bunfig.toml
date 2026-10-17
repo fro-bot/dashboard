@@ -1,0 +1,11 @@
+[install]
+# Matches the hoisted layout the Docker prod-deps stage and tooling expect.
+linker = "hoisted"
+# 3 days, in seconds.
+minimumReleaseAge = 259200
+# First-party packages, exempt by exact name (Bun ignores name@version entries).
+minimumReleaseAgeExcludes = [
+  "@bfra.me/es",
+  "@bfra.me/eslint-config",
+  "@bfra.me/tsconfig",
+]

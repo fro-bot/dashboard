@@ -5,17 +5,25 @@
   "description": "Fro Bot monitoring dashboard with an isolated wiki-write capability",
   "type": "module",
   "scripts": {
-    "bootstrap": "pnpm install",
+    "bootstrap": "bun install",
     "dev": "node --env-file-if-exists=.env --watch src/server.ts",
-    "dev:fixture": "pnpm build:web:fixture && NODE_ENV=development DASHBOARD_HOST=127.0.0.1 DASHBOARD_WEB_DIST=./web/dist-fixture DASHBOARD_FIXTURE_HARNESS_ENABLED=true DASHBOARD_DEV_AUTOLOGIN=true node --env-file-if-exists=.env src/server.ts",
+    "dev:fixture": "bun run build:web:fixture && NODE_ENV=development DASHBOARD_HOST=127.0.0.1 DASHBOARD_WEB_DIST=./web/dist-fixture DASHBOARD_FIXTURE_HARNESS_ENABLED=true DASHBOARD_DEV_AUTOLOGIN=true node --env-file-if-exists=.env src/server.ts",
     "start": "node src/server.ts",
     "build:web": "vite build web",
     "build:web:fixture": "VITE_FIXTURE_MODE=true vite build web",
     "check-types": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json && tsc --noEmit -p .opencode/tsconfig.json",
     "lint": "eslint",
     "fix": "eslint --fix",
-    "pretest": "pnpm build:web",
+    "pretest": "bun run build:web",
     "test": "vitest run && vitest run --config web/vitest.config.ts"
+  },
+  "overrides": {
+    "brace-expansion@2": ">=2.1.2 <6.0.0",
+    "brace-expansion@5": ">=5.0.12 <6.0.0",
+    "fast-uri@3": ">=3.1.5 <4.0.0",
+    "katex@0": ">=0.18.2 <1.0.0",
+    "toml@4": ">=4.2.0 <5.0.0",
+    "undici@7": ">=7.29.0 <8.0.0"
   },
   "dependencies": {
     "@bfra.me/es": "0.1.0",
@@ -60,7 +68,11 @@
     "workbox-strategies": "7.4.1",
     "workbox-window": "7.4.1"
   },
-  "packageManager": "pnpm@11.28.5",
+  "trustedDependencies": [
+    "@swc/core",
+    "unrs-resolver"
+  ],
+  "packageManager": "bun@1.4.3",
   "engines": {
     "node": ">=24"
   }

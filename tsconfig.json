@@ -7,5 +7,12 @@
     "noEmit": true
   },
   "include": ["**/*.ts"],
-  "exclude": ["node_modules", "dist", "web", ".opencode", "test/operator-runtime.test.ts"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "web",
+    ".opencode",
+    "wiki-writer",
+    "test/operator-runtime.test.ts"
+  ]
 }
