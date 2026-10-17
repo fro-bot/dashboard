@@ -1505,6 +1505,20 @@ describe('defaultRuntimeLoader — run-list refresh triggers', () => {
       expect(initOperatorStream).not.toHaveBeenCalled()
     })
 
+    it('a refresh that reports auth-required while an expand waits opens no stream', async () => {
+      document.body.innerHTML = `${cardHtml('run-x-auth', 'status-running')}<div data-role="stream-status"></div>`
+      const {refresh, resolvers} = controllableRefresh()
+      const {runtime, initOperatorStream, select, authRequired} = await mountLoader(refresh)
+
+      const expanding = select('run-x-auth')
+      authRequired()
+      resolvers[0]?.(false)
+      await expanding
+
+      expect(initOperatorStream).not.toHaveBeenCalled()
+      runtime.cleanup()
+    })
+
     it('the cap is 2 seconds', () => {
       expect(EXPAND_REFRESH_CAP_MS).toBe(2000)
     })
@@ -4229,7 +4243,7 @@ describe('defaultRuntimeLoader — finished-run cache', () => {
       })
     })
 
-    it('a clear that lands during a miss-path refresh leaves a live attach', async () => {
+    it('a clear that lands during a miss-path refresh leaves no attach: the expand stops with the session', async () => {
       const net = stubStreamFetch()
       renderPage(cardHtml('run-c-a'))
       let settleRefresh = (_applied: boolean) => {}
@@ -4256,10 +4270,11 @@ describe('defaultRuntimeLoader — finished-run cache', () => {
       writeListStatus('run-c-a', 'succeeded')
       settleRefresh(true)
       await pending
-      await waitFast(() => expect(net.fetchSpy).toHaveBeenCalledTimes(1))
+      await tick()
 
+      expect(net.fetchSpy).not.toHaveBeenCalled()
       expect(mounted.recordedInitCalls()).toHaveLength(0)
-      expect(mounted.attachedRunIds()).toEqual(['run-c-a', 'run-c-a'])
+      expect(mounted.attachedRunIds()).toEqual(['run-c-a'])
     })
 
     it('an unavailable run list on a later mount does not clear the store', async () => {

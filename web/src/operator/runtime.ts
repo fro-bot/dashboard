@@ -741,7 +741,7 @@ async function defaultRuntimeLoader(opts?: {
     const pending = {runId, release: wait.release}
     _pendingExpand = pending
     return wait.settled.then(() => {
-      if (disposed || _pendingExpand !== pending) return
+      if (disposed || authRequired || _pendingExpand !== pending) return
       _pendingExpand = null
       // The refresh may have dropped the run from the list; there is nothing left to stream into.
       const stillListed = typeof document !== 'undefined'
@@ -816,6 +816,8 @@ async function defaultRuntimeLoader(opts?: {
   // is already painted stays as it is. The view preference returns to Rendered for the next sign-in.
   const onAuthRequired = () => {
     authRequired = true
+    // An expand still waiting on the refresh has no session to stream under.
+    _cancelPendingExpand()
     _closeActiveStream()
     streamMod.resetOutputView()
     streamMod.clearFinishedRuns()

@@ -207,6 +207,16 @@ describe('allowlisted constructs', () => {
     expect(render('0. a\n1. b').querySelector('ol')?.hasAttribute('start')).toBe(false)
   })
 
+  it('keeps a nine-digit ordered list start', () => {
+    expect(render('123456789. a\n123456790. b').querySelector('ol')?.getAttribute('start')).toBe('123456789')
+  })
+
+  it('does not turn a ten-digit start into a list with that start', () => {
+    const out = render('1234567890. a\n1234567891. b')
+    expect(out.querySelector('ol')).toBeNull()
+    expect(innerText(out)).toContain('1234567890. a')
+  })
+
   it('renders blockquotes, including nested ones', () => {
     const out = render('> a\n> b\n>\n> > nested')
     expect(tagsOf(out)).toEqual(['blockquote', 'p', 'blockquote', 'p'])
@@ -308,6 +318,13 @@ describe('links', () => {
   it('accepts a different origin that merely shares a prefix with the page origin', () => {
     expect(anchorsOf(render('[go](https://dash.example.evil.example/)'))).toHaveLength(1)
     expect(anchorsOf(render('[go](http://dash.example/)'))).toHaveLength(1)
+  })
+
+  it('shows a rejected link whose label is its own destination once, without repeating it in parentheses', () => {
+    const url = 'https://dash.example/operator'
+    const out = render(`[${url}](${url})`)
+    expect(anchorsOf(out)).toHaveLength(0)
+    expect(innerText(out)).toBe(url)
   })
 
   it('fails closed on an unparseable page origin by comparing the raw string', () => {
@@ -484,10 +501,22 @@ describe('node cap', () => {
     expect(() => render(paragraphs)).toThrow(/node/i)
   })
 
-  it('renders input just under the cap', () => {
-    const paragraphs = Array.from({length: 5000}, () => 'a').join('\n\n')
-    const out = render(paragraphs)
-    expect(descendants(out)).toHaveLength(10_000)
+  // One paragraph of plain text creates two nodes: the <p> and its text node.
+  const NODES_PER_PARAGRAPH = 2
+  const paragraphsFor = (nodes: number) => Array.from({length: nodes / NODES_PER_PARAGRAPH}, () => 'a').join('\n\n')
+
+  it('creates two nodes per plain paragraph', () => {
+    expect(descendants(render('a'))).toHaveLength(NODES_PER_PARAGRAPH)
+  })
+
+  it('renders exactly the cap without throwing', () => {
+    const out = render(paragraphsFor(MAX_OUTPUT_NODES))
+    expect(descendants(out)).toHaveLength(MAX_OUTPUT_NODES)
+  })
+
+  it('throws at one node over the cap', () => {
+    // A thematic break adds a single <hr>.
+    expect(() => render(`${paragraphsFor(MAX_OUTPUT_NODES)}\n\n---`)).toThrow(/node/i)
   })
 
   const MAX_INPUT = 256_000

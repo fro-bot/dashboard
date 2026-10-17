@@ -66,12 +66,22 @@ describe('built client output — no analytics or advertising', () => {
   // Assert on the list of offending filenames, never on the file text itself:
   // a `not.toContain` against a minified bundle prints the whole bundle on
   // failure, which buries the one fact you need.
-  // Whole-word match: bundler output contains identifiers such as `Symbol.toStringTag`, which hold a
-  // token ("gtag") as a substring without referencing a tracker.
+  // Case-insensitive substring match, so tokens embedded in identifiers (`_gtag`, `initPosthog`) are
+  // caught. Bundler output contains `Symbol.toStringTag`, which holds "gtag" without referencing a
+  // tracker; only that name is removed before matching.
+  function mentionsTracker(text: string, token: string): boolean {
+    return text.replaceAll('toStringTag', '').toLowerCase().includes(token.toLowerCase())
+  }
+
+  it('GUARD: the matcher flags embedded tracker identifiers and ignores Symbol.toStringTag', () => {
+    expect(mentionsTracker('window._gtag(1)', 'gtag')).toBe(true)
+    expect(mentionsTracker('initPosthog()', 'posthog')).toBe(true)
+    expect(mentionsTracker('Symbol.toStringTag', 'gtag')).toBe(false)
+  })
+
   it.each(TRACKER_TOKENS)('GUARD: no reference to tracker token "%s" in the shipped output', token => {
-    const needle = new RegExp(`\\b${token.replaceAll('.', '\\.')}\\b`, 'i')
     const offenders = shippedFiles()
-      .filter(([, text]) => needle.test(text))
+      .filter(([, text]) => mentionsTracker(text, token))
       .map(([name]) => name)
 
     expect(offenders, `tracker token "${token}" found in: ${offenders.join(', ')}`).toEqual([])

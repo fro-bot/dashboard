@@ -1186,7 +1186,7 @@ describe('security — operator-stream.js contract pin and checkout-field bounda
     const fs = await import('node:fs/promises')
     const src = await fs.readFile('public/operator-stream.js', 'utf8')
     // Strip comments so prose that names a version cannot hide a second pin.
-    const code = src.replaceAll(/\/\*[\s\S]*?\*\//g, '').replaceAll(/(^|[^:])\/\/.*$/gm, '$1')
+    const code = stripComments(src)
     const literals = code.match(/['"`]\d+\.\d+\.\d+['"`]/g) ?? []
     expect(literals).toHaveLength(1)
     expect(code).toMatch(/export const PINNED_CONTRACT_VERSION = ['"]\d+\.\d+\.\d+['"]/)
@@ -1229,8 +1229,10 @@ const MARKDOWN_RENDERER_PATH = 'web/src/operator/markdown-output.ts'
 const SINK_SCAN_DIRS = ['public', 'web/src/operator'] as const
 const SINK_SCAN_EXTENSIONS = /\.(?:js|mjs|ts|tsx)$/
 
+// A `//` comment starts at the beginning of a line or after whitespace, so `//` inside a string or a
+// URL (`'a//'`, `'https://x'`) is code and cannot hide a sink after it.
 function stripComments(src: string): string {
-  return src.replaceAll(/\/\*[\s\S]*?\*\//g, '').replaceAll(/(^|[^:])\/\/.*$/gm, '$1')
+  return src.replaceAll(/\/\*[\s\S]*?\*\//g, '').replaceAll(/(^|\s)\/\/.*$/gm, '$1')
 }
 
 function isSinkScanned(file: string): boolean {
@@ -1262,6 +1264,8 @@ describe('security — HTML and href sinks across operator output modules', () =
     ['frame.srcdoc = x'],
     ['document.write(x)'],
     ['el["innerHTML"] += x'],
+    ["x = 'a//'; el.innerHTML = y"],
+    ["x = 'https://x'; el.innerHTML = y"],
   ])('the HTML sink pattern matches %s', fixture => {
     expect(stripComments(fixture)).toMatch(HTML_SINK_PATTERN)
   })
@@ -1277,6 +1281,8 @@ describe('security — HTML and href sinks across operator output modules', () =
 
   it.each([
     ['// never innerHTML'],
+    ['  // never innerHTML'],
+    ['const note = 1 // never innerHTML ='],
     ['/* never el.innerHTML = x */'],
     ['/**\n * textContent only, never innerHTML =\n */'],
     ['const note = el.textContent'],
@@ -1286,6 +1292,14 @@ describe('security — HTML and href sinks across operator output modules', () =
     const code = stripComments(fixture)
     expect(code).not.toMatch(HTML_SINK_PATTERN)
     expect(code).not.toMatch(HREF_SINK_PATTERN)
+  })
+
+  it('strips a // comment only at the start of a line or after whitespace', () => {
+    expect(stripComments("const u = 'https://x'")).toBe("const u = 'https://x'")
+    expect(stripComments("x = 'a//b'")).toBe("x = 'a//b'")
+    expect(stripComments('// note')).toBe('')
+    expect(stripComments('  // note').trim()).toBe('')
+    expect(stripComments('f() // note')).toBe('f() ')
   })
 
   it('excludes test files and non-source files from the scan', () => {

@@ -167,10 +167,11 @@ function openFrame(state: State, tokens: readonly Token[], index: number, token:
     case 'bullet_list_open':
       return openElement(state, 'ul')
     case 'ordered_list_open': {
-      const frame = openElement(state, 'ol')
+      const list = createElement(state, 'ol')
       const start = String(token.attrGet('start') ?? '')
-      if (ORDERED_START.test(start)) (frame.node as HTMLElement).setAttribute('start', start)
-      return frame
+      if (ORDERED_START.test(start)) list.setAttribute('start', start)
+      currentNode(state).appendChild(list)
+      return {node: list}
     }
     case 'list_item_open':
       return openElement(state, 'li')
