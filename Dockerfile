@@ -1,16 +1,21 @@
+# ── Bun toolchain stage ───────────────────────────────────────────────────────
+# Digest-pinned multi-arch index. The bare version tag must equal package.json
+# packageManager (enforced by test/bun-version-pin.test.ts). Only the bun binary
+# is copied out of this stage; nothing from it reaches the runtime image.
+FROM oven/bun:1.4.3@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598 AS bun
+
+# ── Builder stage ─────────────────────────────────────────────────────────────
 FROM node:24-trixie-slim@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b7a86afc57ebec315 AS builder
 
-# Enable corepack for pnpm
-RUN corepack enable && corepack prepare pnpm@11.8.0 --activate
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 
 WORKDIR /app
 
 # Copy manifests first for layer caching
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY wiki-writer/package.json ./wiki-writer/package.json
+COPY package.json bun.lock bunfig.toml ./
 
 # Install ALL deps (including devDependencies) for the build step
-RUN pnpm install --frozen-lockfile
+RUN bun install --frozen-lockfile
 
 # Copy web workspace source
 COPY web/ ./web/
@@ -18,22 +23,21 @@ COPY web/ ./web/
 # Build the SPA — emits hashed assets to web/dist/
 ARG DASHBOARD_VERSION=dev
 ENV VITE_DASHBOARD_VERSION=$DASHBOARD_VERSION
-RUN pnpm build:web
+RUN bun run build:web
 
 # ── Production dependency stage ───────────────────────────────────────────────
 FROM node:24-trixie-slim@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b7a86afc57ebec315 AS prod-deps
 
-# Enable corepack for pnpm
-RUN corepack enable && corepack prepare pnpm@11.8.0 --activate
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 
 WORKDIR /app
 
 # Copy manifests for prod-only install
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY wiki-writer/package.json ./wiki-writer/package.json
+COPY package.json bun.lock bunfig.toml ./
 
-# Install production deps only (frozen lockfile) — NO dev deps, NO build tools
-RUN pnpm install --frozen-lockfile --prod
+# Install production deps only (frozen lockfile) — NO dev deps, NO build tools,
+# NO lifecycle scripts
+RUN bun install --frozen-lockfile --production --ignore-scripts
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM node:24-trixie-slim@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b7a86afc57ebec315
@@ -52,12 +56,12 @@ COPY public/ ./public/
 COPY --from=builder /app/web/dist/ ./web/dist/
 
 # Mark this as a production runtime so NODE_ENV-gated guards (e.g. devAutoLogin)
-# fire correctly. The builder stage intentionally does NOT set this so pnpm install
-# and pnpm build:web run with full dev-dep access.
+# fire correctly. The builder stage intentionally does NOT set this so bun install
+# and bun run build:web run with full dev-dep access.
 ENV NODE_ENV=production
 
-# Remove package-manager binaries, shims, and caches inherited from the Node base
-# image before handing the filesystem to the unprivileged runtime user.
+# Remove package-manager binaries, shims, and caches (inherited from the Node base
+# image, or left by Bun) before handing the filesystem to the unprivileged runtime user.
 RUN rm -rf \
       /usr/local/bin/npm \
       /usr/local/bin/npx \
@@ -66,11 +70,14 @@ RUN rm -rf \
       /usr/local/bin/corepack \
       /usr/local/bin/yarn \
       /usr/local/bin/yarnpkg \
+      /usr/local/bin/bun \
+      /usr/local/bin/bunx \
       /usr/local/lib/node_modules/npm \
       /usr/local/lib/node_modules/corepack \
       /root/.cache \
       /root/.npm \
       /root/.local/share/pnpm \
+      /root/.bun \
       /usr/local/share/.cache
 
 USER node
