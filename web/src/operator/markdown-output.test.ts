@@ -397,6 +397,54 @@ describe('link destination host', () => {
     expect(anchorsOf(render('<https://example.com/a>'))).toHaveLength(1)
   })
 
+  describe('a non-ASCII host on a link that shows its own URL', () => {
+    const CYRILLIC = 'https://раypal.com'
+    const CYRILLIC_HOST = new URL(CYRILLIC).hostname
+    const hostOf = (out: Node) => hostSpans(out)[0]
+
+    it('has a punycode form to show', () => {
+      expect(CYRILLIC_HOST).toMatch(/^xn--/)
+    })
+
+    it.each([
+      ['a bare URL', `see ${CYRILLIC} now`],
+      ['an autolink', `<${CYRILLIC}>`],
+      ['an explicit link whose label is its URL', `[${CYRILLIC}](${CYRILLIC})`],
+    ])('shows the punycode host after the anchor for %s', (_name, input) => {
+      const out = render(input)
+      const [a] = anchorsOf(out)
+      const span = a?.nextSibling as Element
+      expect(span.tagName).toBe('SPAN')
+      expect(span.getAttribute('class')).toBe(HOST_CLASS)
+      expect(span.textContent).toBe(` (${CYRILLIC_HOST})`)
+      expect(a?.getAttribute('href')).toContain(CYRILLIC_HOST)
+      expect(hostSpans(out)).toHaveLength(1)
+      expectAllowlisted(out)
+    })
+
+    it('shows the punycode host of an IDN such as münchen.example', () => {
+      for (const input of ['https://münchen.example/a', '<https://münchen.example/a>', '[https://münchen.example/a](https://münchen.example/a)']) {
+        expect(hostOf(render(input))?.textContent).toBe(' (xn--mnchen-3ya.example)')
+      }
+    })
+
+    it('shows the punycode host when the typed URL is punycode but the text shown is decoded', () => {
+      const out = render('<https://xn--mnchen-3ya.example/>')
+      expect(anchorsOf(out)[0]?.textContent).toBe('https://münchen.example/')
+      expect(hostOf(out)?.textContent).toBe(' (xn--mnchen-3ya.example)')
+    })
+
+    it('shows the host once when the label is not the URL', () => {
+      expect(hostSpans(render('[docs](https://münchen.example/)'))).toHaveLength(1)
+    })
+
+    it('shows nothing for an ASCII bare URL, autolink or labelled URL', () => {
+      expect(hostSpans(render('see https://example.com/münchen now'))).toHaveLength(0)
+      expect(hostSpans(render('<https://example.com/münchen>'))).toHaveLength(0)
+      expect(hostSpans(render('[https://example.com/a](https://example.com/a)'))).toHaveLength(0)
+    })
+  })
+
   it('omits userinfo and port from the shown host', () => {
     const span = hostSpans(render('[x](https://e.example:8443/p)'))[0]
     expect(span?.textContent).toBe(' (e.example)')

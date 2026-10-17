@@ -122,7 +122,8 @@ from a parsed token stream, not from markup:
   and an origin that differs from the page origin. Relative, `#fragment`,
   protocol-relative, `mailto:`, `javascript:` and `data:` destinations stay text. Only
   `href`, `target="_blank"` and `rel="noopener noreferrer"` are set. When the visible
-  text of an accepted link is not its URL, the destination host is shown after it.
+  text of an accepted link is not its URL, or the host it shows is not plain ASCII, the
+  destination host (in punycode form) is shown after it.
 - The renderer returns a `DocumentFragment`, and the stream swaps it in with one
   `replaceChildren`. A render that throws, returns no node, or needs more than 20,000
   nodes paints plain `textContent` and latches that attachment to plain text: the
@@ -143,7 +144,7 @@ hidden. Only the stream writes it, and `updateDOM` is the only code that unhides
 and only when it has content: expanding a card reveals nothing, and each stream attach
 clears and hides it before the first paint. Never render any other frame field
 (`runId`, `seq`, `droppedCount`) as free text — surface a *fixed* label for the
-coalesced/truncated hint instead of echoing a count.
+coalesced/truncated hint, never an echoed count.
 
 The raw text stays one click away: each card has a Rendered/Raw toggle, backed by a
 page-wide in-memory preference, and Copy raw copies the run's current `outputText`,

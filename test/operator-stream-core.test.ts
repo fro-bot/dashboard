@@ -13056,7 +13056,7 @@ describe('initOperatorStream — output painting', () => {
   })
 
   describe('without a renderer', () => {
-    it('paints textContent on every frame, as before, and marks the view raw', async () => {
+    it('paints textContent on every frame and marks the view raw', async () => {
       opStubDocument()
       const out = opOutputEl()
       const replaceChildren = vi.spyOn(out, 'replaceChildren')

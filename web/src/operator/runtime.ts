@@ -582,7 +582,7 @@ async function defaultRuntimeLoader(opts?: {
     const {outputEl, toolsEl, coalescedEl, approvalsEl, badgeEl, reasonEl, cancelEl, checkoutEl, questionsEl, timeEl, waitingEl} = discoverCardStreamTargets(runId)
     const summaryStatus = discoverCardSummaryStatus(runId)
     // A run the page already saw finish paints from its record, with no stream. Every other run, and
-    // a record that no longer matches what the list shows for the card, attaches live as before.
+    // a record that does not match what the list shows for the card, attaches live.
     const finishedRecord = takenRecord ?? streamMod.takeUsableFinishedRun(runId, summaryStatus, opts?.fixtureSessionId)
 
     // A re-expanded card must never keep question DOM from a previous attach: the stream and

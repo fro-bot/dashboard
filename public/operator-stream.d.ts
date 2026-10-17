@@ -848,7 +848,8 @@ export type OutputView = 'rendered' | 'raw'
 
 /**
  * Builds the DOM for run output. It receives the stream's document and the page origin, and returns a
- * fragment. It may throw; that paint falls back to plain text and the next paint tries again.
+ * fragment. It may throw or return no node; that attachment then paints plain text until the view
+ * changes, with one retry on the final frame or a terminal status.
  */
 export type RenderOutput = (text: string, context: {readonly doc: Document; readonly origin: string}) => DocumentFragment
 
@@ -935,7 +936,7 @@ export interface InitOptions {
   /**
    * Optional renderer for output text. With it, streaming output paints through the renderer, throttled
    * to about every 100 ms, with a final frame or terminal status flushing at once. Without it, output
-   * paints as plain text exactly as before.
+   * paints as plain text.
    */
   readonly renderOutput?: RenderOutput
 }

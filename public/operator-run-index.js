@@ -1025,7 +1025,7 @@ function bindCardActivation(card, runId, onSelectRun) {
 }
 
 /**
- * Whether a click belongs to the card's content rather than to the card itself: it landed on a link or
+ * Whether a click belongs to the card's content, not the card itself: it landed on a link or
  * a button inside the card, or the reader is selecting text there. Such a click never toggles the card.
  * This guard is the only mechanism: nothing inside the card stops propagation for it.
  */

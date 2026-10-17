@@ -114,6 +114,22 @@ function labelIsUrl(label: string, url: URL): boolean {
   }
 }
 
+/** Whether the host a label shows is written with non-ASCII characters. The label is the text as typed. */
+function labelHostIsNonAscii(label: string): boolean {
+  const authority = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(label.trim())?.[1] ?? ''
+  return /[^\u0000-\u007F]/.test(authority)
+}
+
+/** The muted `(host)` that follows an anchor; `url.hostname` is the punycode form. */
+function hostSuffix(state: State, url: URL): Frame['after'] {
+  return () => {
+    const host = createElement(state, 'span')
+    host.setAttribute('class', LINK_HOST_CLASS)
+    appendText(state, host, ` (${url.hostname})`)
+    return host
+  }
+}
+
 function openLink(state: State, tokens: readonly Token[], index: number, token: Token): Frame {
   const parent = currentNode(state)
   const href = String(token.attrGet('href') ?? '')
@@ -132,16 +148,12 @@ function openLink(state: State, tokens: readonly Token[], index: number, token: 
   anchor.setAttribute('target', '_blank')
   anchor.setAttribute('rel', 'noopener noreferrer')
   parent.appendChild(anchor)
-  if (showsDestination || labelIsUrl(label, url)) return {node: anchor}
-  return {
-    node: anchor,
-    after: () => {
-      const host = createElement(state, 'span')
-      host.setAttribute('class', LINK_HOST_CLASS)
-      appendText(state, host, ` (${url.hostname})`)
-      return host
-    },
+  // A link that shows its own URL needs no host, unless the host it shows is non-ASCII: then the
+  // punycode form is the host the browser will contact.
+  if (showsDestination || labelIsUrl(label, url)) {
+    return labelHostIsNonAscii(label) ? {node: anchor, after: hostSuffix(state, url)} : {node: anchor}
   }
+  return {node: anchor, after: hostSuffix(state, url)}
 }
 
 function headingTag(token: Token): string {

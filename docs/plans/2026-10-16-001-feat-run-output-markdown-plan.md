@@ -13,16 +13,16 @@ Render operator run output as Markdown: while it streams, for the final answer, 
 
 ## Problem Frame
 
-Run output is painted with `textContent`, so agent replies show literal `**bold**`, `- ` bullets and backtick spans (fro-bot/dashboard#586). That rule was deliberate: output is untrusted model text, and a model that read prompt-injected issue or PR content can emit anything. This change makes output readable without letting it become HTML, load a resource, or run script.
+Run output is painted with `textContent`, so agent replies show literal `**bold**`, `- ` bullets and backtick spans (fro-bot/dashboard#586). Output is untrusted model text, and a model that read prompt-injected issue or PR content can emit anything. This change makes output readable without letting it become HTML, load a resource, or run script.
 
-The July 2026 redesign put a gate on any richer renderer: P1–P7 in `docs/plans/2026-07-03-001-feat-operator-home-run-centric-redesign-plan.md` and R15 in `docs/brainstorms/2026-07-03-001-operator-home-run-centric-redesign-requirements.md`. This plan meets that gate, with two wording amendments recorded under Key Technical Decisions.
+The July 2026 redesign put a gate on any richer renderer: P1–P7 in `docs/plans/2026-07-03-001-feat-operator-home-run-centric-redesign-plan.md` and R15 in `docs/brainstorms/2026-07-03-001-operator-home-run-centric-redesign-requirements.md`. This plan meets that gate. The P2, P6 and R15 readings it applies are under Key Technical Decisions.
 
 ## Requirements Trace
 
 - R1. Run output renders as Markdown while streaming, on the authoritative final frame, and on a recorded repaint of a finished run.
 - R2. Only headings, paragraphs, emphasis, strikethrough, lists, code spans and blocks, blockquotes, horizontal rules, line breaks, tables and links are emitted. Every other construct renders as its text.
 - R3. Raw HTML in output is shown as literal text. No `<img>`, `<script>`, `style`, `on*` attribute, or other resource-loading element is ever created.
-- R4. A link becomes an anchor only when its destination parses as an absolute `http:` or `https:` URL of at most 2,048 characters, with no userinfo and an origin that differs from the page origin. It opens in a new tab with `rel="noopener noreferrer"`. Bare http(s) URLs are linkified under the same rule. When an accepted link's visible text is not its URL, the destination host is shown as muted text right after the anchor.
+- R4. A link becomes an anchor only when its destination parses as an absolute `http:` or `https:` URL of at most 2,048 characters, with no userinfo and an origin that differs from the page origin. It opens in a new tab with `rel="noopener noreferrer"`. Bare http(s) URLs are linkified under the same rule. When an accepted link's visible text is not its URL, the destination host is shown as muted text right after the anchor. A link that shows its own URL also gets the host when the host it shows is not plain ASCII.
 - R5. Streaming rendering is throttled. It tolerates unfinished Markdown and never lets the final answer lag.
 - R6. Each card has a Rendered/Raw toggle and a Copy raw button. The toggle sets one page-wide, in-memory preference. Copy raw copies the run's current raw text.
 - R7. Plain text remains the fallback when the renderer is missing, fails to load, is too slow to load, or throws. A throw switches that attachment to plain text until the view changes, with one retry on its final frame or terminal status.
@@ -141,8 +141,8 @@ The July 2026 redesign put a gate on any richer renderer: P1–P7 in `docs/plans
   - P3, no resource loading: Unit 1.
   - P4, CSP unchanged: System-Wide Impact.
   - P5, malicious-Markdown corpus: Unit 1.
-  - P6, fallback and auth close: Units 2 and 4.
-  - P7, Oracle review plus Marcus: Unit 7.
+  - P6, Rendered by default, plain-text fallback, auth close: Units 2 and 4.
+  - P7, independent security review plus Marcus's sign-off: Unit 7.
 - **Parser: `markdown-it` 15.0.3, as an exact pin in root `package.json` `devDependencies` (Renovate-managed). Marcus approved the dependency.**
   - It is bundled into the Vite chunk at build time, so the production image does not need it. Version 15.0.3 ships its own types, so there is no `@types/markdown-it`.
   - Configure it with `html: false`, `linkify: true` and `typographer: false`. With `html: false`, raw HTML parses as text tokens, so it never becomes a node to skip.
@@ -151,22 +151,22 @@ The July 2026 redesign put a gate on any richer renderer: P1–P7 in `docs/plans
     - `marked` has no mode that disables HTML.
     - The mdast family returns `html` nodes that would need a rewrite pass, and has about 43 transitive dependencies.
     - A hand-written parser would leave us owning correctness for tables and nested lists.
-- **Gate P2, met by construction.** P2 asks for a DOMPurify-style sanitizer before DOM insertion. The renderer builds DOM from tokens with `createElement` and `textContent`, from a fixed allowlist, and never builds an HTML string, so there is nothing to sanitize. A second sanitizer would be redundant code plus another dependency. Two checks enforce the invariant instead of assuming it: Unit 1 asserts an explicit element, attribute and href allowlist over every corpus output, and Unit 5 grows the HTML-sink ban to cover the renderer module.
+- **Gate P2, met by construction.** P2 asks for a DOMPurify-style sanitizer before DOM insertion. The renderer builds DOM from tokens with `createElement` and `textContent`, from a fixed allowlist, and never builds an HTML string, so there is nothing to sanitize. A second sanitizer would be redundant code plus another dependency. Two checks enforce the invariant: Unit 1 asserts an explicit element, attribute and href allowlist over every corpus output, and Unit 5 grows the HTML-sink ban to cover the renderer module.
 - **R15 "allowlists no external link/image origins", read as resource loading.** Nothing loads from any origin: no images, iframes, styles or scripts, and CSP is unchanged. Clickable http(s) links are user-initiated navigation that #586 asks for. They open in a new tab with `noopener noreferrer`.
 - **Gate P5, P6 and P7.**
   - P5 is the malicious-Markdown corpus in Unit 1.
-  - P6: plain text stays the fallback when the renderer is missing, fails to load, or throws. `onAuthRequired` in `web/src/operator/runtime.ts` calls `_closeActiveStream()`, so no further paints or toggle repaints happen after `auth-required`. Already-painted DOM is not reverted. The finished-run store is cleared as it is today.
-  - P7: an independent Oracle security review of P1–P6 runs before the PR merges, and Marcus signs off.
+  - P6: Rendered Markdown is the default (#586). Plain text is the fallback when the renderer is missing, fails to load or throws. On `auth-required`, `onAuthRequired` in `web/src/operator/runtime.ts` calls `_closeActiveStream()` and resets the view preference, so no further paints or toggle repaints happen, and the run content leaves the page because the view leaves the ready state. The finished-run store is cleared.
+  - P7: signed off by Marcus after an independent security review, which passed P1–P5.
 - **Redaction (R18).** Run output is already displayed verbatim, and link targets are the only new sink. The gateway owns repo-name filtering of output. This plan adds no repo-name rendering and no repo-name lookup, so AGENTS.md invariant 2 (redaction preservation) is untouched.
 - **The renderer is a pure function passed into the stream.**
   - It is a Vite-built module in `web/src/operator/`, loaded by the runtime alongside the three operator modules, and passed to `initOperatorStream` as an optional `renderOutput(text, {doc, origin})`. The stream passes its document and the page origin. The function returns a `DocumentFragment`.
   - `public/operator-stream.js` stays no-build and dependency-free. It owns mounting, throttling, scroll, selection and fallback.
-  - With no renderer, the existing `textContent` path runs unchanged.
+  - With no renderer, output is painted with `textContent`.
   - The renderer counts the nodes it creates and throws past 20,000, so that paint falls back to plain text. No adaptive interval is built.
 - **The renderer loads in parallel with the operator modules, and the first attach waits for it, bounded.**
   - A recorded repaint is a single synchronous paint with no later frame to upgrade it, so the renderer must be known before the first attach. The loader starts a literal-path dynamic import of the renderer first and does not await it before the run index and launch initialize. A stalled renderer import therefore never stops those from initializing.
   - Only the attaches that happen before the import settles wait for it: `_attachStream` defers the attach until the import settles or `RENDERER_LOAD_CAP_MS` (2,000 ms, counted from the loader's start) passes. Once settled, attaches are synchronous.
-  - The loader reads the renderer through `web/src/operator/renderer-source.ts`, whose default is the literal-path dynamic import. Specs replace the source (an already-resolved stub by default in `test-setup.ts`, or a promise they control), because a registry mock cannot reliably hold one dynamic import back while the loader's other imports run.
+  - The loader reads the renderer through `web/src/operator/renderer-source.ts`, whose default is the literal-path dynamic import. Specs install their own source (an already-resolved stub by default in `test-setup.ts`, or a promise they control), because a registry mock cannot reliably hold one dynamic import back while the loader's other imports run.
   - A rejected import, a missing chunk and a timeout all mean no renderer: that stream paints plain text. A renderer that arrives after the cap is kept for later attaches.
   - The loader starts the import and the cap timer before it imports any operator module, so a slow module import does not add to the cap.
   - Closing the active stream, auth-required and cleanup cancel a waiting attach. A second click on the card whose attach is waiting is a collapse: it cancels the attach and clears the hash. When a waiting attach is released, it re-checks that the card is still listed and attaches nothing if the list dropped it. A stale shell that predates the renderer passes no renderer and degrades the same way.
@@ -177,13 +177,13 @@ The July 2026 redesign put a gate on any richer renderer: P1–P7 in `docs/plans
   - Only `href`, `target` and `rel` are set. A token `title` is ignored.
   - A rejected link renders its label followed by the destination as plain text.
   - Linkified bare URLs pass the same check.
-  - When an accepted link's visible text is not its URL, the renderer appends the destination host as muted text right after the anchor, for example `Source (evil.example)`. The host comes from `url.hostname`, with IDNs left in punycode form. Bare and autolinked URLs show nothing extra.
+  - When an accepted link's visible text is not its URL, the renderer appends the destination host as muted text right after the anchor, for example `Source (evil.example)`. The host comes from `url.hostname`, with IDNs in punycode form. A bare URL, an autolink or a label that is its own URL shows the host only when the host it displays is not plain ASCII, for example `https://раypal.com (xn--…)`; ASCII ones show nothing extra.
 - **Headings are clamped to h4–h6**, so a model `# Title` cannot insert an h1 into the page outline.
 - **Images render as their alt text,** or `[image]` when the alt is empty. Inside a link, the alt text becomes the link label.
 - **Tables are wrapped.** The renderer wraps each `table` in a `div` with a class. Unit 6 styles the wrapper with `overflow-x: auto`.
 - **One painter, memoized.**
   - `paintOutput` is a closure inside `initOperatorStream`, called from `updateDOM`. Tests drive it through `initOperatorStream`. It skips the DOM write when the key `(outputText, outputUnavailable, effective view)` is unchanged, so status, heartbeat, approval and question frames never re-render output. A plain-text fallback records the key with the plain view, so status, heartbeat and approval frames never re-render a latched attachment.
-  - The rendered fragment replaces the old content in one `replaceChildren` swap. A throw mid-build leaves the old DOM in place, and that paint falls back to plain text and sets the render-failure latch.
+  - The rendered fragment is swapped in with one `replaceChildren`. A throw mid-build leaves the DOM as painted, and that paint falls back to plain text and sets the render-failure latch.
 - **Throttle with `setTimeout` only, around 100 ms.**
   - The first non-empty output paints immediately.
   - A final output frame and a terminal status flush synchronously.
@@ -229,11 +229,11 @@ The July 2026 redesign put a gate on any richer renderer: P1–P7 in `docs/plans
 ### Resolved During Planning
 
 - **Parser choice and dependency approval:** `markdown-it` 15.0.3, approved by Marcus.
-- **Gate P2 and R15 wording:** amended as described above. The Oracle review plus Marcus's sign-off satisfy P7.
-- **Link-host display:** shown as muted text after an anchor whose visible text is not its URL. Bare and autolinked URLs show nothing extra.
+- **Gate P2, P6 and R15 readings:** as described above. P7 is signed off by Marcus after an independent security review.
+- **Link-host display:** shown as muted text after an anchor whose visible text is not its URL, and after one that shows its own URL with a non-ASCII host. ASCII bare and autolinked URLs show nothing extra.
 - **Scope of the toggle:** a page-wide in-memory preference, read at paint time, applied to every live attachment.
 - **Bare URLs:** linkified, under the same http(s) check.
-- **P6 at the auth boundary:** `onAuthRequired` closes the active stream, resets the view preference and clears the stores. Already-painted DOM is not reverted.
+- **P6 at the auth boundary:** `onAuthRequired` closes the active stream, resets the view preference and clears the stores. The run content leaves the page because the view leaves the ready state.
 
 ### Deferred to Implementation
 
@@ -345,7 +345,7 @@ sequenceDiagram
 
 **Test scenarios:**
 - Happy path:
-  - with no renderer, the `textContent` path is unchanged and existing tests stay green;
+  - with no renderer, output paints with `textContent` and the existing output tests pass;
   - with a renderer, the first output paints immediately and a trailing paint lands around 100 ms;
   - a final frame flushes synchronously and clears the pending timer;
   - a terminal status flushes before the record is written.
@@ -369,7 +369,7 @@ sequenceDiagram
 - Preference:
   - flipping it repaints every attached card, and a closed attachment is not repainted;
   - `resetOutputView()` resets it to Rendered;
-  - `clearFinishedRuns` leaves it unchanged;
+  - `clearFinishedRuns` does not touch it;
   - the effective view is Raw when no renderer exists, without changing the preference.
 - Scroll and selection:
   - an at-bottom box stays pinned after a swap;
@@ -381,7 +381,7 @@ sequenceDiagram
   - a held selection repaints after the hold limit, and `close()` clears the hold timer;
   - a pointer press or a focused link inside the output defers a streaming paint, release or focus leaving resumes it, a final paint proceeds anyway, and `close()` removes the listeners.
 
-**Verification:** stream-core tests pass, and all existing output tests are unchanged.
+**Verification:** stream-core tests pass, including all existing output tests.
 
 - [x] **Unit 3: Output toolbar and card click guard**
 
@@ -437,7 +437,7 @@ sequenceDiagram
   - handlers do not stack across A→B→A (spy count is 1);
   - the three card shapes have the same role order and row pins.
 
-**Verification:** jsdom and parity tests pass, and existing anatomy pins are updated on purpose rather than loosened.
+**Verification:** jsdom and parity tests pass, and the anatomy pins match the new anatomy exactly.
 
 - [x] **Unit 4: Runtime wiring**
 
@@ -455,7 +455,7 @@ sequenceDiagram
 **Approach:**
 - Import `markdown-output` in the loader's module step, using a literal-path dynamic import with `.catch(() => undefined)`.
 - Pass it as `renderOutput` from `_attachStream` on every attach path: click, launch, restore, jump and recorded repaint. The bootstrap `initOperatorStream` call at the bottom of `public/operator-stream.js` is not an attach path (`?manual=1`) and gets no renderer.
-- `onAuthRequired` calls `_closeActiveStream()` and `resetOutputView()`, besides the existing `clearFinishedRuns()`. No further paints or toggle repaints happen after `auth-required`. Already-painted DOM is not reverted.
+- `onAuthRequired` calls `_closeActiveStream()` and `resetOutputView()`, besides the existing `clearFinishedRuns()`. No further paints or toggle repaints happen after `auth-required`, and the run content leaves the page because the view leaves the ready state.
 - Add `resetOutputView` to the stream module's `Pick` type. The runtime tests' fake stream modules gain it.
 
 **Test scenarios:**
@@ -465,7 +465,7 @@ sequenceDiagram
   - a recorded repaint receives the renderer at init and renders Markdown;
   - clicks on links and the toolbar, and a selection, behave as in Unit 3;
   - after `auth-required`, an arriving frame and a toggle click paint nothing, and the preference is back to Rendered;
-  - `clearFinishedRuns()` alone leaves the preference unchanged.
+  - `clearFinishedRuns()` alone does not change the preference.
 
 **Verification:** runtime tests pass. `web/dist/sw.js` lists the new chunk after `pnpm build:web`.
 
@@ -483,7 +483,7 @@ sequenceDiagram
 **Approach:**
 - Strip comments first, as `test/static-assets.test.ts` already does. Then scan non-test files in `public/` and `web/src/operator/` for write and call forms only, with `(?:innerHTML|outerHTML|insertAdjacentHTML|setHTMLUnsafe|createContextualFragment|parseFromString|srcdoc|document\.write)['"\]\s]*(?:\+?=|\()`.
 - Also match `setAttribute\(\s*['"]href` and `\.href\s*=` outside the renderer module.
-- This scan replaces the narrower `innerHTML` checks in `test/static-assets.test.ts`. The stream-core and launch-core bans stay.
+- This scan is the HTML-sink check in `test/static-assets.test.ts`. The stream-core and launch-core bans stay.
 
 **Test scenarios:**
 - Happy path: the scan passes on the current tree.
@@ -507,7 +507,7 @@ sequenceDiagram
 **Approach:**
 - This unit owns visual rules only. Role order and row pins belong to Unit 3.
 - Style `[data-output-view]` per view.
-- Rendered output gets prose typography, with mono reserved for code. Code blocks wrap rather than adding a third nested scroller. The table wrapper gets `overflow-x: auto`.
+- Rendered output gets prose typography, with mono reserved for code. Code blocks wrap and add no third nested scroller. The table wrapper gets `overflow-x: auto`.
 - Style the link-host text as muted.
 - The grid item gets `min-width: 0`.
 - Blockquotes get no side-stripe border.
@@ -551,7 +551,7 @@ sequenceDiagram
   - the malicious scenario inert, with no network request in the log;
   - one 256k paint timed, with the number recorded in the PR;
   - dark, light and 390px.
-- Gates pass. Then the Oracle security review (P7) runs, followed by Marcus's sign-off.
+- Gates pass. An independent security review (P7) runs, followed by Marcus's sign-off.
 
 ## System-Wide Impact
 
@@ -567,12 +567,12 @@ sequenceDiagram
   - Late timers must not write into a re-used `outputEl`.
 - **API surface parity:** `InitOptions` gains an optional `renderOutput`, and the stream module gains a `resetOutputView` export. The `.d.ts` sidecars and the `Pick` types in `runtime.ts` change together.
 - **Integration coverage:** Unit 3's jsdom tests use a fake renderer. Unit 4's integration test runs the real stream module with the real renderer for click, selection, repaint and auth-boundary behavior. The fixture browser pass covers the assembled surface.
-- **Unchanged invariants:**
-  - The reducer still treats the final frame as authoritative and terminal status as completion.
-  - `MAX_OUTPUT_TEXT_CHARS` is unchanged.
+- **Invariants held:**
+  - The reducer treats the final frame as authoritative and terminal status as completion.
+  - `MAX_OUTPUT_TEXT_CHARS` stays 256,000.
   - No new routes.
-  - No CSP change (P4).
-  - The service worker strategy is unchanged.
+  - CSP is not relaxed (P4).
+  - The service worker strategy is as configured.
   - `public/operator-stream.js` stays no-build with no imports beyond `operator-time.js`.
 
 ## Risks & Dependencies
@@ -580,7 +580,7 @@ sequenceDiagram
 | Risk | Mitigation |
 |------|------------|
 | A parser bug turns input into an unexpected node | The DOM is built only from allowlisted token types. Unknown tokens become text. The P5 corpus and the explicit element, attribute and href allowlist assertions run in CI. |
-| A misleading link label hides its real destination | The destination host is shown after any link whose label is not its URL. Only http(s) URLs become links, they are normalized, and userinfo, same-origin and relative paths stay text. |
+| A misleading link label hides its real destination | The destination host is shown after any link whose label is not its URL, and after any link that shows a non-ASCII host. Only http(s) URLs become links, they are normalized, and userinfo, same-origin and relative paths stay text. |
 | Re-parsing up to 256k characters causes stalls | Memo plus throttle, a 20,000-node cap that drops that paint to plain text, node-count tests in Unit 1, and a timed 256k paint recorded in the PR (Unit 7). |
 | The renderer chunk is missing after a deploy | Soft failure to plain text, with the toggle hidden. |
 | New anatomy breaks pinned grid tests | Unit 3 owns role order and row pins and updates them on purpose, Unit 6 changes visual rules only, and a parity test covers all three card shapes. |

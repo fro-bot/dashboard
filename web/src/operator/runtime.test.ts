@@ -4599,7 +4599,7 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
       expect(mounted.initOperatorStream).toHaveBeenCalledTimes(1)
       expect('renderOutput' in (mounted.lastAttach() as object)).toBe(false)
 
-      // The stalled import is no longer waited on: the next attach is immediate.
+      // The stalled import is not waited on: the next attach is immediate.
       mounted.restore()
       expect(mounted.initOperatorStream).toHaveBeenCalledTimes(2)
     })
@@ -4623,7 +4623,7 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
       await vi.advanceTimersByTimeAsync(500)
       expect(mounted.initOperatorStream).not.toHaveBeenCalled()
 
-      // The cap counts from the loader's start (about 1.1 s ago), not from the end of the stream import.
+      // The cap counts from the loader's start, about 1.1 s ago.
       await vi.advanceTimersByTimeAsync(500)
       expect(mounted.initOperatorStream).toHaveBeenCalledTimes(1)
       expect('renderOutput' in (mounted.lastAttach() as object)).toBe(false)

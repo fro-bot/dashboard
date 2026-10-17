@@ -4111,8 +4111,8 @@ export function initOperatorStream(opts) {
   }
 
   /**
-   * Replace the output with the renderer's fragment in one swap, keeping the reader's place. Returns false
-   * when the renderer throws or returns no node; the old DOM is then left as it was.
+   * Swap the renderer's fragment into the output in one step, keeping the reader's place. Returns false
+   * when the renderer throws or returns no node; the DOM is then left untouched.
    */
   function swapRenderedOutput(text) {
     const trackScroll = typeof outputEl.scrollTop === 'number'
@@ -4209,7 +4209,7 @@ export function initOperatorStream(opts) {
 
     const wrote = writeOutput(text, unavailable, view)
     if (!wrote) renderFailed = true
-    // A failed render left plain text, and the key says so: an unchanged state does not try the renderer again.
+    // A failed render leaves plain text and the key records it, so an unchanged state does not try the renderer again.
     paintedOutput = {text, unavailable, view: wrote ? view : 'raw'}
     if (streaming) startOutputCooldown()
   }
