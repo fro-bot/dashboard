@@ -128,11 +128,23 @@ const SUMMARY_STATUSES = new Set([
 /** In-card copy for an expired run snapshot. Dashboard-owned; never wire text. */
 const OUTPUT_UNAVAILABLE_COPY = 'Output no longer available.'
 
-/** Shortest gap between two rendered paints of streaming output. */
+/** Shortest gap between two paints of streaming output. */
 const OUTPUT_PAINT_INTERVAL_MS = 100
+
+/**
+ * The gap after a rendered paint is this many times the render's duration, which keeps rendering to about
+ * 20% of each window while output streams, and never more than OUTPUT_PAINT_MAX_INTERVAL_MS.
+ */
+const OUTPUT_PAINT_RENDER_MULTIPLIER = 4
+const OUTPUT_PAINT_MAX_INTERVAL_MS = 1000
 
 /** A selection, pointer press or focus inside the output defers streaming repaints for at most this long, then the paint proceeds. */
 const OUTPUT_SELECTION_HOLD_MS = 3000
+
+/** Milliseconds from a monotonic clock where there is one. */
+function clockNow() {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()
+}
 
 /** A box scrolled to within this many pixels of its end counts as at the bottom. */
 const OUTPUT_PIN_TOLERANCE_PX = 8
@@ -3956,6 +3968,7 @@ export function initOperatorStream(opts) {
   // terminal status (renderRetryUsed), which allows one retry; a retry that fails leaves it set.
   let renderFailed = false
   let renderRetryUsed = false
+  let lastRenderMs = 0 // how long the last successful render and swap took on this device; 0 before the first
 
   function outputDocument() {
     return outputEl.ownerDocument ?? globalThis.document
@@ -4094,6 +4107,13 @@ export function initOperatorStream(opts) {
     outputPaintWaiting = false
   }
 
+  // The gap before the next streaming paint: a rendered paint waits a multiple of its own render time,
+  // clamped to the floor and the cap; a plain-text paint, whatever the reason, waits the floor.
+  function outputCooldownMs() {
+    if (paintedView !== 'rendered' || !Number.isFinite(lastRenderMs)) return OUTPUT_PAINT_INTERVAL_MS
+    return Math.min(OUTPUT_PAINT_MAX_INTERVAL_MS, Math.max(OUTPUT_PAINT_INTERVAL_MS, OUTPUT_PAINT_RENDER_MULTIPLIER * lastRenderMs))
+  }
+
   function startOutputCooldown() {
     outputCooldownTimer = setTimeout(() => {
       outputCooldownTimer = null
@@ -4102,7 +4122,7 @@ export function initOperatorStream(opts) {
         outputPaintWaiting = false
         paintOutput(false)
       }
-    }, OUTPUT_PAINT_INTERVAL_MS)
+    }, outputCooldownMs())
   }
 
   function setOutputViewAttribute(view) {
@@ -4118,6 +4138,7 @@ export function initOperatorStream(opts) {
     const trackScroll = typeof outputEl.scrollTop === 'number'
     const previousTop = trackScroll ? outputEl.scrollTop : 0
     const atBottom = trackScroll && outputEl.scrollHeight - previousTop - outputEl.clientHeight <= OUTPUT_PIN_TOLERANCE_PX
+    const startedAt = clockNow()
     try {
       const fragment = outputRenderer(text, {doc: outputDocument(), origin: globalThis.location?.origin ?? ''})
       if (fragment === null || typeof fragment !== 'object') return false
@@ -4125,6 +4146,7 @@ export function initOperatorStream(opts) {
     } catch {
       return false
     }
+    lastRenderMs = clockNow() - startedAt
     if (trackScroll) {
       outputEl.scrollTop = atBottom
         ? outputEl.scrollHeight

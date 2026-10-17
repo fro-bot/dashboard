@@ -13036,6 +13036,32 @@ function opWithSwap(out: ReturnType<typeof opOutputEl>, scrollHeight: number) {
   }
 }
 
+/** A clock the renderer advances, so a render takes exactly as long as the test says. */
+function opClock() {
+  let now = 1000
+  vi.stubGlobal('performance', {now: () => now})
+  return {
+    advance(ms: number) {
+      now += ms
+    },
+  }
+}
+
+/** A renderer whose every call takes `ms` on the stubbed clock. */
+function slowRenderer(clock: ReturnType<typeof opClock>, ms: number | ((callIndex: number) => number)) {
+  return opRenderer((_text, callIndex) => clock.advance(typeof ms === 'number' ? ms : ms(callIndex)))
+}
+
+/** Two deltas: the first paints at once, the second waits out the cooldown the first render set. */
+async function twoDeltas(renderer: ReturnType<typeof opRenderer>) {
+  const out = opOutputEl()
+  const h = await opOpen(out, renderer)
+  await h.push(opDelta('a', 1))
+  await h.push(opDelta('b', 2))
+  expect(renderer).toHaveBeenCalledTimes(1)
+  return {out, h}
+}
+
 async function opOpen(outputEl: FakeElement, renderOutput?: unknown, runId = OP_RUN) {
   return fcOpen(runId, {elements: {outputEl, ...(renderOutput === undefined ? {} : {renderOutput})}})
 }
@@ -13271,6 +13297,156 @@ describe('initOperatorStream — output painting', () => {
       expect(out.attributes['data-output-view']).toBe('unavailable')
       expect(out.className).toContain('run-output-unavailable')
       expect(renderer).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('adaptive repaint interval', () => {
+    it('keeps the 100 ms cooldown after a 10 ms render', async () => {
+      opStubDocument()
+      const renderer = slowRenderer(opClock(), 10)
+      const {out} = await twoDeltas(renderer)
+
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS - 1)
+      expect(renderer).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(renderer).toHaveBeenCalledTimes(2)
+      expect(out.textContent).toBe('R:ab')
+    })
+
+    it('waits 4 times a 60 ms render, 240 ms, before the next rendered paint', async () => {
+      opStubDocument()
+      const renderer = slowRenderer(opClock(), 60)
+      const {out} = await twoDeltas(renderer)
+
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      expect(renderer).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(139)
+      expect(renderer).toHaveBeenCalledTimes(1)
+      expect(out.textContent).toBe('R:a')
+      await vi.advanceTimersByTimeAsync(1)
+      expect(renderer).toHaveBeenCalledTimes(2)
+      expect(out.textContent).toBe('R:ab')
+    })
+
+    it('caps the cooldown at 1000 ms for a 400 ms render', async () => {
+      opStubDocument()
+      const renderer = slowRenderer(opClock(), 400)
+      await twoDeltas(renderer)
+
+      await vi.advanceTimersByTimeAsync(999)
+      expect(renderer).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(renderer).toHaveBeenCalledTimes(2)
+    })
+
+    it('follows the latest render: a fast render after a slow one shortens the next cooldown', async () => {
+      opStubDocument()
+      const clock = opClock()
+      const renderer = slowRenderer(clock, callIndex => (callIndex === 0 ? 60 : 5))
+      const {out, h} = await twoDeltas(renderer)
+      await vi.advanceTimersByTimeAsync(240)
+      expect(out.textContent).toBe('R:ab')
+
+      await h.push(opDelta('c', 3))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS - 1)
+      expect(out.textContent).toBe('R:ab')
+      await vi.advanceTimersByTimeAsync(1)
+      expect(out.textContent).toBe('R:abc')
+    })
+
+    it('a final frame paints at once in the middle of a long cooldown', async () => {
+      opStubDocument()
+      const renderer = slowRenderer(opClock(), 400)
+      const {out, h} = await twoDeltas(renderer)
+      await vi.advanceTimersByTimeAsync(300)
+      expect(out.textContent).toBe('R:a')
+
+      await h.push(fcOutput(OP_RUN, 'whole answer', {seq: 3}))
+
+      expect(out.textContent).toBe('R:whole answer')
+      expect(renderer).toHaveBeenCalledTimes(2)
+    })
+
+    it('a terminal status and a view change paint at once in the middle of a long cooldown', async () => {
+      opStubDocument()
+      const renderer = slowRenderer(opClock(), 400)
+      const {out, h} = await twoDeltas(renderer)
+
+      await h.push(fcStatus(OP_RUN, 'cancelled'))
+      expect(out.textContent).toBe('R:ab')
+
+      h.handle.setOutputView('raw')
+      expect(out.textContent).toBe('ab')
+    })
+
+    it('uses 100 ms in the Raw view, whatever the earlier renders took', async () => {
+      opStubDocument()
+      const renderer = slowRenderer(opClock(), 400)
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      expect(out.textContent).toBe('R:a')
+      h.handle.setOutputView('raw')
+
+      await h.push(opDelta('b', 2))
+      expect(out.textContent).toBe('ab')
+      await h.push(opDelta('c', 3))
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS - 1)
+      expect(out.textContent).toBe('ab')
+      await vi.advanceTimersByTimeAsync(1)
+      expect(out.textContent).toBe('abc')
+      expect(renderer).toHaveBeenCalledTimes(1)
+    })
+
+    it('uses 100 ms for the plain-text paint of a latched attachment, even after a slow failed render', async () => {
+      opStubDocument()
+      const clock = opClock()
+      const renderer = opRenderer(() => {
+        clock.advance(400)
+        throw new Error('render failed')
+      })
+      const out = opOutputEl()
+      const h = await opOpen(out, renderer)
+      await h.push(opDelta('a', 1))
+      expect(out.textContent).toBe('a')
+      await h.push(opDelta('b', 2))
+
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS - 1)
+      expect(out.textContent).toBe('a')
+      await vi.advanceTimersByTimeAsync(1)
+      expect(out.textContent).toBe('ab')
+      expect(renderer).toHaveBeenCalledTimes(1)
+    })
+
+    it('starts from the 100 ms floor on every attach', async () => {
+      opStubDocument()
+      const clock = opClock()
+      const slow = await opOpen(opOutputEl(), slowRenderer(clock, 400), 'run-op-a')
+      await slow.push(fcOutput('run-op-a', 'x', {final: false, seq: 1}))
+      slow.handle.close()
+
+      const renderer = slowRenderer(clock, 10)
+      const out = opOutputEl()
+      const next = await opOpen(out, renderer, 'run-op-b')
+      await next.push(fcOutput('run-op-b', 'a', {final: false, seq: 1}))
+      await next.push(fcOutput('run-op-b', 'b', {final: false, seq: 2}))
+
+      await vi.advanceTimersByTimeAsync(OP_INTERVAL_MS)
+      expect(out.textContent).toBe('R:ab')
+    })
+
+    it('falls back to Date.now() when performance is unavailable', async () => {
+      opStubDocument()
+      vi.stubGlobal('performance', undefined)
+      const renderer = opRenderer(() => {
+        vi.setSystemTime(Date.now() + 60)
+      })
+      const {out} = await twoDeltas(renderer)
+
+      await vi.advanceTimersByTimeAsync(239)
+      expect(out.textContent).toBe('R:a')
+      await vi.advanceTimersByTimeAsync(1)
+      expect(out.textContent).toBe('R:ab')
     })
   })
 

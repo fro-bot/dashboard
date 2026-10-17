@@ -162,7 +162,7 @@ The July 2026 redesign put a gate on any richer renderer: P1–P7 in `docs/plans
   - It is a Vite-built module in `web/src/operator/`, loaded by the runtime alongside the three operator modules, and passed to `initOperatorStream` as an optional `renderOutput(text, {doc, origin})`. The stream passes its document and the page origin. The function returns a `DocumentFragment`.
   - `public/operator-stream.js` stays no-build and dependency-free. It owns mounting, throttling, scroll, selection and fallback.
   - With no renderer, output is painted with `textContent`.
-  - The renderer counts the nodes it creates and throws past 20,000, so that paint falls back to plain text. No adaptive interval is built.
+  - The renderer counts the nodes it creates and throws past 20,000, so that paint falls back to plain text. The repaint interval follows the measured render time (see Throttle).
 - **The renderer loads in parallel with the operator modules, and the first attach waits for it, bounded.**
   - A recorded repaint is a single synchronous paint with no later frame to upgrade it, so the renderer must be known before the first attach. The loader starts a literal-path dynamic import of the renderer first and does not await it before the run index and launch initialize. A stalled renderer import therefore never stops those from initializing.
   - Only the attaches that happen before the import settles wait for it: `_attachStream` defers the attach until the import settles or `RENDERER_LOAD_CAP_MS` (2,000 ms, counted from the loader's start) passes. Once settled, attaches are synchronous.
@@ -184,8 +184,11 @@ The July 2026 redesign put a gate on any richer renderer: P1–P7 in `docs/plans
 - **One painter, memoized.**
   - `paintOutput` is a closure inside `initOperatorStream`, called from `updateDOM`. Tests drive it through `initOperatorStream`. It skips the DOM write when the key `(outputText, outputUnavailable, effective view)` is unchanged, so status, heartbeat, approval and question frames never re-render output. A plain-text fallback records the key with the plain view, so status, heartbeat and approval frames never re-render a latched attachment.
   - The rendered fragment is swapped in with one `replaceChildren`. A throw mid-build leaves the DOM as painted, and that paint falls back to plain text and sets the render-failure latch.
-- **Throttle with `setTimeout` only, around 100 ms.**
+- **Throttle with `setTimeout` only, with an interval that follows the render.**
   - The first non-empty output paints immediately.
+  - After a rendered paint the next streaming paint waits 4 times the duration of that render and swap, measured with `performance.now()` (`Date.now()` where it is missing), clamped to 100 ms and 1,000 ms. That keeps rendering to about 20% of each window on the device it runs on.
+  - A plain-text paint (Raw view, a latched attachment, no renderer) waits 100 ms.
+  - The duration is per attachment and starts at zero on attach.
   - A final output frame and a terminal status flush synchronously.
   - The timer callback checks `aborted` and reads current state when it fires.
   - `close()` cancels it.
@@ -253,7 +256,7 @@ sequenceDiagram
   RT->>ST: initOperatorStream({..., renderOutput})
   ST->>ST: SSE record → reducer → updateDOM
   ST->>ST: paintOutput memo key unchanged? → no-op
-  ST->>ST: throttle (leading edge, ~100 ms, flush on final/terminal)
+  ST->>ST: throttle (leading edge, 4× last render clamped to 100 ms–1 s, flush on final/terminal)
   ST->>MD: renderOutput(outputText, {doc, origin})
   MD-->>ST: DocumentFragment (allowlisted nodes only)
   ST->>DOM: replaceChildren(fragment), restore scroll
@@ -346,11 +349,12 @@ sequenceDiagram
 **Test scenarios:**
 - Happy path:
   - with no renderer, output paints with `textContent` and the existing output tests pass;
-  - with a renderer, the first output paints immediately and a trailing paint lands around 100 ms;
+  - with a renderer, the first output paints immediately and a trailing paint lands after the adaptive interval (100 ms for a fast render, 4 times the render time up to 1 s for a slow one);
   - a final frame flushes synchronously and clears the pending timer;
   - a terminal status flushes before the record is written.
 - Edge cases:
   - a burst of 20 output frames renders at most twice;
+  - the cooldown is 100 ms after a 10 ms render, 240 ms after a 60 ms render and 1,000 ms after a 400 ms render; a final frame, a terminal status and a view change paint inside it; Raw and latched paints use 100 ms; the duration starts at zero on each attach;
   - a status-only, heartbeat or approval frame does not call the renderer;
   - an authoritative empty final hides the region;
   - the timer reads current state when it fires;

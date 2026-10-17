@@ -935,8 +935,8 @@ export interface InitOptions {
   readonly finishedRecord?: FinishedRunRecord
   /**
    * Optional renderer for output text. With it, streaming output paints through the renderer, throttled
-   * to about every 100 ms, with a final frame or terminal status flushing at once. Without it, output
-   * paints as plain text.
+   * to a gap of 4 times the last render's duration (between 100 ms and 1 s), with a final frame or
+   * terminal status flushing at once. Without it, output paints as plain text.
    */
   readonly renderOutput?: RenderOutput
 }
