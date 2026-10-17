@@ -46,7 +46,7 @@ load-bearing rules for code suggestions.
 
 ## Conventions
 
-- pnpm; Node 24 native TS (strip-only): no enums, namespaces, parameter properties, or TS
+- Bun (`bun install`, `bun run <script>`); Node 24 native TS (strip-only): no enums, namespaces, parameter properties, or TS
   import aliases (`erasableSyntaxOnly` lint enforces this).
 - `as unknown as X` for Octokit boundary casts; never `any`.
 - `Result<T, E>` error-return shape for the app client.
@@ -54,7 +54,7 @@ load-bearing rules for code suggestions.
   domains; never reuse one as the other.
 - Same-origin `/operator/*` is reverse-proxy-routed to the Gateway; the dashboard does not
   mount those routes and must not act as a credential-forwarding proxy.
-- Gates before any change is done: `pnpm check-types`, `pnpm lint`, `pnpm test`.
+- Gates before any change is done: `bun run check-types`, `bun run lint`, `bun run test` (never a bare `bun test`).
 - `docs/solutions/` holds documented solutions to past problems (YAML frontmatter:
   `module`, `tags`, `problem_type`) — consult it when implementing or debugging in a
   documented area.

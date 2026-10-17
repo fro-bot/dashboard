@@ -4,7 +4,7 @@ Fro Bot monitoring dashboard with a read-only-by-default GitHub data path and on
 isolated wiki-write capability. Two parts in one repo: a Node 24
 native-TS Hono server (`src/`, strip-only, no backend build step) that serves the
 API + GitHub OAuth, and a Vite + React 19 + Tailwind v4 PWA client (`web/`, built
-via `pnpm build:web` → `web/dist`, served at `/`). Authenticated single-operator
+via `bun run build:web` → `web/dist`, served at `/`). Authenticated single-operator
 view of Fro Bot's cross-repo footprint.
 
 ## Critical security invariants
@@ -20,9 +20,10 @@ view of Fro Bot's cross-repo footprint.
    `wiki-writer` service below is implemented in `wiki-writer/` but is not
    deployed, not integrated, and holds no runtime authority: no workflow builds
    or deploys it, nothing in `src/` reaches it, and its source never enters the
-   dashboard runtime image (`Dockerfile` copies only its `package.json`, for
-   workspace resolution). `wiki-writer/test/security-boundary.test.ts` enforces
-   that `src/` and `web/src/` cannot import writer code or key-loading symbols.
+    dashboard runtime image (`Dockerfile` copies nothing from `wiki-writer/`;
+    it is not a Bun workspace member and is not installed).
+    `wiki-writer/test/security-boundary.test.ts` still runs and enforces
+    that `src/` and `web/src/` cannot import writer code or key-loading symbols.
 
    When it ships, it will be the ONLY GitHub write authority available to the
    application: a separately deployed `wiki-writer` service authenticated as the
@@ -58,15 +59,16 @@ view of Fro Bot's cross-repo footprint.
 
 ## Conventions
 
-- pnpm. Server (`src/`, `test/`, `scripts/`) is Node 24 native TS (strip-only): no
+- Bun (`bun install`, `bun run <script>`). Server (`src/`, `test/`, `scripts/`) is Node 24 native TS (strip-only): no
   enums, namespaces, parameter properties, or TS import aliases (`erasableSyntaxOnly`
   lint enforces this). The client (`web/`) is a full-TS Vite + React 19 workspace with
   its own `web/tsconfig.json` — excluded from the strip-only lint.
 - `as unknown as X` for Octokit boundary casts; never `any`.
 - `Result<T,E>` error-return shape for the app client (extraction seam).
-- Gates: `pnpm check-types` (server + `web/`), `pnpm lint`, `pnpm test` (rebuilds the
-  client via `pretest`, then runs Vitest). Build the client with `pnpm build:web` →
-  `web/dist`; `pnpm dev` serves that prebuilt bundle.
+- Gates: `bun run check-types` (server + `web/`), `bun run lint`, `bun run test` (rebuilds the
+  client via `pretest`, then runs Vitest). Always `bun run test`, never a bare `bun test`,
+  which starts Bun's own runner. Build the client with `bun run build:web` →
+  `web/dist`; `bun run dev` serves that prebuilt bundle.
 - `docs/runbooks/gateway-access.md` — how to reach the gateway behind `/operator/*` and read its
   logs. The operator surface is proxied to `fro-bot/agent`, so operator auth, session, and push
   evidence lives there and no test in this repo can reach it. Requires a local `marcusrbrown/infra`

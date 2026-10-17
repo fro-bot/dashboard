@@ -304,7 +304,7 @@ describe('question runId (discriminated data)', () => {
   })
 
   it('narrows SafeNotificationData: runId is a string only on the run-bearing variant', () => {
-    // Compile-time contract (pnpm check-types): each branch assigns to exactly one variant.
+    // Compile-time contract (bun run check-types): each branch assigns to exactly one variant.
     const classify = (data: SafeNotificationData): string => {
       if (data.runId !== undefined) {
         const withRun: RunNotificationData = data

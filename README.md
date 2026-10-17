@@ -28,17 +28,19 @@ installations, plus an authenticated single-operator control surface. Installs a
 - **Client** — [Vite](https://vite.dev) + [React 19](https://react.dev) +
   [Tailwind CSS v4](https://tailwindcss.com), shipped as an installable PWA
   ([vite-plugin-pwa](https://vite-pwa-org.netlify.app) + [Workbox](https://developer.chrome.com/docs/workbox)).
-- pnpm, [Vitest](https://vitest.dev).
+- [Bun](https://bun.sh) for package management and scripts, [Vitest](https://vitest.dev).
 
 ## Quick Start
 
 ```sh
-pnpm bootstrap   # install deps
-pnpm build:web   # build the client bundle into web/dist
-pnpm dev         # start the server with --watch
+bun install            # install deps
+bun run build:web      # build the client bundle into web/dist
+bun run dev            # start the server with --watch
 ```
 
-`pnpm dev` serves the prebuilt client from `web/dist`, so run `pnpm build:web` first (or after
+Remove any existing `node_modules` before the first `bun install`.
+
+`bun run dev` serves the prebuilt client from `web/dist`, so run `bun run build:web` first (or after
 client changes). The test suite rebuilds the client automatically via `pretest`.
 
 ## Usage
@@ -84,9 +86,9 @@ in-repo).
 ## Development
 
 ```sh
-pnpm check-types # type check server + client
-pnpm lint        # lint
-pnpm test        # build client, then run tests
+bun run check-types # type check server + client
+bun run lint        # lint
+bun run test        # build client, then run tests (not a bare `bun test`)
 ```
 
 `Dockerfile` builds the client in a builder stage and runs `node src/server.ts` against a

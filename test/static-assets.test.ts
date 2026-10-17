@@ -809,7 +809,7 @@ describe('production static JS assets — no fixture strings', () => {
 // Production build artifact assertions — web/dist must be fixture-free
 //
 // These tests scan the compiled browser bundle and service-worker output after
-// `pnpm build:web`. Fixture imports are dev-gated so Vite removes the module
+// `bun run build:web`. Fixture imports are dev-gated so Vite removes the module
 // request strings from production output. The pretest hook runs build:web before
 // vitest, so web/dist is always fresh when these tests run.
 // ---------------------------------------------------------------------------
@@ -1001,7 +1001,7 @@ describe('DASHBOARD_WEB_DIST — static root override', () => {
   })
 
   it('injected webDistRoot=./web/dist-fixture serves assets from dist-fixture', async () => {
-    // web/dist-fixture is built by pnpm build:web:fixture; skip if not present
+    // web/dist-fixture is built by bun run build:web:fixture; skip if not present
     const fs = await import('node:fs')
     if (!fs.existsSync('./web/dist-fixture')) {
       return

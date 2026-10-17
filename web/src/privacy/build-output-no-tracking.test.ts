@@ -1,5 +1,5 @@
 /**
- * Build-output analytics guard — requires a prior `pnpm build:web` (root
+ * Build-output analytics guard — requires a prior `bun run build:web` (root
  * `pretest` runs it automatically). Reads `web/dist`, not source: a tracking
  * script only matters once it ships, and injectManifest/Rollup can introduce
  * things source-only checks would never see.
@@ -17,7 +17,7 @@ function readDist(relPath: string): string {
     return readFileSync(resolve(DIST_DIR, relPath), 'utf-8')
   } catch {
     throw new Error(
-      `web/dist/${relPath} not found. Run 'pnpm build:web' before running tests.\n` +
+      `web/dist/${relPath} not found. Run 'bun run build:web' before running tests.\n` +
         `Expected path: ${resolve(DIST_DIR, relPath)}`,
     )
   }

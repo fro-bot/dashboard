@@ -842,7 +842,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // Warn early if the SPA build artifact is missing (GET / will 404 silently).
   if (!existsSync(`${webDistRoot}/index.html`)) {
     logger.warning(
-      `${webDistRoot}/index.html not found — GET / will return 404. Run \`pnpm build:web\` to build the SPA.`,
+      `${webDistRoot}/index.html not found — GET / will return 404. Run \`bun run build:web\` to build the SPA.`,
     )
   }
 

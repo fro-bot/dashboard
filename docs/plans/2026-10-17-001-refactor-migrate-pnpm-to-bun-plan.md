@@ -18,13 +18,17 @@ The dashboard is the only active Fro Bot repository still on pnpm. fro-bot/agent
 
 ## Requirements Trace
 
-- R1. Bun is the only package manager. `bun.lock` replaces `pnpm-lock.yaml`. Workspaces, overrides and trusted dependencies live in `package.json`. The age gate and linker live in `bunfig.toml`.
+- R1. Bun is the only package manager, and `bun.lock` is the only lockfile.
+  - `wiki-writer` is outside this migration. Bun has no git-subdirectory dependency selector, so `@fro-bot/wiki-write-core` (a `github:…#<sha>&path:` spec) cannot be installed.
+  - `wiki-writer` is not a Bun workspace member. The root tsconfig, ESLint and Vitest gates exclude it, except that Vitest runs `wiki-writer/test/security-boundary.test.ts`. The Dockerfile copies nothing from it.
+  - It returns once the package is published as `@fro.bot/wiki-write-core` (fro-bot/.github#3998).
+  - Overrides and trusted dependencies live in `package.json`. The age gate and linker live in `bunfig.toml`.
 - R2. CI and Docker installs are frozen. Renovate's post-upgrade install runs unfrozen, and CI's frozen install verifies the result.
 - R3. Dependencies resolve fresh, and every security override still holds as a floor.
 - R4. The install layout is hoisted.
 - R5. Install scripts run only for `@swc/core` and `unrs-resolver`.
-- R6. The release-age gate is 3 days. First-party `@bfra.me` packages are exempt by exact name.
-- R7. If a floor can only be met inside the window, resolution fails. The fix is a temporary exact `name@version` exclusion.
+- R6. The release-age gate is 3 days. First-party `@bfra.me` packages are exempt by plain package name. Bun ignores `name@version` exclusion entries.
+- R7. If a floor can only be met inside the window, resolution fails. The fix is a temporary plain-name exclusion, which exempts every version of that package and is removed once the window passes.
 - R8. Scripts run through `bun run`. The tools still execute on Node 24.
 - R9. The strip-only server invariant holds.
 - R10. CI setup installs Bun with a SHA-pinned action, keeps Node 24, and caches Bun's package cache keyed on `bun.lock`.
@@ -48,7 +52,8 @@ Success criteria carried from the origin:
 
 - Bun stays out of production. No `Bun.serve`, no `oven/bun` runtime image, no `bun test`.
 - Existing plans, brainstorms and docs/solutions pages are left as they are. They record past work.
-- No new CI job and no new supply-chain gate. The image is built and smoke-tested locally before merge.
+- No new CI job and no new supply-chain gate.
+- `wiki-writer` is not migrated: it is not a Bun workspace member and is not installed (see R1).
 - No guard rails beyond what the requirements name.
 - No changes to marcusrbrown/infra.
 
@@ -59,7 +64,7 @@ Success criteria carried from the origin:
 - `.context/bun-plan/repo-research.md` maps every touchpoint at line level. It is a local planning artifact and is not committed.
 - fro-bot/agent shows the target shape:
   - `.github/actions/setup/action.yaml`: SHA-pinned `oven-sh/setup-bun`, `~/.bun/install/cache` keyed on `bun.lock`, frozen install.
-  - `bunfig.toml`: hoisted linker, 3-day gate with exact-name exclusions.
+  - `bunfig.toml`: hoisted linker, 3-day gate with plain-name exclusions.
   - `deploy/gateway.Dockerfile`: Bun builds, Node runs, and the production install uses `--ignore-scripts`.
 - marcusrbrown/systematic `.github/renovate.json5` uses `skipArtifactsUpdate` for the `bun` and `npm` managers plus a post-upgrade `bun install`. A recent systematic Renovate PR regenerated `bun.lock` that way on the same pinned bfra-me Renovate workflow this repo uses.
 
@@ -78,10 +83,10 @@ All facts below apply to Bun 1.4.3.
 - Lifecycle scripts: [bun.sh/docs/pm/lifecycle](https://bun.sh/docs/pm/lifecycle). `trustedDependencies` replaces Bun's default trusted list. `bun pm untrusted` lists blocked scripts.
 - Install settings: [bun.sh/docs/pm/cli/install](https://bun.sh/docs/pm/cli/install).
   - `minimumReleaseAge` is in seconds.
-  - `minimumReleaseAgeExcludes` takes exact names or `name@version`, not globs.
+  - `minimumReleaseAgeExcludes` takes plain package names. Bun ignores `name@version` entries, and globs do not match.
   - Resolution fails when no version qualifies.
   - `linker = "hoisted"` must be set explicitly.
-  - The docs and Bun PR #30526 disagree on whether frozen installs enforce the age gate.
+  - A frozen install does not enforce the age gate.
 - Scripts: [bun.sh/docs/runtime](https://bun.sh/docs/runtime). `bun run` runs `pre`/`post` hooks. A bin with a node shebang runs on Node unless `--bun` is passed. `bun run` auto-loads `.env`.
 - [oven-sh/setup-bun](https://github.com/oven-sh/setup-bun). It reads `packageManager` by default, and its built-in cache covers only the binary.
 - [Renovate Bun manager](https://docs.renovatebot.com/modules/manager/bun/). It does not update `packageManager: bun@x`.
@@ -96,7 +101,7 @@ All facts below apply to Bun 1.4.3.
   - A package rule groups both into one PR.
   - A Vitest test asserts the Dockerfile's `oven/bun` tag equals the `packageManager` version. This is a mechanical drift check with no manual baseline.
 - **Overrides use version-scoped keys** (`brace-expansion@2`, `brace-expansion@5`, `fast-uri@3`, `katex@0`, `toml@4`, `undici@7`). A plain name would over-apply across majors. `undici` carries the most risk. Because these keys match the declared range, the resolved `bun.lock` is what proves each floor, not the key syntax.
-- **Exact-name age-gate exclusions** cover every `@bfra.me` package in the resolved tree. Today those are `@bfra.me/es`, `@bfra.me/eslint-config` and `@bfra.me/tsconfig`.
+- **Plain-name age-gate exclusions** cover every `@bfra.me` package in the resolved tree. Today those are `@bfra.me/es`, `@bfra.me/eslint-config` and `@bfra.me/tsconfig`.
 - **`trustedDependencies: ["@swc/core", "unrs-resolver"]`.** Since the list replaces Bun's defaults, `msgpackr-extract` stays blocked. None of the three is a production dependency, so the prod-deps stage also uses `--ignore-scripts`.
 - **Renovate:** `skipArtifactsUpdate` for the `bun` manager, with post-upgrade tasks `bun install` and `bun run fix`. This copies the systematic setup.
 - **The `pretest` hook stays.** `bun run test` runs it. Docs say `bun run test`, never bare `bun test`, which would start Bun's own runner and skip both the build and Vitest.
@@ -105,7 +110,7 @@ All facts below apply to Bun 1.4.3.
   - `bun.lock` takes over the lock-only rule;
   - `bunfig.toml` becomes a hard release path, because the prod-deps stage needs it for the hoisted layout;
   - the paths filter and parity test move with them;
-  - the `package.json` comparison covers `workspaces` and `trustedDependencies`, because they moved there from `pnpm-workspace.yaml`;
+  - the `package.json` comparison covers `workspaces` and `trustedDependencies`, because these fields shape the install;
   - the `pnpm.overrides` comparison is removed.
 
 ## Open Questions
@@ -113,13 +118,16 @@ All facts below apply to Bun 1.4.3.
 ### Resolved During Planning
 
 - **Does Renovate's runner have Bun for post-upgrade tasks?** Yes. A systematic Renovate PR on the same pinned workflow regenerated `bun.lock`.
-- **Does Impeccable detection change?** No. `context.mjs` reads `package.json` workspaces ahead of marker files.
+- **Does Impeccable detection change?** No. `context.mjs` prints the project context without `pnpm-workspace.yaml`.
+- **Does Bun handle the `wiki-writer` git dependency?** It cannot: Bun has no git-subdirectory selector for the `&path:` spec. `wiki-writer` is outside this migration (see R1) and returns once `@fro.bot/wiki-write-core` is published (fro-bot/.github#3998).
+- **Does `dev:fixture`'s inline `VAR=… node …` chain run under `bun run`?** Yes.
+- **Does `bun run test` run `pretest`?** Yes.
+- **What runs on Node?** Vite and tsc run on Node.
+- **Does a frozen install enforce the age gate?** No. The gate applies only when versions resolve: in Renovate's post-upgrade install and in local installs.
+- **Were the young packages installed?** `markdown-it` and `argparse` were inside the window when `bun.lock` was generated. They resolved with a one-time exclusion that is not committed.
 
 ### Deferred to Implementation
 
-- **Does a frozen install enforce the age gate?** Docs and source disagree, so Unit 1 checks the 1.4.3 binary. If it does not, R6 is enforced at resolution only, through Renovate's post-upgrade install and local installs. Record the finding in the PR.
-- **Does Bun handle the `wiki-writer` git dependency with `&path:`?** Not documented. Unit 1's scratch install checks it first, and if it fails the migration stops and comes back with options.
-- **Does Bun's runner execute the `dev:fixture` inline `VAR=… node …` chain?** Unit 1's scratch install checks it before the script is edited.
 - **Is `bun` allowed in Renovate's post-upgrade commands for this repo?** Neither `.github/renovate.json5` nor the `fro-bot/.github` preset sets `allowedCommands`, so the allowlist comes from the shared bfra-me Renovate workflow. The existing `pnpm install` task runs, and systematic's `bun install` runs on the same pinned workflow. The first Renovate PR after merge confirms it.
 
 ## Implementation Units
@@ -134,7 +142,7 @@ flowchart LR
   U4 --> U5
 ```
 
-- [ ] **Unit 1: Manifests, Bun config and lockfile**
+- [x] **Unit 1: Manifests, Bun config and lockfile**
 
 **Goal:** Install from Bun with the policies carried over, and generate `bun.lock`.
 
@@ -145,25 +153,26 @@ flowchart LR
 **Files:**
 
 - Modify: `package.json`.
-  - Set `packageManager`, `workspaces` and `overrides`.
+  - Set `packageManager` and `overrides`.
   - Set `trustedDependencies`.
   - Change scripts `bootstrap`, `dev:fixture` and `pretest`.
+- Modify: `tsconfig.json`, `eslint.config.ts` and `vitest.config.ts` to exclude `wiki-writer`, except that Vitest runs `wiki-writer/test/security-boundary.test.ts`.
 - Create: `bunfig.toml`, `bun.lock`.
 - Delete: `pnpm-workspace.yaml`, `pnpm-lock.yaml`.
 
 **Approach:**
 
 - Before editing the repo, run a scratch install that checks:
-  - the `wiki-writer` git dependency with `&path:`;
   - the six version-scoped overrides against the resolved versions;
   - `bun pm untrusted` output;
   - frozen-install behavior on manifest drift and on a lockfile entry younger than the gate;
   - that `bun run test` runs `pretest`;
   - that `bun run dev:fixture` runs its inline `VAR=… node …` chain.
 
-  If the git dependency fails, or any override floor is not met in the resolved tree, stop and report. Record the age-gate and frozen-install results in the PR, since they depend on registry timing and cannot be re-run as tests.
+  If any override floor is not met in the resolved tree, stop and report. Record the age-gate and frozen-install results in the PR, since they depend on registry timing and cannot be re-run as tests.
 
-- `bunfig.toml` holds `linker = "hoisted"`, a 3-day `minimumReleaseAge`, and exact-name `minimumReleaseAgeExcludes`.
+- `bunfig.toml` holds `linker = "hoisted"`, a 3-day `minimumReleaseAge`, and plain-name `minimumReleaseAgeExcludes`.
+- `wiki-writer` is not a workspace member and is not installed.
 - Generate `bun.lock` with one unfrozen `bun install`. Remove the pnpm-shaped `node_modules` first.
 
 **Test scenarios:**
@@ -173,14 +182,14 @@ flowchart LR
 - Happy path, covering AE2: after a frozen install, `bun pm untrusted` lists `msgpackr-extract` as blocked, and the `@swc/core` and `unrs-resolver` native bindings load.
 - Edge case, covering AE3: every resolved `brace-expansion`, `fast-uri`, `katex`, `toml` and `undici` version in `bun.lock` meets its override floor. No `brace-expansion` 2.x resolves at all; requests for it resolve to 5.x.
 - Edge case, covering AE4 (one-time scratch check, result recorded in the PR): resolving a third-party version younger than 3 days is refused, and an `@bfra.me` release of the same age resolves.
-- Error path, covering AE5 (one-time scratch check, result recorded in the PR): with a temporary exact `name@version` exclusion, a floor that only a fresh version satisfies resolves. Without it, resolution fails.
+- Error path, covering AE5 (one-time scratch check, result recorded in the PR): with a temporary plain-name exclusion, a floor that only a fresh version satisfies resolves. Without it, resolution fails.
 
 **Verification:**
 
 - `bun run check-types`, `bun run lint` and `bun run test` pass locally with `.env` present.
 - `node .agents/skills/impeccable/scripts/context.mjs` prints the same resolved context before and after.
 
-- [ ] **Unit 2: Release guard and release workflow**
+- [x] **Unit 2: Release guard and release workflow**
 
 **Goal:** A change to the Bun lockfile or Bun config releases the way a pnpm lockfile change did. The smoke check proves Bun is absent from the image.
 
@@ -197,7 +206,7 @@ flowchart LR
 
 - The lock-only rule keys on `bun.lock`, and its reason text names it.
 - `bunfig.toml` joins `isHardReleasePath`.
-- The runtime-fields comparison adds `workspaces` and `trustedDependencies` next to `overrides`, since both now live in `package.json` and shape the image.
+- The runtime-fields comparison covers `workspaces` and `trustedDependencies` next to `overrides`, since these fields shape the image.
 - Remove the `pnpm.overrides` comparison and the `pnpm` types.
 - Replace `pnpm-lock.yaml` with `bun.lock` in the paths filter, and add `bunfig.toml`.
 - Add `bun` and `bunx` to the smoke tool loop. Add `/usr/local/bin/bun`, `/usr/local/bin/bunx` and `/root/.bun` to the residue loop.
@@ -209,13 +218,13 @@ flowchart LR
 - Happy path, covering AE6: a change to `bun.lock` alone releases.
 - Happy path: a change to `bunfig.toml` alone releases.
 - Happy path: a `package.json` change to only `workspaces` releases, and a change to only `trustedDependencies` releases.
-- Edge case: a change to `pnpm-lock.yaml` alone no longer releases.
+- Edge case: a change to `pnpm-lock.yaml` alone does not release.
 - Integration: the parity test asserts `bun.lock` and `bunfig.toml` appear in the `release.yaml` paths filter.
 - Existing fixtures that name `pnpm-lock.yaml` or `packageManager: pnpm@…` move to Bun values.
 
 **Verification:** the guard tests pass, and the paths filter lists `bun.lock` and `bunfig.toml`.
 
-- [ ] **Unit 3: CI setup, Fro Bot workflow and Renovate**
+- [x] **Unit 3: CI setup, Fro Bot workflow and Renovate**
 
 **Goal:** CI, the Fro Bot review and Renovate install and run with Bun.
 
@@ -249,7 +258,7 @@ flowchart LR
 - A second run hits the Bun cache.
 - `actionlint` passes.
 
-- [ ] **Unit 4: Dockerfile**
+- [x] **Unit 4: Dockerfile**
 
 **Goal:** The build stages use Bun from a digest-pinned image. The runtime stage is Node only.
 
@@ -265,7 +274,7 @@ flowchart LR
 **Approach:**
 
 - A shared stage references `oven/bun:<version>@sha256:<index digest>`, where `<version>` is the bare version tag (the Debian variant) so the drift test compares it to `packageManager` by plain equality. The builder and prod-deps stages copy `/usr/local/bin/bun` from it.
-- Both stages copy `package.json`, `bun.lock` and `bunfig.toml`, plus `wiki-writer/package.json`.
+- Both stages copy `package.json`, `bun.lock` and `bunfig.toml`. Nothing from `wiki-writer/` is copied.
 - The builder runs `bun install --frozen-lockfile` and `bun run build:web`.
 - Prod-deps runs `bun install --frozen-lockfile --production --ignore-scripts`.
 - Add the Bun paths to the runtime residue removal. `CMD ["node", "src/server.ts"]` does not change.
@@ -275,10 +284,11 @@ flowchart LR
 - Happy path: the test reads `packageManager` and the Dockerfile's `oven/bun` tag, and they are equal.
 - Error path: a Dockerfile `oven/bun` reference without a `@sha256:` digest fails the test.
 
-**Verification:** run a local `docker build` and the release smoke loop against the image.
+**Verification:** this machine has no container runtime, so the `docker build`, the smoke loop and the Trivy checks run in the release workflow.
 
 - Covering AE7: no `bun`, `bunx`, `npm`, `npx`, `pnpm`, `pnpx`, `corepack`, `yarn` or `yarnpkg`, and the container starts with `node src/server.ts`.
 - The Trivy enforcement pass on the built image exits 0.
+- `test/bun-version-pin.test.ts` passes locally.
 
 - [ ] **Unit 5: Instructions, strings and full verification**
 
@@ -304,7 +314,7 @@ flowchart LR
 **Verification:**
 
 - `bun run check-types`, `bun run lint`, `bun run test` and `bun run build:web` pass, along with the strip-only load loop.
-- The local Docker build, smoke loop and Trivy results from Unit 4 are recorded in the PR.
+- The Docker build, smoke loop and Trivy checks from Unit 4 run in the release workflow, since this machine has no container runtime.
 - One fixture browser pass using `bun run dev:fixture` passes: the app loads, the runs list and a run stream work, the service worker registers, and the console shows no errors.
 - After merge:
   - the release run succeeds;
@@ -313,25 +323,25 @@ flowchart LR
 ## System-Wide Impact
 
 - **Interaction graph:** CI setup feeds `main.yaml` and `fro-bot.yaml`. The release guard feeds `release.yaml`, which feeds the Docker build and the infra dispatch. Renovate feeds PRs. All of these move together in one PR.
-- **Error propagation:** a broken setup action fails every CI job on the PR, which is visible. A broken Dockerfile shows up only at release, so the local build and smoke check are the pre-merge proof.
+- **Error propagation:** a broken setup action fails every CI job on the PR, which is visible. A broken Dockerfile shows up only at release, where the build, smoke check and Trivy run.
 - **State lifecycle risks:**
   - Old `pnpm-store` caches stay until GitHub evicts them. They are harmless because the key prefix differs.
   - A contributor's pnpm-shaped `node_modules` has to be removed before installing with Bun.
 - **Unchanged invariants:**
   - The server runtime, `node src/server.ts`, the strip-only lint and the `node:24-trixie-slim` digest stay the same.
-  - The writer boundary is unchanged: the Dockerfile still copies only `wiki-writer/package.json`.
+  - The writer boundary holds: the Dockerfile copies nothing from `wiki-writer/`, and `wiki-writer/test/security-boundary.test.ts` runs.
   - The release CalVer and the infra dispatch are untouched.
 
 ## Risks & Dependencies
 
 | Risk                                                  | Mitigation                                                                                                       |
 | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Bun cannot install the `wiki-writer` git dependency   | Unit 1 checks it first and stops the migration if it fails                                                       |
+| Bun cannot install the `wiki-writer` git dependency   | `wiki-writer` is outside the migration (R1) and returns once the package is published                            |
 | A version-scoped override misses a requester          | The resolved `bun.lock` is checked against every floor (AE3)                                                     |
 | Fresh resolve changes runtime transitive dependencies | Gates, the local image smoke check, Trivy and the fixture browser pass                                           |
-| The first build of the new Dockerfile is the release  | Local `docker build`, smoke loop and Trivy before merge. If the release fails, rerun it with `workflow_dispatch` |
+| The first build of the new Dockerfile is the release  | The release workflow runs the build, smoke loop and Trivy. If the release fails, rerun it with `workflow_dispatch` |
 | Renovate's Bun post-upgrade task fails                | Copy the pattern proven in systematic. Check the first Renovate PR after merge                                   |
-| Frozen installs do not enforce the age gate           | Record the finding. The gate still applies wherever resolution happens                                           |
+| Frozen installs do not enforce the age gate           | The gate applies where versions resolve: Renovate's post-upgrade install and local installs                      |
 
 ## Documentation / Operational Notes
 

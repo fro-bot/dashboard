@@ -338,9 +338,9 @@ describe('SPA static assets — served pre-auth', () => {
 
   it('web/dist/ exists and contains index.html (build artifact present)', () => {
     // Verify the build artifact is present in the repo for local dev/test.
-    // In CI the builder stage produces it; locally run `pnpm build:web` first.
+    // In CI the builder stage produces it; locally run `bun run build:web` first.
     const distPath = join(process.cwd(), 'web', 'dist')
-    expect(existsSync(distPath), 'web/dist/ must exist — run pnpm build:web').toBe(true)
+    expect(existsSync(distPath), 'web/dist/ must exist — run bun run build:web').toBe(true)
     expect(existsSync(join(distPath, 'index.html')), 'web/dist/index.html must exist').toBe(true)
   })
 

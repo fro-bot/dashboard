@@ -1,5 +1,5 @@
 /**
- * Service worker tests — build-output assertions (require a prior `pnpm build:web`):
+ * Service worker tests — build-output assertions (require a prior `bun run build:web`):
  * - Pins the deny-by-default fetch router structure.
  * - Pins that /api/monitoring NetworkFirst route is ABSENT (monitoring removed).
  * - Pins the /operator navigation redirect handler is present BEFORE generic nav fallback.
@@ -7,7 +7,7 @@
  *
  * Build-output tests read the built artifact, not the source sw.ts, because the
  * injectManifest step substitutes self.__WB_MANIFEST and produces the final sw.js.
- * The root `pretest` script runs `pnpm build:web` automatically.
+ * `bun run test` runs the root `pretest` script, which runs `bun run build:web` automatically.
  */
 
 import {readFileSync} from 'node:fs'
@@ -36,7 +36,7 @@ function readSW(): string {
     return readFileSync(SW_PATH, 'utf-8')
   } catch {
     throw new Error(
-      `web/dist/sw.js not found. Run 'pnpm build:web' before running tests.\n` +
+      `web/dist/sw.js not found. Run 'bun run build:web' before running tests.\n` +
         `Expected path: ${SW_PATH}`,
     )
   }
