@@ -96,7 +96,7 @@ All facts below apply to Bun 1.4.3.
 - **Bun 1.4.3 in `packageManager`.** It is the latest release and matches fro-bot/agent's manifest. setup-bun reads the field without extra inputs.
 - **Docker gets Bun from a digest-pinned `oven/bun` image.** A shared stage holds the image, and the builder and prod-deps stages copy the binary from it. A digest pin covers the whole artifact, while a checksum download is verified against a file from the same host. Use the Debian multi-arch index digest so it works on trixie glibc.
 - **One Renovate group for the Bun version.**
-  - A custom regex manager updates `packageManager: bun@x` from oven-sh/bun releases.
+  - Renovate's `bun` manager updates `packageManager: bun@x`.
   - The Dockerfile manager updates the `oven/bun` tag and digest.
   - A package rule groups both into one PR.
   - A Vitest test asserts the Dockerfile's `oven/bun` tag equals the `packageManager` version. This is a mechanical drift check with no manual baseline.
@@ -247,8 +247,7 @@ flowchart LR
 - Renovate changes:
   - post-upgrade commands `bun install` and `bun run fix`;
   - `skipArtifactsUpdate` for the `bun` manager;
-  - a custom regex manager for `packageManager: bun@x`;
-  - a group rule tying it to `oven/bun`.
+  - a group rule tying the `packageManager` pin to `oven/bun`.
 
 **Test expectation:** none. These are config changes, and CI on the PR exercises them. The Fro Bot review runs through the PR's own setup action, so the `main.yaml` checks are the authoritative signal for the setup change.
 
