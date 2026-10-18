@@ -821,3 +821,171 @@ describe('fail-loud', () => {
     expect(later.output).toContain('timed out')
   })
 })
+
+describe('engine warm-up (createHook)', () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>(res => {
+      resolve = res
+    })
+    return { promise, resolve }
+  }
+
+  it('skips the scan and warns engine-pending once while the warm-up is pending, then scans once it resolves', async () => {
+    const warm = deferred<boolean>()
+    let warmCalls = 0
+    const calls: unknown[][] = []
+    const hook = createHook({
+      runDetector: fakeRunner(ok(envelope('found: gradient-text')), calls),
+      worktree: '/repo',
+      warmEngine: () => {
+        warmCalls += 1
+        return warm.promise
+      },
+      engineReadyWaitMs: 10,
+    })
+
+    const first = makeOutput()
+    await expect(hook(makeInput(), first)).resolves.toBeUndefined()
+    expect(first.output).toContain('[impeccable] design engine is still downloading')
+    expect(calls).toHaveLength(0)
+
+    const second = makeOutput()
+    await hook(makeInput(), second)
+    expect(second.output).toBe('ok')
+    expect(calls).toHaveLength(0)
+
+    warm.resolve(true)
+    const third = makeOutput()
+    await hook(makeInput(), third)
+    expect(calls).toHaveLength(1)
+    expect(third.output).toContain('found: gradient-text')
+    expect(warmCalls).toBe(1)
+  })
+
+  it('does not stop the warm-up when a hook call stops waiting for it', async () => {
+    const warm = deferred<boolean>()
+    const calls: unknown[][] = []
+    const hook = createHook({
+      runDetector: fakeRunner(ok(), calls),
+      worktree: '/repo',
+      warmEngine: () => warm.promise,
+      engineReadyWaitMs: 5,
+    })
+    await hook(makeInput(), makeOutput())
+    await hook(makeInput(), makeOutput())
+    warm.resolve(true)
+    await hook(makeInput(), makeOutput())
+    expect(calls).toHaveLength(1)
+  })
+
+  it('warns engine-unavailable once and skips when the warm-up fails, then retries after the retry interval', async () => {
+    let clock = 1_000
+    let attempts = 0
+    const calls: unknown[][] = []
+    const hook = createHook({
+      runDetector: fakeRunner(ok(envelope('found')), calls),
+      worktree: '/repo',
+      warmEngine: () => {
+        attempts += 1
+        return Promise.resolve(attempts >= 2)
+      },
+      now: () => clock,
+      engineRetryMs: 60_000,
+    })
+
+    const first = makeOutput()
+    await hook(makeInput(), first)
+    expect(first.output).toContain('[impeccable] design engine could not be fetched or started')
+    expect(calls).toHaveLength(0)
+    expect(attempts).toBe(1)
+
+    clock += 30_000
+    const early = makeOutput()
+    await hook(makeInput(), early)
+    expect(early.output).toBe('ok')
+    expect(attempts).toBe(1)
+    expect(calls).toHaveLength(0)
+
+    clock += 31_000
+    const retried = makeOutput()
+    await hook(makeInput(), retried)
+    expect(attempts).toBe(2)
+    expect(calls).toHaveLength(1)
+    expect(retried.output).toContain('found')
+  })
+
+  it('treats a warm-up that throws or rejects as a failed warm-up and never throws', async () => {
+    for (const warmEngine of [
+      () => Promise.reject(new Error('boom')),
+      () => {
+        throw new Error('boom')
+      },
+    ]) {
+      const calls: unknown[][] = []
+      const hook = createHook({ runDetector: fakeRunner(ok(), calls), worktree: '/repo', warmEngine })
+      const output = makeOutput()
+      await expect(hook(makeInput(), output)).resolves.toBeUndefined()
+      expect(output.output).toContain('could not be fetched or started')
+      expect(calls).toHaveLength(0)
+    }
+  })
+
+  it('adds no warning and scans on the first call when the warm-up resolves at once', async () => {
+    let warmCalls = 0
+    const calls: unknown[][] = []
+    const hook = createHook({
+      runDetector: fakeRunner(ok(), calls),
+      worktree: '/repo',
+      warmEngine: () => {
+        warmCalls += 1
+        return Promise.resolve(true)
+      },
+    })
+    const first = makeOutput()
+    await hook(makeInput(), first)
+    await hook(makeInput(), makeOutput())
+
+    expect(first.output).toBe('ok')
+    expect(calls).toHaveLength(2)
+    expect(warmCalls).toBe(1)
+  })
+
+  it('runs one warm-up across concurrent calls', async () => {
+    const warm = deferred<boolean>()
+    let warmCalls = 0
+    const calls: unknown[][] = []
+    const hook = createHook({
+      runDetector: fakeRunner(ok(), calls),
+      worktree: '/repo',
+      warmEngine: () => {
+        warmCalls += 1
+        return warm.promise
+      },
+    })
+
+    const pending = Array.from({ length: 5 }, () => hook(makeInput(), makeOutput()))
+    setTimeout(() => {
+      warm.resolve(true)
+    }, 20)
+    await Promise.all(pending)
+
+    expect(warmCalls).toBe(1)
+    expect(calls).toHaveLength(5)
+  })
+
+  it('does not wait for the warm-up on a call that needs no scan', async () => {
+    let warmCalls = 0
+    const hook = createHook({
+      runDetector: fakeRunner(ok()),
+      worktree: '/repo',
+      warmEngine: () => {
+        warmCalls += 1
+        return new Promise<boolean>(() => {})
+      },
+    })
+    await hook(makeInput({ tool: 'read' }), makeOutput())
+    await hook(makeInput({ args: {} }), makeOutput())
+    expect(warmCalls).toBe(0)
+  })
+})

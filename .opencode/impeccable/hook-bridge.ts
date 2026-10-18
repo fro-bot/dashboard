@@ -186,9 +186,24 @@ export type DetectorRunner = (
   opts: { worktree: string },
 ) => Promise<DetectorRunResult>
 
+/** Resolves true once the engine binary is fetched and answers its handshake. Never rejects when built by `createEngineWarmup`; `createHook` treats a rejection or throw as a failed warm-up. */
+export type EngineWarmup = () => Promise<boolean>
+
 export interface CreateHookOptions {
   runDetector: DetectorRunner
   worktree: string
+  /**
+   * Makes the engine ready before any scan. It runs once per hook instance,
+   * on the first call that needs a scan, and its result is shared by every
+   * call. When omitted, scans run without waiting for an engine.
+   */
+  warmEngine?: EngineWarmup
+  /** Longest a single call waits for a pending warm-up. Defaults to `DETECTOR_TIMEOUT_MS`. */
+  engineReadyWaitMs?: number
+  /** Shortest time between a failed warm-up and the next attempt. Defaults to `ENGINE_RETRY_INTERVAL_MS`. */
+  engineRetryMs?: number
+  /** Clock in milliseconds. Defaults to `Date.now`. */
+  now?: () => number
 }
 
 export interface CreateSpawnRunnerOptions {
@@ -486,6 +501,54 @@ export function createLauncherRunner(launcherPath: string): DetectorRunner {
   return createSpawnRunner({ scriptPath: launcherPath, command: launcherPath, args: ['hook'] })
 }
 
+/** Budget for the first-use engine fetch, sized for a slow network. */
+export const ENGINE_WARMUP_TIMEOUT_MS = 120_000
+
+/** Shortest time between a failed engine warm-up and the next attempt. */
+export const ENGINE_RETRY_INTERVAL_MS = 60_000
+
+const ENGINE_HANDSHAKE_PREFIX = 'impeccable-engine'
+
+export interface CreateEngineWarmupOptions {
+  /** Time before the launcher is sent SIGTERM. Defaults to `ENGINE_WARMUP_TIMEOUT_MS`. */
+  timeoutMs?: number
+  /** Time between SIGTERM and SIGKILL. Defaults to `DETECTOR_KILL_GRACE_MS`. */
+  killGraceMs?: number
+  /** Time past timeout plus grace at which the run resolves regardless of the child's pipes. Defaults to `DETECTOR_DEADLINE_SLACK_MS`. */
+  deadlineSlackMs?: number
+}
+
+/**
+ * Runs the launcher's `engine-probe` subcommand through the same spawn runner
+ * as the hook, with the long first-use budget. On a cold machine the launcher
+ * downloads the engine binary into `~/.impeccable/bin/<version>/` and verifies
+ * its sha256 before answering; on a warm cache it answers at once. The result
+ * is true only for a clean exit whose stdout starts with the engine handshake.
+ * A timeout kills the launcher's whole process group, so a stalled `curl` goes
+ * with it. It never rejects.
+ */
+export function createEngineWarmup(launcherPath: string, worktree: string, options: CreateEngineWarmupOptions = {}): EngineWarmup {
+  const run = createSpawnRunner({
+    scriptPath: launcherPath,
+    command: launcherPath,
+    args: ['engine-probe'],
+    timeoutMs: options.timeoutMs ?? ENGINE_WARMUP_TIMEOUT_MS,
+    killGraceMs: options.killGraceMs,
+    deadlineSlackMs: options.deadlineSlackMs,
+  })
+  // engine-probe ignores stdin; the runner still writes a payload to it.
+  const payload = buildHookPayload({ tool: 'edit', args: {}, cwd: worktree, sessionID: 'engine-warmup' })
+
+  return async () => {
+    try {
+      const result = await run(payload, { worktree })
+      return result.kind === 'ok' && result.stdout.startsWith(ENGINE_HANDSHAKE_PREFIX)
+    } catch {
+      return false
+    }
+  }
+}
+
 /** Most UTF-16 code units of feedback appended to a tool's output; longer feedback is truncated. */
 export const FEEDBACK_MAX_CHARS = 64 * 1024
 
@@ -562,6 +625,8 @@ type WarningKind =
   | 'stderr-on-clean'
   | 'malformed'
   | 'no-path'
+  | 'engine-pending'
+  | 'engine-unavailable'
   | 'bridge-error'
 
 const WARNING_MESSAGES = {
@@ -572,6 +637,8 @@ const WARNING_MESSAGES = {
   'stderr-on-clean': '[impeccable] design hook produced unexpected diagnostic output',
   malformed: '[impeccable] design hook returned unrecognized output',
   'no-path': '[impeccable] design hook skipped a file-changing tool call with no extractable path',
+  'engine-pending': '[impeccable] design engine is still downloading; scans resume when it is ready',
+  'engine-unavailable': '[impeccable] design engine could not be fetched or started; scans are skipped and the fetch is retried periodically',
   'bridge-error': '[impeccable] design hook bridge hit an internal error',
 } as const satisfies Record<WarningKind, string>
 
@@ -592,6 +659,11 @@ const WARNING_MESSAGES = {
  *  - a built-in `edit`/`write`/`apply_patch`, or a mutating tool with a path-like
  *    arg key, yielding no path: `no-path`, and the hook is not run. A mutating
  *    tool with no path-like arg key is silent and not run.
+ *  - the engine warm-up still pending after `engineReadyWaitMs`: `engine-pending`,
+ *    the hook is not run, and the warm-up keeps running.
+ *  - the engine warm-up failed: `engine-unavailable`, the hook is not run, and
+ *    the warm-up is attempted again no sooner than `engineRetryMs` after the
+ *    failure.
  *  - the runner rejecting, or any other bridge fault: `bridge-error`.
  *
  * Each warning kind shows once per hook instance (one plugin process). Warning
@@ -600,6 +672,53 @@ const WARNING_MESSAGES = {
  */
 export function createHook(options: CreateHookOptions) {
   const warned = new Set<WarningKind>()
+  const readyWaitMs = options.engineReadyWaitMs ?? DETECTOR_TIMEOUT_MS
+  const retryMs = options.engineRetryMs ?? ENGINE_RETRY_INTERVAL_MS
+  const now = options.now ?? Date.now
+
+  // One warm-up is in flight at a time. A hook call that stops waiting for it
+  // does not stop it.
+  type EngineState = 'idle' | 'warming' | 'ready' | 'failed'
+  let engine: EngineState = options.warmEngine ? 'idle' : 'ready'
+  // Read through a function so the state set by the warm-up is not narrowed away across an await.
+  const engineState = (): EngineState => engine
+  let warming: Promise<void> | undefined
+  let failedAt = 0
+
+  const startWarmup = (warmEngine: EngineWarmup): Promise<void> => {
+    engine = 'warming'
+    const settled = (async () => warmEngine())().then(
+      ready => ({ ready }),
+      () => ({ ready: false }),
+    )
+    warming = settled.then(({ ready }) => {
+      engine = ready ? 'ready' : 'failed'
+      if (!ready) failedAt = now()
+    })
+    return warming
+  }
+
+  /** Whether the engine is ready, still warming after the wait, or unavailable. */
+  const awaitEngine = async (): Promise<'ready' | 'pending' | 'unavailable'> => {
+    const warmEngine = options.warmEngine
+    if (engineState() === 'ready' || !warmEngine) return 'ready'
+    if (engineState() === 'failed' && now() - failedAt < retryMs) return 'unavailable'
+    if (engineState() === 'idle' || engineState() === 'failed') startWarmup(warmEngine)
+
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const waited = new Promise<'pending'>(resolve => {
+      timer = setTimeout(() => {
+        resolve('pending')
+      }, readyWaitMs)
+    })
+    try {
+      const outcome = await Promise.race([warming, waited])
+      if (outcome === 'pending') return 'pending'
+    } finally {
+      clearTimeout(timer)
+    }
+    return engineState() === 'ready' ? 'ready' : 'unavailable'
+  }
 
   return async function toolExecuteAfter(
     input: { tool: string; sessionID: string; callID: string; args: unknown },
@@ -628,6 +747,12 @@ export function createHook(options: CreateHookOptions) {
       if (touchedPaths.length === 0) {
         // Silence is only right for an MCP tool that never carried a path.
         if (expectsPath(input.tool, input.args)) warnOnce('no-path')
+        return
+      }
+
+      const engineReadiness = await awaitEngine()
+      if (engineReadiness !== 'ready') {
+        warnOnce(engineReadiness === 'pending' ? 'engine-pending' : 'engine-unavailable')
         return
       }
 

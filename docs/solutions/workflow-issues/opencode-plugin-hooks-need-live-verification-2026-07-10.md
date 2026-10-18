@@ -51,12 +51,16 @@ A non-function export is the classic trap: OpenCode iterates a plugin module's e
 
 ```ts
 // plugin.ts — the ONLY runtime export is the factory
-export const ImpeccablePlugin: Plugin = async (input) => ({
-  'tool.execute.after': createHook({
-    runDetector: createLauncherRunner(`${input.worktree}/${HOOK_LAUNCHER_RELATIVE_PATH}`),
-    worktree: input.worktree,
-  }),
-})
+export const ImpeccablePlugin: Plugin = async (input) => {
+  const launcher = `${input.worktree}/${HOOK_LAUNCHER_RELATIVE_PATH}`
+  return {
+    'tool.execute.after': createHook({
+      runDetector: createLauncherRunner(launcher),
+      warmEngine: createEngineWarmup(launcher, input.worktree),
+      worktree: input.worktree,
+    }),
+  }
+}
 ```
 
 **4. Cross-check side-effect evidence, not just the visible tool result.** A hook can fire and still no-op silently. Prove the subprocess actually ran by checking a side effect it owns — e.g. its dedup cache mtime:
@@ -80,7 +84,13 @@ This is how the `IMPECCABLE_HOOK_DEPTH` bug was found in one shell command inste
 
 **8. Match the subprocess's output contract to what the agent should see.** The hook writes a JSON envelope (`{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"…"}}`) and emits a "scanned, no issues" ack on clean files. Parse only that envelope: accept it only when `hookEventName` is `PostToolUse` and `additionalContext` is a non-empty string, and surface just that inner text. Raw stdout and stderr never reach the agent. Silence clean acks (`IMPECCABLE_HOOK_QUIET=1`) so a clean edit adds nothing. Appended feedback is capped at 64 KiB (UTF-16 code units, cut without splitting a surrogate pair) and ends with a `[impeccable] feedback truncated` marker line inside the wrapper when it is cut.
 
-**9. Warm the engine before any test that runs the real hook.** The engine binary is not in git. On first use the launcher downloads it for the host platform into `~/.impeccable/bin/<version>/` and checks its sha256. That takes several seconds on a fast link, which is longer than the hook's 5 s timeout. A cold machine therefore reports a timeout. The launcher runs `curl` and `sh` as grandchildren, so the runner signals the child's whole process group; a timeout kills the download with the launcher. The integration suite runs `scripts/impeccable engine-probe` once in a `beforeAll` with a 120 s budget, against the real HOME cache, so the download happens before any timeout-bound test. If the probe fails, the suite fails with a message that names the cause. A machine with a cold cache and no network cannot run the real hook; set `IMPECCABLE_BIN` to an installed engine there.
+**9. Warm the engine once, outside the hook timeout.** The engine binary is not in git. On first use the launcher downloads it for the host platform into `~/.impeccable/bin/<version>/` and checks its sha256. That takes several seconds on a fast link, and the launcher's `curl` has no time limit of its own, so a download inside the hook's 5 s timeout is killed and the cache is never written. The bridge therefore warms the engine separately (`createEngineWarmup`): the first hook call that needs a scan runs `scripts/impeccable engine-probe` once through the same spawn runner, with a 120 s budget and the same process-group kill. Ready means a clean exit whose stdout starts with `impeccable-engine`. Every call waits for that shared warm-up for at most the normal hook budget:
+
+- Still pending: the call skips the scan, warns `engine-pending`, and spawns no hook. The warm-up keeps running; the hook timeout does not kill it.
+- Failed: the call warns `engine-unavailable` and skips the scan. A later call retries no sooner than 60 s after the failure.
+- Warm cache: the probe answers in under 100 ms and nothing is skipped.
+
+The integration suite warms the cache with the same function in a `beforeAll`, against the real HOME cache, so no timeout-bound test pays for a download. If it fails, the suite fails with a fixed message that names the cause. A machine with a cold cache and no network cannot run the real hook; set `IMPECCABLE_BIN` to an installed engine there. Two risks remain: the engine is downloaded at runtime and checked only against a sha256 sidecar from the same host, and a warm-up that is still running when OpenCode exits can outlive it.
 
 ## Why This Matters
 
@@ -113,12 +123,16 @@ output.output += proc.stdout.toString()  // leaks the raw JSON envelope
 
 ```ts
 // plugin.ts: exactly one runtime export
-export const ImpeccablePlugin: Plugin = async (input) => ({
-  'tool.execute.after': createHook({
-    runDetector: createLauncherRunner(`${input.worktree}/${HOOK_LAUNCHER_RELATIVE_PATH}`),
-    worktree: input.worktree,
-  }),
-})
+export const ImpeccablePlugin: Plugin = async (input) => {
+  const launcher = `${input.worktree}/${HOOK_LAUNCHER_RELATIVE_PATH}`
+  return {
+    'tool.execute.after': createHook({
+      runDetector: createLauncherRunner(launcher),
+      warmEngine: createEngineWarmup(launcher, input.worktree),
+      worktree: input.worktree,
+    }),
+  }
+}
 
 // runner env (node:child_process spawn of the launcher, no shell):
 // inherit the environment, delete both depth vars, set the harness signal and quiet clean-acks

@@ -87,7 +87,9 @@ view of Fro Bot's cross-repo footprint.
   The bridge runs the skill's `scripts/impeccable hook` launcher, which execs a native
   engine binary. That binary is gitignored (`.agents/skills/impeccable/scripts/bin/`)
   and fetched per machine into `~/.impeccable/bin/<version>/`, sha256-verified, the
-  first time the launcher runs. The integration tests in
+  first time the launcher runs. The bridge warms the engine once per session, and a
+  cold machine skips scans with an `engine-pending` warning until the download
+  finishes. The integration tests in
   `.opencode/impeccable/hook-bridge.integration.test.ts` warm that cache first, so a
   cold machine needs network access for `bun run test`.
 - Live/browser verification needs the dev server backgrounded and run without

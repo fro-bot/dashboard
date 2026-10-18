@@ -48,6 +48,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
   - exit 0 with stderr;
   - malformed output (bad JSON, wrong event, missing or empty `additionalContext`);
   - oversized output;
+  - the design engine still downloading, or unavailable;
   - no extractable path on a built-in `edit`, `write` or `apply_patch` call, or on a tool whose args carry a path-like key.
 
   Exit 0 with empty stdout and empty stderr is a clean scan and stays silent.
@@ -154,7 +155,13 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 
 - **Runner: Node `child_process.spawn`, ported from `.io`.** Unlike Bun `$`, it can be tested under Vitest on Node. It spawns a literal `node` with no shell.
 - **Timing: 5000 ms timeout, then a 2000 ms grace before SIGKILL, with a final deadline just after timeout plus grace.** The runner resolves on `close`, or at the final deadline if a child keeps its pipes open. A tool call therefore never waits much longer than 7 s. On POSIX the child is spawned with `detached: true` so it leads its own process group, and SIGTERM, SIGKILL and the final-deadline SIGKILL go to the group. On Windows only the direct child is signalled.
-- **Result shape: discriminated, with a distinct message per kind.** The kinds are `ok`, `timeout`, `spawn-error`, `nonzero-exit` and `overflow`. The bridge adds `stderr-on-clean`, `malformed`, `no-path` and `bridge-error`. All extraction failures share the `malformed` kind. A runner rejection or a fault in the bridge itself is `bridge-error`, not `spawn-error`. A warning names its kind and never includes stderr.
+- **Result shape: discriminated, with a distinct message per kind.** The kinds are `ok`, `timeout`, `spawn-error`, `nonzero-exit` and `overflow`. The bridge adds `stderr-on-clean`, `malformed`, `no-path`, `engine-pending`, `engine-unavailable` and `bridge-error`. All extraction failures share the `malformed` kind. A runner rejection or a fault in the bridge itself is `bridge-error`, not `spawn-error`. A warning names its kind and never includes stderr.
+- **Engine warm-up: single-flight per plugin instance, with its own long budget.**
+  - The engine binary is fetched on first use, and the download takes longer than the 5 s hook timeout. The first hook call that needs a scan runs the launcher once with `engine-probe`, through the same spawn runner (process group, group kill, deadline) with a 120 s budget. A warm cache answers in well under 100 ms.
+  - The warm-up counts as ready only for a clean exit whose stdout starts with `impeccable-engine`.
+  - Every hook call waits for the shared warm-up for at most the normal hook budget. If it is still pending, the call skips the scan, warns `engine-pending` and spawns no hook. The warm-up keeps running, and the hook timeout does not kill it.
+  - If the warm-up fails, the call warns `engine-unavailable` and skips the scan. A later call retries the warm-up no sooner than 60 s after the failure, so a transient network failure recovers within the session.
+  - The warm-up is passed to `createHook` as an option, so unit tests can fake it. `plugin.ts` still has one export.
 - **Warn once per kind per plugin instance.** A timeout that follows an earlier warning of another kind still shows. A non-string `output.output` is never modified.
 - **Clean scan: exit 0 with empty stdout and empty stderr, which matches `.io`.** A hook crash that exits 0 and writes nothing looks the same at runtime. The canary integration test guards it, and this is an accepted risk.
 - **The no-path warning applies only to built-in `edit`, `write` and `apply_patch`, and to tools whose args carry a path-like key.** Path-less MCP `*_edit` calls stay silent.
@@ -424,7 +431,8 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - The installer must leave `.impeccable/config.json` unchanged. Review the full `git status`. Anything outside `.agents/skills/impeccable/` is reverted, including any wiring of `hook-before-edit.mjs` or the Stop hook.
 - Only the OpenCode bridge runs the design hook. The repo has no Copilot or Codex hook manifest, so `.github/hooks/impeccable.json` and `.codex/hooks.json` are deleted.
 - The hook is the launcher `scripts/impeccable hook`, a shell script that execs the engine binary for the host platform. The engine binary is not tracked: `.agents/skills/impeccable/scripts/bin/` is gitignored, and the launcher fetches the binary per machine into `~/.impeccable/bin/<version>/` and verifies its sha256 on first use. The bridge runs the launcher directly through `createLauncherRunner`, with no Node and no shell. The stdin fields, stdout envelope, harness, quiet and depth env vars, and the silent clean run are what the bridge expects. The hook ignores `*** Move to:` markers, so the bridge's synthetic Update markers are required.
-- The integration suites that run the real hook warm the engine cache in a `beforeAll` (`scripts/impeccable engine-probe`, 120 s budget, the real HOME cache), so a cold runner downloads the engine before any 5 s hook-timeout test. A failed probe fails those suites with a message that names the cause.
+- At runtime the bridge warms the engine once per plugin instance (see Key Technical Decisions), so a cold machine skips scans with an `engine-pending` warning until the download finishes, and the download is never killed by the hook timeout.
+- The integration suites that run the real hook warm the engine cache in a `beforeAll` through the same `createEngineWarmup` (120 s budget, the real HOME cache), so a cold runner downloads the engine before any 5 s hook-timeout test. A failed warm-up fails those suites with a fixed message that names the cause.
 
 **Test scenarios:**
 - Integration: the Unit 1 canary passes against the v4 hook.
@@ -432,6 +440,8 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - Integration: a clean scan with the v4 hook stays silent.
 - Integration: from a cold engine cache, the real-hook suites pass after the warm-up.
 - Error path: when the engine cannot be fetched, the real-hook suites fail with the warm-up message and run no test.
+- Unit: with a pending warm-up the hook skips, warns `engine-pending` once and never calls the runner, and the next call after the warm-up resolves scans. A failed warm-up warns `engine-unavailable` once, skips, and is retried after the retry interval. A warm cache adds no warning. Concurrent calls share one warm-up.
+- Integration: against a server that never answers, a hook call returns within the wait with `engine-pending` and spawns no hook, and when the warm-up times out its `curl` is gone.
 
 **Verification:**
 - The integration suite passes on the v4 bundle, from a cold and from a warm cache.
@@ -478,6 +488,9 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 | The installer rewrites config or wires a hook that can block | Unit 7 requires an unchanged config and a reviewed `git status` |
 | v4 writes stderr on clean runs, so every edit warns | Unit 5 records stderr on a clean run. Unit 7 adapts the bridge |
 | Vitest runs on Node while OpenCode loads plugins under Bun | Live verification in Units 4 and 7 |
+| The launcher downloads the engine binary at runtime and verifies it only against a sha256 sidecar served by the same host, so a compromised release channel defeats the check | Accepted. The download is over HTTPS from the project's GitHub releases, and `IMPECCABLE_BIN` can point at an engine installed another way |
+| A warm-up still running when OpenCode exits can outlive it, because the child is not `unref`ed or tied to the host's lifetime | Accepted. The warm-up has its own deadline, and the next warm-up finds the finished or partial cache |
+| A cold machine skips scans until the engine download finishes | The first call warns `engine-pending`. The warm-up is not killed by the hook timeout, and scans resume on the first call after it finishes |
 | The v4 pin breaks main after merge | Revert the Renovate PR. The pin returns to 3.6.1 |
 
 ## Sources & References

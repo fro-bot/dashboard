@@ -6,7 +6,7 @@
  * Runs under Vitest on Node. The runner spawns a literal `node`, so every test
  * here depends on the host being Node and fails loudly otherwise.
  */
-import { execFile, execFileSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
@@ -17,7 +17,16 @@ import { fileURLToPath } from 'node:url'
 
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 
-import { buildHookPayload, createHook, createLauncherRunner, createSpawnRunner, HOOK_LAUNCHER_RELATIVE_PATH } from './hook-bridge.ts'
+import {
+  buildHookPayload,
+  createEngineWarmup,
+  createHook,
+  createLauncherRunner,
+  createSpawnRunner,
+  ENGINE_WARMUP_TIMEOUT_MS,
+  HOOK_LAUNCHER_RELATIVE_PATH,
+  type DetectorRunner,
+} from './hook-bridge.ts'
 
 // Split across two literals so this test source does not itself trip the
 // per-line detector; the written fixture line carries both on one line.
@@ -37,6 +46,13 @@ function worktree(): string {
 function fixture(script: string): string {
   const path = join(worktree(), `${randomUUID()}.mjs`)
   writeFileSync(path, script, 'utf-8')
+  return path
+}
+
+/** Writes an executable `sh` launcher stand-in and returns its path. */
+function launcherFixture(body: string): string {
+  const path = join(worktree(), `launcher-${randomUUID()}`)
+  writeFileSync(path, `#!/bin/sh\n${body}\n`, { encoding: 'utf-8', mode: 0o755 })
   return path
 }
 
@@ -583,13 +599,69 @@ describe('createSpawnRunner + createHook end-to-end', () => {
   })
 })
 
-describe('createLauncherRunner', () => {
-  function launcherFixture(body: string): string {
-    const path = join(worktree(), `launcher-${randomUUID()}`)
-    writeFileSync(path, `#!/bin/sh\n${body}\n`, { encoding: 'utf-8', mode: 0o755 })
-    return path
+interface StalledDownload {
+  /** A copy of the vendored launcher with no engine binary beside it. */
+  launcher: string
+  /** A string unique to this download's URL, for `pgrep -f`. */
+  marker: string
+  /** How many download requests the server has accepted. */
+  requests: () => number
+}
+
+/**
+ * Runs `body` against a launcher whose first-use engine download never
+ * finishes: the server accepts the request and never answers, so the
+ * launcher's curl waits. Only the launcher and its VERSION file are copied, so
+ * the sibling engine binary is absent and the launcher takes its download
+ * path. HOME and the cache root are temporary so a cached engine on this
+ * machine is not used.
+ */
+async function withStalledDownload(body: (download: StalledDownload) => Promise<void>): Promise<void> {
+  const marker = `cold-download-${randomUUID()}`
+  trackedProcessMarkers.push(marker)
+
+  let requestCount = 0
+  const server: Server = createServer(() => {
+    requestCount += 1
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+
+  const scriptsDir = join(worktree(), 'cold-skill', 'scripts')
+  mkdirSync(scriptsDir, { recursive: true })
+  const launcher = join(scriptsDir, 'impeccable')
+  copyFileSync(join(REPO_ROOT, HOOK_LAUNCHER_RELATIVE_PATH), launcher)
+  writeFileSync(join(scriptsDir, 'VERSION'), '0.0.0\n', 'utf-8')
+  const home = join(worktree(), 'cold-home')
+  mkdirSync(home, { recursive: true })
+
+  const overrides: Record<string, string | undefined> = {
+    HOME: home,
+    IMPECCABLE_HOME: join(home, '.impeccable'),
+    IMPECCABLE_DOWNLOAD_BASE: `http://127.0.0.1:${(server.address() as AddressInfo).port}/${marker}`,
+    IMPECCABLE_BIN: undefined,
+    IMPECCABLE_LAUNCHER_PROBE: undefined,
+    PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+  }
+  const previous: Record<string, string | undefined> = {}
+  for (const [key, value] of Object.entries(overrides)) {
+    previous[key] = process.env[key]
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
   }
 
+  try {
+    await body({ launcher, marker, requests: () => requestCount })
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    server.closeAllConnections()
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+}
+
+describe('createLauncherRunner', () => {
   it('runs the launcher directly with the hook subcommand and the claude harness and quiet env', async () => {
     const launcher = launcherFixture(
       'printf \'{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"argv=%s harness=%s quiet=%s"}}\' "$*" "$IMPECCABLE_HOOK_HARNESS" "$IMPECCABLE_HOOK_QUIET"',
@@ -609,43 +681,7 @@ describe('createLauncherRunner', () => {
   })
 
   it('leaves no curl behind when the launcher times out during a first-use engine download', async () => {
-    const marker = `cold-download-${randomUUID()}`
-    trackedProcessMarkers.push(marker)
-
-    // A server that accepts the request and never answers keeps the launcher's curl waiting.
-    let requests = 0
-    const server: Server = createServer(() => {
-      requests += 1
-    })
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
-
-    // Only the launcher and its VERSION file are copied, so the sibling engine
-    // binary is absent and the launcher takes its download path. HOME and the
-    // cache root are temporary so a cached engine on this machine is not used.
-    const scriptsDir = join(worktree(), 'cold-skill', 'scripts')
-    mkdirSync(scriptsDir, { recursive: true })
-    const launcher = join(scriptsDir, 'impeccable')
-    copyFileSync(join(REPO_ROOT, HOOK_LAUNCHER_RELATIVE_PATH), launcher)
-    writeFileSync(join(scriptsDir, 'VERSION'), '0.0.0\n', 'utf-8')
-    const home = join(worktree(), 'cold-home')
-    mkdirSync(home, { recursive: true })
-
-    const overrides: Record<string, string | undefined> = {
-      HOME: home,
-      IMPECCABLE_HOME: join(home, '.impeccable'),
-      IMPECCABLE_DOWNLOAD_BASE: `http://127.0.0.1:${(server.address() as AddressInfo).port}/${marker}`,
-      IMPECCABLE_BIN: undefined,
-      IMPECCABLE_LAUNCHER_PROBE: undefined,
-      PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
-    }
-    const previous: Record<string, string | undefined> = {}
-    for (const [key, value] of Object.entries(overrides)) {
-      previous[key] = process.env[key]
-      if (value === undefined) delete process.env[key]
-      else process.env[key] = value
-    }
-
-    try {
+    await withStalledDownload(async ({ launcher, marker, requests }) => {
       const runner = createSpawnRunner({
         scriptPath: launcher,
         command: launcher,
@@ -657,16 +693,9 @@ describe('createLauncherRunner', () => {
 
       expect(result.kind).toBe('timeout')
       // The download really started, so the assertion below is not vacuous.
-      expect(requests).toBeGreaterThan(0)
+      expect(requests()).toBeGreaterThan(0)
       await expectMarkerProcessesGone(marker)
-    } finally {
-      for (const [key, value] of Object.entries(previous)) {
-        if (value === undefined) delete process.env[key]
-        else process.env[key] = value
-      }
-      server.closeAllConnections()
-      await new Promise<void>(resolve => server.close(() => resolve()))
-    }
+    })
   }, 15_000)
 
   it('resolves spawn-error, without throwing, when the launcher does not exist', async () => {
@@ -676,34 +705,92 @@ describe('createLauncherRunner', () => {
   })
 })
 
+describe('createEngineWarmup', () => {
+  const warmupOptions = { timeoutMs: 1000, killGraceMs: 100 }
+
+  it('is ready when the launcher answers engine-probe with the engine handshake', async () => {
+    const launcher = launcherFixture('[ "$1" = engine-probe ] && printf "impeccable-engine 1.2.3\\n"')
+    expect(await createEngineWarmup(launcher, worktree(), warmupOptions)()).toBe(true)
+  })
+
+  it('is not ready for output that is not the engine handshake', async () => {
+    const launcher = launcherFixture('printf "something else\\n"')
+    expect(await createEngineWarmup(launcher, worktree(), warmupOptions)()).toBe(false)
+  })
+
+  it('is not ready when the launcher exits nonzero or does not exist', async () => {
+    const failing = launcherFixture('printf "impeccable-engine 1.2.3\\n"; exit 3')
+    expect(await createEngineWarmup(failing, worktree(), warmupOptions)()).toBe(false)
+    expect(await createEngineWarmup(join(tmpdir(), `no-launcher-${randomUUID()}`), worktree(), warmupOptions)()).toBe(false)
+  })
+
+  it('is not ready, and leaves no child behind, when the launcher stalls past the warm-up budget', async () => {
+    const pidFile = trackedFile('stalled-child-pid')
+    // The launcher's own child stays in its process group, as the real launcher's curl does.
+    const launcher = launcherFixture(`sleep 60 &\necho $! > ${JSON.stringify(pidFile)}\nwait`)
+    const start = Date.now()
+    expect(await createEngineWarmup(launcher, worktree(), warmupOptions)()).toBe(false)
+
+    expect(Date.now() - start).toBeLessThan(5000)
+    await expectProcessGone(readPid(pidFile))
+  }, 15_000)
+})
+
+describe('engine warm-up through createHook, with a stalled first-use download', () => {
+  it('skips the scan with engine-pending without spawning the hook, then reports engine-unavailable once the warm-up times out, with no curl left', async () => {
+    await withStalledDownload(async ({ launcher, marker, requests }) => {
+      let hookSpawns = 0
+      const spawnCounting: DetectorRunner = (hookPayload, opts) => {
+        hookSpawns += 1
+        return createSpawnRunner({ scriptPath: launcher, command: launcher, args: ['hook'] })(hookPayload, opts)
+      }
+      const hook = createHook({
+        runDetector: spawnCounting,
+        worktree: worktree(),
+        warmEngine: createEngineWarmup(launcher, worktree(), { timeoutMs: 1500, killGraceMs: 200 }),
+        engineReadyWaitMs: 300,
+      })
+      const edit = { tool: 'edit', sessionID: 's', callID: 'c', args: { filePath: '/repo/src/App.tsx' } }
+
+      const first = { title: 't', output: 'ok', metadata: {} }
+      const start = Date.now()
+      await hook(edit, first)
+
+      expect(Date.now() - start).toBeLessThan(1500)
+      expect(first.output).toContain('design engine is still downloading')
+      expect(hookSpawns).toBe(0)
+      expect(requests()).toBeGreaterThan(0)
+
+      // The warm-up keeps running past the hook's wait, and its group is killed at its own timeout.
+      await expectMarkerProcessesGone(marker, 5000)
+
+      const second = { title: 't', output: 'ok', metadata: {} }
+      await hook(edit, second)
+      expect(second.output).toContain('design engine could not be fetched or started')
+      expect(hookSpawns).toBe(0)
+
+      const third = { title: 't', output: 'ok', metadata: {} }
+      await hook(edit, third)
+      expect(third.output).toBe('ok')
+    })
+  }, 20_000)
+})
+
 /**
  * The launcher fetches the engine binary for the host platform into
  * `~/.impeccable/bin/<version>/` the first time it runs, and verifies its sha256.
  * A cold machine would spend that download inside the 5 s hook timeout, so the
- * suites below fetch it first, with a budget sized for a slow network. The
- * cache is the real HOME cache, because that is what the launcher uses in
- * production.
+ * suites below fetch it first through the bridge's own warm-up, with its long
+ * budget. The cache is the real HOME cache, because that is what the launcher
+ * uses in production.
  */
-const ENGINE_WARMUP_TIMEOUT_MS = 120_000
-
-function warmEngineCache(): Promise<void> {
-  const launcher = join(REPO_ROOT, HOOK_LAUNCHER_RELATIVE_PATH)
-  return new Promise((resolve, reject) => {
-    execFile(launcher, ['engine-probe'], { timeout: ENGINE_WARMUP_TIMEOUT_MS, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
-      if (error === null && stdout.startsWith('impeccable-engine')) {
-        resolve()
-        return
-      }
-      const detail = error === null ? `unexpected output: ${stdout.trim()}` : error.message
-      reject(
-        new Error(
-          `The Impeccable engine could not be fetched or started (${detail}). ` +
-            `${stderr.trim()} The launcher needs network access to download the engine into ~/.impeccable/bin on first use, ` +
-            'or IMPECCABLE_BIN pointing at an installed engine.',
-        ),
-      )
-    })
-  })
+async function warmEngineCache(): Promise<void> {
+  const ready = await createEngineWarmup(join(REPO_ROOT, HOOK_LAUNCHER_RELATIVE_PATH), worktree())()
+  if (!ready) {
+    throw new Error(
+      'The Impeccable engine could not be fetched or started. The launcher needs network access to download the engine into ~/.impeccable/bin on first use, or IMPECCABLE_BIN pointing at an installed engine.',
+    )
+  }
 }
 
 describe('real vendored hook', () => {
