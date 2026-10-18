@@ -78,7 +78,7 @@ printf '{"tool_name":"write","tool_input":{"file_path":"/abs/probe.css"},"cwd":"
 
 This is how the `IMPECCABLE_HOOK_DEPTH` bug was found in one shell command instead of one restart: the standalone run scanned correctly, so the difference had to be an env var the plugin added.
 
-**6. Do not add "defensive" env vars you have not verified against the subprocess's own logic.** The hook treats *any* `IMPECCABLE_HOOK_DEPTH` value as a re-entrancy signal and returns empty (exit 0). Setting it "just in case" made the detector silently bail on every call. The bridge runs the launcher as a plain subprocess, which cannot re-enter the tool hook, so there is nothing to guard against. The runner deletes any inherited `IMPECCABLE_HOOK_DEPTH` and `CLAUDE_HOOK_DEPTH` from the child's environment and never sets one.
+**6. Do not add "defensive" env vars you have not verified against the subprocess's own logic.** The hook treats *any* `IMPECCABLE_HOOK_DEPTH` value as a re-entrancy signal and returns empty (exit 0). Setting it "just in case" made the detector silently bail on every call. The bridge runs the launcher as a plain subprocess, which cannot re-enter the tool hook, so there is nothing to guard against. The runner never forwards `IMPECCABLE_HOOK_DEPTH` or `CLAUDE_HOOK_DEPTH` and never sets one. It builds the child's environment from one allow-list (`CHILD_ENV_ALLOWLIST`): `PATH`, `HOME`, `TMPDIR`, `USER`, `LOGNAME`, `LANG`, `LC_*` and `IMPECCABLE_*`, plus the harness and quiet signals. Tokens and other host secrets never reach the engine, and the real-hook suite runs on that reduced environment. A user behind a proxy that needs `HTTPS_PROXY` or `SSL_CERT_FILE` gets `engine-unavailable` on the first download, because those names are not forwarded; `IMPECCABLE_BIN` can point at an engine installed another way.
 
 **7. Design a fail-loud path that can actually fire.** The hook is contractually always-exit-0, which defeats exit-code-only fail-loud logic. A broken bridge must be detectable by *other* signals. Warn once per kind on timeout, spawn failure, nonzero exit, output overflow, unrecognized stdout, stderr output on an otherwise clean exit, and a fault inside the bridge itself. Only exit 0 with empty stdout and empty stderr counts as a clean scan and stays silent.
 
@@ -86,11 +86,11 @@ This is how the `IMPECCABLE_HOOK_DEPTH` bug was found in one shell command inste
 
 **9. Warm the engine once, outside the hook timeout.** The engine binary is not in git. On first use the launcher downloads it for the host platform into `~/.impeccable/bin/<version>/` and checks its sha256. That takes several seconds on a fast link, and the launcher's `curl` has no time limit of its own, so a download inside the hook's 5 s timeout is killed and the cache is never written. The bridge therefore warms the engine separately (`createEngineWarmup`): the first hook call that needs a scan runs `scripts/impeccable engine-probe` once through the same spawn runner, with a 120 s budget and the same process-group kill. Ready means a clean exit whose stdout starts with `impeccable-engine`. Every call waits for that shared warm-up for at most the normal hook budget:
 
-- Still pending: the call skips the scan, warns `engine-pending`, and spawns no hook. The warm-up keeps running; the hook timeout does not kill it.
-- Failed: the call warns `engine-unavailable` and skips the scan. A later call retries no sooner than 60 s after the failure.
+- Still pending: the call skips the scan, warns `engine-pending`, and spawns no hook. The warm-up keeps running; the hook timeout does not kill it. After one call has seen it pending, later calls skip at once with no wait until it settles, so a long download does not add the hook budget to every edit.
+- Failed: the call warns `engine-unavailable` and skips the scan. A later call retries no sooner than 60 s after the failure. A failed or timed-out warm-up also removes the `.impeccable.part.<pid>` staging files its killed download left in `~/.impeccable/bin/<version>/` (regular files only, never a symlink, never a file of a process that is still running).
 - Warm cache: the probe answers in under 100 ms and nothing is skipped.
 
-The integration suite warms the cache with the same function in a `beforeAll`, against the real HOME cache, so no timeout-bound test pays for a download. If it fails, the suite fails with a fixed message that names the cause. A machine with a cold cache and no network cannot run the real hook; set `IMPECCABLE_BIN` to an installed engine there. Two risks remain: the engine is downloaded at runtime and checked only against a sha256 sidecar from the same host, and a warm-up that is still running when OpenCode exits can outlive it.
+The integration suite warms the cache with the same function in a `beforeAll`, against the real HOME cache, so no timeout-bound test pays for a download. CI restores `~/.impeccable/bin` with `actions/cache`, keyed on the runner and the hash of the skill's `scripts/VERSION`, so a runner downloads the engine once per skill version. If it fails, the suite fails with a fixed message that names the cause. A machine with a cold cache and no network cannot run the real hook; set `IMPECCABLE_BIN` to an installed engine there. Two risks remain: the engine is downloaded at runtime and checked only against a sha256 sidecar from the same host, and a warm-up that is still running when OpenCode exits can outlive it.
 
 ## Why This Matters
 
@@ -135,12 +135,8 @@ export const ImpeccablePlugin: Plugin = async (input) => {
 }
 
 // runner env (node:child_process spawn of the launcher, no shell):
-// inherit the environment, delete both depth vars, set the harness signal and quiet clean-acks
-const env = { ...process.env }
-delete env.IMPECCABLE_HOOK_DEPTH
-delete env.CLAUDE_HOOK_DEPTH
-env.IMPECCABLE_HOOK_HARNESS = 'claude'
-env.IMPECCABLE_HOOK_QUIET = '1'
+// allow-listed names only, never a depth var, plus the harness signal and quiet clean-acks
+const env = buildChildEnv(process.env)
 
 // surfacing: the PostToolUse envelope's additionalContext only; anything else warns once
 const feedback = extractFeedbackText(result.stdout)

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   bareToolName,
+  buildChildEnv,
   buildHookPayload,
   createHook,
   extractFeedbackText,
@@ -987,5 +988,147 @@ describe('engine warm-up (createHook)', () => {
     await hook(makeInput({ tool: 'read' }), makeOutput())
     await hook(makeInput({ args: {} }), makeOutput())
     expect(warmCalls).toBe(0)
+  })
+})
+
+describe('fast skip while the warm-up is pending (createHook)', () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>(res => {
+      resolve = res
+    })
+    return { promise, resolve }
+  }
+
+  async function timed(run: () => Promise<void>): Promise<number> {
+    const start = performance.now()
+    await run()
+    return performance.now() - start
+  }
+
+  it('skips at once, without waiting or spawning, on every call after one has seen the warm-up pending', async () => {
+    const warm = deferred<boolean>()
+    const calls: unknown[][] = []
+    const hook = createHook({
+      runDetector: fakeRunner(ok(envelope('found')), calls),
+      worktree: '/repo',
+      warmEngine: () => warm.promise,
+      engineReadyWaitMs: 300,
+    })
+
+    const first = makeOutput()
+    const firstMs = await timed(() => hook(makeInput(), first))
+    expect(firstMs).toBeGreaterThanOrEqual(250)
+    expect(first.output).toContain('still downloading')
+
+    for (let i = 0; i < 2; i += 1) {
+      const output = makeOutput()
+      const elapsedMs = await timed(() => hook(makeInput(), output))
+      expect(elapsedMs).toBeLessThan(50)
+      expect(output.output).toBe('ok')
+    }
+    expect(calls).toHaveLength(0)
+
+    warm.resolve(true)
+    const after = makeOutput()
+    await hook(makeInput(), after)
+    expect(calls).toHaveLength(1)
+    expect(after.output).toContain('found')
+  })
+
+  it('applies the engine-unavailable and retry logic when a warm-up that was seen pending then fails', async () => {
+    let clock = 1_000
+    let attempts = 0
+    const first = deferred<boolean>()
+    const calls: unknown[][] = []
+    const hook = createHook({
+      runDetector: fakeRunner(ok(envelope('found')), calls),
+      worktree: '/repo',
+      warmEngine: () => {
+        attempts += 1
+        return attempts === 1 ? first.promise : Promise.resolve(true)
+      },
+      engineReadyWaitMs: 10,
+      engineRetryMs: 60_000,
+      now: () => clock,
+    })
+
+    await hook(makeInput(), makeOutput())
+    first.resolve(false)
+
+    const failed = makeOutput()
+    await hook(makeInput(), failed)
+    expect(failed.output).toContain('could not be fetched or started')
+    expect(calls).toHaveLength(0)
+
+    clock += 61_000
+    const retried = makeOutput()
+    await hook(makeInput(), retried)
+    expect(attempts).toBe(2)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('waits for a retried warm-up again before it is seen pending', async () => {
+    let clock = 1_000
+    let attempts = 0
+    const second = deferred<boolean>()
+    const hook = createHook({
+      runDetector: fakeRunner(ok()),
+      worktree: '/repo',
+      warmEngine: () => {
+        attempts += 1
+        return attempts === 1 ? Promise.resolve(false) : second.promise
+      },
+      engineReadyWaitMs: 150,
+      engineRetryMs: 60_000,
+      now: () => clock,
+    })
+
+    await hook(makeInput(), makeOutput())
+    clock += 61_000
+    const elapsedMs = await timed(() => hook(makeInput(), makeOutput()))
+    expect(attempts).toBe(2)
+    expect(elapsedMs).toBeGreaterThanOrEqual(100)
+  })
+})
+
+describe('buildChildEnv', () => {
+  it('keeps only the allow-listed names, every IMPECCABLE_ variable but the depth one, and the bridge signals', () => {
+    const env = buildChildEnv({
+      PATH: '/usr/bin',
+      HOME: '/home/u',
+      TMPDIR: '/tmp',
+      USER: 'u',
+      LOGNAME: 'u',
+      LANG: 'en_US.UTF-8',
+      LC_ALL: 'C',
+      IMPECCABLE_HOME: '/cache',
+      IMPECCABLE_DOWNLOAD_BASE: 'http://x',
+      IMPECCABLE_HOOK_DEPTH: '1',
+      CLAUDE_HOOK_DEPTH: '1',
+      IMPECCABLE_HOOK_HARNESS: 'cursor',
+      IMPECCABLE_HOOK_QUIET: '0',
+      GITHUB_TOKEN: 'ghp_secret',
+      FAKE_SECRET: 'secret',
+      NODE_OPTIONS: '--inspect',
+    })
+
+    expect(env).toEqual({
+      PATH: '/usr/bin',
+      HOME: '/home/u',
+      TMPDIR: '/tmp',
+      USER: 'u',
+      LOGNAME: 'u',
+      LANG: 'en_US.UTF-8',
+      LC_ALL: 'C',
+      IMPECCABLE_HOME: '/cache',
+      IMPECCABLE_DOWNLOAD_BASE: 'http://x',
+      IMPECCABLE_HOOK_HARNESS: 'claude',
+      IMPECCABLE_HOOK_QUIET: '1',
+    })
+  })
+
+  it('omits allow-listed names the source does not set', () => {
+    expect(buildChildEnv({})).toEqual({ IMPECCABLE_HOOK_HARNESS: 'claude', IMPECCABLE_HOOK_QUIET: '1' })
   })
 })

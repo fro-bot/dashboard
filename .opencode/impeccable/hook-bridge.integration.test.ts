@@ -6,9 +6,20 @@
  * Runs under Vitest on Node. The runner spawns a literal `node`, so every test
  * here depends on the host being Node and fails loudly otherwise.
  */
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -219,6 +230,47 @@ describe('createSpawnRunner', () => {
       if (prev.claude === undefined) delete process.env.CLAUDE_HOOK_DEPTH
       else process.env.CLAUDE_HOOK_DEPTH = prev.claude
     }
+  })
+
+  it('passes the child only the allow-listed environment', async () => {
+    const scriptPath = fixture('process.stdout.write(JSON.stringify(process.env));\nprocess.exit(0);\n')
+    const runner = createSpawnRunner({ scriptPath })
+
+    await withEnv(
+      {
+        GITHUB_TOKEN: 'ghp_not-for-the-engine',
+        FAKE_SECRET: 'not-for-the-engine',
+        NODE_OPTIONS: '--max-old-space-size=64',
+        LC_ALL: 'C',
+        LANG: 'en_US.UTF-8',
+        IMPECCABLE_HOME: '/tmp/impeccable-home',
+        IMPECCABLE_HOOK_DEPTH: '1',
+        CLAUDE_HOOK_DEPTH: '1',
+      },
+      async () => {
+        const result = await runner(payload, { worktree: worktree() })
+        expect(result.kind).toBe('ok')
+        if (result.kind !== 'ok') return
+        const env = JSON.parse(result.stdout) as Record<string, string | undefined>
+
+        for (const name of ['GITHUB_TOKEN', 'FAKE_SECRET', 'NODE_OPTIONS', 'IMPECCABLE_HOOK_DEPTH', 'CLAUDE_HOOK_DEPTH']) {
+          expect(env).not.toHaveProperty(name)
+        }
+        expect(env.PATH).toBe(process.env.PATH)
+        expect(env.HOME).toBe(process.env.HOME)
+        expect(env.LC_ALL).toBe('C')
+        expect(env.LANG).toBe('en_US.UTF-8')
+        expect(env.IMPECCABLE_HOME).toBe('/tmp/impeccable-home')
+        expect(env.IMPECCABLE_HOOK_HARNESS).toBe('claude')
+        expect(env.IMPECCABLE_HOOK_QUIET).toBe('1')
+        // Nothing outside the allow-list and the IMPECCABLE_ prefix gets through. macOS adds
+        // __CF_USER_TEXT_ENCODING to every process it starts, so it is not the bridge's doing.
+        const unexpected = Object.keys(env).filter(
+          name => name !== '__CF_USER_TEXT_ENCODING' && !/^(PATH|HOME|TMPDIR|USER|LOGNAME|LANG|LC_.*|IMPECCABLE_.*)$/.test(name),
+        )
+        expect(unexpected).toEqual([])
+      },
+    )
   })
 
   it('sends the payload over stdin without cross-contaminating stdout/stderr', async () => {
@@ -599,6 +651,24 @@ describe('createSpawnRunner + createHook end-to-end', () => {
   })
 })
 
+/** Runs `body` with the given process env overrides (`undefined` deletes a name), then restores the previous values. */
+async function withEnv(overrides: Record<string, string | undefined>, body: () => Promise<void>): Promise<void> {
+  const previous: Record<string, string | undefined> = {}
+  for (const [key, value] of Object.entries(overrides)) {
+    previous[key] = process.env[key]
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+  try {
+    await body()
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+
 interface StalledDownload {
   /** A copy of the vendored launcher with no engine binary beside it. */
   launcher: string
@@ -606,6 +676,8 @@ interface StalledDownload {
   marker: string
   /** How many download requests the server has accepted. */
   requests: () => number
+  /** The launcher's staging directory for this download, `<cache>/bin/<version>`. */
+  stagingDir: string
 }
 
 /**
@@ -642,20 +714,12 @@ async function withStalledDownload(body: (download: StalledDownload) => Promise<
     IMPECCABLE_LAUNCHER_PROBE: undefined,
     PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
   }
-  const previous: Record<string, string | undefined> = {}
-  for (const [key, value] of Object.entries(overrides)) {
-    previous[key] = process.env[key]
-    if (value === undefined) delete process.env[key]
-    else process.env[key] = value
-  }
 
   try {
-    await body({ launcher, marker, requests: () => requestCount })
+    await withEnv(overrides, () =>
+      body({ launcher, marker, requests: () => requestCount, stagingDir: join(home, '.impeccable', 'bin', '0.0.0') }),
+    )
   } finally {
-    for (const [key, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[key]
-      else process.env[key] = value
-    }
     server.closeAllConnections()
     await new Promise<void>(resolve => server.close(() => resolve()))
   }
@@ -724,6 +788,104 @@ describe('createEngineWarmup', () => {
     expect(await createEngineWarmup(join(tmpdir(), `no-launcher-${randomUUID()}`), worktree(), warmupOptions)()).toBe(false)
   })
 
+  describe('staging files of a failed warm-up', () => {
+    const PART = '.impeccable.part.'
+
+    /** A skill dir whose launcher fails, a cache root, and the staging dir the launcher would use. */
+    function failingSkill(): { launcher: string; stagingDir: string; cacheRoot: string } {
+      const scriptsDir = join(worktree(), 'staging-skill', 'scripts')
+      mkdirSync(scriptsDir, { recursive: true })
+      const launcher = join(scriptsDir, 'impeccable')
+      writeFileSync(launcher, '#!/bin/sh\nexit 7\n', { encoding: 'utf-8', mode: 0o755 })
+      writeFileSync(join(scriptsDir, 'VERSION'), '9.9.9\n', 'utf-8')
+      const cacheRoot = join(worktree(), 'staging-cache')
+      const stagingDir = join(cacheRoot, 'bin', '9.9.9')
+      mkdirSync(stagingDir, { recursive: true })
+      return { launcher, stagingDir, cacheRoot }
+    }
+
+    function deadPid(): number {
+      const pid = spawnSync('true').pid
+      expect(pid).toBeGreaterThan(0)
+      return pid
+    }
+
+    it('removes leftover .impeccable.part files of dead processes and leaves everything else alone', async () => {
+      const { launcher, stagingDir, cacheRoot } = failingSkill()
+      const dead = deadPid()
+      const victim = join(worktree(), 'victim.txt')
+      writeFileSync(victim, 'keep me', 'utf-8')
+
+      writeFileSync(join(stagingDir, `${PART}${dead}`), 'partial', 'utf-8')
+      writeFileSync(join(stagingDir, `${PART}${dead}.sha256`), 'abc', 'utf-8')
+      // Left alone: a staging file of a live process, a symlink with a matching name, a directory, and non-matching names.
+      writeFileSync(join(stagingDir, `${PART}${process.pid}`), 'in flight', 'utf-8')
+      symlinkSync(victim, join(stagingDir, `${PART}${dead + 1}`))
+      mkdirSync(join(stagingDir, `${PART}${dead + 2}`))
+      writeFileSync(join(stagingDir, `${PART}notes.txt`), 'x', 'utf-8')
+      writeFileSync(join(stagingDir, 'impeccable'), 'engine', 'utf-8')
+      writeFileSync(join(stagingDir, `other${PART}${dead}`), 'x', 'utf-8')
+
+      await withEnv({ IMPECCABLE_HOME: cacheRoot }, async () => {
+        expect(await createEngineWarmup(launcher, worktree(), warmupOptions)()).toBe(false)
+      })
+
+      expect(readdirSync(stagingDir).sort()).toEqual(
+        [
+          `${PART}${dead + 1}`,
+          `${PART}${dead + 2}`,
+          `${PART}notes.txt`,
+          `${PART}${process.pid}`,
+          'impeccable',
+          `other${PART}${dead}`,
+        ].sort(),
+      )
+      expect(lstatSync(join(stagingDir, `${PART}${dead + 1}`)).isSymbolicLink()).toBe(true)
+      expect(readFileSync(victim, 'utf-8')).toBe('keep me')
+    })
+
+    it('uses $HOME/.impeccable when IMPECCABLE_HOME is not set', async () => {
+      const { launcher } = failingSkill()
+      const home = join(worktree(), 'staging-home')
+      const stagingDir = join(home, '.impeccable', 'bin', '9.9.9')
+      mkdirSync(stagingDir, { recursive: true })
+      writeFileSync(join(stagingDir, `${PART}${deadPid()}`), 'partial', 'utf-8')
+
+      await withEnv({ HOME: home, IMPECCABLE_HOME: undefined }, async () => {
+        expect(await createEngineWarmup(launcher, worktree(), warmupOptions)()).toBe(false)
+      })
+
+      expect(readdirSync(stagingDir)).toEqual([])
+    })
+
+    it('never throws when the staging directory or the VERSION file is missing', async () => {
+      const { launcher, cacheRoot } = failingSkill()
+      rmSync(join(cacheRoot, 'bin'), { recursive: true })
+      await withEnv({ IMPECCABLE_HOME: cacheRoot }, async () => {
+        expect(await createEngineWarmup(launcher, worktree(), warmupOptions)()).toBe(false)
+      })
+
+      rmSync(join(launcher, '..', 'VERSION'))
+      await withEnv({ IMPECCABLE_HOME: cacheRoot }, async () => {
+        expect(await createEngineWarmup(launcher, worktree(), warmupOptions)()).toBe(false)
+      })
+    })
+
+    it('does not clean up after a warm-up that succeeds', async () => {
+      const { stagingDir, cacheRoot } = failingSkill()
+      const launcher = launcherFixture('printf "impeccable-engine 1.2.3\\n"')
+      writeFileSync(join(launcher, '..', 'VERSION'), '9.9.9\n', 'utf-8')
+      const part = join(stagingDir, `${PART}${deadPid()}`)
+      writeFileSync(part, 'partial', 'utf-8')
+
+      await withEnv({ IMPECCABLE_HOME: cacheRoot }, async () => {
+        expect(await createEngineWarmup(launcher, worktree(), warmupOptions)()).toBe(true)
+      })
+
+      expect(existsSync(part)).toBe(true)
+    })
+  })
+
   it('is not ready, and leaves no child behind, when the launcher stalls past the warm-up budget', async () => {
     const pidFile = trackedFile('stalled-child-pid')
     // The launcher's own child stays in its process group, as the real launcher's curl does.
@@ -738,7 +900,7 @@ describe('createEngineWarmup', () => {
 
 describe('engine warm-up through createHook, with a stalled first-use download', () => {
   it('skips the scan with engine-pending without spawning the hook, then reports engine-unavailable once the warm-up times out, with no curl left', async () => {
-    await withStalledDownload(async ({ launcher, marker, requests }) => {
+    await withStalledDownload(async ({ launcher, marker, requests, stagingDir }) => {
       let hookSpawns = 0
       const spawnCounting: DetectorRunner = (hookPayload, opts) => {
         hookSpawns += 1
@@ -760,6 +922,8 @@ describe('engine warm-up through createHook, with a stalled first-use download',
       expect(first.output).toContain('design engine is still downloading')
       expect(hookSpawns).toBe(0)
       expect(requests()).toBeGreaterThan(0)
+      // The launcher has begun staging the download.
+      expect(readdirSync(stagingDir).some(name => name.startsWith('.impeccable.part.'))).toBe(true)
 
       // The warm-up keeps running past the hook's wait, and its group is killed at its own timeout.
       await expectMarkerProcessesGone(marker, 5000)
@@ -768,6 +932,8 @@ describe('engine warm-up through createHook, with a stalled first-use download',
       await hook(edit, second)
       expect(second.output).toContain('design engine could not be fetched or started')
       expect(hookSpawns).toBe(0)
+      // The failed warm-up removed its staging files.
+      expect(readdirSync(stagingDir).filter(name => name.startsWith('.impeccable.part.'))).toEqual([])
 
       const third = { title: 't', output: 'ok', metadata: {} }
       await hook(edit, third)

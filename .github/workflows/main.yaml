@@ -168,6 +168,12 @@ jobs:
       - name: 🏗 Build web
         run: bun run build:web
 
+      - name: 💾 Restore Impeccable engine cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/.impeccable/bin
+          key: impeccable-engine-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.agents/skills/impeccable/scripts/VERSION') }}
+
       - name: 🧪 Run Tests
         run: bun run test
 

@@ -53,7 +53,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 
   Exit 0 with empty stdout and empty stderr is a clean scan and stays silent.
 - R3. The agent sees only parsed PostToolUse feedback. Raw stdout and stderr never reach it.
-- R4. Inherited `IMPECCABLE_HOOK_DEPTH` and `CLAUDE_HOOK_DEPTH` are removed from the child's env, and the bridge never sets them.
+- R4. The child gets a minimal env built from one allow-list: `PATH`, `HOME`, `TMPDIR`, `USER`, `LOGNAME`, `LANG`, `LC_*` and `IMPECCABLE_*`, plus the harness and quiet signals the bridge sets. `IMPECCABLE_HOOK_DEPTH` and `CLAUDE_HOOK_DEPTH` are never forwarded and the bridge never sets them. Tokens and other secrets in the host env never reach the engine.
 - R5. `apply_patch` scans the add and update paths and the rename destination.
 - R6. The bridge stays advisory. It never blocks a tool call or throws from one, and `plugin.ts` exports only the plugin factory.
 
@@ -160,7 +160,9 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
   - The engine binary is fetched on first use, and the download takes longer than the 5 s hook timeout. The first hook call that needs a scan runs the launcher once with `engine-probe`, through the same spawn runner (process group, group kill, deadline) with a 120 s budget. A warm cache answers in well under 100 ms.
   - The warm-up counts as ready only for a clean exit whose stdout starts with `impeccable-engine`.
   - Every hook call waits for the shared warm-up for at most the normal hook budget. If it is still pending, the call skips the scan, warns `engine-pending` and spawns no hook. The warm-up keeps running, and the hook timeout does not kill it.
+  - Once one call has seen the warm-up pending, later calls skip at once, with no wait, until it settles. After it settles ok, scans run. After it fails, the `engine-unavailable` path below applies.
   - If the warm-up fails, the call warns `engine-unavailable` and skips the scan. A later call retries the warm-up no sooner than 60 s after the failure, so a transient network failure recovers within the session.
+  - A failed or timed-out warm-up removes the download staging files it leaves behind: regular files named `.impeccable.part.<pid>` and `.impeccable.part.<pid>.sha256` in `<cache root>/bin/<version>/`. The cache root is `IMPECCABLE_HOME` or `$HOME/.impeccable`, and the version is the skill's `scripts/VERSION`. Symlinks, directories, other names and files of a process that is still running are left alone, and cleanup never throws.
   - The warm-up is passed to `createHook` as an option, so unit tests can fake it. `plugin.ts` still has one export.
 - **Warn once per kind per plugin instance.** A timeout that follows an earlier warning of another kind still shows. A non-string `output.output` is never modified.
 - **Clean scan: exit 0 with empty stdout and empty stderr, which matches `.io`.** A hook crash that exits 0 and writes nothing looks the same at runtime. The canary integration test guards it, and this is an accepted risk.
@@ -213,7 +215,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 **Approach:**
 - Port `createSpawnRunner` into `hook-bridge.ts`, adding the final deadline and the discriminated result.
 - Remove `withTimeout` from `createHook`, and remove the runner from `plugin.ts`. `plugin.ts` keeps exactly one export.
-- The child gets the inherited env minus both depth variables.
+- The child gets `buildChildEnv(process.env)`: the names and prefixes in `CHILD_ENV_ALLOWLIST`, minus both depth variables, plus the harness and quiet signals. The runner and the warm-up share it, because the warm-up uses the same runner.
 - On POSIX the child is spawned with `detached: true`. Timeout signals go to `process.kill(-pid, …)`, falling back to the direct child when the pid is missing or the group signal throws. The child is never `unref`ed, so the run still settles on `close` or the deadline.
 
 **Execution note:** Test-first. Port the whole `.io` integration suite. Flip the timeout no-op test in `plugin.test.ts`. Then confirm all of it fails red against the current bridge.
@@ -232,6 +234,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - Error path: the launcher timing out during a first-use download, against a server that never answers, leaves no `curl` behind.
 - Error path: a missing `node` binary or script resolves `spawn-error` and does not throw.
 - Edge case: inherited `IMPECCABLE_HOOK_DEPTH` and `CLAUDE_HOOK_DEPTH` are absent from the child's env.
+- Edge case: a child that dumps its env sees `PATH`, `HOME`, `LC_*` and `IMPECCABLE_*`, and does not see `GITHUB_TOKEN`, `FAKE_SECRET` or any other name outside the allow-list.
 - Integration: the real vendored hook, run on a fixture file with a known anti-pattern, returns an envelope containing that finding. This is the canary for a hook crash.
 - Integration: `plugin.ts` exposes exactly one runtime export.
 
@@ -420,6 +423,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 **Files:**
 - Modify: `.agents/skills/impeccable/**` (installer output)
 - Modify: `.gitignore` (the engine binary directory)
+- Modify: `.github/workflows/main.yaml` (the `test` job caches `~/.impeccable/bin`)
 - Modify: `.opencode/impeccable/hook-bridge.ts`, `.opencode/impeccable/plugin.ts`
 - Modify: `AGENTS.md`, `docs/solutions/workflow-issues/impeccable-skill-shared-agents-install-2026-06-25.md`, `docs/solutions/workflow-issues/opencode-plugin-hooks-need-live-verification-2026-07-10.md`
 - Delete: `.github/hooks/impeccable.json`, `.codex/hooks.json`
@@ -432,6 +436,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - Only the OpenCode bridge runs the design hook. The repo has no Copilot or Codex hook manifest, so `.github/hooks/impeccable.json` and `.codex/hooks.json` are deleted.
 - The hook is the launcher `scripts/impeccable hook`, a shell script that execs the engine binary for the host platform. The engine binary is not tracked: `.agents/skills/impeccable/scripts/bin/` is gitignored, and the launcher fetches the binary per machine into `~/.impeccable/bin/<version>/` and verifies its sha256 on first use. The bridge runs the launcher directly through `createLauncherRunner`, with no Node and no shell. The stdin fields, stdout envelope, harness, quiet and depth env vars, and the silent clean run are what the bridge expects. The hook ignores `*** Move to:` markers, so the bridge's synthetic Update markers are required.
 - At runtime the bridge warms the engine once per plugin instance (see Key Technical Decisions), so a cold machine skips scans with an `engine-pending` warning until the download finishes, and the download is never killed by the hook timeout.
+- The `test` job restores `~/.impeccable/bin` with the repo's pinned `actions/cache`, keyed on the runner OS and arch and the hash of the skill's `scripts/VERSION`, so CI downloads the engine once per skill version.
 - The integration suites that run the real hook warm the engine cache in a `beforeAll` through the same `createEngineWarmup` (120 s budget, the real HOME cache), so a cold runner downloads the engine before any 5 s hook-timeout test. A failed warm-up fails those suites with a fixed message that names the cause.
 
 **Test scenarios:**
@@ -441,7 +446,9 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - Integration: from a cold engine cache, the real-hook suites pass after the warm-up.
 - Error path: when the engine cannot be fetched, the real-hook suites fail with the warm-up message and run no test.
 - Unit: with a pending warm-up the hook skips, warns `engine-pending` once and never calls the runner, and the next call after the warm-up resolves scans. A failed warm-up warns `engine-unavailable` once, skips, and is retried after the retry interval. A warm cache adds no warning. Concurrent calls share one warm-up.
-- Integration: against a server that never answers, a hook call returns within the wait with `engine-pending` and spawns no hook, and when the warm-up times out its `curl` is gone.
+- Integration: against a server that never answers, a hook call returns within the wait with `engine-pending` and spawns no hook, and when the warm-up times out its `curl` is gone and its `.impeccable.part.*` files are removed.
+- Unit: after one call has seen the warm-up pending, the next calls return in under 50 ms and spawn nothing, and the call after it resolves scans.
+- Integration: cleanup removes only matching regular files of dead processes, and leaves a symlink, a directory, non-matching names and a live process's file alone.
 
 **Verification:**
 - The integration suite passes on the v4 bundle, from a cold and from a warm cache.
@@ -489,6 +496,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 | v4 writes stderr on clean runs, so every edit warns | Unit 5 records stderr on a clean run. Unit 7 adapts the bridge |
 | Vitest runs on Node while OpenCode loads plugins under Bun | Live verification in Units 4 and 7 |
 | The launcher downloads the engine binary at runtime and verifies it only against a sha256 sidecar served by the same host, so a compromised release channel defeats the check | Accepted. The download is over HTTPS from the project's GitHub releases, and `IMPECCABLE_BIN` can point at an engine installed another way |
+| The reduced child env drops proxy and CA variables (`HTTPS_PROXY`, `SSL_CERT_FILE`), so the first-use download fails behind a proxy that needs them | Accepted. The warm-up reports `engine-unavailable`, and `IMPECCABLE_BIN` can point at an engine installed another way |
 | A warm-up still running when OpenCode exits can outlive it, because the child is not `unref`ed or tied to the host's lifetime | Accepted. The warm-up has its own deadline, and the next warm-up finds the finished or partial cache |
 | A cold machine skips scans until the engine download finishes | The first call warns `engine-pending`. The warm-up is not killed by the hook timeout, and scans resume on the first call after it finishes |
 | The v4 pin breaks main after merge | Revert the Renovate PR. The pin returns to 3.6.1 |

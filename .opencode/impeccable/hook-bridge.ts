@@ -18,7 +18,9 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
+import { lstatSync, readdirSync, readFileSync, unlinkSync } from 'node:fs'
 import { access } from 'node:fs/promises'
+import { join, dirname } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 
 /**
@@ -28,6 +30,35 @@ import { StringDecoder } from 'node:string_decoder'
  * payload as that harness's event shape and drop the apply_patch multi-file input.
  */
 export const IMPECCABLE_HOOK_HARNESS = 'claude'
+
+/**
+ * The environment the engine child gets, and nothing else: these exact names,
+ * every name with one of these prefixes, and the harness and quiet signals the
+ * bridge sets. Tokens and other secrets in the host's environment never reach
+ * the child.
+ */
+export const CHILD_ENV_ALLOWLIST = {
+  names: ['PATH', 'HOME', 'TMPDIR', 'USER', 'LOGNAME', 'LANG'],
+  prefixes: ['LC_', 'IMPECCABLE_'],
+  /** Names the prefixes would let through that the child must never get: either one makes the hook a no-op. */
+  denied: ['IMPECCABLE_HOOK_DEPTH', 'CLAUDE_HOOK_DEPTH'],
+} as const
+
+/** Builds the child's environment from `source` by the allow-list, then sets the harness and quiet signals. */
+export function buildChildEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {}
+  for (const [name, value] of Object.entries(source)) {
+    if (value === undefined) continue
+    const denied = (CHILD_ENV_ALLOWLIST.denied as readonly string[]).includes(name)
+    const allowed =
+      CHILD_ENV_ALLOWLIST.names.includes(name as (typeof CHILD_ENV_ALLOWLIST.names)[number]) ||
+      CHILD_ENV_ALLOWLIST.prefixes.some((prefix) => name.startsWith(prefix))
+    if (allowed && !denied) env[name] = value
+  }
+  env.IMPECCABLE_HOOK_HARNESS = IMPECCABLE_HOOK_HARNESS
+  env.IMPECCABLE_HOOK_QUIET = '1'
+  return env
+}
 
 /** Worktree-relative path to the vendored launcher. It is a POSIX shell script that execs the engine binary for the host platform. */
 export const HOOK_LAUNCHER_RELATIVE_PATH = '.agents/skills/impeccable/scripts/impeccable'
@@ -421,9 +452,10 @@ function decode(chunks: Buffer[]): string {
  * `node <scriptPath>`, a literal `node` rather than `process.execPath`, which
  * under a Bun host would be Bun.
  *
- * The child inherits the environment minus both depth variables, with
- * `IMPECCABLE_HOOK_HARNESS=claude` and `IMPECCABLE_HOOK_QUIET=1` set. A depth
- * variable makes the hook a no-op, so the bridge never sets one.
+ * The child gets only the environment `buildChildEnv` builds from
+ * `CHILD_ENV_ALLOWLIST`, with `IMPECCABLE_HOOK_HARNESS=claude` and
+ * `IMPECCABLE_HOOK_QUIET=1` set. A depth variable makes the hook a no-op, so
+ * the bridge never forwards or sets one.
  *
  * Each of stdout and stderr is capped at `maxOutputBytes` of UTF-8. Excess
  * bytes are discarded as they arrive, and the run resolves `overflow`.
@@ -461,11 +493,7 @@ export function createSpawnRunner(options: CreateSpawnRunnerOptions): DetectorRu
         // A check that settles after the run resolved must not start a child.
         if (run.settled) return
 
-        const env: NodeJS.ProcessEnv = { ...process.env }
-        delete env.IMPECCABLE_HOOK_DEPTH
-        delete env.CLAUDE_HOOK_DEPTH
-        env.IMPECCABLE_HOOK_HARNESS = IMPECCABLE_HOOK_HARNESS
-        env.IMPECCABLE_HOOK_QUIET = '1'
+        const env = buildChildEnv(process.env)
 
         try {
           run.attach(
@@ -540,12 +568,60 @@ export function createEngineWarmup(launcherPath: string, worktree: string, optio
   const payload = buildHookPayload({ tool: 'edit', args: {}, cwd: worktree, sessionID: 'engine-warmup' })
 
   return async () => {
+    let ready = false
     try {
       const result = await run(payload, { worktree })
-      return result.kind === 'ok' && result.stdout.startsWith(ENGINE_HANDSHAKE_PREFIX)
+      ready = result.kind === 'ok' && result.stdout.startsWith(ENGINE_HANDSHAKE_PREFIX)
     } catch {
-      return false
+      ready = false
     }
+    if (!ready) removeEngineStagingFiles(launcherPath)
+    return ready
+  }
+}
+
+const ENGINE_STAGING_FILE_RE = /^\.impeccable\.part\.(\d+)(\.sha256)?$/
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    // EPERM means the process exists but belongs to someone else.
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+/**
+ * Removes the download staging files a failed or timed-out warm-up leaves in
+ * the launcher's cache directory: `<cache root>/bin/<version>/.impeccable.part.<pid>`
+ * and its `.sha256` sidecar. The cache root is `IMPECCABLE_HOME`, or
+ * `$HOME/.impeccable`; the version is the skill's `scripts/VERSION`. Only
+ * regular files with exactly those names are removed (a symlink or directory is
+ * skipped), and a file named for a process that is still running is skipped,
+ * because that process may be mid-download. It never throws.
+ */
+function removeEngineStagingFiles(launcherPath: string): void {
+  try {
+    const env = buildChildEnv(process.env)
+    const cacheRoot = env.IMPECCABLE_HOME ?? (env.HOME ? join(env.HOME, '.impeccable') : undefined)
+    if (!cacheRoot) return
+    const version = readFileSync(join(dirname(launcherPath), 'VERSION'), 'utf-8').trim()
+    if (!version || version.includes('/') || version.includes('\\')) return
+
+    const stagingDir = join(cacheRoot, 'bin', version)
+    for (const name of readdirSync(stagingDir)) {
+      const match = ENGINE_STAGING_FILE_RE.exec(name)
+      if (!match || processIsAlive(Number(match[1]))) continue
+      try {
+        const path = join(stagingDir, name)
+        if (lstatSync(path).isFile()) unlinkSync(path)
+      } catch {
+        // The file may already be gone, or not ours to remove.
+      }
+    }
+  } catch {
+    // No cache directory, no VERSION file, or an unreadable directory: nothing to clean.
   }
 }
 
@@ -660,7 +736,8 @@ const WARNING_MESSAGES = {
  *    arg key, yielding no path: `no-path`, and the hook is not run. A mutating
  *    tool with no path-like arg key is silent and not run.
  *  - the engine warm-up still pending after `engineReadyWaitMs`: `engine-pending`,
- *    the hook is not run, and the warm-up keeps running.
+ *    the hook is not run, and the warm-up keeps running. Calls after that skip
+ *    at once, without waiting, until the warm-up settles.
  *  - the engine warm-up failed: `engine-unavailable`, the hook is not run, and
  *    the warm-up is attempted again no sooner than `engineRetryMs` after the
  *    failure.
@@ -684,15 +761,19 @@ export function createHook(options: CreateHookOptions) {
   const engineState = (): EngineState => engine
   let warming: Promise<void> | undefined
   let failedAt = 0
+  // Set once a call has waited out the budget on the current warm-up; later calls then skip without waiting.
+  let seenPending = false
 
   const startWarmup = (warmEngine: EngineWarmup): Promise<void> => {
     engine = 'warming'
+    seenPending = false
     const settled = (async () => warmEngine())().then(
       ready => ({ ready }),
       () => ({ ready: false }),
     )
     warming = settled.then(({ ready }) => {
       engine = ready ? 'ready' : 'failed'
+      seenPending = false
       if (!ready) failedAt = now()
     })
     return warming
@@ -701,7 +782,17 @@ export function createHook(options: CreateHookOptions) {
   /** Whether the engine is ready, still warming after the wait, or unavailable. */
   const awaitEngine = async (): Promise<'ready' | 'pending' | 'unavailable'> => {
     const warmEngine = options.warmEngine
-    if (engineState() === 'ready' || !warmEngine) return 'ready'
+    if (!warmEngine) return 'ready'
+
+    if (seenPending && engineState() === 'warming') {
+      // Yield one macrotask so a warm-up that settled a moment ago is seen as settled.
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0)
+      })
+      if (engineState() === 'warming') return 'pending'
+    }
+
+    if (engineState() === 'ready') return 'ready'
     if (engineState() === 'failed' && now() - failedAt < retryMs) return 'unavailable'
     if (engineState() === 'idle' || engineState() === 'failed') startWarmup(warmEngine)
 
@@ -713,7 +804,10 @@ export function createHook(options: CreateHookOptions) {
     })
     try {
       const outcome = await Promise.race([warming, waited])
-      if (outcome === 'pending') return 'pending'
+      if (outcome === 'pending') {
+        seenPending = true
+        return 'pending'
+      }
     } finally {
       clearTimeout(timer)
     }
