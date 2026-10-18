@@ -115,6 +115,14 @@ async function expectMarkerProcessesGone(marker: string, budgetMs = 1000): Promi
   expect(markerProcessAlive(marker)).toBe(false)
 }
 
+/** Polls until `condition` holds, up to a bounded budget, so a slow process start is not mistaken for a missing one. */
+async function waitUntil(condition: () => boolean, budgetMs = 1000): Promise<void> {
+  const deadline = Date.now() + budgetMs
+  while (!condition() && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+}
+
 afterEach(() => {
   // Safety net: no test may leave a child behind, even when an assertion fails first.
   for (const marker of trackedProcessMarkers.splice(0)) {
@@ -246,6 +254,11 @@ describe('createSpawnRunner', () => {
         IMPECCABLE_HOME: '/tmp/impeccable-home',
         IMPECCABLE_HOOK_DEPTH: '1',
         CLAUDE_HOOK_DEPTH: '1',
+        HTTPS_PROXY: 'http://proxy.invalid:3128',
+        https_proxy: 'http://proxy.invalid:3128',
+        NO_PROXY: 'localhost',
+        SSL_CERT_FILE: '/tmp/ca.pem',
+        CURL_CA_BUNDLE: '/tmp/ca.pem',
       },
       async () => {
         const result = await runner(payload, { worktree: worktree() })
@@ -261,12 +274,21 @@ describe('createSpawnRunner', () => {
         expect(env.LC_ALL).toBe('C')
         expect(env.LANG).toBe('en_US.UTF-8')
         expect(env.IMPECCABLE_HOME).toBe('/tmp/impeccable-home')
+        // The launcher's curl needs these behind a proxy or a TLS-intercepting CA.
+        expect(env.HTTPS_PROXY).toBe('http://proxy.invalid:3128')
+        expect(env.https_proxy).toBe('http://proxy.invalid:3128')
+        expect(env.NO_PROXY).toBe('localhost')
+        expect(env.SSL_CERT_FILE).toBe('/tmp/ca.pem')
+        expect(env.CURL_CA_BUNDLE).toBe('/tmp/ca.pem')
         expect(env.IMPECCABLE_HOOK_HARNESS).toBe('claude')
         expect(env.IMPECCABLE_HOOK_QUIET).toBe('1')
         // Nothing outside the allow-list and the IMPECCABLE_ prefix gets through. macOS adds
         // __CF_USER_TEXT_ENCODING to every process it starts, so it is not the bridge's doing.
         const unexpected = Object.keys(env).filter(
-          name => name !== '__CF_USER_TEXT_ENCODING' && !/^(PATH|HOME|TMPDIR|USER|LOGNAME|LANG|LC_.*|IMPECCABLE_.*)$/.test(name),
+          name =>
+            name !== '__CF_USER_TEXT_ENCODING' &&
+            !/^(PATH|HOME|TMPDIR|USER|LOGNAME|LANG|LC_.*|IMPECCABLE_.*)$/.test(name) &&
+            !/^(HTTP_PROXY|HTTPS_PROXY|NO_PROXY|ALL_PROXY|http_proxy|https_proxy|no_proxy|all_proxy|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE)$/.test(name),
         )
         expect(unexpected).toEqual([])
       },
@@ -858,6 +880,20 @@ describe('createEngineWarmup', () => {
       expect(readdirSync(stagingDir)).toEqual([])
     })
 
+    it('falls back to $HOME/.impeccable when IMPECCABLE_HOME is set but empty, as the launcher does', async () => {
+      const { launcher } = failingSkill()
+      const home = join(worktree(), 'staging-empty-home')
+      const stagingDir = join(home, '.impeccable', 'bin', '9.9.9')
+      mkdirSync(stagingDir, { recursive: true })
+      writeFileSync(join(stagingDir, `${PART}${deadPid()}`), 'partial', 'utf-8')
+
+      await withEnv({ HOME: home, IMPECCABLE_HOME: '' }, async () => {
+        expect(await createEngineWarmup(launcher, worktree(), warmupOptions)()).toBe(false)
+      })
+
+      expect(readdirSync(stagingDir)).toEqual([])
+    })
+
     it('never throws when the staging directory or the VERSION file is missing', async () => {
       const { launcher, cacheRoot } = failingSkill()
       rmSync(join(cacheRoot, 'bin'), { recursive: true })
@@ -921,6 +957,8 @@ describe('engine warm-up through createHook, with a stalled first-use download',
       expect(Date.now() - start).toBeLessThan(1500)
       expect(first.output).toContain('design engine is still downloading')
       expect(hookSpawns).toBe(0)
+      // The download starts in the background; under load the first hook call can return before curl connects.
+      await waitUntil(() => requests() > 0)
       expect(requests()).toBeGreaterThan(0)
       // The launcher has begun staging the download.
       expect(readdirSync(stagingDir).some(name => name.startsWith('.impeccable.part.'))).toBe(true)

@@ -38,7 +38,27 @@ export const IMPECCABLE_HOOK_HARNESS = 'claude'
  * the child.
  */
 export const CHILD_ENV_ALLOWLIST = {
-  names: ['PATH', 'HOME', 'TMPDIR', 'USER', 'LOGNAME', 'LANG'],
+  names: [
+    'PATH',
+    'HOME',
+    'TMPDIR',
+    'USER',
+    'LOGNAME',
+    'LANG',
+    // The launcher's curl or wget needs these behind a proxy or a TLS-intercepting CA. A proxy URL
+    // with embedded credentials therefore reaches the engine. Exact names only, never prefixes.
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'NO_PROXY',
+    'ALL_PROXY',
+    'http_proxy',
+    'https_proxy',
+    'no_proxy',
+    'all_proxy',
+    'SSL_CERT_FILE',
+    'SSL_CERT_DIR',
+    'CURL_CA_BUNDLE',
+  ],
   prefixes: ['LC_', 'IMPECCABLE_'],
   /** Names the prefixes would let through that the child must never get: either one makes the hook a no-op. */
   denied: ['IMPECCABLE_HOOK_DEPTH', 'CLAUDE_HOOK_DEPTH'],
@@ -604,7 +624,8 @@ function processIsAlive(pid: number): boolean {
 function removeEngineStagingFiles(launcherPath: string): void {
   try {
     const env = buildChildEnv(process.env)
-    const cacheRoot = env.IMPECCABLE_HOME ?? (env.HOME ? join(env.HOME, '.impeccable') : undefined)
+    // An empty IMPECCABLE_HOME falls back to $HOME/.impeccable, as the launcher's `${IMPECCABLE_HOME:-…}` does.
+    const cacheRoot = env.IMPECCABLE_HOME || (env.HOME ? join(env.HOME, '.impeccable') : undefined)
     if (!cacheRoot) return
     const version = readFileSync(join(dirname(launcherPath), 'VERSION'), 'utf-8').trim()
     if (!version || version.includes('/') || version.includes('\\')) return

@@ -1128,6 +1128,33 @@ describe('buildChildEnv', () => {
     })
   })
 
+  it('forwards the proxy and CA variables by exact name, in upper and lower case, and nothing that merely resembles them', () => {
+    const forwarded = {
+      HTTP_PROXY: 'http://user:pass@proxy:3128',
+      HTTPS_PROXY: 'http://user:pass@proxy:3128',
+      NO_PROXY: 'localhost',
+      ALL_PROXY: 'socks5://proxy:1080',
+      http_proxy: 'http://proxy:3128',
+      https_proxy: 'http://proxy:3128',
+      no_proxy: 'localhost',
+      all_proxy: 'socks5://proxy:1080',
+      SSL_CERT_FILE: '/etc/ssl/ca.pem',
+      SSL_CERT_DIR: '/etc/ssl/certs',
+      CURL_CA_BUNDLE: '/etc/ssl/ca.pem',
+    }
+    const env = buildChildEnv({
+      ...forwarded,
+      HTTPS_PROXY_USER: 'u',
+      Https_Proxy: 'http://mixed-case',
+      SSL_CERT_FILE_BACKUP: '/x',
+      CURL_HOME: '/home/u',
+      PROXY: 'http://proxy',
+      GITHUB_TOKEN: 'ghp_secret',
+    })
+
+    expect(env).toEqual({ ...forwarded, IMPECCABLE_HOOK_HARNESS: 'claude', IMPECCABLE_HOOK_QUIET: '1' })
+  })
+
   it('omits allow-listed names the source does not set', () => {
     expect(buildChildEnv({})).toEqual({ IMPECCABLE_HOOK_HARNESS: 'claude', IMPECCABLE_HOOK_QUIET: '1' })
   })
