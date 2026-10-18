@@ -19,7 +19,7 @@ Impeccable ships interactive post-tool-use hooks for four harnesses (Claude Code
 ## Requirements Trace
 
 - R1-R5. Repo-local plugin fires after file-mutating tool calls, surfaces findings the same turn, stays advisory, and stays silent when out of scope.
-- R6. Bound each detector run with a timeout (~5s) and degrade to no-op.
+- R6. Bound each detector run with a timeout (~5s: SIGTERM, then SIGKILL after a 2s grace) and warn once instead of silently doing nothing.
 - R7-R8. Reuse `hook.mjs` as a thin adapter; make `hook.mjs` recognize the bridged events as a supported harness shape.
 - R9. Survive `npx impeccable update` (verify, not assume).
 - R10. Respect `.impeccable/config.json` via `hook.mjs`.
@@ -51,7 +51,7 @@ Impeccable ships interactive post-tool-use hooks for four harnesses (Claude Code
 
 ### External References
 
-- OpenCode plugin API (opencode.ai/docs/plugins, opencode.ai/docs/config): `tool.execute.after(input: {tool, sessionID, callID, args}, output: {title, output, metadata})`; feedback the model sees is appended to `output.output` for native tools; MCP tools may surface a raw `content[]` result instead. A custom-path plugin needs an explicit `plugin` entry in `opencode.json`; `.opencode/plugin/` files are auto-discovered. Shell via the injected `$` (Bun).
+- OpenCode plugin API (opencode.ai/docs/plugins, opencode.ai/docs/config): `tool.execute.after(input: {tool, sessionID, callID, args}, output: {title, output, metadata})`; feedback the model sees is appended to `output.output` for native tools; MCP tools may surface a raw `content[]` result instead. A custom-path plugin needs an explicit `plugin` entry in `opencode.json`; `.opencode/plugin/` files are auto-discovered. The bridge does not use the injected `$`; it launches `node` with `node:child_process`.
 
 ## Key Technical Decisions
 
@@ -127,9 +127,10 @@ Impeccable ships interactive post-tool-use hooks for four harnesses (Claude Code
 - Modify: `.opencode/impeccable/plugin.test.ts`
 
 **Approach:**
-- On a mutating tool, shape the payload (Unit 1) and pipe it to `node .agents/skills/impeccable/scripts/hook.mjs` via the injected `$`, `cwd` at the worktree, `.nothrow().quiet()`.
-- Wrap the invocation in a ~5s timeout; on timeout, abandon and continue (no-op, logged).
-- Set the harness signal (`IMPECCABLE_HOOK_HARNESS`) and a defensive `IMPECCABLE_HOOK_DEPTH` guard so nested runs can't recurse.
+- On a mutating tool, shape the payload (Unit 1) and pipe it over stdin to `node .agents/skills/impeccable/scripts/hook.mjs` with a `node:child_process` `spawn` runner (`createSpawnRunner`): literal `node`, no shell, `cwd` at the worktree.
+- The runner alone owns the timeout: SIGTERM after 5000 ms, SIGKILL after a 2000 ms grace period, and a final deadline 500 ms later that resolves even if the pipes stay open. `createHook` adds no timer of its own. On timeout the hook returns without throwing and warns once.
+- The child inherits the environment, minus `IMPECCABLE_HOOK_DEPTH` and `CLAUDE_HOOK_DEPTH`, with `IMPECCABLE_HOOK_HARNESS=claude` and `IMPECCABLE_HOOK_QUIET=1` set. The bridge never sets a depth variable, because `hook.mjs` treats any value as a re-entrancy signal and does nothing.
+- Cap each of stdout and stderr at 1 MiB, truncated on a UTF-8 boundary.
 - Return early (no work) for non-mutating tools.
 
 **Execution note:** Resolve the harness-signal and exact-tool-name questions against a live session here (see Deferred to Implementation) before finalizing the matcher and env.
@@ -141,10 +142,10 @@ Impeccable ships interactive post-tool-use hooks for four harnesses (Claude Code
 **Test scenarios:**
 - Happy path: a mutating tool event triggers one `hook.mjs` invocation with the file path in the piped payload (subprocess stubbed/faked).
 - Edge case: a non-mutating tool triggers no invocation.
-- Error path: a `hook.mjs` invocation exceeding the timeout is abandoned and the hook returns without throwing.
+- Error path: a `hook.mjs` invocation exceeding the timeout is killed and the hook returns without throwing, with a one-time warning.
 
 **Verification:**
-- With the subprocess faked, mutating events invoke the bridge once with the correct payload; non-mutating events don't; timeout degrades to no-op.
+- With the subprocess faked, mutating events invoke the bridge once with the correct payload; non-mutating events don't; a timeout warns once and never throws.
 
 ---
 
@@ -200,8 +201,8 @@ Impeccable ships interactive post-tool-use hooks for four harnesses (Claude Code
 ## System-Wide Impact
 
 - **Interaction graph:** the plugin observes every `tool.execute.after`; only mutating tools do work, everything else returns immediately.
-- **Error propagation:** bridge/detector failures never propagate to the tool — they degrade to a one-time warning (R11) or silent no-op on timeout (R6).
-- **Re-entrancy:** detection runs as a subprocess, outside the tool system, so it cannot re-trigger `tool.execute.after`; a depth-guard env is set defensively.
+- **Error propagation:** bridge/detector failures never propagate to the tool — they degrade to a one-time warning per kind (R11), including on timeout (R6). Only exit 0 with empty stdout and empty stderr counts as a clean scan and stays silent.
+- **Re-entrancy:** detection runs as a subprocess, outside the tool system, so it cannot re-trigger `tool.execute.after`; no depth-guard env is set, since `hook.mjs` would treat it as a signal to skip the scan.
 - **Unchanged invariants:** the CI `impeccable detect` gate, `.impeccable/config.json`, and the four Impeccable-managed harness hooks are untouched; this only adds an OpenCode-local surface.
 
 ## Risks & Dependencies
@@ -210,7 +211,7 @@ Impeccable ships interactive post-tool-use hooks for four harnesses (Claude Code
 |------|------------|
 | Wrong edit-tool name → hook never fires (silent) | Dual bare+suffixed matcher; live-session verification (Unit 4); fail-loud guard surfaces a dead bridge. |
 | Feedback attached to a field the model doesn't see | Resolve the native-vs-`content[]` attachment path live before finalizing (Unit 3 / Deferred). |
-| Slow detector stalls edits | ~5s timeout with no-op fallback (R6), matching the Copilot hook. |
+| Slow detector stalls edits | ~5s timeout (SIGTERM, then SIGKILL after a 2s grace, then a final deadline) with a one-time warning (R6), matching the Copilot hook. |
 | Future `impeccable update` changes `hook.mjs`'s contract or starts targeting `.opencode/` | Depend only on the documented stdin/stdout contract; Unit 4 re-checks survival; contract break would surface as a fail-loud warning, not a silent break. |
 
 ## Sources & References

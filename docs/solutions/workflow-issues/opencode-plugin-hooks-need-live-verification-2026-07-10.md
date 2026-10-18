@@ -31,7 +31,7 @@ Three surfaces of the plugin's real contract sit outside the unit-test boundary:
 - **The subprocess boundary** — the `env` / stdin / stdout contract with `hook.mjs`.
 - **Host startup behavior** — plugins load once, so code changes need a restart to take effect.
 
-Unit tests with an injected fake runner prove the bridge *state machine* (tool matching, path extraction, timeout, fail-loud) — and nothing else.
+Unit tests with an injected fake runner prove the bridge *state machine* (tool matching, path extraction, fail-loud) — and nothing else. Timeouts, kill behavior, and pipe handling live in the real runner, so they need a test against a real subprocess.
 
 ## Guidance
 
@@ -52,7 +52,10 @@ A non-function export is the classic trap: OpenCode iterates a plugin module's e
 ```ts
 // plugin.ts — the ONLY runtime export is the factory
 export const ImpeccablePlugin: Plugin = async (input) => ({
-  'tool.execute.after': createHook({ runDetector: createDefaultRunner(input), worktree: input.worktree }),
+  'tool.execute.after': createHook({
+    runDetector: createSpawnRunner({ scriptPath: `${input.worktree}/${HOOK_SCRIPT_RELATIVE_PATH}` }),
+    worktree: input.worktree,
+  }),
 })
 ```
 
@@ -71,11 +74,11 @@ printf '{"tool_name":"write","tool_input":{"file_path":"/abs/probe.css"},"cwd":"
 
 This is how the `IMPECCABLE_HOOK_DEPTH` bug was found in one shell command instead of one restart: the standalone run scanned correctly, so the difference had to be an env var the plugin added.
 
-**6. Do not add "defensive" env vars you have not verified against the subprocess's own logic.** `hook.mjs` treats *any* `IMPECCABLE_HOOK_DEPTH` value as a re-entrancy signal and returns empty (exit 0). Setting it "just in case" made the detector silently bail on every call. The bridge runs `hook.mjs` as a plain subprocess, which cannot re-enter the tool hook — there was nothing to guard against.
+**6. Do not add "defensive" env vars you have not verified against the subprocess's own logic.** `hook.mjs` treats *any* `IMPECCABLE_HOOK_DEPTH` value as a re-entrancy signal and returns empty (exit 0). Setting it "just in case" made the detector silently bail on every call. The bridge runs `hook.mjs` as a plain subprocess, which cannot re-enter the tool hook, so there is nothing to guard against. The runner deletes any inherited `IMPECCABLE_HOOK_DEPTH` and `CLAUDE_HOOK_DEPTH` from the child's environment and never sets one.
 
-**7. Design a fail-loud path that can actually fire.** `hook.mjs` is contractually always-exit-0, which defeats exit-code-only fail-loud logic. A broken bridge must be detectable by *other* signals — surface a warning on nonzero exit *and* treat empty/unparseable output as suspect, rather than assuming "no output = clean."
+**7. Design a fail-loud path that can actually fire.** `hook.mjs` is contractually always-exit-0, which defeats exit-code-only fail-loud logic. A broken bridge must be detectable by *other* signals. Warn once per kind on timeout, spawn failure, nonzero exit, output overflow, unrecognized stdout, and stderr output on an otherwise clean exit. Only exit 0 with empty stdout and empty stderr counts as a clean scan and stays silent.
 
-**8. Match the subprocess's output contract to what the agent should see.** `hook.mjs` writes a JSON envelope (`{"hookSpecificOutput":{"additionalContext":"…"}}`) and emits a "scanned, no issues" ack on clean files. Extract the inner text (don't leak the wire JSON) and silence clean acks (`IMPECCABLE_HOOK_QUIET=1`) so a clean edit adds nothing.
+**8. Match the subprocess's output contract to what the agent should see.** `hook.mjs` writes a JSON envelope (`{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"…"}}`) and emits a "scanned, no issues" ack on clean files. Parse only that envelope: accept it only when `hookEventName` is `PostToolUse` and `additionalContext` is a non-empty string, and surface just that inner text. Raw stdout and stderr never reach the agent. Silence clean acks (`IMPECCABLE_HOOK_QUIET=1`) so a clean edit adds nothing.
 
 ## Why This Matters
 
@@ -109,15 +112,25 @@ output.output += proc.stdout.toString()  // leaks the raw JSON envelope
 ```ts
 // plugin.ts: exactly one runtime export
 export const ImpeccablePlugin: Plugin = async (input) => ({
-  'tool.execute.after': createHook({ runDetector: createDefaultRunner(input), worktree: input.worktree }),
+  'tool.execute.after': createHook({
+    runDetector: createSpawnRunner({ scriptPath: `${input.worktree}/${HOOK_SCRIPT_RELATIVE_PATH}` }),
+    worktree: input.worktree,
+  }),
 })
 
-// runner env: harness signal + quiet clean-acks; deliberately NO depth var
-.env({ ...process.env, IMPECCABLE_HOOK_HARNESS, IMPECCABLE_HOOK_QUIET: '1' })
+// runner env (node:child_process spawn, literal `node`, no shell):
+// inherit the environment, delete both depth vars, set the harness signal and quiet clean-acks
+const env = { ...process.env }
+delete env.IMPECCABLE_HOOK_DEPTH
+delete env.CLAUDE_HOOK_DEPTH
+env.IMPECCABLE_HOOK_HARNESS = 'claude'
+env.IMPECCABLE_HOOK_QUIET = '1'
 
-// surfacing: inner human text only
-const feedback = extractFeedbackText(result.stdout ?? '')
+// surfacing: the PostToolUse envelope's additionalContext only; anything else warns once
+const feedback = extractFeedbackText(result.stdout)
 ```
+
+The runner owns the timeout: SIGTERM at 5 s, SIGKILL after a 2 s grace, and a final deadline 0.5 s later that resolves even if the pipes stay open. `createHook` adds no timer of its own.
 
 ## Related
 
