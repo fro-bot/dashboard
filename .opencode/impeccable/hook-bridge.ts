@@ -5,8 +5,10 @@
  * pipe a hook.mjs-shaped event to `.agents/skills/impeccable/scripts/hook.mjs`
  * over stdin and surface any findings back to the agent in the same turn.
  *
- * Advisory only — never blocks a tool call. Fail-loud: bridge/parse failures
- * emit a one-time warning per session instead of silently doing nothing.
+ * Advisory only — never blocks a tool call. Fail-loud: each kind of degraded
+ * outcome emits one warning per plugin instance instead of silently doing
+ * nothing. Only parsed PostToolUse feedback and fixed warning text reach the
+ * agent; raw hook stdout and stderr never do.
  *
  * This module must NOT import from `@opencode-ai/plugin`. The subprocess runner
  * uses `node:child_process`, so it behaves the same under the Bun host and under
@@ -17,6 +19,7 @@
 
 import { spawn } from 'node:child_process'
 import { access } from 'node:fs/promises'
+import { StringDecoder } from 'node:string_decoder'
 
 /**
  * The value `hook.mjs`'s `resolveHarness()` reads via the `IMPECCABLE_HOOK_HARNESS`
@@ -41,6 +44,9 @@ export const DETECTOR_KILL_GRACE_MS = 2000
 
 /** Time past timeout plus grace after which the runner resolves even if the child still holds its pipes open. */
 export const DETECTOR_DEADLINE_SLACK_MS = 500
+
+/** Most bytes kept from each of the child's stdout and stderr. */
+export const DETECTOR_MAX_OUTPUT_BYTES = 1024 * 1024
 
 const MUTATING_BASE_TOOLS = new Set(['edit', 'write', 'apply_patch'])
 const MUTATING_SUFFIX_RE = /_(edit|write|apply_patch)$/
@@ -137,7 +143,7 @@ export function buildHookPayload(input: BuildHookPayloadInput): {
  * - `timeout`: the child ran past its deadline, or exited without releasing its pipes. Output captured so far is carried.
  * - `spawn-error`: the child could not be started (missing script, missing executable, bad cwd).
  * - `nonzero-exit`: the child exited nonzero, or was killed by a signal it was not sent by the runner (`exitCode` is -1).
- * - `overflow`: the child produced more output than the runner keeps.
+ * - `overflow`: the child wrote more than the cap to stdout or stderr. The result carries at most the cap from each stream.
  */
 export type DetectorRunResult =
   | { kind: 'ok'; stdout: string; stderr: string }
@@ -166,6 +172,8 @@ export interface CreateSpawnRunnerOptions {
   killGraceMs?: number
   /** Time past timeout plus grace at which the runner resolves regardless of the child's pipes. Defaults to `DETECTOR_DEADLINE_SLACK_MS`. */
   deadlineSlackMs?: number
+  /** Most bytes kept from each of stdout and stderr. Defaults to `DETECTOR_MAX_OUTPUT_BYTES`. */
+  maxOutputBytes?: number
   /** Node executable to spawn. Defaults to literal `node`; override only for tests. */
   nodeExecutable?: string
 }
@@ -185,6 +193,9 @@ function noop(): void {}
  * `IMPECCABLE_HOOK_HARNESS=claude` and `IMPECCABLE_HOOK_QUIET=1` set. A depth
  * variable makes `hook.mjs` a no-op, so the bridge never sets one.
  *
+ * Each of stdout and stderr is capped at `maxOutputBytes` of UTF-8. Excess
+ * bytes are discarded as they arrive, and the run resolves `overflow`.
+ *
  * This runner is the sole authority over the child's lifetime: SIGTERM at the
  * timeout, SIGKILL after the grace period, and a final deadline just past
  * both at which it resolves even if a child or grandchild still holds the
@@ -195,6 +206,7 @@ export function createSpawnRunner(options: CreateSpawnRunnerOptions): DetectorRu
   const timeoutMs = options.timeoutMs ?? DETECTOR_TIMEOUT_MS
   const killGraceMs = options.killGraceMs ?? DETECTOR_KILL_GRACE_MS
   const deadlineSlackMs = options.deadlineSlackMs ?? DETECTOR_DEADLINE_SLACK_MS
+  const maxOutputBytes = options.maxOutputBytes ?? DETECTOR_MAX_OUTPUT_BYTES
   const nodeExecutable = options.nodeExecutable ?? 'node'
 
   return async (payload, opts) => {
@@ -225,17 +237,37 @@ export function createSpawnRunner(options: CreateSpawnRunnerOptions): DetectorRu
 
       const stdoutChunks: Buffer[] = []
       const stderrChunks: Buffer[] = []
+      let stdoutBytes = 0
+      let stderrBytes = 0
       let started = false
       let timedOut = false
+      let overflowed = false
       let settled = false
       let hardTimer: ReturnType<typeof setTimeout> | undefined
       let killTimer: ReturnType<typeof setTimeout> | undefined
       let deadlineTimer: ReturnType<typeof setTimeout> | undefined
 
-      const captured = () => ({
-        stdout: Buffer.concat(stdoutChunks).toString('utf-8'),
-        stderr: Buffer.concat(stderrChunks).toString('utf-8'),
-      })
+      // A StringDecoder that is never flushed drops an incomplete trailing
+      // multibyte sequence. Buffer#toString would turn it into U+FFFD, which is
+      // longer than the bytes it replaces and could push the string past the cap.
+      const decode = (chunks: Buffer[]): string => {
+        const decoder = new StringDecoder('utf-8')
+        return chunks.map((chunk) => decoder.write(chunk)).join('')
+      }
+
+      const captured = () => ({ stdout: decode(stdoutChunks), stderr: decode(stderrChunks) })
+
+      // Keeps at most maxOutputBytes in total and returns the new byte count.
+      const appendBounded = (chunks: Buffer[], currentBytes: number, chunk: Buffer): number => {
+        const remaining = maxOutputBytes - currentBytes
+        if (chunk.length > remaining) {
+          overflowed = true
+          if (remaining > 0) chunks.push(chunk.subarray(0, remaining))
+          return maxOutputBytes
+        }
+        chunks.push(chunk)
+        return currentBytes + chunk.length
+      }
 
       const signal = (name: NodeJS.Signals) => {
         try {
@@ -277,14 +309,16 @@ export function createSpawnRunner(options: CreateSpawnRunnerOptions): DetectorRu
       })
 
       child.stdout?.on('data', (chunk: Buffer) => {
-        stdoutChunks.push(chunk)
+        stdoutBytes = appendBounded(stdoutChunks, stdoutBytes, chunk)
       })
       child.stderr?.on('data', (chunk: Buffer) => {
-        stderrChunks.push(chunk)
+        stderrBytes = appendBounded(stderrChunks, stderrBytes, chunk)
       })
 
       child.on('close', (code: number | null) => {
-        if (timedOut) {
+        if (overflowed) {
+          finish({ kind: 'overflow', ...captured() })
+        } else if (timedOut) {
           // Exiting after the timeout, even cleanly via a handled SIGTERM, is not a clean scan.
           finish({ kind: 'timeout', ...captured() })
         } else if (code === 0) {
@@ -331,60 +365,90 @@ const FEEDBACK_OPEN = '\n\n<impeccable_feedback>\n'
 const FEEDBACK_CLOSE = '\n</impeccable_feedback>'
 
 /**
- * Extracts the human-readable feedback text from hook.mjs's stdout. For the
- * claude harness, hook.mjs writes a JSON envelope
+ * Strictly extracts the human-readable feedback text from hook.mjs's stdout.
+ * Accepts ONLY the nested Claude-harness `PostToolUse` envelope:
  * `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"…"}}`
- * — this pulls just the inner text so the agent doesn't see raw JSON.
- * Defensive: never drops content — falls back to the raw trimmed stdout on
- * parse failure or when no recognized field is present.
+ * with a non-empty string `additionalContext`.
+ *
+ * Every other shape returns `null`, so raw or malformed content never reaches
+ * model-visible output: empty input, non-JSON text, non-object JSON, a missing
+ * envelope, another event name, an empty or non-string `additionalContext`, and
+ * `additionalContext` placed anywhere but inside `hookSpecificOutput`.
  */
-export function extractFeedbackText(stdout: string): string {
+export function extractFeedbackText(stdout: string): string | null {
   const trimmed = stdout.trim()
-  if (!trimmed) return ''
+  if (!trimmed) return null
 
   let parsed: unknown
   try {
     parsed = JSON.parse(trimmed)
   } catch {
-    return trimmed
+    return null
   }
 
-  if (!isRecord(parsed)) return trimmed
+  if (!isRecord(parsed)) return null
 
-  const hookSpecificOutput = isRecord(parsed.hookSpecificOutput) ? parsed.hookSpecificOutput : undefined
-  const candidates = [
-    hookSpecificOutput?.additionalContext,
-    parsed.additionalContext,
-    parsed.additional_context,
-  ]
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate) return candidate
-  }
+  const hookSpecificOutput = parsed.hookSpecificOutput
+  if (!isRecord(hookSpecificOutput)) return null
+  if (hookSpecificOutput.hookEventName !== 'PostToolUse') return null
 
-  return trimmed
+  const additionalContext = hookSpecificOutput.additionalContext
+  if (typeof additionalContext !== 'string' || !additionalContext) return null
+
+  return additionalContext
 }
+
+type WarningKind = 'timeout' | 'spawn-error' | 'nonzero-exit' | 'overflow' | 'stderr-on-clean' | 'malformed'
+
+const WARNING_MESSAGES = {
+  timeout: '[impeccable] design hook timed out before finishing its scan',
+  'spawn-error': '[impeccable] design hook could not be started',
+  'nonzero-exit': '[impeccable] design hook did not run cleanly',
+  overflow: '[impeccable] design hook produced more output than the bridge keeps',
+  'stderr-on-clean': '[impeccable] design hook produced unexpected diagnostic output',
+  malformed: '[impeccable] design hook returned unrecognized output',
+} as const satisfies Record<WarningKind, string>
 
 /**
  * Builds the `tool.execute.after` handler, with the subprocess runner
  * injected so all logic here is testable under Node.
+ *
+ * The runner is the sole authority over its own timeout; this function never
+ * races it with a second timer.
+ *
+ * Outcome table:
+ *  - exit 0, empty stdout, empty stderr: a clean scan, silent.
+ *  - exit 0, valid PostToolUse envelope: only its `additionalContext` is appended.
+ *  - exit 0, empty stdout, non-empty stderr: `stderr-on-clean`.
+ *  - exit 0, non-empty stdout that is not a valid envelope: `malformed`.
+ *  - `timeout`, `spawn-error`, `nonzero-exit`, `overflow`: the matching warning kind.
+ *  - the runner rejecting, or any bridge fault: `spawn-error`.
+ *
+ * Each warning kind shows once per hook instance (one plugin process). Warning
+ * text is fixed; hook stdout and stderr are never included. A non-string
+ * `output.output` is left untouched and does not use up its kind. Never throws.
  */
 export function createHook(options: CreateHookOptions) {
-  let hasWarned = false
+  const warned = new Set<WarningKind>()
 
   return async function toolExecuteAfter(
     input: { tool: string; sessionID: string; callID: string; args: unknown },
     output: { title: string; output: string; metadata: unknown },
   ): Promise<void> {
-    // Fail-loud: appends a one-time (per session) non-blocking warning to the
-    // tool's model-visible output. Never throws.
-    const warnOnce = (message: string) => {
-      if (hasWarned) return
-      hasWarned = true
+    const append = (text: string): boolean => {
+      if (typeof output.output !== 'string') return false
       try {
-        output.output += `${FEEDBACK_OPEN}${message}${FEEDBACK_CLOSE}`
+        output.output += `${FEEDBACK_OPEN}${text}${FEEDBACK_CLOSE}`
+        return true
       } catch {
         // Fail-loud must never itself throw.
+        return false
       }
+    }
+
+    const warnOnce = (kind: WarningKind) => {
+      if (warned.has(kind)) return
+      if (append(WARNING_MESSAGES[kind])) warned.add(kind)
     }
 
     try {
@@ -403,40 +467,33 @@ export function createHook(options: CreateHookOptions) {
       let result: DetectorRunResult
       try {
         result = await options.runDetector(payload, { worktree: options.worktree })
-      } catch (err) {
-        warnOnce(`[impeccable] design hook bridge failed: ${err instanceof Error ? err.message : String(err)}`)
+      } catch {
+        warnOnce('spawn-error')
         return
       }
 
-      // The runner owns the timeout. Only a clean exit counts as a scan; every
-      // other outcome must fail loud rather than masquerade as a clean scan.
-      switch (result.kind) {
-        case 'ok':
-          break
-        case 'timeout':
-          warnOnce('[impeccable] design hook timed out before finishing its scan')
-          return
-        case 'spawn-error':
-          warnOnce('[impeccable] design hook could not be started')
-          return
-        case 'nonzero-exit': {
-          // hook.mjs is contractually always-exit-0; a nonzero exit means the
-          // invocation itself broke (unreadable script, crash, etc.).
-          const detail = result.stderr.trim() || `exit ${result.exitCode}`
-          warnOnce(`[impeccable] design hook did not run cleanly: ${detail}`)
-          return
-        }
-        case 'overflow':
-          warnOnce('[impeccable] design hook produced more output than the bridge keeps')
-          return
+      // Only a clean exit counts as a scan; every other outcome fails loud
+      // rather than masquerading as a clean scan.
+      if (result.kind !== 'ok') {
+        warnOnce(result.kind)
+        return
+      }
+
+      if (!result.stdout.trim()) {
+        // Exit 0 with empty stdout is clean unless the child also wrote to stderr.
+        if (result.stderr.trim()) warnOnce('stderr-on-clean')
+        return
       }
 
       const feedback = extractFeedbackText(result.stdout)
-      if (!feedback) return
+      if (feedback === null) {
+        warnOnce('malformed')
+        return
+      }
 
-      output.output += `${FEEDBACK_OPEN}${feedback}${FEEDBACK_CLOSE}`
-    } catch (err) {
-      warnOnce(`[impeccable] design hook bridge error: ${err instanceof Error ? err.message : String(err)}`)
+      append(feedback)
+    } catch {
+      warnOnce('spawn-error')
     }
   }
 }

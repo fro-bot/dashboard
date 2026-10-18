@@ -282,10 +282,65 @@ describe('createSpawnRunner', () => {
     expect(isAlive(readPid(grandchildPidFile))).toBe(true)
   }, 15_000)
 
-  // The output cap is enforced in the strict-output stage.
-  it.todo('resolves overflow when output exceeds the bounded capture size')
-  it.todo('measures the cap in UTF-8 bytes, never decoded string length')
-  it.todo('never re-expands a multibyte character split at the cap boundary')
+  it('resolves overflow, keeping at most the cap, when stdout exceeds the bounded capture size', async () => {
+    const scriptPath = fixture('process.stdout.write("x".repeat(200));\n')
+    const runner = createSpawnRunner({ scriptPath, maxOutputBytes: 64 })
+    const result = await runner(payload, { worktree: worktree() })
+    expect(result.kind).toBe('overflow')
+    if (result.kind !== 'overflow') return
+    expect(Buffer.byteLength(result.stdout, 'utf-8')).toBeLessThanOrEqual(64)
+    expect(result.stdout.length).toBeLessThan(200)
+  })
+
+  it('resolves overflow when stderr exceeds the bounded capture size', async () => {
+    const scriptPath = fixture('process.stderr.write("y".repeat(200));\n')
+    const runner = createSpawnRunner({ scriptPath, maxOutputBytes: 64 })
+    const result = await runner(payload, { worktree: worktree() })
+    expect(result.kind).toBe('overflow')
+    if (result.kind !== 'overflow') return
+    expect(Buffer.byteLength(result.stderr, 'utf-8')).toBeLessThanOrEqual(64)
+  })
+
+  it('does not report overflow for output exactly at the cap', async () => {
+    const scriptPath = fixture('process.stdout.write("x".repeat(64));\n')
+    const runner = createSpawnRunner({ scriptPath, maxOutputBytes: 64 })
+    const result = await runner(payload, { worktree: worktree() })
+    expect(result).toEqual({ kind: 'ok', stdout: 'x'.repeat(64), stderr: '' })
+  })
+
+  it('measures the cap in UTF-8 bytes, never decoded string length', async () => {
+    // 'é' is 1 UTF-16 code unit but 2 UTF-8 bytes, so a length-based cap would
+    // let about twice the intended byte budget through.
+    const scriptPath = fixture(`process.stdout.write('é'.repeat(50));\n`)
+    const runner = createSpawnRunner({ scriptPath, maxOutputBytes: 20 })
+    const result = await runner(payload, { worktree: worktree() })
+    expect(result.kind).toBe('overflow')
+    if (result.kind !== 'overflow') return
+    expect(Buffer.byteLength(result.stdout, 'utf-8')).toBeLessThanOrEqual(20)
+  })
+
+  it('never re-expands a multibyte character split at the cap boundary', async () => {
+    // 21 is odd and 'é' is 2 bytes, so the 21-byte prefix ends mid-character.
+    // A naive Buffer#toString would turn the dangling lead byte into U+FFFD
+    // (3 bytes) and push the string back over the cap.
+    const scriptPath = fixture(`process.stdout.write('é'.repeat(50));\n`)
+    const runner = createSpawnRunner({ scriptPath, maxOutputBytes: 21 })
+    const result = await runner(payload, { worktree: worktree() })
+    expect(result.kind).toBe('overflow')
+    if (result.kind !== 'overflow') return
+    expect(Buffer.byteLength(result.stdout, 'utf-8')).toBeLessThanOrEqual(21)
+    expect(result.stdout).not.toContain('\uFFFD')
+    expect(result.stdout).toBe('é'.repeat(10))
+  })
+
+  it('caps at 1 MiB by default', async () => {
+    const scriptPath = fixture('process.stdout.write("x".repeat(1024 * 1024 + 1));\n')
+    const runner = createSpawnRunner({ scriptPath })
+    const result = await runner(payload, { worktree: worktree() })
+    expect(result.kind).toBe('overflow')
+    if (result.kind !== 'overflow') return
+    expect(Buffer.byteLength(result.stdout, 'utf-8')).toBeLessThanOrEqual(1024 * 1024)
+  })
 })
 
 describe('createSpawnRunner + createHook end-to-end', () => {
@@ -321,6 +376,32 @@ describe('createSpawnRunner + createHook end-to-end', () => {
     expect(output.output).toContain('timed out')
     await expectProcessGone(readPid(pidFile))
   }, 15_000)
+
+  it('warns overflow and appends no partial envelope for a real child that floods stdout', async () => {
+    const scriptPath = fixture(
+      [
+        `process.stdout.write('{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"PARTIAL-FINDING ');`,
+        `process.stdout.write("x".repeat(2 * 1024 * 1024));`,
+        `process.stdout.write('"}}');`,
+      ].join('\n'),
+    )
+    const hook = createHook({ runDetector: createSpawnRunner({ scriptPath }), worktree: worktree() })
+    const output = { title: 't', output: 'ok', metadata: {} }
+    await hook({ tool: 'edit', sessionID: 's', callID: 'c', args: { filePath: '/repo/src/App.tsx' } }, output)
+    expect(output.output).toContain('[impeccable]')
+    expect(output.output).toContain('more output than')
+    expect(output.output).not.toContain('PARTIAL-FINDING')
+    expect(output.output.length).toBeLessThan(1000)
+  }, 15_000)
+
+  it('never surfaces stderr text from a real child that exits nonzero', async () => {
+    const scriptPath = fixture('process.stderr.write("RAW-STDERR secret");\nprocess.exit(2);\n')
+    const hook = createHook({ runDetector: createSpawnRunner({ scriptPath }), worktree: worktree() })
+    const output = { title: 't', output: 'ok', metadata: {} }
+    await hook({ tool: 'edit', sessionID: 's', callID: 'c', args: { filePath: '/repo/src/App.tsx' } }, output)
+    expect(output.output).toContain('did not run cleanly')
+    expect(output.output).not.toContain('RAW-STDERR')
+  })
 
   it('warns without throwing when the script cannot be spawned', async () => {
     const runner = createSpawnRunner({ scriptPath: join(tmpdir(), `does-not-exist-${randomUUID()}.mjs`) })
