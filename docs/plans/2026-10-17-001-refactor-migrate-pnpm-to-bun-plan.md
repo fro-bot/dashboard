@@ -284,7 +284,7 @@ flowchart LR
 - Happy path: the test reads `packageManager` and the Dockerfile's `oven/bun` tag, and they are equal.
 - Error path: a Dockerfile `oven/bun` reference without a `@sha256:` digest fails the test.
 
-**Verification:** this machine has no container runtime, so the `docker build`, the smoke loop and the Trivy checks run in the release workflow.
+**Verification:** a local `docker build` for `linux/amd64` (the release platform) and the host architecture, the release smoke loop against each image, and the Trivy enforcement and reporting passes at the release workflow's version and settings.
 
 - Covering AE7: no `bun`, `bunx`, `npm`, `npx`, `pnpm`, `pnpx`, `corepack`, `yarn` or `yarnpkg`, and the container starts with `node src/server.ts`.
 - The Trivy enforcement pass on the built image exits 0.
@@ -314,7 +314,7 @@ flowchart LR
 **Verification:**
 
 - `bun run check-types`, `bun run lint`, `bun run test` and `bun run build:web` pass, along with the strip-only load loop.
-- The Docker build, smoke loop and Trivy checks from Unit 4 run in the release workflow, since this machine has no container runtime.
+- The Unit 4 Docker build, smoke loop and Trivy checks pass locally.
 - One fixture browser pass using `bun run dev:fixture` passes: the app loads, the runs list and a run stream work, the service worker registers, and the console shows no errors.
 - After merge:
   - the release run succeeds;
@@ -323,7 +323,7 @@ flowchart LR
 ## System-Wide Impact
 
 - **Interaction graph:** CI setup feeds `main.yaml` and `fro-bot.yaml`. The release guard feeds `release.yaml`, which feeds the Docker build and the infra dispatch. Renovate feeds PRs. All of these move together in one PR.
-- **Error propagation:** a broken setup action fails every CI job on the PR, which is visible. A broken Dockerfile shows up only at release, where the build, smoke check and Trivy run.
+- **Error propagation:** a broken setup action fails every CI job on the PR, which is visible. No PR job builds the image, so the local build, smoke loop and Trivy run before merge.
 - **State lifecycle risks:**
   - Old `pnpm-store` caches stay until GitHub evicts them. They are harmless because the key prefix differs.
   - A contributor's pnpm-shaped `node_modules` has to be removed before installing with Bun.
@@ -334,14 +334,14 @@ flowchart LR
 
 ## Risks & Dependencies
 
-| Risk                                                  | Mitigation                                                                                                       |
-| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Bun cannot install the `wiki-writer` git dependency   | `wiki-writer` is outside the migration (R1) and returns once the package is published                            |
-| A version-scoped override misses a requester          | The resolved `bun.lock` is checked against every floor (AE3)                                                     |
-| Fresh resolve changes runtime transitive dependencies | Gates, the local image smoke check, Trivy and the fixture browser pass                                           |
-| The first build of the new Dockerfile is the release  | The release workflow runs the build, smoke loop and Trivy. If the release fails, rerun it with `workflow_dispatch` |
-| Renovate's Bun post-upgrade task fails                | Copy the pattern proven in systematic. Check the first Renovate PR after merge                                   |
-| Frozen installs do not enforce the age gate           | The gate applies where versions resolve: Renovate's post-upgrade install and local installs                      |
+| Risk                                                  | Mitigation                                                                                              |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Bun cannot install the `wiki-writer` git dependency   | `wiki-writer` is outside the migration (R1) and returns once the package is published                   |
+| A version-scoped override misses a requester          | The resolved `bun.lock` is checked against every floor (AE3)                                            |
+| Fresh resolve changes runtime transitive dependencies | Gates, the local image smoke check, Trivy and the fixture browser pass                                  |
+| No PR job builds the image                            | Local build, smoke loop and Trivy before merge. If the release fails, rerun it with `workflow_dispatch` |
+| Renovate's Bun post-upgrade task fails                | Copy the pattern proven in systematic. Check the first Renovate PR after merge                          |
+| Frozen installs do not enforce the age gate           | The gate applies where versions resolve: Renovate's post-upgrade install and local installs             |
 
 ## Documentation / Operational Notes
 
