@@ -8,11 +8,15 @@
  * Advisory only — never blocks a tool call. Fail-loud: bridge/parse failures
  * emit a one-time warning per session instead of silently doing nothing.
  *
- * This module must NOT import from `@opencode-ai/plugin` and must NOT use Bun
- * `$` — the OpenCode plugin loader iterates a plugin module's exports and
+ * This module must NOT import from `@opencode-ai/plugin`. The subprocess runner
+ * uses `node:child_process`, so it behaves the same under the Bun host and under
+ * Node tests. The OpenCode plugin loader iterates a plugin module's exports and
  * treats each as a candidate plugin factory, so `.opencode/impeccable/plugin.ts`
  * must export ONLY the plugin factory. Everything else lives here.
  */
+
+import { spawn } from 'node:child_process'
+import { access } from 'node:fs/promises'
 
 /**
  * The value `hook.mjs`'s `resolveHarness()` reads via the `IMPECCABLE_HOOK_HARNESS`
@@ -31,6 +35,12 @@ export const HOOK_SCRIPT_RELATIVE_PATH = '.agents/skills/impeccable/scripts/hook
 
 /** Matches the Copilot hook's `timeoutSec: 5`. */
 export const DETECTOR_TIMEOUT_MS = 5000
+
+/** Time between SIGTERM and SIGKILL when the hook subprocess exceeds its timeout. */
+export const DETECTOR_KILL_GRACE_MS = 2000
+
+/** Time past timeout plus grace after which the runner resolves even if the child still holds its pipes open. */
+export const DETECTOR_DEADLINE_SLACK_MS = 500
 
 const MUTATING_BASE_TOOLS = new Set(['edit', 'write', 'apply_patch'])
 const MUTATING_SUFFIX_RE = /_(edit|write|apply_patch)$/
@@ -120,13 +130,23 @@ export function buildHookPayload(input: BuildHookPayloadInput): {
   }
 }
 
-export interface DetectorRunResult {
-  stdout: string
-  stderr: string
-  exitCode: number
-}
+/**
+ * Outcome of one hook subprocess run. Every outcome is a value; a runner never rejects.
+ *
+ * - `ok`: the child exited 0 within its deadline.
+ * - `timeout`: the child ran past its deadline, or exited without releasing its pipes. Output captured so far is carried.
+ * - `spawn-error`: the child could not be started (missing script, missing executable, bad cwd).
+ * - `nonzero-exit`: the child exited nonzero, or was killed by a signal it was not sent by the runner (`exitCode` is -1).
+ * - `overflow`: the child produced more output than the runner keeps.
+ */
+export type DetectorRunResult =
+  | { kind: 'ok'; stdout: string; stderr: string }
+  | { kind: 'timeout'; stdout: string; stderr: string }
+  | { kind: 'spawn-error'; message: string }
+  | { kind: 'nonzero-exit'; exitCode: number; stdout: string; stderr: string }
+  | { kind: 'overflow'; stdout: string; stderr: string }
 
-/** Injectable subprocess runner: given the hook payload and the worktree cwd, returns the detector's stdout/stderr/exitCode. */
+/** Injectable subprocess runner: given the hook payload and the worktree cwd, resolves with the outcome of one hook run. */
 export type DetectorRunner = (
   payload: ReturnType<typeof buildHookPayload>,
   opts: { worktree: string },
@@ -135,20 +155,175 @@ export type DetectorRunner = (
 export interface CreateHookOptions {
   runDetector: DetectorRunner
   worktree: string
-  timeoutMs?: number
 }
 
-const TIMEOUT_SENTINEL = Symbol('impeccable-hook-timeout')
+export interface CreateSpawnRunnerOptions {
+  /** Absolute path to `hook.mjs` (or an ephemeral test fixture). */
+  scriptPath: string
+  /** Time before the child is sent SIGTERM. Defaults to `DETECTOR_TIMEOUT_MS`. */
+  timeoutMs?: number
+  /** Time between SIGTERM and SIGKILL. Defaults to `DETECTOR_KILL_GRACE_MS`. */
+  killGraceMs?: number
+  /** Time past timeout plus grace at which the runner resolves regardless of the child's pipes. Defaults to `DETECTOR_DEADLINE_SLACK_MS`. */
+  deadlineSlackMs?: number
+  /** Node executable to spawn. Defaults to literal `node`; override only for tests. */
+  nodeExecutable?: string
+}
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | typeof TIMEOUT_SENTINEL> {
-  let timer: ReturnType<typeof setTimeout>
-  const timeout = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {
-    timer = setTimeout(() => resolve(TIMEOUT_SENTINEL), timeoutMs)
-  })
-  try {
-    return await Promise.race([promise, timeout])
-  } finally {
-    clearTimeout(timer!)
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+function noop(): void {}
+
+/**
+ * Real `node:child_process.spawn` runner: `node <scriptPath>` (no shell, a
+ * literal `node` rather than `process.execPath`, which under a Bun host would
+ * be Bun) with the payload piped over stdin and cwd at the worktree.
+ *
+ * The child inherits the environment minus both depth variables, with
+ * `IMPECCABLE_HOOK_HARNESS=claude` and `IMPECCABLE_HOOK_QUIET=1` set. A depth
+ * variable makes `hook.mjs` a no-op, so the bridge never sets one.
+ *
+ * This runner is the sole authority over the child's lifetime: SIGTERM at the
+ * timeout, SIGKILL after the grace period, and a final deadline just past
+ * both at which it resolves even if a child or grandchild still holds the
+ * pipes open. A tool call therefore waits at most timeout + grace + slack.
+ * Callers must not layer a second timeout on top of it.
+ */
+export function createSpawnRunner(options: CreateSpawnRunnerOptions): DetectorRunner {
+  const timeoutMs = options.timeoutMs ?? DETECTOR_TIMEOUT_MS
+  const killGraceMs = options.killGraceMs ?? DETECTOR_KILL_GRACE_MS
+  const deadlineSlackMs = options.deadlineSlackMs ?? DETECTOR_DEADLINE_SLACK_MS
+  const nodeExecutable = options.nodeExecutable ?? 'node'
+
+  return async (payload, opts) => {
+    try {
+      await access(options.scriptPath)
+    } catch (err) {
+      return { kind: 'spawn-error', message: describeError(err) }
+    }
+
+    return new Promise<DetectorRunResult>((resolve) => {
+      const env: NodeJS.ProcessEnv = { ...process.env }
+      delete env.IMPECCABLE_HOOK_DEPTH
+      delete env.CLAUDE_HOOK_DEPTH
+      env.IMPECCABLE_HOOK_HARNESS = IMPECCABLE_HOOK_HARNESS
+      env.IMPECCABLE_HOOK_QUIET = '1'
+
+      let child: ReturnType<typeof spawn>
+      try {
+        child = spawn(nodeExecutable, [options.scriptPath], {
+          cwd: opts.worktree,
+          env,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        })
+      } catch (err) {
+        resolve({ kind: 'spawn-error', message: describeError(err) })
+        return
+      }
+
+      const stdoutChunks: Buffer[] = []
+      const stderrChunks: Buffer[] = []
+      let started = false
+      let timedOut = false
+      let settled = false
+      let hardTimer: ReturnType<typeof setTimeout> | undefined
+      let killTimer: ReturnType<typeof setTimeout> | undefined
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+
+      const captured = () => ({
+        stdout: Buffer.concat(stdoutChunks).toString('utf-8'),
+        stderr: Buffer.concat(stderrChunks).toString('utf-8'),
+      })
+
+      const signal = (name: NodeJS.Signals) => {
+        try {
+          child.kill(name)
+        } catch {
+          // The process may already have exited.
+        }
+      }
+
+      const finish = (result: DetectorRunResult) => {
+        if (settled) return
+        settled = true
+        if (hardTimer) clearTimeout(hardTimer)
+        if (killTimer) clearTimeout(killTimer)
+        if (deadlineTimer) clearTimeout(deadlineTimer)
+        child.stdout?.removeAllListeners()
+        child.stderr?.removeAllListeners()
+        child.stdin?.removeAllListeners()
+        child.removeAllListeners()
+        // Late stream or process errors must not become uncaught exceptions once settled.
+        child.stdout?.on('error', noop)
+        child.stderr?.on('error', noop)
+        child.stdin?.on('error', noop)
+        child.on('error', noop)
+        // Release our end of pipes a grandchild may still hold open.
+        child.stdout?.destroy()
+        child.stderr?.destroy()
+        resolve(result)
+      }
+
+      child.once('spawn', () => {
+        started = true
+      })
+
+      child.on('error', (err) => {
+        // Before 'spawn' this is a failure to start. After it, 'close' or the
+        // final deadline settles the run.
+        if (!started) finish({ kind: 'spawn-error', message: describeError(err) })
+      })
+
+      child.stdout?.on('data', (chunk: Buffer) => {
+        stdoutChunks.push(chunk)
+      })
+      child.stderr?.on('data', (chunk: Buffer) => {
+        stderrChunks.push(chunk)
+      })
+
+      child.on('close', (code: number | null) => {
+        if (timedOut) {
+          // Exiting after the timeout, even cleanly via a handled SIGTERM, is not a clean scan.
+          finish({ kind: 'timeout', ...captured() })
+        } else if (code === 0) {
+          finish({ kind: 'ok', ...captured() })
+        } else {
+          finish({ kind: 'nonzero-exit', exitCode: code ?? -1, ...captured() })
+        }
+      })
+
+      hardTimer = setTimeout(() => {
+        timedOut = true
+        try {
+          child.stdin?.end()
+        } catch {
+          // Stdin may already be closed.
+        }
+        signal('SIGTERM')
+        killTimer = setTimeout(() => {
+          signal('SIGKILL')
+        }, killGraceMs)
+      }, timeoutMs)
+
+      deadlineTimer = setTimeout(
+        () => {
+          signal('SIGKILL')
+          finish({ kind: 'timeout', ...captured() })
+        },
+        timeoutMs + killGraceMs + deadlineSlackMs,
+      )
+
+      // A child that exits without reading stdin can raise EPIPE on write. That is
+      // not a spawn failure and must not crash the host.
+      child.stdin?.on('error', noop)
+      try {
+        child.stdin?.end(JSON.stringify(payload))
+      } catch {
+        // If the write fails, the child's own error and close events settle the run.
+      }
+    })
   }
 }
 
@@ -194,7 +369,6 @@ export function extractFeedbackText(stdout: string): string {
  * injected so all logic here is testable under Node.
  */
 export function createHook(options: CreateHookOptions) {
-  const timeoutMs = options.timeoutMs ?? DETECTOR_TIMEOUT_MS
   let hasWarned = false
 
   return async function toolExecuteAfter(
@@ -226,30 +400,38 @@ export function createHook(options: CreateHookOptions) {
         sessionID: input.sessionID,
       })
 
-      let result: DetectorRunResult | typeof TIMEOUT_SENTINEL
+      let result: DetectorRunResult
       try {
-        result = await withTimeout(options.runDetector(payload, { worktree: options.worktree }), timeoutMs)
+        result = await options.runDetector(payload, { worktree: options.worktree })
       } catch (err) {
         warnOnce(`[impeccable] design hook bridge failed: ${err instanceof Error ? err.message : String(err)}`)
         return
       }
 
-      if (result === TIMEOUT_SENTINEL) {
-        // Degrade to no-op on timeout, no warning — this is expected
-        // backpressure, not a broken bridge.
-        return
+      // The runner owns the timeout. Only a clean exit counts as a scan; every
+      // other outcome must fail loud rather than masquerade as a clean scan.
+      switch (result.kind) {
+        case 'ok':
+          break
+        case 'timeout':
+          warnOnce('[impeccable] design hook timed out before finishing its scan')
+          return
+        case 'spawn-error':
+          warnOnce('[impeccable] design hook could not be started')
+          return
+        case 'nonzero-exit': {
+          // hook.mjs is contractually always-exit-0; a nonzero exit means the
+          // invocation itself broke (unreadable script, crash, etc.).
+          const detail = result.stderr.trim() || `exit ${result.exitCode}`
+          warnOnce(`[impeccable] design hook did not run cleanly: ${detail}`)
+          return
+        }
+        case 'overflow':
+          warnOnce('[impeccable] design hook produced more output than the bridge keeps')
+          return
       }
 
-      // hook.mjs is contractually always-exit-0; a nonzero exit means the
-      // invocation itself broke (bad node path, unreadable script, etc.), which
-      // must fail loud rather than masquerade as a clean scan.
-      if (result.exitCode !== 0) {
-        const detail = result.stderr?.trim() || `exit ${result.exitCode}`
-        warnOnce(`[impeccable] design hook did not run cleanly: ${detail}`)
-        return
-      }
-
-      const feedback = extractFeedbackText(result.stdout ?? '')
+      const feedback = extractFeedbackText(result.stdout)
       if (!feedback) return
 
       output.output += `${FEEDBACK_OPEN}${feedback}${FEEDBACK_CLOSE}`

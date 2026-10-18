@@ -152,6 +152,10 @@ describe('buildHookPayload', () => {
   })
 })
 
+function ok(stdout = '', stderr = ''): DetectorRunResult {
+  return { kind: 'ok', stdout, stderr }
+}
+
 function fakeRunner(result: DetectorRunResult | Error, calls: unknown[][] = []) {
   return async (...args: unknown[]) => {
     calls.push(args)
@@ -164,7 +168,7 @@ describe('bridge (createHook)', () => {
   it('invokes the runner once with the file path in the payload for a mutating tool', async () => {
     const calls: unknown[][] = []
     const hook = createHook({
-      runDetector: fakeRunner({ stdout: '', stderr: '', exitCode: 0 }, calls),
+      runDetector: fakeRunner(ok(), calls),
       worktree: '/repo',
     })
     await hook(makeInput(), makeOutput())
@@ -176,7 +180,7 @@ describe('bridge (createHook)', () => {
   it('invokes the runner zero times for a non-mutating tool', async () => {
     const calls: unknown[][] = []
     const hook = createHook({
-      runDetector: fakeRunner({ stdout: '', stderr: '', exitCode: 0 }, calls),
+      runDetector: fakeRunner(ok(), calls),
       worktree: '/repo',
     })
     await hook(makeInput({ tool: 'read' }), makeOutput())
@@ -186,21 +190,51 @@ describe('bridge (createHook)', () => {
   it('invokes the runner zero times when no path can be extracted', async () => {
     const calls: unknown[][] = []
     const hook = createHook({
-      runDetector: fakeRunner({ stdout: '', stderr: '', exitCode: 0 }, calls),
+      runDetector: fakeRunner(ok(), calls),
       worktree: '/repo',
     })
     await hook(makeInput({ args: {} }), makeOutput())
     expect(calls).toHaveLength(0)
   })
 
-  it('degrades to no-op without throwing when the runner exceeds the timeout', async () => {
+  it('warns once, without throwing, when the runner reports a timeout', async () => {
     const hook = createHook({
-      runDetector: () => new Promise<DetectorRunResult>(() => {}), // never resolves
+      runDetector: fakeRunner({ kind: 'timeout', stdout: '', stderr: '' }),
       worktree: '/repo',
-      timeoutMs: 10,
     })
     const output = makeOutput()
     await expect(hook(makeInput(), output)).resolves.toBeUndefined()
+    expect(output.output).toContain('[impeccable]')
+    expect(output.output).toContain('timed out')
+
+    const second = makeOutput()
+    await hook(makeInput(), second)
+    expect(second.output).toBe('ok')
+  })
+
+  it('warns, without throwing, when the runner reports a spawn error', async () => {
+    const hook = createHook({
+      runDetector: fakeRunner({ kind: 'spawn-error', message: 'spawn node ENOENT' }),
+      worktree: '/repo',
+    })
+    const output = makeOutput()
+    await expect(hook(makeInput(), output)).resolves.toBeUndefined()
+    expect(output.output).toContain('[impeccable]')
+    expect(output.output).toContain('could not be started')
+  })
+
+  it('does not apply its own timeout: a runner that settles late still decides the outcome', async () => {
+    const hook = createHook({
+      runDetector: () =>
+        new Promise<DetectorRunResult>(resolve => {
+          setTimeout(() => {
+            resolve(ok())
+          }, 30)
+        }),
+      worktree: '/repo',
+    })
+    const output = makeOutput()
+    await hook(makeInput(), output)
     expect(output.output).toBe('ok')
   })
 })
@@ -246,7 +280,7 @@ describe('surface', () => {
       hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: 'found: gradient-text at L3' },
     })
     const hook = createHook({
-      runDetector: fakeRunner({ stdout, stderr: '', exitCode: 0 }),
+      runDetector: fakeRunner(ok(stdout)),
       worktree: '/repo',
     })
     const output = makeOutput()
@@ -258,7 +292,7 @@ describe('surface', () => {
 
   it('leaves output.output byte-unchanged when stdout is empty', async () => {
     const hook = createHook({
-      runDetector: fakeRunner({ stdout: '', stderr: '', exitCode: 0 }),
+      runDetector: fakeRunner(ok()),
       worktree: '/repo',
     })
     const output = makeOutput()
@@ -268,7 +302,7 @@ describe('surface', () => {
 
   it('leaves output.output byte-unchanged when stdout is whitespace-only', async () => {
     const hook = createHook({
-      runDetector: fakeRunner({ stdout: '   \n', stderr: '', exitCode: 0 }),
+      runDetector: fakeRunner(ok('   \n')),
       worktree: '/repo',
     })
     const output = makeOutput()
@@ -280,7 +314,7 @@ describe('surface', () => {
 describe('fail-loud', () => {
   it('warns when the detector exits nonzero (hook.mjs is contractually always-exit-0)', async () => {
     const hook = createHook({
-      runDetector: fakeRunner({ stdout: '', stderr: 'node: cannot find module', exitCode: 1 }),
+      runDetector: fakeRunner({ kind: 'nonzero-exit', exitCode: 1, stdout: '', stderr: 'node: cannot find module' }),
       worktree: '/repo',
     })
     const output = makeOutput()
