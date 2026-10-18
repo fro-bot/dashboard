@@ -16,6 +16,10 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { buildHookPayload, createHook, createSpawnRunner, HOOK_SCRIPT_RELATIVE_PATH } from './hook-bridge.ts'
 
+// Split across two literals so this test source does not itself trip the
+// per-line detector; the written fixture line carries both on one line.
+const GRADIENT_TEXT_LINE = ['.gradient-heading { background-clip: text;', 'background-image: linear-gradient(red, blue); }'].join(' ')
+
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 let tmpDir: string | undefined
@@ -423,10 +427,7 @@ describe('real vendored hook.mjs', () => {
     const projectDir = join(worktree(), 'canary-project')
     mkdirSync(join(projectDir, 'src'), { recursive: true })
     writeFileSync(join(projectDir, 'package.json'), '{}', 'utf-8')
-    // Split across two literals so this test source does not itself trip the
-    // per-line detector; the written fixture line carries both on one line.
-    const antiPatternLine = ['.gradient-heading { background-clip: text;', 'background-image: linear-gradient(red, blue); }'].join(' ')
-    writeFileSync(join(projectDir, 'src', 'App.tsx'), `${antiPatternLine}\n`, 'utf-8')
+    writeFileSync(join(projectDir, 'src', 'App.tsx'), `${GRADIENT_TEXT_LINE}\n`, 'utf-8')
 
     const hookPayload = buildHookPayload({
       tool: 'edit',
@@ -465,8 +466,70 @@ describe('real vendored hook.mjs', () => {
     expect(result).toEqual({ kind: 'ok', stdout: '', stderr: '' })
   }, 15_000)
 
-  // Rename-destination scanning is the path-handling stage.
-  it.todo('scans the Move-to destination, not the pre-move path')
+  it('scans the Move-to destination of a rename, and names it in the finding, not the pre-move path', async () => {
+    const projectDir = join(worktree(), 'rename-project')
+    mkdirSync(join(projectDir, 'new'), { recursive: true })
+    writeFileSync(join(projectDir, 'package.json'), '{}', 'utf-8')
+    // Only the destination exists on disk, so a finding can only come from the Move-to marker.
+    writeFileSync(join(projectDir, 'new', 'name.tsx'), `${GRADIENT_TEXT_LINE}\n`, 'utf-8')
+
+    const patchText = ['*** Begin Patch', '*** Update File: old/name.tsx', '*** Move to: new/name.tsx', '*** End Patch'].join('\n')
+    const sessionID = `rename-${randomUUID()}`
+    const hookPayload = buildHookPayload({ tool: 'apply_patch', args: { patchText }, cwd: projectDir, sessionID })
+    const runner = createSpawnRunner({ scriptPath: join(REPO_ROOT, HOOK_SCRIPT_RELATIVE_PATH) })
+    const result = await runner(hookPayload, { worktree: projectDir })
+
+    expect(result.kind).toBe('ok')
+    if (result.kind !== 'ok') return
+    const parsed = JSON.parse(result.stdout) as { hookSpecificOutput?: { additionalContext?: string } }
+    const context = parsed.hookSpecificOutput?.additionalContext ?? ''
+    expect(context).toContain('gradient-text')
+    expect(context).toContain('new/name.tsx')
+    expect(context).not.toContain('old/name.tsx')
+  }, 15_000)
+
+  it('surfaces the rename-destination finding through createHook for a real apply_patch call', async () => {
+    const projectDir = join(worktree(), 'rename-e2e-project')
+    mkdirSync(join(projectDir, 'new'), { recursive: true })
+    writeFileSync(join(projectDir, 'package.json'), '{}', 'utf-8')
+    writeFileSync(join(projectDir, 'new', 'name.tsx'), `${GRADIENT_TEXT_LINE}\n`, 'utf-8')
+
+    const hook = createHook({
+      runDetector: createSpawnRunner({ scriptPath: join(REPO_ROOT, HOOK_SCRIPT_RELATIVE_PATH) }),
+      worktree: projectDir,
+    })
+    const output = { title: 't', output: 'ok', metadata: {} }
+    const patchText = ['*** Begin Patch', '*** Update File: old/name.tsx', '*** Move to: new/name.tsx', '*** End Patch'].join('\n')
+    await hook({ tool: 'apply_patch', sessionID: `rename-e2e-${randomUUID()}`, callID: 'c', args: { patchText } }, output)
+
+    expect(output.output).toContain('gradient-text')
+    expect(output.output).toContain('new/name.tsx')
+  }, 15_000)
+
+  it('leaves a patch that adds, updates and deletes files scanning the same files as before', async () => {
+    const projectDir = join(worktree(), 'multi-project')
+    mkdirSync(join(projectDir, 'src'), { recursive: true })
+    writeFileSync(join(projectDir, 'package.json'), '{}', 'utf-8')
+    writeFileSync(join(projectDir, 'src', 'Added.tsx'), `${GRADIENT_TEXT_LINE}\n`, 'utf-8')
+    writeFileSync(join(projectDir, 'src', 'Updated.tsx'), 'export const U = () => null\n', 'utf-8')
+
+    const patchText = [
+      '*** Begin Patch',
+      '*** Add File: src/Added.tsx',
+      '+x',
+      '*** Update File: src/Updated.tsx',
+      '*** Delete File: src/Gone.tsx',
+      '*** End Patch',
+    ].join('\n')
+    const hookPayload = buildHookPayload({ tool: 'apply_patch', args: { patchText }, cwd: projectDir, sessionID: `multi-${randomUUID()}` })
+    const runner = createSpawnRunner({ scriptPath: join(REPO_ROOT, HOOK_SCRIPT_RELATIVE_PATH) })
+    const result = await runner(hookPayload, { worktree: projectDir })
+
+    expect(result.kind).toBe('ok')
+    if (result.kind !== 'ok') return
+    expect(result.stdout).toContain('src/Added.tsx')
+    expect(result.stdout).not.toContain('src/Updated.tsx')
+  }, 15_000)
 })
 
 describe('plugin module and registration', () => {

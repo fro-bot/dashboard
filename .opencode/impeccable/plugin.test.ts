@@ -243,6 +243,145 @@ describe('bridge (createHook)', () => {
   })
 })
 
+describe('buildHookPayload rename destinations', () => {
+  const patch = (...lines: string[]) => ['*** Begin Patch', ...lines, '*** End Patch'].join('\n')
+  const commandOf = (patchText: string, tool = 'apply_patch') => {
+    const payload = buildHookPayload({ tool, args: { patchText }, cwd: '/repo', sessionID: 's' })
+    return 'command' in payload.tool_input ? payload.tool_input.command : ''
+  }
+
+  it('appends an Update marker for the Move-to destination of a rename', () => {
+    const patchText = patch('*** Update File: a.tsx', '*** Move to: b.tsx', '@@', '-x', '+y')
+    const command = commandOf(patchText)
+    expect(command.startsWith(patchText)).toBe(true)
+    expect(command).toMatch(/^\*\*\* Update File: b\.tsx$/m)
+  })
+
+  it('passes a patch with only Add, Update and Delete markers through unchanged', () => {
+    const patchText = patch('*** Add File: a.ts', '+x', '*** Update File: b.ts', '@@', '-1', '+2', '*** Delete File: c.ts')
+    expect(commandOf(patchText)).toBe(patchText)
+  })
+
+  it('appends one marker per distinct destination and none for a destination already updated', () => {
+    const patchText = patch(
+      '*** Update File: a.tsx',
+      '*** Move to: b.tsx',
+      '*** Update File: c.tsx',
+      '*** Move to: d.tsx',
+      '*** Update File: d.tsx',
+      '*** Update File: e.tsx',
+      '*** Move to: b.tsx',
+    )
+    const command = commandOf(patchText)
+    expect(command.startsWith(patchText)).toBe(true)
+    const appended = command.slice(patchText.length)
+    expect(appended).toBe('\n*** Update File: b.tsx')
+  })
+
+  it('adds the marker for an MCP-suffixed apply_patch tool too', () => {
+    const command = commandOf(patch('*** Update File: a.tsx', '*** Move to: b.tsx'), 'aft_apply_patch')
+    expect(command).toMatch(/^\*\*\* Update File: b\.tsx$/m)
+  })
+
+  it('leaves edit and write payloads unchanged', () => {
+    const payload = buildHookPayload({ tool: 'write', args: { filePath: 'src/App.tsx' }, cwd: '/repo', sessionID: 's' })
+    expect(payload.tool_input).toEqual({ file_path: 'src/App.tsx' })
+  })
+})
+
+describe('no-path warning', () => {
+  it('warns no-path once for a built-in edit with no filePath, and does not run the hook', async () => {
+    const calls: unknown[][] = []
+    const hook = createHook({ runDetector: fakeRunner(ok(), calls), worktree: '/repo' })
+    const first = makeOutput()
+    const second = makeOutput()
+    await hook(makeInput({ args: {} }), first)
+    await hook(makeInput({ args: {} }), second)
+    expect(calls).toHaveLength(0)
+    expect(first.output).toContain('[impeccable]')
+    expect(first.output).toContain('no extractable path')
+    expect(second.output).toBe('ok')
+  })
+
+  it('warns no-path for built-in write and apply_patch with no path', async () => {
+    for (const [tool, args] of [
+      ['write', {}],
+      ['apply_patch', {}],
+      ['apply_patch', { patchText: '*** Begin Patch\n*** End Patch' }],
+      ['edit', { filePath: '' }],
+      ['edit', undefined],
+    ] as [string, unknown][]) {
+      const hook = createHook({ runDetector: fakeRunner(ok()), worktree: '/repo' })
+      const output = makeOutput()
+      await hook(makeInput({ tool, args }), output)
+      expect(output.output, `${tool} ${JSON.stringify(args)}`).toContain('no extractable path')
+    }
+  })
+
+  it('warns no-path for an MCP edit/write/apply_patch tool whose args carry a path-like key with no usable value', async () => {
+    for (const [tool, args] of [
+      ['aft_edit', { filePath: '' }],
+      ['x_write', { filePath: 42 }],
+      ['aft_apply_patch', { patchText: '' }],
+    ] as [string, unknown][]) {
+      const calls: unknown[][] = []
+      const hook = createHook({ runDetector: fakeRunner(ok(), calls), worktree: '/repo' })
+      const output = makeOutput()
+      await hook(makeInput({ tool, args }), output)
+      expect(calls).toHaveLength(0)
+      expect(output.output, `${tool} ${JSON.stringify(args)}`).toContain('no extractable path')
+    }
+  })
+
+  it('stays silent, without running the hook, for an MCP edit/write tool with no path-like arg', async () => {
+    for (const [tool, args] of [
+      ['foo_edit', {}],
+      ['foo_edit', undefined],
+      ['foo_write', { content: 'x' }],
+      ['foo_edit', { query: 'x' }],
+      ['foo_apply_patch', {}],
+    ] as [string, unknown][]) {
+      const calls: unknown[][] = []
+      const hook = createHook({ runDetector: fakeRunner(ok(), calls), worktree: '/repo' })
+      const output = makeOutput()
+      await hook(makeInput({ tool, args }), output)
+      expect(calls, `${tool} ${JSON.stringify(args)}`).toHaveLength(0)
+      expect(output.output).toBe('ok')
+    }
+  })
+
+  it('stays silent for non-mutating tools whatever their args', async () => {
+    const hook = createHook({ runDetector: fakeRunner(ok()), worktree: '/repo' })
+    const output = makeOutput()
+    await hook(makeInput({ tool: 'read', args: {} }), output)
+    expect(output.output).toBe('ok')
+  })
+
+  it('uses its own kind: a no-path warning does not silence a later timeout warning', async () => {
+    const results: DetectorRunResult[] = [{ kind: 'timeout', stdout: '', stderr: '' }]
+    const hook = createHook({ runDetector: async () => results[0]!, worktree: '/repo' })
+    const noPath = makeOutput()
+    const timeout = makeOutput()
+    await hook(makeInput({ args: {} }), noPath)
+    await hook(makeInput(), timeout)
+    expect(noPath.output).toContain('no extractable path')
+    expect(timeout.output).toContain('timed out')
+  })
+})
+
+describe('paths reach the hook as given', () => {
+  it('passes absolute, relative and out-of-worktree paths through unchanged', async () => {
+    for (const filePath of ['/repo/web/src/App.tsx', 'web/src/App.tsx', './web/src/App.tsx', '../other/App.tsx', '/elsewhere/App.tsx']) {
+      const calls: unknown[][] = []
+      const hook = createHook({ runDetector: fakeRunner(ok(), calls), worktree: '/repo' })
+      await hook(makeInput({ args: { filePath } }), makeOutput())
+      const [payload] = calls[0] as [ReturnType<typeof buildHookPayload>]
+      expect(payload.tool_input).toEqual({ file_path: filePath })
+      expect(payload.cwd).toBe('/repo')
+    }
+  })
+})
+
 describe('extractFeedbackText', () => {
   it('extracts additionalContext from the claude PostToolUse envelope', () => {
     expect(extractFeedbackText(envelope('hello'))).toBe('hello')
@@ -456,7 +595,7 @@ describe('fail-loud', () => {
     expect(timeout2.output).toBe('ok')
   })
 
-  it('warns once for each of the six kinds on separate instances, and a second occurrence stays silent', async () => {
+  it('warns once for each runner-reported kind on separate instances, and a second occurrence stays silent', async () => {
     const cases: [DetectorRunResult, string][] = [
       [{ kind: 'timeout', stdout: '', stderr: '' }, 'timed out'],
       [{ kind: 'spawn-error', message: 'x' }, 'could not be started'],
@@ -476,7 +615,7 @@ describe('fail-loud', () => {
     }
   })
 
-  it('keeps the kinds independent: every kind warns on a single instance', async () => {
+  it('keeps the kinds independent: all seven kinds warn on a single instance', async () => {
     const results: DetectorRunResult[] = [
       { kind: 'timeout', stdout: '', stderr: '' },
       { kind: 'spawn-error', message: 'x' },
@@ -492,6 +631,9 @@ describe('fail-loud', () => {
       await hook(makeInput(), output)
       expect(output.output).toContain('[impeccable]')
     }
+    const noPath = makeOutput()
+    await hook(makeInput({ args: {} }), noPath)
+    expect(noPath.output).toContain('no extractable path')
   })
 
   it('leaves a non-string output.output untouched, for a warning and for findings', async () => {

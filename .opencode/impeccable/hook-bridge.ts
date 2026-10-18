@@ -59,6 +59,11 @@ export function isMutatingTool(tool: string): boolean {
 }
 
 const APPLY_PATCH_FILE_LINE_RE = /^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm
+const APPLY_PATCH_MOVE_TO_RE = /^\*\*\* Move to: (.+)$/gm
+const APPLY_PATCH_ADD_OR_UPDATE_RE = /^\*\*\* (?:Add File|Update File): (.+)$/gm
+
+/** Arg keys `extractTouchedPaths` reads: `filePath` for edit/write, `patchText` for apply_patch. */
+const PATH_ARG_KEYS = ['filePath', 'patchText'] as const
 
 function parseApplyPatchPaths(patchText: string): string[] {
   const out: string[] = []
@@ -67,6 +72,32 @@ function parseApplyPatchPaths(patchText: string): string[] {
     if (p && !out.includes(p)) out.push(p)
   }
   return out
+}
+
+/**
+ * The vendored `hook-lib.mjs` `parseApplyPatchPaths` recognizes only
+ * `*** Add File:` and `*** Update File:` markers, not `*** Move to:`, so a
+ * rename's destination would never be scanned. This appends one synthetic
+ * `*** Update File: <dest>` marker per distinct Move-to destination that no
+ * Add or Update marker already covers. The original patch text is kept
+ * verbatim and the markers are appended after it, so the vendored script's
+ * own parsing of the patch is not disturbed.
+ */
+function withMoveToScanMarkers(patchText: string): string {
+  const covered = new Set<string>()
+  for (const match of patchText.matchAll(APPLY_PATCH_ADD_OR_UPDATE_RE)) {
+    const p = (match[1] ?? '').trim()
+    if (p) covered.add(p)
+  }
+
+  const destinations: string[] = []
+  for (const match of patchText.matchAll(APPLY_PATCH_MOVE_TO_RE)) {
+    const p = (match[1] ?? '').trim()
+    if (p && !covered.has(p) && !destinations.includes(p)) destinations.push(p)
+  }
+
+  if (destinations.length === 0) return patchText
+  return `${patchText}\n${destinations.map((p) => `*** Update File: ${p}`).join('\n')}`
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -107,7 +138,8 @@ export interface BuildHookPayloadInput {
  * carries the raw patch text so hook.mjs's own `parseApplyPatchPaths` can
  * extract every touched file — hook.mjs only reads `tool_input.command` when
  * `tool_name === 'apply_patch'` exactly, so a `file_path`-only payload would
- * silently drop all but incidental files. For edit/write, `tool_input.file_path`
+ * silently drop all but incidental files. Rename destinations are appended as
+ * Update markers (see `withMoveToScanMarkers`). For edit/write, `tool_input.file_path`
  * carries the first touched path.
  */
 export function buildHookPayload(input: BuildHookPayloadInput): {
@@ -122,7 +154,7 @@ export function buildHookPayload(input: BuildHookPayloadInput): {
   if (bareName === 'apply_patch') {
     const args = isRecord(input.args) ? input.args : {}
     const patchText = typeof args.patchText === 'string' ? args.patchText : ''
-    toolInput = { command: patchText }
+    toolInput = { command: withMoveToScanMarkers(patchText) }
   } else {
     const [firstPath] = extractTouchedPaths(input.tool, input.args)
     toolInput = { file_path: firstPath ?? '' }
@@ -398,7 +430,25 @@ export function extractFeedbackText(stdout: string): string | null {
   return additionalContext
 }
 
-type WarningKind = 'timeout' | 'spawn-error' | 'nonzero-exit' | 'overflow' | 'stderr-on-clean' | 'malformed'
+/**
+ * True when a mutating tool call should have yielded a path: the built-in
+ * `edit`, `write` and `apply_patch`, or any other mutating tool whose args
+ * carry a key `extractTouchedPaths` reads. A namespaced tool with no such key
+ * is not known to touch a file the bridge can scan.
+ */
+function expectsPath(tool: string, args: unknown): boolean {
+  if (MUTATING_BASE_TOOLS.has(tool)) return true
+  return isRecord(args) && PATH_ARG_KEYS.some((key) => key in args)
+}
+
+type WarningKind =
+  | 'timeout'
+  | 'spawn-error'
+  | 'nonzero-exit'
+  | 'overflow'
+  | 'stderr-on-clean'
+  | 'malformed'
+  | 'no-path'
 
 const WARNING_MESSAGES = {
   timeout: '[impeccable] design hook timed out before finishing its scan',
@@ -407,6 +457,7 @@ const WARNING_MESSAGES = {
   overflow: '[impeccable] design hook produced more output than the bridge keeps',
   'stderr-on-clean': '[impeccable] design hook produced unexpected diagnostic output',
   malformed: '[impeccable] design hook returned unrecognized output',
+  'no-path': '[impeccable] design hook skipped a file-changing tool call with no extractable path',
 } as const satisfies Record<WarningKind, string>
 
 /**
@@ -422,6 +473,9 @@ const WARNING_MESSAGES = {
  *  - exit 0, empty stdout, non-empty stderr: `stderr-on-clean`.
  *  - exit 0, non-empty stdout that is not a valid envelope: `malformed`.
  *  - `timeout`, `spawn-error`, `nonzero-exit`, `overflow`: the matching warning kind.
+ *  - a built-in `edit`/`write`/`apply_patch`, or a mutating tool with a path-like
+ *    arg key, yielding no path: `no-path`, and the hook is not run. A mutating
+ *    tool with no path-like arg key is silent and not run.
  *  - the runner rejecting, or any bridge fault: `spawn-error`.
  *
  * Each warning kind shows once per hook instance (one plugin process). Warning
@@ -455,7 +509,11 @@ export function createHook(options: CreateHookOptions) {
       if (!isMutatingTool(input.tool)) return
 
       const touchedPaths = extractTouchedPaths(input.tool, input.args)
-      if (touchedPaths.length === 0) return
+      if (touchedPaths.length === 0) {
+        // Silence is only right for an MCP tool that never carried a path.
+        if (expectsPath(input.tool, input.args)) warnOnce('no-path')
+        return
+      }
 
       const payload = buildHookPayload({
         tool: input.tool,
