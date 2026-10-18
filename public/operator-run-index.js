@@ -1010,8 +1010,17 @@ function bindCardActivation(card, runId, onSelectRun) {
   const activate = () => {
     toggleCardExpansion(card, runId, onSelectRun)
   }
+  // Whether the latest press began on a link or button inside the card. A press that starts on a control
+  // and ends elsewhere (the toolbar moved under the pointer as output streamed in) is dispatched as a click
+  // on the nearest common ancestor, so the click target alone cannot say where the press began.
+  let pressBeganOnControl = false
+  card.addEventListener('pointerdown', event => {
+    pressBeganOnControl = controlWithin(card, event.target)
+  })
   card.addEventListener('click', event => {
-    if (clickBelongsToContent(card, event)) return
+    const pressed = pressBeganOnControl
+    pressBeganOnControl = false
+    if (pressed || clickBelongsToContent(card, event)) return
     activate()
   })
   card.addEventListener('keydown', e => {
@@ -1027,15 +1036,20 @@ function bindCardActivation(card, runId, onSelectRun) {
 /**
  * Whether a click belongs to the card's content, not the card itself: it landed on a link or
  * a button inside the card, or the reader is selecting text there. Such a click never toggles the card.
+ * A press that began on a link or button is also content, wherever the click lands (see bindCardActivation).
  * This guard is the only mechanism: nothing inside the card stops propagation for it.
  */
 function clickBelongsToContent(card, event) {
   const target = event?.target
-  if (target !== card && typeof target?.closest === 'function') {
-    const control = target.closest('a[href], button')
-    if (control !== null && control !== undefined && (typeof card.contains !== 'function' || card.contains(control))) return true
-  }
+  if (target !== card && controlWithin(card, target)) return true
   return selectionInside(card)
+}
+
+/** True when `target` is, or sits inside, a link or button that belongs to `card`. */
+function controlWithin(card, target) {
+  if (typeof target?.closest !== 'function') return false
+  const control = target.closest('a[href], button')
+  return control !== null && control !== undefined && (typeof card.contains !== 'function' || card.contains(control))
 }
 
 /** True when a non-collapsed text selection starts or ends inside `card`. */

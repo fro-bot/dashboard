@@ -268,3 +268,115 @@ describe('card click guard with rendered links', () => {
     expect(event.cancelBubble).toBe(false)
   })
 })
+
+describe('toolbar clicks on an expanded card', () => {
+  /**
+   * The card as the runtime drives it: a click expands and attaches the real stream, and a second
+   * activation of the same card collapses it and closes the stream. `closes` counts those collapses.
+   */
+  async function mountExpandedStreamingCardWith(stream: ReturnType<typeof feedStream>) {
+    const mounted = await mountListCard()
+    const {card} = mounted
+    const attached: {handle: StreamHandle | null} = {handle: null}
+    const closes = vi.fn()
+    mounted.onSelectRun.mockImplementation(() => {
+      if (attached.handle !== null) {
+        attached.handle.close()
+        attached.handle = null
+        closes()
+        return
+      }
+      attached.handle = attach(card)
+    })
+    click(card)
+    expect(card.dataset.expanded).toBe('true')
+    await stream.ready()
+    stream.delta('Intro **bold** text\n\n- one\n- two', 0)
+    await vi.waitFor(() => expect(output(card).querySelector('strong')?.textContent).toBe('bold'))
+    expect(tools(card).hidden).toBe(false)
+    mounted.onSelectRun.mockClear()
+    mounted.parentClick.mockClear()
+    return {...mounted, closes, attached}
+  }
+
+  it('Raw/Rendered toggle clicks leave the card expanded and its stream attached', async () => {
+    const {card, onSelectRun, parentClick, closes, attached} = await mountExpandedStreamingCardWith(feedStream())
+
+    click(toggleButton(card))
+
+    expect(output(card).getAttribute('data-output-view')).toBe('raw')
+    expect(onSelectRun).not.toHaveBeenCalled()
+    expect(card.dataset.expanded).toBe('true')
+    expect(attached.handle).not.toBeNull()
+    expect(closes).not.toHaveBeenCalled()
+    expect(parentClick).toHaveBeenCalledTimes(1)
+
+    click(toggleButton(card))
+
+    expect(output(card).getAttribute('data-output-view')).toBe('rendered')
+    expect(onSelectRun).not.toHaveBeenCalled()
+    expect(card.dataset.expanded).toBe('true')
+    expect(attached.handle).not.toBeNull()
+    expect(closes).not.toHaveBeenCalled()
+  })
+
+  it('Copy raw clicks leave the card expanded and its stream attached', async () => {
+    Object.defineProperty(navigator, 'clipboard', {value: {writeText: vi.fn(async (_text: string) => {})}, configurable: true})
+    const {card, onSelectRun, closes, attached} = await mountExpandedStreamingCardWith(feedStream())
+
+    click(copyButton(card))
+    click(copyButton(card))
+
+    expect(onSelectRun).not.toHaveBeenCalled()
+    expect(card.dataset.expanded).toBe('true')
+    expect(attached.handle).not.toBeNull()
+    expect(closes).not.toHaveBeenCalled()
+  })
+
+  // A press that starts on a control and is released elsewhere (the streamed output grew and moved the
+  // toolbar under the pointer) makes the browser dispatch the click on the nearest common ancestor: the card.
+  function pressOn(el: Element) {
+    el.dispatchEvent(new Event('pointerdown', {bubbles: true}))
+  }
+
+  it.each([
+    ['the toggle', toggleButton],
+    ['Copy raw', copyButton],
+  ])('a press on %s that is released over the card does not collapse it', async (_name, control) => {
+    Object.defineProperty(navigator, 'clipboard', {value: {writeText: vi.fn(async (_text: string) => {})}, configurable: true})
+    const stream = feedStream()
+    const {card, onSelectRun, parentClick, closes, attached} = await mountExpandedStreamingCardWith(stream)
+
+    pressOn(control(card))
+    stream.delta('\n\n- three\n- four', 1)
+    await vi.waitFor(() => expect(output(card).querySelectorAll('li')).toHaveLength(4))
+    const event = click(card)
+
+    expect(onSelectRun).not.toHaveBeenCalled()
+    expect(card.dataset.expanded).toBe('true')
+    expect(attached.handle).not.toBeNull()
+    expect(closes).not.toHaveBeenCalled()
+    expect(parentClick).toHaveBeenCalledTimes(1)
+    expect(event.cancelBubble).toBe(false)
+
+    // The next click on the toggle works, and the card stays open.
+    click(toggleButton(card))
+    expect(output(card).getAttribute('data-output-view')).toBe('raw')
+    expect(card.dataset.expanded).toBe('true')
+    expect(attached.handle).not.toBeNull()
+  })
+
+  it('a later press on plain card content still collapses the card', async () => {
+    const stream = feedStream()
+    const {card, onSelectRun, closes} = await mountExpandedStreamingCardWith(stream)
+
+    pressOn(toggleButton(card))
+    click(card) // released over the card: ignored
+    pressOn(output(card))
+    click(card)
+
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
+    expect(card.dataset.expanded).toBe('false')
+    expect(closes).toHaveBeenCalledTimes(1)
+  })
+})
