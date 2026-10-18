@@ -75,7 +75,7 @@ jobs:
 
           work=$(mktemp -d)
           rc=0
-          findings=$(npx impeccable@3.6.1 detect --json web/src web/privacy.html 2>"$work/stderr") || rc=$?
+          findings=$(npx impeccable@4.5.2 detect --json web/src web/privacy.html 2>"$work/stderr") || rc=$?
 
           if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
             echo "::error::Impeccable could not scan (exit $rc)."
