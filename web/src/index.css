@@ -1,6 +1,25 @@
 @import 'tailwindcss';
 @import './styles/tokens.css';
 
+/* Typography for the standalone privacy page, which loads this stylesheet. */
+.privacy-title {
+  font-size: var(--text-h2);
+}
+
+.privacy-section-title {
+  font-size: var(--text-h3);
+}
+
+.privacy-lead {
+  font-size: var(--text-body-lg);
+}
+
+@media (min-width: 640px) {
+  .privacy-title {
+    font-size: var(--text-h1);
+  }
+}
+
 .operator-panel {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
