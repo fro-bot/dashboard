@@ -6,6 +6,7 @@ import {
   createHook,
   extractFeedbackText,
   extractTouchedPaths,
+  FEEDBACK_MAX_CHARS,
   isMutatingTool,
   PATH_ARG_KEYS,
   type DetectorRunResult,
@@ -512,6 +513,80 @@ describe('surface', () => {
     const output = makeOutput()
     await hook(makeInput(), output)
     expect(output.output).toBe('ok')
+  })
+})
+
+describe('feedback cap', () => {
+  const MARKER = '[impeccable] feedback truncated'
+  const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+
+  async function appendedFor(feedback: string): Promise<string> {
+    const hook = createHook({ runDetector: fakeRunner(ok(envelope(feedback))), worktree: '/repo' })
+    const output = makeOutput()
+    await hook(makeInput(), output)
+    return output.output
+  }
+
+  it('caps feedback at 64 KiB of UTF-16 code units', () => {
+    expect(FEEDBACK_MAX_CHARS).toBe(64 * 1024)
+  })
+
+  it('appends feedback exactly at the cap unchanged, with no marker', async () => {
+    const feedback = 'a'.repeat(FEEDBACK_MAX_CHARS)
+    expect(await appendedFor(feedback)).toBe(`ok\n\n<impeccable_feedback>\n${feedback}\n</impeccable_feedback>`)
+  })
+
+  it('truncates feedback one code unit over the cap to the cap and adds the marker inside the wrapper', async () => {
+    const feedback = 'a'.repeat(FEEDBACK_MAX_CHARS) + 'Z'
+    const result = await appendedFor(feedback)
+    expect(result).toBe(
+      `ok\n\n<impeccable_feedback>\n${'a'.repeat(FEEDBACK_MAX_CHARS)}\n${MARKER}\n</impeccable_feedback>`,
+    )
+    expect(result).not.toContain('Z')
+  })
+
+  it('drops a high surrogate left alone when the cut lands inside a surrogate pair', async () => {
+    // The pair occupies indexes CAP-1 and CAP, so the cap would keep only its high half.
+    const feedback = `${'a'.repeat(FEEDBACK_MAX_CHARS - 1)}\u{1F600}tail`
+    const result = await appendedFor(feedback)
+    expect(result).not.toMatch(LONE_SURROGATE)
+    expect(result).toBe(
+      `ok\n\n<impeccable_feedback>\n${'a'.repeat(FEEDBACK_MAX_CHARS - 1)}\n${MARKER}\n</impeccable_feedback>`,
+    )
+  })
+
+  it('keeps a whole surrogate pair that ends exactly at the cap', async () => {
+    const feedback = `${'a'.repeat(FEEDBACK_MAX_CHARS - 2)}\u{1F600}tail`
+    const result = await appendedFor(feedback)
+    expect(result).not.toMatch(LONE_SURROGATE)
+    expect(result).toContain(`${'a'.repeat(FEEDBACK_MAX_CHARS - 2)}\u{1F600}\n${MARKER}`)
+    expect(result).not.toContain('tail')
+  })
+
+  it('does not use up a warning kind: a warning after a truncation still appears, and truncation repeats', async () => {
+    const results: DetectorRunResult[] = [
+      ok(envelope('a'.repeat(FEEDBACK_MAX_CHARS + 10))),
+      { kind: 'timeout', stdout: '', stderr: '' },
+      ok(envelope('a'.repeat(FEEDBACK_MAX_CHARS + 10))),
+      { kind: 'timeout', stdout: '', stderr: '' },
+    ]
+    let call = 0
+    const hook = createHook({ runDetector: async () => results[call++] ?? ok(), worktree: '/repo' })
+    const outputs = [makeOutput(), makeOutput(), makeOutput(), makeOutput()]
+    for (const output of outputs) await hook(makeInput(), output)
+
+    expect(outputs[0]!.output).toContain(MARKER)
+    expect(outputs[0]!.output).not.toContain('timed out')
+    expect(outputs[1]!.output).toContain('timed out')
+    // The marker is not a warning: it appears on every truncation.
+    expect(outputs[2]!.output).toContain(MARKER)
+    // The timeout kind was spent once by the earlier timeout.
+    expect(outputs[3]!.output).toBe('ok')
+  })
+
+  it('does not emit a warning of its own when it truncates', async () => {
+    const result = await appendedFor('a'.repeat(FEEDBACK_MAX_CHARS * 2))
+    expect(result.match(/\[impeccable\]/g)).toHaveLength(1)
   })
 })
 

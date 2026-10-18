@@ -446,6 +446,26 @@ export function createSpawnRunner(options: CreateSpawnRunnerOptions): DetectorRu
     })
 }
 
+/** Most UTF-16 code units of feedback appended to a tool's output; longer feedback is truncated. */
+export const FEEDBACK_MAX_CHARS = 64 * 1024
+
+const FEEDBACK_TRUNCATED_MARKER = '[impeccable] feedback truncated'
+
+/**
+ * Cuts feedback to `FEEDBACK_MAX_CHARS` code units and adds the marker on its
+ * own line. A cut that lands between the halves of a surrogate pair drops the
+ * high half, so the result never ends in a lone surrogate. Feedback within the
+ * cap is returned unchanged. This is not a warning and is never deduplicated.
+ */
+function capFeedback(feedback: string): string {
+  if (feedback.length <= FEEDBACK_MAX_CHARS) return feedback
+
+  let end = FEEDBACK_MAX_CHARS
+  const last = feedback.charCodeAt(end - 1)
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1
+  return `${feedback.slice(0, end)}\n${FEEDBACK_TRUNCATED_MARKER}`
+}
+
 const FEEDBACK_OPEN = '\n\n<impeccable_feedback>\n'
 const FEEDBACK_CLOSE = '\n</impeccable_feedback>'
 
@@ -524,7 +544,8 @@ const WARNING_MESSAGES = {
  *
  * Outcome table:
  *  - exit 0, empty stdout, empty stderr: a clean scan, silent.
- *  - exit 0, valid PostToolUse envelope: only its `additionalContext` is appended.
+ *  - exit 0, valid PostToolUse envelope: only its `additionalContext` is appended,
+ *    cut to `FEEDBACK_MAX_CHARS` with a truncation marker when longer.
  *  - exit 0, empty stdout, non-empty stderr: `stderr-on-clean`.
  *  - exit 0, non-empty stdout that is not a valid envelope: `malformed`.
  *  - `timeout`, `spawn-error`, `nonzero-exit`, `overflow`: the matching warning kind.
@@ -604,7 +625,7 @@ export function createHook(options: CreateHookOptions) {
         return
       }
 
-      append(feedback)
+      append(capFeedback(feedback))
     } catch {
       warnOnce('bridge-error')
     }
