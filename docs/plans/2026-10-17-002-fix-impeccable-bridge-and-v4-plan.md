@@ -164,6 +164,10 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - **Spike outcome: go or hold.**
   - On go: genuine anti-patterns are fixed in the spike-fixes PR, and an intentional brand token gets a scoped `ignoreValues` entry in the same PR.
   - On hold: the detector is unusable, because it rejects the config or its exit codes or output can't be used. The step rewrite still lands, since it works on 3.x. Spike fixes, the skill refresh and the approval stop, and the skill stays on 3.x.
+- **Design Check pass/fail rules.**
+  - Primary entries are array elements without `advisory: true`. Any primary entry fails the step.
+  - Advisories (`advisory: true`) are printed as a notice and never block.
+  - A path pre-check fails the step when `web/src` or `web/privacy.html` is missing, because 3.x exits 0 on an unscannable path.
 - **Skew window accepted.** Between the skill-refresh merge and the Renovate merge, main runs the v4 skill with the 3.6.1 detector. If the Renovate PR head's version differs from the vendored skill, Unit 7 reruns at the PR head's version before approval.
 - **Orphaned children are an accepted risk.** The deadline bounds a child only while the plugin process lives. If OpenCode exits mid-scan, the child can outlive it. `hook.mjs` spawns nothing, so the exposure is one short-lived process.
 
@@ -343,7 +347,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - Each version has a recorded exit code and findings set for each input.
 - A go or hold decision is recorded.
 
-- [ ] **Unit 6: Exit-code-safe Design Check step**
+- [x] **Unit 6: Exit-code-safe Design Check step**
 
 **Goal:** The Design Check prints findings and fails correctly on 3.x and 4.x.
 
@@ -355,9 +359,11 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - Modify: `.github/workflows/main.yaml`
 
 **Approach:**
-- Capture stdout and the exit code without `bash -e` aborting the assignment.
-- Print the findings whenever they are non-empty or the exit is nonzero.
-- Fail on scan failure (printed distinctly), on findings, or on a non-empty primary findings array. Advisories and the 3.x exit codes are handled as Unit 5 recorded them.
+- Capture stdout and the exit code without `bash -e` aborting the assignment (`|| rc=$?`). stderr goes to a temp file and is echoed only on scan failure.
+- Check that `web/src` and `web/privacy.html` exist before scanning. 3.x exits 0 on an unscannable path, so the pre-check is what fails a renamed path.
+- Count primary entries with `node -e` over the captured JSON. A primary entry is any array element without `advisory: true`. Stdout that is not a JSON array is a scan failure.
+- Fail on scan failure (exit 1 or any code other than 0 and 2; printed distinctly as "Impeccable could not scan"), on any primary entry (printed with the guidance to fix it or add a scoped ignore), and on exit 2 with no primary entries (printed as inconsistent output).
+- Advisories (`advisory: true`) are printed as a notice and never block.
 - Keep the `npx impeccable@<version>` literal on its own line, in the same shape, so the Renovate regex still matches it.
 
 **Test expectation:** none. The PR's own Design Check exercises the step on 3.6.1.

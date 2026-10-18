@@ -64,11 +64,67 @@ jobs:
       - name: 🎨 Detect UI anti-patterns
         run: |
           # Pinned: an older major ignores .impeccable/config.json ignoreValues and would fail the gate on intentional brand tokens.
-          findings=$(npx impeccable@3.6.1 detect --json web/src web/privacy.html)
-          if [ "$findings" != "[]" ]; then
+          # Exit 2 means findings; 1 means a target could not be scanned. Some versions exit 0 on a missing path, hence the path check.
+          # stdout is a JSON array. Primary entries have no `advisory: true`; advisories are printed and never block.
+          for target in web/src web/privacy.html; do
+            if [ ! -e "$target" ]; then
+              echo "::error::Design Check target '$target' does not exist. Update the scanned paths in this step."
+              exit 1
+            fi
+          done
+
+          work=$(mktemp -d)
+          rc=0
+          findings=$(npx impeccable@3.6.1 detect --json web/src web/privacy.html 2>"$work/stderr") || rc=$?
+
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+            echo "::error::Impeccable could not scan (exit $rc)."
+            cat "$work/stderr"
+            exit 1
+          fi
+
+          # Split the array into primary and advisory entries; print "<primary> <advisory>" counts.
+          if ! counts=$(printf '%s' "$findings" | node -e '
+            const fs = require("node:fs");
+            let data;
+            try {
+              data = JSON.parse(fs.readFileSync(0, "utf8"));
+            } catch {
+              process.exit(3);
+            }
+            if (!Array.isArray(data)) process.exit(3);
+            const primary = data.filter((entry) => entry?.advisory !== true);
+            const advisory = data.filter((entry) => entry?.advisory === true);
+            const dir = process.argv[1];
+            fs.writeFileSync(dir + "/primary.json", JSON.stringify(primary, null, 2));
+            fs.writeFileSync(dir + "/advisory.json", JSON.stringify(advisory, null, 2));
+            process.stdout.write(primary.length + " " + advisory.length);
+          ' "$work"); then
+            echo "::error::Impeccable could not scan: stdout is not a JSON array (exit $rc)."
             echo "$findings"
+            cat "$work/stderr"
+            exit 1
+          fi
+          primary_count=${counts% *}
+          advisory_count=${counts#* }
+
+          if [ "$primary_count" -gt 0 ]; then
+            cat "$work/primary.json"
+            echo
             echo "Impeccable detected UI anti-patterns. Address them or, for an intentional brand choice, add a scoped ignore via 'impeccable ignores add-value'."
             exit 1
+          fi
+          if [ "$rc" -eq 2 ]; then
+            echo "::error::Impeccable exited 2 but reported no primary findings; treating the output as inconsistent."
+            echo "$findings"
+            exit 1
+          fi
+          if [ "$advisory_count" -gt 0 ]; then
+            echo "::notice::Impeccable reported $advisory_count advisory finding(s); advisories do not block."
+            cat "$work/advisory.json"
+            echo
+            echo "No blocking UI anti-patterns detected."
+            exit 0
           fi
           echo "No UI anti-patterns detected."
 
