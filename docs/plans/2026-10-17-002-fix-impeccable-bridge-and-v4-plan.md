@@ -40,7 +40,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 
 **Stage A: bridge**
 
-- R1. A timed-out hook subprocess is terminated with SIGTERM, then SIGKILL after a grace period. The tool call never waits past a bounded deadline.
+- R1. A timed-out hook subprocess is terminated with SIGTERM, then SIGKILL after a grace period. Both signals go to the child's whole process group on POSIX, so the launcher's `curl` and `sh` die with it. The tool call never waits past a bounded deadline.
 - R2. Each degraded outcome warns in the tool result. The outcomes are:
   - timeout;
   - spawn failure;
@@ -153,7 +153,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 ## Key Technical Decisions
 
 - **Runner: Node `child_process.spawn`, ported from `.io`.** Unlike Bun `$`, it can be tested under Vitest on Node. It spawns a literal `node` with no shell.
-- **Timing: 5000 ms timeout, then a 2000 ms grace before SIGKILL, with a final deadline just after timeout plus grace.** The runner resolves on `close`, or at the final deadline if a child keeps its pipes open. A tool call therefore never waits much longer than 7 s.
+- **Timing: 5000 ms timeout, then a 2000 ms grace before SIGKILL, with a final deadline just after timeout plus grace.** The runner resolves on `close`, or at the final deadline if a child keeps its pipes open. A tool call therefore never waits much longer than 7 s. On POSIX the child is spawned with `detached: true` so it leads its own process group, and SIGTERM, SIGKILL and the final-deadline SIGKILL go to the group. On Windows only the direct child is signalled.
 - **Result shape: discriminated, with a distinct message per kind.** The kinds are `ok`, `timeout`, `spawn-error`, `nonzero-exit` and `overflow`. The bridge adds `stderr-on-clean`, `malformed`, `no-path` and `bridge-error`. All extraction failures share the `malformed` kind. A runner rejection or a fault in the bridge itself is `bridge-error`, not `spawn-error`. A warning names its kind and never includes stderr.
 - **Warn once per kind per plugin instance.** A timeout that follows an earlier warning of another kind still shows. A non-string `output.output` is never modified.
 - **Clean scan: exit 0 with empty stdout and empty stderr, which matches `.io`.** A hook crash that exits 0 and writes nothing looks the same at runtime. The canary integration test guards it, and this is an accepted risk.
@@ -170,7 +170,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
   - Advisories (`advisory: true`) are printed as a notice and never block.
   - A path pre-check fails the step when `web/src` or `web/privacy.html` is missing, because 3.x exits 0 on an unscannable path.
 - **Skew window accepted.** Between the skill-refresh merge and the Renovate merge, main runs the v4 skill with the 3.6.1 detector. If the Renovate PR head's version differs from the vendored skill, Unit 7 reruns at the PR head's version before approval.
-- **Orphaned children are an accepted risk.** The deadline bounds a child only while the plugin process lives. If OpenCode exits mid-scan, the child can outlive it. The hook spawns nothing, so the exposure is one short-lived process. A launcher killed during the first-use engine download can leave its `curl` child running.
+- **Orphaned children are an accepted risk, with two reach limits.** The deadline and the group kill bound a child only while the plugin process lives. If OpenCode exits mid-scan, the child group can outlive it. A grandchild that leaves the group (`setsid`, `detached`) is out of the group kill's reach. The launcher's `curl` and `sh` stay in the child's group, so a timeout during the first-use engine download kills them.
 
 ## Open Questions
 
@@ -207,6 +207,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - Port `createSpawnRunner` into `hook-bridge.ts`, adding the final deadline and the discriminated result.
 - Remove `withTimeout` from `createHook`, and remove the runner from `plugin.ts`. `plugin.ts` keeps exactly one export.
 - The child gets the inherited env minus both depth variables.
+- On POSIX the child is spawned with `detached: true`. Timeout signals go to `process.kill(-pid, …)`, falling back to the direct child when the pid is missing or the group signal throws. The child is never `unref`ed, so the run still settles on `close` or the deadline.
 
 **Execution note:** Test-first. Port the whole `.io` integration suite. Flip the timeout no-op test in `plugin.test.ts`. Then confirm all of it fails red against the current bridge.
 
@@ -219,6 +220,9 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - Error path: a child that ignores SIGTERM is SIGKILLed after the grace period and resolves `timeout`. Afterwards, `process.kill(pid, 0)` throws (1000 ms budget beyond the grace period).
 - Edge case: a child that exits during the grace period resolves `timeout` without being SIGKILLed.
 - Edge case: a child that exits 0 but keeps stdout open resolves `timeout` at the final deadline.
+- Error path: a grandchild in the child's process group, with both ignoring SIGTERM, is gone after the run resolves `timeout`. The same holds when the child has exited and the grandchild holds the pipes.
+- Edge case: a grandchild that detaches into its own process group survives. This pins the documented reach limit.
+- Error path: the launcher timing out during a first-use download, against a server that never answers, leaves no `curl` behind.
 - Error path: a missing `node` binary or script resolves `spawn-error` and does not throw.
 - Edge case: inherited `IMPECCABLE_HOOK_DEPTH` and `CLAUDE_HOOK_DEPTH` are absent from the child's env.
 - Integration: the real vendored hook, run on a fixture file with a known anti-pattern, returns an envelope containing that finding. This is the canary for a hook crash.

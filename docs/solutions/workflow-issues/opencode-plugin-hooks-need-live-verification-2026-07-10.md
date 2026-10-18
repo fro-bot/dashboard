@@ -80,7 +80,7 @@ This is how the `IMPECCABLE_HOOK_DEPTH` bug was found in one shell command inste
 
 **8. Match the subprocess's output contract to what the agent should see.** The hook writes a JSON envelope (`{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"…"}}`) and emits a "scanned, no issues" ack on clean files. Parse only that envelope: accept it only when `hookEventName` is `PostToolUse` and `additionalContext` is a non-empty string, and surface just that inner text. Raw stdout and stderr never reach the agent. Silence clean acks (`IMPECCABLE_HOOK_QUIET=1`) so a clean edit adds nothing. Appended feedback is capped at 64 KiB (UTF-16 code units, cut without splitting a surrogate pair) and ends with a `[impeccable] feedback truncated` marker line inside the wrapper when it is cut.
 
-**9. Warm the engine before any test that runs the real hook.** The engine binary is not in git. On first use the launcher downloads it for the host platform into `~/.impeccable/bin/<version>/` and checks its sha256. That takes several seconds on a fast link, which is longer than the hook's 5 s timeout. A cold machine therefore reports a timeout, and the launcher's `curl` child can keep running after the launcher is killed. The integration suite runs `scripts/impeccable engine-probe` once in a `beforeAll` with a 120 s budget, against the real HOME cache, so the download happens before any timeout-bound test. If the probe fails, the suite fails with a message that names the cause. A machine with a cold cache and no network cannot run the real hook; set `IMPECCABLE_BIN` to an installed engine there.
+**9. Warm the engine before any test that runs the real hook.** The engine binary is not in git. On first use the launcher downloads it for the host platform into `~/.impeccable/bin/<version>/` and checks its sha256. That takes several seconds on a fast link, which is longer than the hook's 5 s timeout. A cold machine therefore reports a timeout. The launcher runs `curl` and `sh` as grandchildren, so the runner signals the child's whole process group; a timeout kills the download with the launcher. The integration suite runs `scripts/impeccable engine-probe` once in a `beforeAll` with a 120 s budget, against the real HOME cache, so the download happens before any timeout-bound test. If the probe fails, the suite fails with a message that names the cause. A machine with a cold cache and no network cannot run the real hook; set `IMPECCABLE_BIN` to an installed engine there.
 
 ## Why This Matters
 
@@ -132,7 +132,7 @@ env.IMPECCABLE_HOOK_QUIET = '1'
 const feedback = extractFeedbackText(result.stdout)
 ```
 
-The runner owns the timeout: SIGTERM at 5 s, SIGKILL after a 2 s grace, and a final deadline 0.5 s later that resolves even if the pipes stay open. `createHook` adds no timer of its own.
+The runner owns the timeout: SIGTERM at 5 s, SIGKILL after a 2 s grace, and a final deadline 0.5 s later that resolves even if the pipes stay open. On POSIX the child is spawned with `detached: true` so it leads its own process group, and each signal, including the final-deadline SIGKILL, goes to the group (`process.kill(-pid, …)`, falling back to the direct child). Grandchildren such as the launcher's `curl` die with it. A grandchild that calls `setsid` or detaches escapes the group; the integration suite pins that limit. On Windows only the direct child is signalled. `createHook` adds no timer of its own.
 
 ## Related
 

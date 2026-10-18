@@ -212,6 +212,9 @@ export interface CreateSpawnRunnerOptions {
 
 function noop(): void {}
 
+/** True where the child can lead its own process group and the group can be signalled (POSIX). */
+const SUPPORTS_PROCESS_GROUPS = process.platform !== 'win32'
+
 interface RunLimits {
   timeoutMs: number
   killGraceMs: number
@@ -346,9 +349,27 @@ class HookRun {
     return currentBytes + chunk.length
   }
 
+  /**
+   * Signals the child's whole process group, so grandchildren in that group
+   * (the launcher's `curl` and `sh`) receive it too. Falls back to the direct
+   * child when the child has no pid, the platform has no process groups, or
+   * the group signal fails (for example ESRCH once the group is empty).
+   */
   private signal(name: NodeJS.Signals): void {
+    const child = this.child
+    if (!child) return
+
+    if (SUPPORTS_PROCESS_GROUPS && child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, name)
+        return
+      } catch {
+        // Fall through to the direct child.
+      }
+    }
+
     try {
-      this.child?.kill(name)
+      child.kill(name)
     } catch {
       // The process may already have exited.
     }
@@ -395,7 +416,11 @@ function decode(chunks: Buffer[]): string {
  * This runner is the sole authority over the run's lifetime: SIGTERM at the
  * timeout, SIGKILL after the grace period, and a final deadline just past
  * both at which it resolves even if a child or grandchild still holds the
- * pipes open. The deadline starts before the script existence check, so a
+ * pipes open. On POSIX each signal goes to the child's whole process group
+ * (the child is spawned with `detached: true` so it leads one) and the final
+ * deadline SIGKILLs the group, so a launcher's `curl` and `sh` die with it.
+ * A grandchild that leaves the group (`setsid`, `detached`) is out of reach.
+ * On Windows only the direct child is signalled. The deadline starts before the script existence check, so a
  * check that never settles resolves `spawn-error` at the deadline and the
  * child is never spawned after the run has resolved. A tool call therefore
  * waits at most timeout + grace + slack. Callers must not layer a second
@@ -429,7 +454,13 @@ export function createSpawnRunner(options: CreateSpawnRunnerOptions): DetectorRu
 
         try {
           run.attach(
-            spawn(command, args, { cwd: opts.worktree, env, stdio: ['pipe', 'pipe', 'pipe'] }),
+            spawn(command, args, {
+              cwd: opts.worktree,
+              env,
+              stdio: ['pipe', 'pipe', 'pipe'],
+              // On POSIX the child leads its own process group, so a timeout can signal it and its grandchildren together.
+              detached: SUPPORTS_PROCESS_GROUPS,
+            }),
             payload,
           )
         } catch {

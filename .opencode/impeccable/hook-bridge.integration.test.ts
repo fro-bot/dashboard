@@ -6,9 +6,11 @@
  * Runs under Vitest on Node. The runner spawns a literal `node`, so every test
  * here depends on the host being Node and fails loudly otherwise.
  */
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer, type Server } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -25,6 +27,7 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 let tmpDir: string | undefined
 const trackedPidFiles: string[] = []
+const trackedProcessMarkers: string[] = []
 
 function worktree(): string {
   tmpDir ??= mkdtempSync(join(tmpdir(), 'impeccable-bridge-'))
@@ -66,8 +69,34 @@ async function expectProcessGone(pid: number, budgetMs = 1000): Promise<void> {
   expect(() => process.kill(pid, 0)).toThrow()
 }
 
+/** True when a process whose command line contains `marker` is running. */
+function markerProcessAlive(marker: string): boolean {
+  try {
+    execFileSync('pgrep', ['-f', marker], { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Polls until no process carries `marker`, up to a bounded budget. */
+async function expectMarkerProcessesGone(marker: string, budgetMs = 1000): Promise<void> {
+  const deadline = Date.now() + budgetMs
+  while (markerProcessAlive(marker) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  expect(markerProcessAlive(marker)).toBe(false)
+}
+
 afterEach(() => {
   // Safety net: no test may leave a child behind, even when an assertion fails first.
+  for (const marker of trackedProcessMarkers.splice(0)) {
+    try {
+      execFileSync('pkill', ['-f', marker], { stdio: 'ignore' })
+    } catch {
+      // Nothing matched.
+    }
+  }
   for (const file of trackedPidFiles.splice(0)) {
     if (!existsSync(file)) continue
     const pid = Number(readFileSync(file, 'utf-8'))
@@ -260,14 +289,61 @@ describe('createSpawnRunner', () => {
     await expectProcessGone(readPid(pidFile))
   }, 15_000)
 
+  it('kills the whole process group on timeout: a grandchild in the child\'s group is gone, even when both ignore SIGTERM', async () => {
+    const childPidFile = trackedFile('child-pid')
+    const grandchildPidFile = trackedFile('grandchild-pid')
+    const grandchildCode = `process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);`
+    const scriptPath = fixture(
+      [
+        `import {spawn} from 'node:child_process';`,
+        `import {writeFileSync} from 'node:fs';`,
+        `writeFileSync(${JSON.stringify(childPidFile)}, String(process.pid));`,
+        // A plain spawn: the grandchild stays in this process's group and holds the pipes.
+        `const grandchild = spawn(process.execPath, ['-e', ${JSON.stringify(grandchildCode)}], {stdio: ['ignore', 'inherit', 'inherit']});`,
+        `writeFileSync(${JSON.stringify(grandchildPidFile)}, String(grandchild.pid));`,
+        `process.on('SIGTERM', () => {});`,
+        `setInterval(() => {}, 1000);`,
+      ].join('\n'),
+    )
+    const runner = createSpawnRunner({ scriptPath, timeoutMs: 1000, killGraceMs: 100 })
+    const result = await runner(payload, { worktree: worktree() })
+
+    expect(result.kind).toBe('timeout')
+    await expectProcessGone(readPid(childPidFile))
+    await expectProcessGone(readPid(grandchildPidFile))
+  }, 15_000)
+
+  it('kills a grandchild in the child\'s group that outlives an exited child and holds the pipes', async () => {
+    const grandchildPidFile = trackedFile('grandchild-pid')
+    const grandchildCode = `process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);`
+    const scriptPath = fixture(
+      [
+        `import {spawn} from 'node:child_process';`,
+        `import {writeFileSync} from 'node:fs';`,
+        `const grandchild = spawn(process.execPath, ['-e', ${JSON.stringify(grandchildCode)}], {stdio: ['ignore', 'inherit', 'inherit']});`,
+        `writeFileSync(${JSON.stringify(grandchildPidFile)}, String(grandchild.pid));`,
+        `process.exit(0);`,
+      ].join('\n'),
+    )
+    const runner = createSpawnRunner({ scriptPath, timeoutMs: 400, killGraceMs: 100 })
+    const start = Date.now()
+    const result = await runner(payload, { worktree: worktree() })
+    const elapsedMs = Date.now() - start
+
+    expect(result.kind).toBe('timeout')
+    expect(elapsedMs).toBeLessThan(400 + 100 + 2000)
+    await expectProcessGone(readPid(grandchildPidFile))
+  }, 15_000)
+
   it('resolves timeout at the final deadline when an exited child leaves stdout open through a grandchild', async () => {
     const grandchildPidFile = trackedFile('grandchild-pid')
     const scriptPath = fixture(
       [
         `import {spawn} from 'node:child_process';`,
         `import {writeFileSync} from 'node:fs';`,
-        // The detached grandchild inherits stdout/stderr, so the pipes stay
-        // open after this process exits 0 and 'close' never fires on its own.
+        // The detached grandchild leads its own process group and inherits
+        // stdout/stderr, so the pipes stay open after this process exits 0
+        // and 'close' never fires on its own.
         `const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {detached: true, stdio: ['ignore', 'inherit', 'inherit']});`,
         `writeFileSync(${JSON.stringify(grandchildPidFile)}, String(grandchild.pid));`,
         `grandchild.unref();`,
@@ -283,7 +359,7 @@ describe('createSpawnRunner', () => {
     // Resolved by the deadline, not by waiting for the grandchild to release the pipes.
     expect(elapsedMs).toBeLessThan(400 + 100 + 2000)
     expect(elapsedMs).toBeGreaterThanOrEqual(400)
-    // The grandchild is outside the runner's reach; the afterEach safety net reaps it.
+    // A grandchild that leaves the child's process group is outside the group kill's reach; the afterEach safety net reaps it.
     expect(isAlive(readPid(grandchildPidFile))).toBe(true)
   }, 15_000)
 
@@ -402,8 +478,9 @@ describe('createSpawnRunner', () => {
         `import {spawn} from 'node:child_process';`,
         `import {writeFileSync} from 'node:fs';`,
         `process.stdout.write("x".repeat(200));`,
-        // The detached grandchild inherits stdout/stderr, so the pipes stay
-        // open after this process exits and 'close' never fires on its own.
+        // The detached grandchild leads its own process group and inherits
+        // stdout/stderr, so the pipes stay open after this process exits and
+        // 'close' never fires on its own.
         `const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {detached: true, stdio: ['ignore', 'inherit', 'inherit']});`,
         `writeFileSync(${JSON.stringify(grandchildPidFile)}, String(grandchild.pid));`,
         `grandchild.unref();`,
@@ -421,7 +498,7 @@ describe('createSpawnRunner', () => {
     // Resolved by the deadline, not by waiting for the grandchild to release the pipes.
     expect(elapsedMs).toBeGreaterThanOrEqual(400)
     expect(elapsedMs).toBeLessThan(400 + 100 + 2000)
-    // The grandchild is outside the runner's reach; the afterEach safety net reaps it.
+    // A grandchild that leaves the child's process group is outside the group kill's reach; the afterEach safety net reaps it.
     expect(isAlive(readPid(grandchildPidFile))).toBe(true)
   }, 15_000)
 
@@ -530,6 +607,67 @@ describe('createLauncherRunner', () => {
 
     expect(result).toEqual({ kind: 'ok', stdout: JSON.stringify(payload), stderr: '' })
   })
+
+  it('leaves no curl behind when the launcher times out during a first-use engine download', async () => {
+    const marker = `cold-download-${randomUUID()}`
+    trackedProcessMarkers.push(marker)
+
+    // A server that accepts the request and never answers keeps the launcher's curl waiting.
+    let requests = 0
+    const server: Server = createServer(() => {
+      requests += 1
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+
+    // Only the launcher and its VERSION file are copied, so the sibling engine
+    // binary is absent and the launcher takes its download path. HOME and the
+    // cache root are temporary so a cached engine on this machine is not used.
+    const scriptsDir = join(worktree(), 'cold-skill', 'scripts')
+    mkdirSync(scriptsDir, { recursive: true })
+    const launcher = join(scriptsDir, 'impeccable')
+    copyFileSync(join(REPO_ROOT, HOOK_LAUNCHER_RELATIVE_PATH), launcher)
+    writeFileSync(join(scriptsDir, 'VERSION'), '0.0.0\n', 'utf-8')
+    const home = join(worktree(), 'cold-home')
+    mkdirSync(home, { recursive: true })
+
+    const overrides: Record<string, string | undefined> = {
+      HOME: home,
+      IMPECCABLE_HOME: join(home, '.impeccable'),
+      IMPECCABLE_DOWNLOAD_BASE: `http://127.0.0.1:${(server.address() as AddressInfo).port}/${marker}`,
+      IMPECCABLE_BIN: undefined,
+      IMPECCABLE_LAUNCHER_PROBE: undefined,
+      PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+    }
+    const previous: Record<string, string | undefined> = {}
+    for (const [key, value] of Object.entries(overrides)) {
+      previous[key] = process.env[key]
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+
+    try {
+      const runner = createSpawnRunner({
+        scriptPath: launcher,
+        command: launcher,
+        args: ['hook'],
+        timeoutMs: 1500,
+        killGraceMs: 200,
+      })
+      const result = await runner(payload, { worktree: worktree() })
+
+      expect(result.kind).toBe('timeout')
+      // The download really started, so the assertion below is not vacuous.
+      expect(requests).toBeGreaterThan(0)
+      await expectMarkerProcessesGone(marker)
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  }, 15_000)
 
   it('resolves spawn-error, without throwing, when the launcher does not exist', async () => {
     const result = await createLauncherRunner(join(tmpdir(), `no-launcher-${randomUUID()}`))(payload, { worktree: worktree() })
