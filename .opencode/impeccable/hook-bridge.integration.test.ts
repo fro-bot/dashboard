@@ -337,6 +337,63 @@ describe('createSpawnRunner', () => {
     expect(result.stdout).toBe('é'.repeat(10))
   })
 
+  it('resolves spawn-error at the final deadline, with nothing spawned, when the script check never settles', async () => {
+    const markerFile = trackedFile('ran-marker')
+    const scriptPath = fixture(
+      [`import {writeFileSync} from 'node:fs';`, `writeFileSync(${JSON.stringify(markerFile)}, 'ran');`].join('\n'),
+    )
+    const runner = createSpawnRunner({
+      scriptPath,
+      timeoutMs: 100,
+      killGraceMs: 50,
+      deadlineSlackMs: 50,
+      checkScript: () => new Promise<void>(() => {}),
+    })
+    const start = Date.now()
+    const result = await runner(payload, { worktree: worktree() })
+    const elapsedMs = Date.now() - start
+
+    expect(result).toEqual({ kind: 'spawn-error' })
+    expect(elapsedMs).toBeGreaterThanOrEqual(200)
+    expect(elapsedMs).toBeLessThan(200 + 1000)
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    expect(existsSync(markerFile)).toBe(false)
+  }, 15_000)
+
+  it('never spawns a child when the script check settles after the run has already resolved', async () => {
+    const markerFile = trackedFile('ran-marker')
+    const scriptPath = fixture(
+      [`import {writeFileSync} from 'node:fs';`, `writeFileSync(${JSON.stringify(markerFile)}, 'ran');`].join('\n'),
+    )
+    const runner = createSpawnRunner({
+      scriptPath,
+      timeoutMs: 100,
+      killGraceMs: 50,
+      deadlineSlackMs: 50,
+      // Settles successfully, but only after the 200 ms deadline.
+      checkScript: () => new Promise<void>((resolve) => setTimeout(resolve, 350)),
+    })
+    const result = await runner(payload, { worktree: worktree() })
+
+    expect(result).toEqual({ kind: 'spawn-error' })
+    // Wait past the late settle plus ample time for a wrongly spawned node to write its marker.
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    expect(existsSync(markerFile)).toBe(false)
+  }, 15_000)
+
+  it('resolves spawn-error, without throwing, when the script check rejects or throws', async () => {
+    const scriptPath = fixture('process.exit(0);\n')
+    const rejecting = createSpawnRunner({ scriptPath, checkScript: () => Promise.reject(new Error('stalled mount')) })
+    const throwing = createSpawnRunner({
+      scriptPath,
+      checkScript: () => {
+        throw new Error('sync fault')
+      },
+    })
+    expect(await rejecting(payload, { worktree: worktree() })).toEqual({ kind: 'spawn-error' })
+    expect(await throwing(payload, { worktree: worktree() })).toEqual({ kind: 'spawn-error' })
+  })
+
   it('resolves overflow, not timeout, at the final deadline when the child overflowed and a grandchild holds the pipes', async () => {
     const grandchildPidFile = trackedFile('grandchild-pid')
     const scriptPath = fixture(

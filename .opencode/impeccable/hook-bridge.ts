@@ -17,7 +17,7 @@
  * must export ONLY the plugin factory. Everything else lives here.
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { access } from 'node:fs/promises'
 import { StringDecoder } from 'node:string_decoder'
 
@@ -208,9 +208,178 @@ export interface CreateSpawnRunnerOptions {
   maxOutputBytes?: number
   /** Node executable to spawn. Defaults to literal `node`; override only for tests. */
   nodeExecutable?: string
+  /** Pre-spawn check that the script exists; rejecting means it cannot run. Defaults to `fs.access`; override only for tests. */
+  checkScript?: (scriptPath: string) => Promise<unknown>
 }
 
 function noop(): void {}
+
+interface RunLimits {
+  timeoutMs: number
+  killGraceMs: number
+  deadlineSlackMs: number
+  maxOutputBytes: number
+}
+
+/** Why a run is ending. Together with the run's flags it decides the result. */
+type SettleCause = { by: 'exit'; code: number | null } | { by: 'deadline' } | { by: 'spawn-error' }
+
+/**
+ * The lifecycle of one hook run: the child, its three timers, the bounded
+ * capture of its output, and the flags that decide the result. `settle` is the
+ * only place a run ends and the only place the result is chosen.
+ */
+class HookRun {
+  settled = false
+  private timedOut = false
+  private overflowed = false
+  private started = false
+  private child: ChildProcess | undefined
+  private readonly stdoutChunks: Buffer[] = []
+  private readonly stderrChunks: Buffer[] = []
+  private stdoutBytes = 0
+  private stderrBytes = 0
+  private hardTimer: ReturnType<typeof setTimeout> | undefined
+  private killTimer: ReturnType<typeof setTimeout> | undefined
+  private deadlineTimer: ReturnType<typeof setTimeout> | undefined
+  private readonly limits: RunLimits
+  private readonly resolve: (result: DetectorRunResult) => void
+
+  constructor(limits: RunLimits, resolve: (result: DetectorRunResult) => void) {
+    this.limits = limits
+    this.resolve = resolve
+  }
+
+  /** Bounds the whole run, including any pre-spawn check: it settles at timeout + grace + slack at the latest. */
+  armDeadline(): void {
+    const { timeoutMs, killGraceMs, deadlineSlackMs } = this.limits
+    this.deadlineTimer = setTimeout(
+      () => {
+        // With no child there was nothing to scan, so the run never started.
+        this.settle(this.child ? { by: 'deadline' } : { by: 'spawn-error' })
+      },
+      timeoutMs + killGraceMs + deadlineSlackMs,
+    )
+  }
+
+  /** Takes over a spawned child: captures its output, arms SIGTERM then SIGKILL, and feeds it the payload. */
+  attach(child: ChildProcess, payload: unknown): void {
+    this.child = child
+
+    child.once('spawn', () => {
+      this.started = true
+    })
+    child.on('error', () => {
+      // Before 'spawn' this is a failure to start. After it, 'close' or the
+      // deadline settles the run.
+      if (!this.started) this.settle({ by: 'spawn-error' })
+    })
+    child.stdout?.on('data', (chunk: Buffer) => {
+      this.stdoutBytes = this.capture(this.stdoutChunks, this.stdoutBytes, chunk)
+    })
+    child.stderr?.on('data', (chunk: Buffer) => {
+      this.stderrBytes = this.capture(this.stderrChunks, this.stderrBytes, chunk)
+    })
+    child.on('close', (code: number | null) => {
+      this.settle({ by: 'exit', code })
+    })
+
+    this.hardTimer = setTimeout(() => {
+      this.timedOut = true
+      try {
+        child.stdin?.end()
+      } catch {
+        // Stdin may already be closed.
+      }
+      this.signal('SIGTERM')
+      this.killTimer = setTimeout(() => {
+        this.signal('SIGKILL')
+      }, this.limits.killGraceMs)
+    }, this.limits.timeoutMs)
+
+    // A child that exits without reading stdin can raise EPIPE on write. That is
+    // not a spawn failure and must not crash the host.
+    child.stdin?.on('error', noop)
+    try {
+      child.stdin?.end(JSON.stringify(payload))
+    } catch {
+      // If the write fails, the child's own error and close events settle the run.
+    }
+  }
+
+  /**
+   * Ends the run exactly once. Precedence: overflow, then timeout (the timer
+   * fired or the deadline passed, even if the child then exited 0), then the
+   * exit code.
+   */
+  settle(cause: SettleCause): void {
+    if (this.settled) return
+    this.settled = true
+
+    if (cause.by === 'deadline') this.signal('SIGKILL')
+    if (this.hardTimer) clearTimeout(this.hardTimer)
+    if (this.killTimer) clearTimeout(this.killTimer)
+    if (this.deadlineTimer) clearTimeout(this.deadlineTimer)
+    this.release()
+
+    this.resolve(this.outcome(cause))
+  }
+
+  private outcome(cause: SettleCause): DetectorRunResult {
+    if (cause.by === 'spawn-error') return { kind: 'spawn-error' }
+
+    const output = { stdout: decode(this.stdoutChunks), stderr: decode(this.stderrChunks) }
+    if (this.overflowed) return { kind: 'overflow', ...output }
+    if (this.timedOut || cause.by === 'deadline') return { kind: 'timeout', ...output }
+    if (cause.code === 0) return { kind: 'ok', ...output }
+    return { kind: 'nonzero-exit', exitCode: cause.code ?? -1, ...output }
+  }
+
+  /** Keeps at most maxOutputBytes in total and returns the new byte count. */
+  private capture(chunks: Buffer[], currentBytes: number, chunk: Buffer): number {
+    const { maxOutputBytes } = this.limits
+    const remaining = maxOutputBytes - currentBytes
+    if (chunk.length > remaining) {
+      this.overflowed = true
+      if (remaining > 0) chunks.push(chunk.subarray(0, remaining))
+      return maxOutputBytes
+    }
+    chunks.push(chunk)
+    return currentBytes + chunk.length
+  }
+
+  private signal(name: NodeJS.Signals): void {
+    try {
+      this.child?.kill(name)
+    } catch {
+      // The process may already have exited.
+    }
+  }
+
+  /** Detaches from the child so late events cannot throw, and drops our end of pipes a grandchild may hold open. */
+  private release(): void {
+    const child = this.child
+    if (!child) return
+    child.stdout?.removeAllListeners()
+    child.stderr?.removeAllListeners()
+    child.stdin?.removeAllListeners()
+    child.removeAllListeners()
+    child.stdout?.on('error', noop)
+    child.stderr?.on('error', noop)
+    child.stdin?.on('error', noop)
+    child.on('error', noop)
+    child.stdout?.destroy()
+    child.stderr?.destroy()
+  }
+}
+
+// A StringDecoder that is never flushed drops an incomplete trailing multibyte
+// sequence. Buffer#toString would turn it into U+FFFD, which is longer than the
+// bytes it replaces and could push the string past the cap.
+function decode(chunks: Buffer[]): string {
+  const decoder = new StringDecoder('utf-8')
+  return chunks.map((chunk) => decoder.write(chunk)).join('')
+}
 
 /**
  * Real `node:child_process.spawn` runner: `node <scriptPath>` (no shell, a
@@ -224,169 +393,57 @@ function noop(): void {}
  * Each of stdout and stderr is capped at `maxOutputBytes` of UTF-8. Excess
  * bytes are discarded as they arrive, and the run resolves `overflow`.
  *
- * This runner is the sole authority over the child's lifetime: SIGTERM at the
+ * This runner is the sole authority over the run's lifetime: SIGTERM at the
  * timeout, SIGKILL after the grace period, and a final deadline just past
  * both at which it resolves even if a child or grandchild still holds the
- * pipes open. A tool call therefore waits at most timeout + grace + slack.
- * Callers must not layer a second timeout on top of it.
+ * pipes open. The deadline starts before the script existence check, so a
+ * check that never settles resolves `spawn-error` at the deadline and the
+ * child is never spawned after the run has resolved. A tool call therefore
+ * waits at most timeout + grace + slack. Callers must not layer a second
+ * timeout on top of it.
  */
 export function createSpawnRunner(options: CreateSpawnRunnerOptions): DetectorRunner {
-  const timeoutMs = options.timeoutMs ?? DETECTOR_TIMEOUT_MS
-  const killGraceMs = options.killGraceMs ?? DETECTOR_KILL_GRACE_MS
-  const deadlineSlackMs = options.deadlineSlackMs ?? DETECTOR_DEADLINE_SLACK_MS
-  const maxOutputBytes = options.maxOutputBytes ?? DETECTOR_MAX_OUTPUT_BYTES
-  const nodeExecutable = options.nodeExecutable ?? 'node'
-
-  return async (payload, opts) => {
-    try {
-      await access(options.scriptPath)
-    } catch {
-      return { kind: 'spawn-error' }
-    }
-
-    return new Promise<DetectorRunResult>((resolve) => {
-      const env: NodeJS.ProcessEnv = { ...process.env }
-      delete env.IMPECCABLE_HOOK_DEPTH
-      delete env.CLAUDE_HOOK_DEPTH
-      env.IMPECCABLE_HOOK_HARNESS = IMPECCABLE_HOOK_HARNESS
-      env.IMPECCABLE_HOOK_QUIET = '1'
-
-      let child: ReturnType<typeof spawn>
-      try {
-        child = spawn(nodeExecutable, [options.scriptPath], {
-          cwd: opts.worktree,
-          env,
-          stdio: ['pipe', 'pipe', 'pipe'],
-        })
-      } catch {
-        resolve({ kind: 'spawn-error' })
-        return
-      }
-
-      const stdoutChunks: Buffer[] = []
-      const stderrChunks: Buffer[] = []
-      let stdoutBytes = 0
-      let stderrBytes = 0
-      let started = false
-      let timedOut = false
-      let overflowed = false
-      let settled = false
-      let hardTimer: ReturnType<typeof setTimeout> | undefined
-      let killTimer: ReturnType<typeof setTimeout> | undefined
-      let deadlineTimer: ReturnType<typeof setTimeout> | undefined
-
-      // A StringDecoder that is never flushed drops an incomplete trailing
-      // multibyte sequence. Buffer#toString would turn it into U+FFFD, which is
-      // longer than the bytes it replaces and could push the string past the cap.
-      const decode = (chunks: Buffer[]): string => {
-        const decoder = new StringDecoder('utf-8')
-        return chunks.map((chunk) => decoder.write(chunk)).join('')
-      }
-
-      const captured = () => ({ stdout: decode(stdoutChunks), stderr: decode(stderrChunks) })
-
-      // Keeps at most maxOutputBytes in total and returns the new byte count.
-      const appendBounded = (chunks: Buffer[], currentBytes: number, chunk: Buffer): number => {
-        const remaining = maxOutputBytes - currentBytes
-        if (chunk.length > remaining) {
-          overflowed = true
-          if (remaining > 0) chunks.push(chunk.subarray(0, remaining))
-          return maxOutputBytes
-        }
-        chunks.push(chunk)
-        return currentBytes + chunk.length
-      }
-
-      const signal = (name: NodeJS.Signals) => {
-        try {
-          child.kill(name)
-        } catch {
-          // The process may already have exited.
-        }
-      }
-
-      const finish = (result: DetectorRunResult) => {
-        if (settled) return
-        settled = true
-        if (hardTimer) clearTimeout(hardTimer)
-        if (killTimer) clearTimeout(killTimer)
-        if (deadlineTimer) clearTimeout(deadlineTimer)
-        child.stdout?.removeAllListeners()
-        child.stderr?.removeAllListeners()
-        child.stdin?.removeAllListeners()
-        child.removeAllListeners()
-        // Late stream or process errors must not become uncaught exceptions once settled.
-        child.stdout?.on('error', noop)
-        child.stderr?.on('error', noop)
-        child.stdin?.on('error', noop)
-        child.on('error', noop)
-        // Release our end of pipes a grandchild may still hold open.
-        child.stdout?.destroy()
-        child.stderr?.destroy()
-        resolve(result)
-      }
-
-      child.once('spawn', () => {
-        started = true
-      })
-
-      child.on('error', () => {
-        // Before 'spawn' this is a failure to start. After it, 'close' or the
-        // final deadline settles the run.
-        if (!started) finish({ kind: 'spawn-error' })
-      })
-
-      child.stdout?.on('data', (chunk: Buffer) => {
-        stdoutBytes = appendBounded(stdoutChunks, stdoutBytes, chunk)
-      })
-      child.stderr?.on('data', (chunk: Buffer) => {
-        stderrBytes = appendBounded(stderrChunks, stderrBytes, chunk)
-      })
-
-      child.on('close', (code: number | null) => {
-        if (overflowed) {
-          finish({ kind: 'overflow', ...captured() })
-        } else if (timedOut) {
-          // Exiting after the timeout, even cleanly via a handled SIGTERM, is not a clean scan.
-          finish({ kind: 'timeout', ...captured() })
-        } else if (code === 0) {
-          finish({ kind: 'ok', ...captured() })
-        } else {
-          finish({ kind: 'nonzero-exit', exitCode: code ?? -1, ...captured() })
-        }
-      })
-
-      hardTimer = setTimeout(() => {
-        timedOut = true
-        try {
-          child.stdin?.end()
-        } catch {
-          // Stdin may already be closed.
-        }
-        signal('SIGTERM')
-        killTimer = setTimeout(() => {
-          signal('SIGKILL')
-        }, killGraceMs)
-      }, timeoutMs)
-
-      deadlineTimer = setTimeout(
-        () => {
-          signal('SIGKILL')
-          finish({ kind: overflowed ? 'overflow' : 'timeout', ...captured() })
-        },
-        timeoutMs + killGraceMs + deadlineSlackMs,
-      )
-
-      // A child that exits without reading stdin can raise EPIPE on write. That is
-      // not a spawn failure and must not crash the host.
-      child.stdin?.on('error', noop)
-      try {
-        child.stdin?.end(JSON.stringify(payload))
-      } catch {
-        // If the write fails, the child's own error and close events settle the run.
-      }
-    })
+  const limits: RunLimits = {
+    timeoutMs: options.timeoutMs ?? DETECTOR_TIMEOUT_MS,
+    killGraceMs: options.killGraceMs ?? DETECTOR_KILL_GRACE_MS,
+    deadlineSlackMs: options.deadlineSlackMs ?? DETECTOR_DEADLINE_SLACK_MS,
+    maxOutputBytes: options.maxOutputBytes ?? DETECTOR_MAX_OUTPUT_BYTES,
   }
+  const nodeExecutable = options.nodeExecutable ?? 'node'
+  const checkScript = options.checkScript ?? ((path: string) => access(path))
+
+  return (payload, opts) =>
+    new Promise<DetectorRunResult>((resolve) => {
+      const run = new HookRun(limits, resolve)
+      run.armDeadline()
+
+      const spawnChild = () => {
+        // A check that settles after the run resolved must not start a child.
+        if (run.settled) return
+
+        const env: NodeJS.ProcessEnv = { ...process.env }
+        delete env.IMPECCABLE_HOOK_DEPTH
+        delete env.CLAUDE_HOOK_DEPTH
+        env.IMPECCABLE_HOOK_HARNESS = IMPECCABLE_HOOK_HARNESS
+        env.IMPECCABLE_HOOK_QUIET = '1'
+
+        try {
+          run.attach(
+            spawn(nodeExecutable, [options.scriptPath], { cwd: opts.worktree, env, stdio: ['pipe', 'pipe', 'pipe'] }),
+            payload,
+          )
+        } catch {
+          run.settle({ by: 'spawn-error' })
+        }
+      }
+
+      // The check runs in a promise chain so a synchronous throw from it is a rejection too.
+      Promise.resolve()
+        .then(() => checkScript(options.scriptPath))
+        .then(spawnChild, () => {
+          run.settle({ by: 'spawn-error' })
+        })
+    })
 }
 
 const FEEDBACK_OPEN = '\n\n<impeccable_feedback>\n'
