@@ -339,6 +339,13 @@ describe('toolbar clicks on an expanded card', () => {
     el.dispatchEvent(new Event('pointerdown', {bubbles: true}))
   }
 
+  // A click that ends a pointer press reports a click count of 1 or more; a keyboard or synthetic click reports 0.
+  function pointerClick(el: Element): MouseEvent {
+    const event = new MouseEvent('click', {bubbles: true, cancelable: true, detail: 1})
+    el.dispatchEvent(event)
+    return event
+  }
+
   it.each([
     ['the toggle', toggleButton],
     ['Copy raw', copyButton],
@@ -350,7 +357,7 @@ describe('toolbar clicks on an expanded card', () => {
     pressOn(control(card))
     stream.delta('\n\n- three\n- four', 1)
     await vi.waitFor(() => expect(output(card).querySelectorAll('li')).toHaveLength(4))
-    const event = click(card)
+    const event = pointerClick(card)
 
     expect(onSelectRun).not.toHaveBeenCalled()
     expect(card.dataset.expanded).toBe('true')
@@ -371,9 +378,32 @@ describe('toolbar clicks on an expanded card', () => {
     const {card, onSelectRun, closes} = await mountExpandedStreamingCardWith(stream)
 
     pressOn(toggleButton(card))
-    click(card) // released over the card: ignored
+    pointerClick(card) // released over the card: ignored
     pressOn(output(card))
-    click(card)
+    pointerClick(card)
+
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
+    expect(card.dataset.expanded).toBe('false')
+    expect(closes).toHaveBeenCalledTimes(1)
+  })
+
+  it('a cancelled press on a control does not swallow the next card click', async () => {
+    const {card, onSelectRun, closes} = await mountExpandedStreamingCardWith(feedStream())
+
+    pressOn(toggleButton(card))
+    toggleButton(card).dispatchEvent(new Event('pointercancel', {bubbles: true})) // a touch scroll took over
+    pointerClick(card)
+
+    expect(onSelectRun).toHaveBeenCalledTimes(1)
+    expect(card.dataset.expanded).toBe('false')
+    expect(closes).toHaveBeenCalledTimes(1)
+  })
+
+  it('a keyboard or synthetic click after a press that produced no click still collapses the card', async () => {
+    const {card, onSelectRun, closes} = await mountExpandedStreamingCardWith(feedStream())
+
+    pressOn(toggleButton(card)) // dragged off and released outside the card: no click
+    card.click() // click count 0
 
     expect(onSelectRun).toHaveBeenCalledTimes(1)
     expect(card.dataset.expanded).toBe('false')

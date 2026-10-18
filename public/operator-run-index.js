@@ -1012,13 +1012,19 @@ function bindCardActivation(card, runId, onSelectRun) {
   }
   // Whether the latest press began on a link or button inside the card. A press that starts on a control
   // and ends elsewhere (the toolbar moved under the pointer as output streamed in) is dispatched as a click
-  // on the nearest common ancestor, so the click target alone cannot say where the press began.
+  // on the nearest common ancestor, so the click target alone cannot say where the press began. The flag
+  // belongs to one press: a new press replaces it, a cancelled press and every click clear it, and only a
+  // click that ends a pointer press (click count of 1 or more) honors it. Keyboard and synthetic clicks
+  // report a count of 0 and are judged by their target alone.
   let pressBeganOnControl = false
   card.addEventListener('pointerdown', event => {
     pressBeganOnControl = controlWithin(card, event.target)
   })
+  card.addEventListener('pointercancel', () => {
+    pressBeganOnControl = false
+  })
   card.addEventListener('click', event => {
-    const pressed = pressBeganOnControl
+    const pressed = pressBeganOnControl && event.detail > 0
     pressBeganOnControl = false
     if (pressed || clickBelongsToContent(card, event)) return
     activate()
