@@ -7,6 +7,7 @@ import {
   extractFeedbackText,
   extractTouchedPaths,
   isMutatingTool,
+  PATH_ARG_KEYS,
   type DetectorRunResult,
 } from './hook-bridge.ts'
 
@@ -160,6 +161,15 @@ function ok(stdout = '', stderr = ''): DetectorRunResult {
   return { kind: 'ok', stdout, stderr }
 }
 
+/** Args whose path property throws when read, which fails inside the hook itself rather than in the runner. */
+function throwingArgs(): unknown {
+  return {
+    get filePath(): string {
+      throw new Error('RAW-INTERNAL-DETAIL')
+    },
+  }
+}
+
 function fakeRunner(result: DetectorRunResult | Error, calls: unknown[][] = []) {
   return async (...args: unknown[]) => {
     calls.push(args)
@@ -218,7 +228,7 @@ describe('bridge (createHook)', () => {
 
   it('warns, without throwing, when the runner reports a spawn error', async () => {
     const hook = createHook({
-      runDetector: fakeRunner({ kind: 'spawn-error', message: 'spawn node ENOENT' }),
+      runDetector: fakeRunner({ kind: 'spawn-error' }),
       worktree: '/repo',
     })
     const output = makeOutput()
@@ -382,6 +392,35 @@ describe('paths reach the hook as given', () => {
   })
 })
 
+describe('PATH_ARG_KEYS', () => {
+  it('names exactly the arg keys extractTouchedPaths reads', () => {
+    const keys = Object.values(PATH_ARG_KEYS)
+    expect(keys.toSorted()).toEqual(['filePath', 'patchText'])
+
+    // Each named key yields a path for the tool that reads it.
+    expect(extractTouchedPaths('edit', { [PATH_ARG_KEYS.file]: '/a/b.ts' })).toEqual(['/a/b.ts'])
+    expect(extractTouchedPaths('apply_patch', { [PATH_ARG_KEYS.patch]: '*** Add File: a.ts\n' })).toEqual(['a.ts'])
+
+    // A key outside the set yields nothing, for every tool shape.
+    for (const tool of ['edit', 'write', 'apply_patch', 'aft_edit', 'aft_apply_patch']) {
+      expect(extractTouchedPaths(tool, { path: '/a/b.ts', file_path: '/a/b.ts', patch: '*** Add File: a.ts\n' })).toEqual([])
+    }
+  })
+
+  it('is the set that makes a namespaced tool expect a path', async () => {
+    for (const key of Object.values(PATH_ARG_KEYS)) {
+      const hook = createHook({ runDetector: fakeRunner(ok()), worktree: '/repo' })
+      const output = makeOutput()
+      await hook(makeInput({ tool: 'foo_edit', args: { [key]: '' } }), output)
+      expect(output.output, key).toContain('no extractable path')
+    }
+    const hook = createHook({ runDetector: fakeRunner(ok()), worktree: '/repo' })
+    const output = makeOutput()
+    await hook(makeInput({ tool: 'foo_edit', args: { path: '' } }), output)
+    expect(output.output).toBe('ok')
+  })
+})
+
 describe('extractFeedbackText', () => {
   it('extracts additionalContext from the claude PostToolUse envelope', () => {
     expect(extractFeedbackText(envelope('hello'))).toBe('hello')
@@ -541,6 +580,45 @@ describe('fail-loud', () => {
     expect(output.output).toContain('[impeccable]')
   })
 
+  it('warns bridge-error, not spawn-error, with fixed text when the runner throws', async () => {
+    const hook = createHook({ runDetector: fakeRunner(new Error('RAW-INTERNAL-DETAIL')), worktree: '/repo' })
+    const output = makeOutput()
+    await expect(hook(makeInput(), output)).resolves.toBeUndefined()
+    expect(output.output).toContain('design hook bridge hit an internal error')
+    expect(output.output).not.toContain('could not be started')
+    expect(output.output).not.toContain('RAW-INTERNAL-DETAIL')
+  })
+
+  it('warns bridge-error, not spawn-error, with fixed text when the hook itself faults', async () => {
+    const calls: unknown[][] = []
+    const hook = createHook({ runDetector: fakeRunner(ok(), calls), worktree: '/repo' })
+    const output = makeOutput()
+    await expect(hook(makeInput({ args: throwingArgs() }), output)).resolves.toBeUndefined()
+    expect(calls).toHaveLength(0)
+    expect(output.output).toContain('design hook bridge hit an internal error')
+    expect(output.output).not.toContain('could not be started')
+    expect(output.output).not.toContain('RAW-INTERNAL-DETAIL')
+  })
+
+  it('keeps bridge-error and spawn-error as separate kinds', async () => {
+    const results: (DetectorRunResult | Error)[] = [new Error('boom'), { kind: 'spawn-error' }]
+    let call = 0
+    const hook = createHook({
+      runDetector: async () => {
+        const next = results[call++] ?? ok()
+        if (next instanceof Error) throw next
+        return next
+      },
+      worktree: '/repo',
+    })
+    const first = makeOutput()
+    const second = makeOutput()
+    await hook(makeInput(), first)
+    await hook(makeInput(), second)
+    expect(first.output).toContain('internal error')
+    expect(second.output).toContain('could not be started')
+  })
+
   it('does not re-warn on a second failure of the same kind (same hook instance)', async () => {
     const hook = createHook({
       runDetector: fakeRunner(new Error('boom')),
@@ -598,7 +676,7 @@ describe('fail-loud', () => {
   it('warns once for each runner-reported kind on separate instances, and a second occurrence stays silent', async () => {
     const cases: [DetectorRunResult, string][] = [
       [{ kind: 'timeout', stdout: '', stderr: '' }, 'timed out'],
-      [{ kind: 'spawn-error', message: 'x' }, 'could not be started'],
+      [{ kind: 'spawn-error' }, 'could not be started'],
       [{ kind: 'nonzero-exit', exitCode: 2, stdout: '', stderr: '' }, 'did not run cleanly'],
       [{ kind: 'overflow', stdout: '', stderr: '' }, 'more output than'],
       [ok('', 'diag'), 'diagnostic output'],
@@ -615,10 +693,10 @@ describe('fail-loud', () => {
     }
   })
 
-  it('keeps the kinds independent: all seven kinds warn on a single instance', async () => {
+  it('keeps the kinds independent: all eight kinds warn on a single instance', async () => {
     const results: DetectorRunResult[] = [
       { kind: 'timeout', stdout: '', stderr: '' },
-      { kind: 'spawn-error', message: 'x' },
+      { kind: 'spawn-error' },
       { kind: 'nonzero-exit', exitCode: 2, stdout: '', stderr: '' },
       { kind: 'overflow', stdout: '', stderr: '' },
       ok('', 'diag'),
@@ -634,6 +712,10 @@ describe('fail-loud', () => {
     const noPath = makeOutput()
     await hook(makeInput({ args: {} }), noPath)
     expect(noPath.output).toContain('no extractable path')
+
+    const bridgeError = makeOutput()
+    await hook(makeInput({ args: throwingArgs() }), bridgeError)
+    expect(bridgeError.output).toContain('internal error')
   })
 
   it('leaves a non-string output.output untouched, for a warning and for findings', async () => {

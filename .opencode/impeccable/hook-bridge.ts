@@ -62,8 +62,8 @@ const APPLY_PATCH_FILE_LINE_RE = /^\*\*\* (?:Add File|Update File|Delete File|Mo
 const APPLY_PATCH_MOVE_TO_RE = /^\*\*\* Move to: (.+)$/gm
 const APPLY_PATCH_ADD_OR_UPDATE_RE = /^\*\*\* (?:Add File|Update File): (.+)$/gm
 
-/** Arg keys `extractTouchedPaths` reads: `filePath` for edit/write, `patchText` for apply_patch. */
-const PATH_ARG_KEYS = ['filePath', 'patchText'] as const
+/** The tool-arg keys that carry a path: `filePath` for edit/write, `patchText` for apply_patch. `extractTouchedPaths` reads only these, and `expectsPath` keys off the same set. */
+export const PATH_ARG_KEYS = { file: 'filePath', patch: 'patchText' } as const
 
 function parseApplyPatchPaths(patchText: string): string[] {
   const out: string[] = []
@@ -109,12 +109,12 @@ export function extractTouchedPaths(tool: string, args: unknown): string[] {
   if (!isRecord(args)) return []
 
   if (tool === 'apply_patch' || MUTATING_SUFFIX_RE.exec(tool)?.[1] === 'apply_patch') {
-    const patchText = args.patchText
+    const patchText = args[PATH_ARG_KEYS.patch]
     if (typeof patchText === 'string' && patchText) return parseApplyPatchPaths(patchText)
     return []
   }
 
-  const filePath = args.filePath
+  const filePath = args[PATH_ARG_KEYS.file]
   if (typeof filePath === 'string' && filePath) return [filePath]
   return []
 }
@@ -175,12 +175,12 @@ export function buildHookPayload(input: BuildHookPayloadInput): {
  * - `timeout`: the child ran past its deadline, or exited without releasing its pipes. Output captured so far is carried.
  * - `spawn-error`: the child could not be started (missing script, missing executable, bad cwd).
  * - `nonzero-exit`: the child exited nonzero, or was killed by a signal it was not sent by the runner (`exitCode` is -1).
- * - `overflow`: the child wrote more than the cap to stdout or stderr. The result carries at most the cap from each stream.
+ * - `overflow`: the child wrote more than the cap to stdout or stderr. The result carries at most the cap from each stream. It takes precedence over `timeout`.
  */
 export type DetectorRunResult =
   | { kind: 'ok'; stdout: string; stderr: string }
   | { kind: 'timeout'; stdout: string; stderr: string }
-  | { kind: 'spawn-error'; message: string }
+  | { kind: 'spawn-error' }
   | { kind: 'nonzero-exit'; exitCode: number; stdout: string; stderr: string }
   | { kind: 'overflow'; stdout: string; stderr: string }
 
@@ -208,10 +208,6 @@ export interface CreateSpawnRunnerOptions {
   maxOutputBytes?: number
   /** Node executable to spawn. Defaults to literal `node`; override only for tests. */
   nodeExecutable?: string
-}
-
-function describeError(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
 }
 
 function noop(): void {}
@@ -244,8 +240,8 @@ export function createSpawnRunner(options: CreateSpawnRunnerOptions): DetectorRu
   return async (payload, opts) => {
     try {
       await access(options.scriptPath)
-    } catch (err) {
-      return { kind: 'spawn-error', message: describeError(err) }
+    } catch {
+      return { kind: 'spawn-error' }
     }
 
     return new Promise<DetectorRunResult>((resolve) => {
@@ -262,8 +258,8 @@ export function createSpawnRunner(options: CreateSpawnRunnerOptions): DetectorRu
           env,
           stdio: ['pipe', 'pipe', 'pipe'],
         })
-      } catch (err) {
-        resolve({ kind: 'spawn-error', message: describeError(err) })
+      } catch {
+        resolve({ kind: 'spawn-error' })
         return
       }
 
@@ -334,10 +330,10 @@ export function createSpawnRunner(options: CreateSpawnRunnerOptions): DetectorRu
         started = true
       })
 
-      child.on('error', (err) => {
+      child.on('error', () => {
         // Before 'spawn' this is a failure to start. After it, 'close' or the
         // final deadline settles the run.
-        if (!started) finish({ kind: 'spawn-error', message: describeError(err) })
+        if (!started) finish({ kind: 'spawn-error' })
       })
 
       child.stdout?.on('data', (chunk: Buffer) => {
@@ -376,7 +372,7 @@ export function createSpawnRunner(options: CreateSpawnRunnerOptions): DetectorRu
       deadlineTimer = setTimeout(
         () => {
           signal('SIGKILL')
-          finish({ kind: 'timeout', ...captured() })
+          finish({ kind: overflowed ? 'overflow' : 'timeout', ...captured() })
         },
         timeoutMs + killGraceMs + deadlineSlackMs,
       )
@@ -438,7 +434,7 @@ export function extractFeedbackText(stdout: string): string | null {
  */
 function expectsPath(tool: string, args: unknown): boolean {
   if (MUTATING_BASE_TOOLS.has(tool)) return true
-  return isRecord(args) && PATH_ARG_KEYS.some((key) => key in args)
+  return isRecord(args) && Object.values(PATH_ARG_KEYS).some((key) => key in args)
 }
 
 type WarningKind =
@@ -449,6 +445,7 @@ type WarningKind =
   | 'stderr-on-clean'
   | 'malformed'
   | 'no-path'
+  | 'bridge-error'
 
 const WARNING_MESSAGES = {
   timeout: '[impeccable] design hook timed out before finishing its scan',
@@ -458,6 +455,7 @@ const WARNING_MESSAGES = {
   'stderr-on-clean': '[impeccable] design hook produced unexpected diagnostic output',
   malformed: '[impeccable] design hook returned unrecognized output',
   'no-path': '[impeccable] design hook skipped a file-changing tool call with no extractable path',
+  'bridge-error': '[impeccable] design hook bridge hit an internal error',
 } as const satisfies Record<WarningKind, string>
 
 /**
@@ -476,7 +474,7 @@ const WARNING_MESSAGES = {
  *  - a built-in `edit`/`write`/`apply_patch`, or a mutating tool with a path-like
  *    arg key, yielding no path: `no-path`, and the hook is not run. A mutating
  *    tool with no path-like arg key is silent and not run.
- *  - the runner rejecting, or any bridge fault: `spawn-error`.
+ *  - the runner rejecting, or any other bridge fault: `bridge-error`.
  *
  * Each warning kind shows once per hook instance (one plugin process). Warning
  * text is fixed; hook stdout and stderr are never included. A non-string
@@ -526,7 +524,7 @@ export function createHook(options: CreateHookOptions) {
       try {
         result = await options.runDetector(payload, { worktree: options.worktree })
       } catch {
-        warnOnce('spawn-error')
+        warnOnce('bridge-error')
         return
       }
 
@@ -551,7 +549,7 @@ export function createHook(options: CreateHookOptions) {
 
       append(feedback)
     } catch {
-      warnOnce('spawn-error')
+      warnOnce('bridge-error')
     }
   }
 }

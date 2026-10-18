@@ -337,6 +337,36 @@ describe('createSpawnRunner', () => {
     expect(result.stdout).toBe('é'.repeat(10))
   })
 
+  it('resolves overflow, not timeout, at the final deadline when the child overflowed and a grandchild holds the pipes', async () => {
+    const grandchildPidFile = trackedFile('grandchild-pid')
+    const scriptPath = fixture(
+      [
+        `import {spawn} from 'node:child_process';`,
+        `import {writeFileSync} from 'node:fs';`,
+        `process.stdout.write("x".repeat(200));`,
+        // The detached grandchild inherits stdout/stderr, so the pipes stay
+        // open after this process exits and 'close' never fires on its own.
+        `const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {detached: true, stdio: ['ignore', 'inherit', 'inherit']});`,
+        `writeFileSync(${JSON.stringify(grandchildPidFile)}, String(grandchild.pid));`,
+        `grandchild.unref();`,
+        `process.exit(0);`,
+      ].join('\n'),
+    )
+    const runner = createSpawnRunner({ scriptPath, timeoutMs: 400, killGraceMs: 100, maxOutputBytes: 64 })
+    const start = Date.now()
+    const result = await runner(payload, { worktree: worktree() })
+    const elapsedMs = Date.now() - start
+
+    expect(result.kind).toBe('overflow')
+    if (result.kind !== 'overflow') return
+    expect(Buffer.byteLength(result.stdout, 'utf-8')).toBeLessThanOrEqual(64)
+    // Resolved by the deadline, not by waiting for the grandchild to release the pipes.
+    expect(elapsedMs).toBeGreaterThanOrEqual(400)
+    expect(elapsedMs).toBeLessThan(400 + 100 + 2000)
+    // The grandchild is outside the runner's reach; the afterEach safety net reaps it.
+    expect(isAlive(readPid(grandchildPidFile))).toBe(true)
+  }, 15_000)
+
   it('caps at 1 MiB by default', async () => {
     const scriptPath = fixture('process.stdout.write("x".repeat(1024 * 1024 + 1));\n')
     const runner = createSpawnRunner({ scriptPath })
@@ -506,12 +536,12 @@ describe('real vendored hook.mjs', () => {
     expect(output.output).toContain('new/name.tsx')
   }, 15_000)
 
-  it('leaves a patch that adds, updates and deletes files scanning the same files as before', async () => {
+  it('scans both the added and the updated file of a patch that adds, updates and deletes files', async () => {
     const projectDir = join(worktree(), 'multi-project')
     mkdirSync(join(projectDir, 'src'), { recursive: true })
     writeFileSync(join(projectDir, 'package.json'), '{}', 'utf-8')
     writeFileSync(join(projectDir, 'src', 'Added.tsx'), `${GRADIENT_TEXT_LINE}\n`, 'utf-8')
-    writeFileSync(join(projectDir, 'src', 'Updated.tsx'), 'export const U = () => null\n', 'utf-8')
+    writeFileSync(join(projectDir, 'src', 'Updated.tsx'), `${GRADIENT_TEXT_LINE}\n`, 'utf-8')
 
     const patchText = [
       '*** Begin Patch',
@@ -528,7 +558,7 @@ describe('real vendored hook.mjs', () => {
     expect(result.kind).toBe('ok')
     if (result.kind !== 'ok') return
     expect(result.stdout).toContain('src/Added.tsx')
-    expect(result.stdout).not.toContain('src/Updated.tsx')
+    expect(result.stdout).toContain('src/Updated.tsx')
   }, 15_000)
 })
 
