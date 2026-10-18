@@ -184,7 +184,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 
 ### Stage A: bridge hardening (PR 1, closes #193)
 
-- [ ] **Unit 1: Spawn runner with a bounded deadline**
+- [x] **Unit 1: Spawn runner with a bounded deadline**
 
 **Goal:** Replace the Bun `$` runner with a Node spawn runner that owns the timeout and bounds the tool call.
 
@@ -223,7 +223,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - The integration suite reaps every child.
 - The canary passes against the vendored `hook.mjs`.
 
-- [ ] **Unit 2: Strict output handling and warnings per kind**
+- [x] **Unit 2: Strict output handling and warnings per kind**
 
 **Goal:** Only parsed feedback reaches the agent, and each degraded outcome warns once per kind.
 
@@ -259,7 +259,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - No test output contains raw stdout or stderr.
 - Each kind warns once.
 
-- [ ] **Unit 3: Rename destinations and no-path warnings**
+- [x] **Unit 3: Rename destinations and no-path warnings**
 
 **Goal:** Scan rename destinations, and warn when a file-mutating tool yields no path.
 
@@ -287,7 +287,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 **Verification:**
 - The rename destination is scanned by the real hook.
 
-- [ ] **Unit 4: Live verification and docs**
+- [x] **Unit 4: Live verification and docs**
 
 **Goal:** Prove the assembled plugin works in a real OpenCode session, and bring the docs in line with the current design.
 
@@ -317,7 +317,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 
 ### Stage B: v4 move (PRs 2–4, then the Renovate PR)
 
-- [ ] **Unit 5: Detector spike**
+- [x] **Unit 5: Detector spike**
 
 **Goal:** Decide from data whether v4 can be used on this tree, and how the step has to treat its output.
 
