@@ -23,12 +23,12 @@ applies_when:
 
 ## Context
 
-A repo-local OpenCode plugin (`.opencode/impeccable/plugin.ts`) bridges OpenCode's `tool.execute.after` hook to Impeccable's shared design detector (`.agents/skills/impeccable/scripts/hook.mjs`) so file-mutating edits get in-session design feedback. Building it surfaced **four** distinct silent-failure bugs — and every one passed the full unit suite, `tsc`, and `eslint` clean. Each was caught only by live-session verification, and each cost its own OpenCode restart cycle.
+A repo-local OpenCode plugin (`.opencode/impeccable/plugin.ts`) bridges OpenCode's `tool.execute.after` hook to Impeccable's design hook so file-mutating edits get in-session design feedback. The bridge runs the skill's `.agents/skills/impeccable/scripts/impeccable hook` launcher directly, with no Node and no shell. The launcher is a POSIX shell script that execs the native engine binary for the host platform. That binary is gitignored: the launcher fetches it into `~/.impeccable/bin/<version>/` on first use and verifies its sha256. Building it surfaced **four** distinct silent-failure bugs — and every one passed the full unit suite, `tsc`, and `eslint` clean. Each was caught only by live-session verification, and each cost its own OpenCode restart cycle.
 
 Three surfaces of the plugin's real contract sit outside the unit-test boundary:
 
 - **The host loader's export semantics** — how OpenCode decides a module is a valid plugin.
-- **The subprocess boundary** — the `env` / stdin / stdout contract with `hook.mjs`.
+- **The subprocess boundary** — the `env` / stdin / stdout contract with the hook, and the engine binary being present on the machine.
 - **Host startup behavior** — plugins load once, so code changes need a restart to take effect.
 
 Unit tests with an injected fake runner prove the bridge *state machine* (tool matching, path extraction, fail-loud) — and nothing else. Timeouts, kill behavior, and pipe handling live in the real runner, so they need a test against a real subprocess.
@@ -53,7 +53,7 @@ A non-function export is the classic trap: OpenCode iterates a plugin module's e
 // plugin.ts — the ONLY runtime export is the factory
 export const ImpeccablePlugin: Plugin = async (input) => ({
   'tool.execute.after': createHook({
-    runDetector: createSpawnRunner({ scriptPath: `${input.worktree}/${HOOK_SCRIPT_RELATIVE_PATH}` }),
+    runDetector: createLauncherRunner(`${input.worktree}/${HOOK_LAUNCHER_RELATIVE_PATH}`),
     worktree: input.worktree,
   }),
 })
@@ -62,23 +62,25 @@ export const ImpeccablePlugin: Plugin = async (input) => ({
 **4. Cross-check side-effect evidence, not just the visible tool result.** A hook can fire and still no-op silently. Prove the subprocess actually ran by checking a side effect it owns — e.g. its dedup cache mtime:
 
 ```bash
-stat -f '%Sm %N' .impeccable/hook.cache.json   # unchanged mtime ⇒ hook.mjs bailed without scanning
+stat -f '%Sm %N' .impeccable/hook.cache.json   # unchanged mtime ⇒ the hook bailed without scanning
 ```
 
 **5. Probe at the subprocess boundary directly** to isolate plugin-vs-detector bugs without a restart per hypothesis. Run the exact invocation the plugin would, with the same env, standalone:
 
 ```bash
 printf '{"tool_name":"write","tool_input":{"file_path":"/abs/probe.css"},"cwd":"'"$PWD"'","session_id":"probe"}' \
-  | IMPECCABLE_HOOK_HARNESS=claude node .agents/skills/impeccable/scripts/hook.mjs
+  | IMPECCABLE_HOOK_HARNESS=claude .agents/skills/impeccable/scripts/impeccable hook
 ```
 
 This is how the `IMPECCABLE_HOOK_DEPTH` bug was found in one shell command instead of one restart: the standalone run scanned correctly, so the difference had to be an env var the plugin added.
 
-**6. Do not add "defensive" env vars you have not verified against the subprocess's own logic.** `hook.mjs` treats *any* `IMPECCABLE_HOOK_DEPTH` value as a re-entrancy signal and returns empty (exit 0). Setting it "just in case" made the detector silently bail on every call. The bridge runs `hook.mjs` as a plain subprocess, which cannot re-enter the tool hook, so there is nothing to guard against. The runner deletes any inherited `IMPECCABLE_HOOK_DEPTH` and `CLAUDE_HOOK_DEPTH` from the child's environment and never sets one.
+**6. Do not add "defensive" env vars you have not verified against the subprocess's own logic.** The hook treats *any* `IMPECCABLE_HOOK_DEPTH` value as a re-entrancy signal and returns empty (exit 0). Setting it "just in case" made the detector silently bail on every call. The bridge runs the launcher as a plain subprocess, which cannot re-enter the tool hook, so there is nothing to guard against. The runner deletes any inherited `IMPECCABLE_HOOK_DEPTH` and `CLAUDE_HOOK_DEPTH` from the child's environment and never sets one.
 
-**7. Design a fail-loud path that can actually fire.** `hook.mjs` is contractually always-exit-0, which defeats exit-code-only fail-loud logic. A broken bridge must be detectable by *other* signals. Warn once per kind on timeout, spawn failure, nonzero exit, output overflow, unrecognized stdout, stderr output on an otherwise clean exit, and a fault inside the bridge itself. Only exit 0 with empty stdout and empty stderr counts as a clean scan and stays silent.
+**7. Design a fail-loud path that can actually fire.** The hook is contractually always-exit-0, which defeats exit-code-only fail-loud logic. A broken bridge must be detectable by *other* signals. Warn once per kind on timeout, spawn failure, nonzero exit, output overflow, unrecognized stdout, stderr output on an otherwise clean exit, and a fault inside the bridge itself. Only exit 0 with empty stdout and empty stderr counts as a clean scan and stays silent.
 
-**8. Match the subprocess's output contract to what the agent should see.** `hook.mjs` writes a JSON envelope (`{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"…"}}`) and emits a "scanned, no issues" ack on clean files. Parse only that envelope: accept it only when `hookEventName` is `PostToolUse` and `additionalContext` is a non-empty string, and surface just that inner text. Raw stdout and stderr never reach the agent. Silence clean acks (`IMPECCABLE_HOOK_QUIET=1`) so a clean edit adds nothing. Appended feedback is capped at 64 KiB (UTF-16 code units, cut without splitting a surrogate pair) and ends with a `[impeccable] feedback truncated` marker line inside the wrapper when it is cut.
+**8. Match the subprocess's output contract to what the agent should see.** The hook writes a JSON envelope (`{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"…"}}`) and emits a "scanned, no issues" ack on clean files. Parse only that envelope: accept it only when `hookEventName` is `PostToolUse` and `additionalContext` is a non-empty string, and surface just that inner text. Raw stdout and stderr never reach the agent. Silence clean acks (`IMPECCABLE_HOOK_QUIET=1`) so a clean edit adds nothing. Appended feedback is capped at 64 KiB (UTF-16 code units, cut without splitting a surrogate pair) and ends with a `[impeccable] feedback truncated` marker line inside the wrapper when it is cut.
+
+**9. Warm the engine before any test that runs the real hook.** The engine binary is not in git. On first use the launcher downloads it for the host platform into `~/.impeccable/bin/<version>/` and checks its sha256. That takes several seconds on a fast link, which is longer than the hook's 5 s timeout. A cold machine therefore reports a timeout, and the launcher's `curl` child can keep running after the launcher is killed. The integration suite runs `scripts/impeccable engine-probe` once in a `beforeAll` with a 120 s budget, against the real HOME cache, so the download happens before any timeout-bound test. If the probe fails, the suite fails with a message that names the cause. A machine with a cold cache and no network cannot run the real hook; set `IMPECCABLE_BIN` to an installed engine there.
 
 ## Why This Matters
 
@@ -102,7 +104,7 @@ Each surface is *individually* invisible to tests, so one "run it for real" pass
 export const isMutatingTool = ...        // extra export → loader rejects the module
 export const ImpeccablePlugin = ...
 // runner env:
-IMPECCABLE_HOOK_DEPTH: '1'               // trips hook.mjs re-entrancy guard → silent no-op
+IMPECCABLE_HOOK_DEPTH: '1'               // trips the hook's re-entrancy guard → silent no-op
 // surfacing:
 output.output += proc.stdout.toString()  // leaks the raw JSON envelope
 ```
@@ -113,12 +115,12 @@ output.output += proc.stdout.toString()  // leaks the raw JSON envelope
 // plugin.ts: exactly one runtime export
 export const ImpeccablePlugin: Plugin = async (input) => ({
   'tool.execute.after': createHook({
-    runDetector: createSpawnRunner({ scriptPath: `${input.worktree}/${HOOK_SCRIPT_RELATIVE_PATH}` }),
+    runDetector: createLauncherRunner(`${input.worktree}/${HOOK_LAUNCHER_RELATIVE_PATH}`),
     worktree: input.worktree,
   }),
 })
 
-// runner env (node:child_process spawn, literal `node`, no shell):
+// runner env (node:child_process spawn of the launcher, no shell):
 // inherit the environment, delete both depth vars, set the harness signal and quiet clean-acks
 const env = { ...process.env }
 delete env.IMPECCABLE_HOOK_DEPTH

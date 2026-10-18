@@ -22,6 +22,10 @@ web/dist-fixture
 !.opencode/tui.json
 !.opencode/tsconfig.json
 
+# Impeccable engine binary: fetched per machine by the skill's launcher
+# (sha256-verified), never committed.
+.agents/skills/impeccable/scripts/bin/
+
 # impeccable-ignore-start
 # Ephemeral output, runtime state, and per-dev overrides.
 # Unanchored: .impeccable may sit at the repo root or under a nested

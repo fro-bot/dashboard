@@ -94,7 +94,7 @@ describe('bareToolName', () => {
 })
 
 describe('buildHookPayload', () => {
-  it('produces the exact field names hook.mjs reads for a representative edit event', () => {
+  it('produces the exact field names the hook reads for a representative edit event', () => {
     const payload = buildHookPayload({
       tool: 'edit',
       args: { filePath: '/repo/web/src/App.tsx' },

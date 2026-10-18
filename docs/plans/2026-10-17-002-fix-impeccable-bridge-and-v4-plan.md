@@ -29,7 +29,7 @@ The bridge in `.opencode/impeccable/` has these defects:
 
 - **Timeout.** `withTimeout` races the hook promise but never kills the child, so a timed-out scan is silent and looks like a clean one.
 - **Output.** Raw stdout can reach the agent when the envelope is malformed. Stderr is surfaced verbatim. Output size is unbounded.
-- **Environment.** An inherited hook-depth env var silently turns `hook.mjs` into a no-op.
+- **Environment.** An inherited hook-depth env var silently turns the hook into a no-op.
 - **Renames.** The destination of an `apply_patch` rename is never scanned.
 
 These break the advisory, fail-loud contract in `docs/brainstorms/2026-07-10-opencode-impeccable-plugin-requirements.md` (R6, R11, AE6).
@@ -69,6 +69,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - The gitignored, OpenCode-generated `.opencode/package.json` and its lockfile are not changed.
 - No host-log channel (`client.app.log`). The warning in the tool result is the only signal.
 - `hook-before-edit.mjs` stays unwired, because it can block writes.
+- The design hook runs only through the OpenCode bridge. The repo has no Copilot or Codex hook manifest.
 
 ## Context & Research
 
@@ -94,7 +95,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
   Its `hook-bridge.integration.test.ts` has 21 real-child tests, with a 1000 ms SIGKILL budget.
 - `vitest.config.ts` includes `.opencode/impeccable/**`. `bun run test` runs Vitest on Node. ESLint ignores `.opencode/**`.
 - The Design Check step is in `.github/workflows/main.yaml`. Renovate tracks its `npx impeccable@<version>` line through the shared `bfra-me/renovate-config` npx regex, so the line keeps its shape.
-- The vendored skill lives in `.agents/skills/impeccable/` (3.9.1). The bridge spawns `scripts/hook.mjs` from it.
+- The vendored skill lives in `.agents/skills/impeccable/`. The bridge runs its `scripts/impeccable hook` launcher.
 
 ### Institutional Learnings
 
@@ -141,7 +142,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
       "disposition": "extend"
     },
     {
-      "path_or_symbol": ".agents/skills/impeccable/scripts/hook.mjs",
+      "path_or_symbol": ".agents/skills/impeccable/scripts/impeccable",
       "description": "Vendored Impeccable PostToolUse hook the bridge spawns; reused unchanged",
       "disposition": "reuse"
     }
@@ -155,7 +156,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - **Timing: 5000 ms timeout, then a 2000 ms grace before SIGKILL, with a final deadline just after timeout plus grace.** The runner resolves on `close`, or at the final deadline if a child keeps its pipes open. A tool call therefore never waits much longer than 7 s.
 - **Result shape: discriminated, with a distinct message per kind.** The kinds are `ok`, `timeout`, `spawn-error`, `nonzero-exit` and `overflow`. The bridge adds `stderr-on-clean`, `malformed`, `no-path` and `bridge-error`. All extraction failures share the `malformed` kind. A runner rejection or a fault in the bridge itself is `bridge-error`, not `spawn-error`. A warning names its kind and never includes stderr.
 - **Warn once per kind per plugin instance.** A timeout that follows an earlier warning of another kind still shows. A non-string `output.output` is never modified.
-- **Clean scan: exit 0 with empty stdout and empty stderr, which matches `.io`.** A `hook-lib` crash that exits 0 and writes nothing looks the same at runtime. The canary integration test guards it, and this is an accepted risk.
+- **Clean scan: exit 0 with empty stdout and empty stderr, which matches `.io`.** A hook crash that exits 0 and writes nothing looks the same at runtime. The canary integration test guards it, and this is an accepted risk.
 - **The no-path warning applies only to built-in `edit`, `write` and `apply_patch`, and to tools whose args carry a path-like key.** Path-less MCP `*_edit` calls stay silent.
 - **Stage B order: spike, step rewrite, spike fixes, skill, Renovate.**
   - The step rewrite works on 3.6.1 and 4.x. The `npx impeccable@<version>` literal keeps its own line.
@@ -169,7 +170,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
   - Advisories (`advisory: true`) are printed as a notice and never block.
   - A path pre-check fails the step when `web/src` or `web/privacy.html` is missing, because 3.x exits 0 on an unscannable path.
 - **Skew window accepted.** Between the skill-refresh merge and the Renovate merge, main runs the v4 skill with the 3.6.1 detector. If the Renovate PR head's version differs from the vendored skill, Unit 7 reruns at the PR head's version before approval.
-- **Orphaned children are an accepted risk.** The deadline bounds a child only while the plugin process lives. If OpenCode exits mid-scan, the child can outlive it. `hook.mjs` spawns nothing, so the exposure is one short-lived process.
+- **Orphaned children are an accepted risk.** The deadline bounds a child only while the plugin process lives. If OpenCode exits mid-scan, the child can outlive it. The hook spawns nothing, so the exposure is one short-lived process. A launcher killed during the first-use engine download can leave its `curl` child running.
 
 ## Open Questions
 
@@ -181,8 +182,8 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 ### Deferred to Implementation
 
 - **Spike results.** For each version, capture the exit code on findings and on scan failure (3.6.1 and 4.x), whether advisories appear in the `--json` array, whether `ignoreValues` is honored, any new findings, and stderr on a clean run. Unit 6's handling of advisories and of the 3.x exit codes depends on these.
-- **The v4 `hook.mjs` contract.** Check that stdin fields, stdout envelope, env vars and stderr on a clean run still match the bridge, against the installed bundle.
-- **Installer flags.** Use `--help` to check whether `--providers=agents` and the `skills install` namespace still work at the target version.
+- **The v4 hook contract.** Resolved: the stdin fields, stdout envelope, env vars and the silent clean run match the bridge. The hook is the `scripts/impeccable hook` launcher.
+- **Installer flags.** Resolved: `npx impeccable install -y --providers=agents --scope=project --force` is the command. `skills install` is a legacy alias for it.
 
 ## Implementation Units
 
@@ -220,12 +221,12 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - Edge case: a child that exits 0 but keeps stdout open resolves `timeout` at the final deadline.
 - Error path: a missing `node` binary or script resolves `spawn-error` and does not throw.
 - Edge case: inherited `IMPECCABLE_HOOK_DEPTH` and `CLAUDE_HOOK_DEPTH` are absent from the child's env.
-- Integration: the real vendored `hook.mjs`, run on a fixture file with a known anti-pattern, returns an envelope containing that finding. This is the canary for a `hook-lib` crash.
+- Integration: the real vendored hook, run on a fixture file with a known anti-pattern, returns an envelope containing that finding. This is the canary for a hook crash.
 - Integration: `plugin.ts` exposes exactly one runtime export.
 
 **Verification:**
 - The integration suite reaps every child.
-- The canary passes against the vendored `hook.mjs`.
+- The canary passes against the vendored hook.
 
 - [x] **Unit 2: Strict output handling and warnings per kind**
 
@@ -285,8 +286,8 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - Happy path: an `apply_patch` that adds, updates and deletes files passes through unchanged apart from rename markers.
 - Edge case: an MCP `foo_edit` with no path-like arg stays silent.
 - Error path: a built-in `edit` with no `filePath` warns once.
-- Edge case: absolute and relative paths reach `hook.mjs` as given. Paths outside the worktree pass through, and `hook.mjs` filters them.
-- Integration: the vendored `hook.mjs` scans a rename destination.
+- Edge case: absolute and relative paths reach the hook as given. Paths outside the worktree pass through, and the hook filters them.
+- Integration: the vendored hook scans a rename destination.
 
 **Verification:**
 - The rename destination is scanned by the real hook.
@@ -310,7 +311,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
   - an `apply_patch` rename;
   - an MCP `*_edit`;
   - a burst of parallel edits.
-- In a scratch copy, use a `hook.mjs` that ignores SIGTERM to check the timeout path: the warning shows once, and no child is left behind. Production code gets no test seam.
+- In a scratch copy, use a launcher that ignores SIGTERM to check the timeout path: the warning shows once, and no child is left behind. Production code gets no test seam.
 - Rewrite the runner, timeout and depth-guard statements in both docs so they state the current decision only.
 
 **Test expectation:** none. This unit is verification and docs only.
@@ -374,7 +375,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - Run locally, the step script prints and fails on a findings fixture and on an unscannable input, under both 3.6.1 and 4.x. A clean tree passes under both.
 - Renovate's dashboard still lists the `impeccable` dependency after merge.
 
-- [ ] **Unit 6b: Spike fixes**
+- [x] **Unit 6b: Spike fixes**
 
 **Goal:** Remove every genuine v4 finding before the pin moves.
 
@@ -397,7 +398,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - The v4 detector, run locally with this branch's config, returns an empty primary findings array.
 - The 3.6.1 Design Check still passes.
 
-- [ ] **Unit 7: Vendored skill refresh**
+- [x] **Unit 7: Vendored skill refresh**
 
 **Goal:** Install the skill at the version on Renovate's v4 branch, and confirm the bridge contract still holds.
 
@@ -407,20 +408,29 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 
 **Files:**
 - Modify: `.agents/skills/impeccable/**` (installer output)
-- Test: `.opencode/impeccable/hook-bridge.integration.test.ts`
+- Modify: `.gitignore` (the engine binary directory)
+- Modify: `.opencode/impeccable/hook-bridge.ts`, `.opencode/impeccable/plugin.ts`
+- Modify: `AGENTS.md`, `docs/solutions/workflow-issues/impeccable-skill-shared-agents-install-2026-06-25.md`, `docs/solutions/workflow-issues/opencode-plugin-hooks-need-live-verification-2026-07-10.md`
+- Delete: `.github/hooks/impeccable.json`, `.codex/hooks.json`
+- Test: `.opencode/impeccable/hook-bridge.integration.test.ts`, `.opencode/impeccable/plugin.test.ts`
 
 **Approach:**
 - Read the version from the current Renovate branch head. Check `--help` for the install command and the `agents` provider before running the installer.
-- The installer must leave `.impeccable/config.json` unchanged. Review the full `git status`. Revert any change to another harness's hook config, and any wiring of `hook-before-edit.mjs` or the Stop hook.
-- Check the v4 `hook.mjs` against the bridge: stdin fields, stdout envelope, harness, quiet and depth env vars, `apply_patch` Move-to parsing, and stderr on a clean run. Adapt the bridge only where the contract changed.
+- Run `npx impeccable@<version> install -y --providers=agents --scope=project --no-hooks --force </dev/null` with `CI=true`. `--no-hooks` keeps the install inside `.agents/`. Without it the installer writes `.codex/hooks.json` with a `PostToolUse` entry and a Stop deep-pass entry. The installer fetches the newest signed skill bundle. To install another version, download that release's `universal.zip` and `universal.zip.sig.json` and set `IMPECCABLE_BUNDLE_PATH` to the zip. The installer still verifies the signature.
+- The installer must leave `.impeccable/config.json` unchanged. Review the full `git status`. Anything outside `.agents/skills/impeccable/` is reverted, including any wiring of `hook-before-edit.mjs` or the Stop hook.
+- Only the OpenCode bridge runs the design hook. The repo has no Copilot or Codex hook manifest, so `.github/hooks/impeccable.json` and `.codex/hooks.json` are deleted.
+- The hook is the launcher `scripts/impeccable hook`, a shell script that execs the engine binary for the host platform. The engine binary is not tracked: `.agents/skills/impeccable/scripts/bin/` is gitignored, and the launcher fetches the binary per machine into `~/.impeccable/bin/<version>/` and verifies its sha256 on first use. The bridge runs the launcher directly through `createLauncherRunner`, with no Node and no shell. The stdin fields, stdout envelope, harness, quiet and depth env vars, and the silent clean run are what the bridge expects. The hook ignores `*** Move to:` markers, so the bridge's synthetic Update markers are required.
+- The integration suites that run the real hook warm the engine cache in a `beforeAll` (`scripts/impeccable engine-probe`, 120 s budget, the real HOME cache), so a cold runner downloads the engine before any 5 s hook-timeout test. A failed probe fails those suites with a message that names the cause.
 
 **Test scenarios:**
-- Integration: the Unit 1 canary passes against the v4 `hook.mjs`.
-- Integration: the Unit 3 rename-destination case passes against the v4 `hook.mjs`.
-- Integration: a clean scan with the v4 `hook.mjs` stays silent.
+- Integration: the Unit 1 canary passes against the v4 hook.
+- Integration: the Unit 3 rename-destination case passes against the v4 hook.
+- Integration: a clean scan with the v4 hook stays silent.
+- Integration: from a cold engine cache, the real-hook suites pass after the warm-up.
+- Error path: when the engine cannot be fetched, the real-hook suites fail with the warm-up message and run no test.
 
 **Verification:**
-- The integration suite passes on the v4 bundle.
+- The integration suite passes on the v4 bundle, from a cold and from a warm cache.
 - `.impeccable/config.json` is unchanged by the installer.
 - Repeat the Unit 4 live checks on the refreshed skill.
 
@@ -451,15 +461,15 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - **Error propagation:** Runner and extraction failures each become one warning per kind. Nothing throws into OpenCode.
 - **Unchanged invariants:**
   - `IMPECCABLE_HOOK_HARNESS=claude` and `IMPECCABLE_HOOK_QUIET=1` keep their current behavior.
-  - `.github/hooks/impeccable.json` is unchanged.
+  - The OpenCode bridge is the only runner of the design hook.
   - Renovate owns the CI pin.
 
 ## Risks & Dependencies
 
 | Risk | Mitigation |
 |------|------------|
-| A `hook-lib` crash that exits 0 with no output looks like a clean scan | The canary integration test runs the real hook on a known finding |
-| The v4 `hook.mjs` contract changed and the docs don't say so | Unit 7 checks the installed bundle. The canary and rename tests run the real script |
+| A hook crash that exits 0 with no output looks like a clean scan | The canary integration test runs the real hook on a known finding |
+| The hook contract drifts from what the bridge expects | Unit 7 checks the installed bundle. The canary and rename tests run the real script |
 | Renovate retargets from 4.5.2 to 4.6.0 between the spike and the approval | Unit 7 reads the version from the branch head. Unit 8 reruns Unit 7 if the PR head differs |
 | The installer rewrites config or wires a hook that can block | Unit 7 requires an unchanged config and a reviewed `git status` |
 | v4 writes stderr on clean runs, so every edit warns | Unit 5 records stderr on a clean run. Unit 7 adapts the bridge |

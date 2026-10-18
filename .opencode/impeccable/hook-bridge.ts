@@ -1,8 +1,8 @@
 /**
  * Pure, Node-testable core of the Impeccable OpenCode bridge.
  *
- * Mirrors `.github/hooks/impeccable.json`: after a file-mutating tool call,
- * pipe a hook.mjs-shaped event to `.agents/skills/impeccable/scripts/hook.mjs`
+ * After a file-mutating tool call, pipe a claude-shaped hook event to the
+ * vendored Impeccable launcher (`.agents/skills/impeccable/scripts/impeccable hook`)
  * over stdin and surface any findings back to the agent in the same turn.
  *
  * Advisory only — never blocks a tool call. Fail-loud: each kind of degraded
@@ -22,19 +22,15 @@ import { access } from 'node:fs/promises'
 import { StringDecoder } from 'node:string_decoder'
 
 /**
- * The value `hook.mjs`'s `resolveHarness()` reads via the `IMPECCABLE_HOOK_HARNESS`
- * env override. Our payload is claude-shaped
- * (`tool_name`/`tool_input.file_path`/`tool_input.command`), and
- * `normalizeHookEvent(event, cwd, 'claude')` passes claude-harness events
- * through UNCHANGED (hook-lib.mjs: `if (harness !== 'cursor') return event`).
- * 'github' would instead route through `normalizeGitHubEvent`, which expects
- * camelCase `toolName`/`toolArgs` and would only work by incidental spread of
- * our pre-set `tool_input` — silently dropping apply_patch multi-file parsing.
+ * The value the hook reads from the `IMPECCABLE_HOOK_HARNESS` env override. Our
+ * payload is claude-shaped (`tool_name`/`tool_input.file_path`/`tool_input.command`),
+ * and the claude harness takes it as-is. Another harness value would parse the
+ * payload as that harness's event shape and drop the apply_patch multi-file input.
  */
 export const IMPECCABLE_HOOK_HARNESS = 'claude'
 
-/** Absolute-worktree-relative path to the shared hook script, matching `.github/hooks/impeccable.json`. */
-export const HOOK_SCRIPT_RELATIVE_PATH = '.agents/skills/impeccable/scripts/hook.mjs'
+/** Worktree-relative path to the vendored launcher. It is a POSIX shell script that execs the engine binary for the host platform. */
+export const HOOK_LAUNCHER_RELATIVE_PATH = '.agents/skills/impeccable/scripts/impeccable'
 
 /** Matches the Copilot hook's `timeoutSec: 5`. */
 export const DETECTOR_TIMEOUT_MS = 5000
@@ -75,12 +71,12 @@ function parseApplyPatchPaths(patchText: string): string[] {
 }
 
 /**
- * The vendored `hook-lib.mjs` `parseApplyPatchPaths` recognizes only
+ * The vendored hook recognizes only
  * `*** Add File:` and `*** Update File:` markers, not `*** Move to:`, so a
  * rename's destination would never be scanned. This appends one synthetic
  * `*** Update File: <dest>` marker per distinct Move-to destination that no
  * Add or Update marker already covers. The original patch text is kept
- * verbatim and the markers are appended after it, so the vendored script's
+ * verbatim and the markers are appended after it, so the vendored hook's
  * own parsing of the patch is not disturbed.
  */
 function withMoveToScanMarkers(patchText: string): string {
@@ -119,7 +115,7 @@ export function extractTouchedPaths(tool: string, args: unknown): string[] {
   return []
 }
 
-/** Strips an MCP namespace prefix (`aft_edit`→`edit`) so `tool_name` matches the bare form hook.mjs's `resolveTargetFiles` special-cases (`tool_name === 'apply_patch'` exactly). Passes bare names and non-mutating names through unchanged. */
+/** Strips an MCP namespace prefix (`aft_edit`→`edit`) so `tool_name` matches the bare form the hook special-cases (`tool_name === 'apply_patch'` exactly). Passes bare names and non-mutating names through unchanged. */
 export function bareToolName(tool: string): string {
   const match = MUTATING_SUFFIX_RE.exec(tool)
   return match?.[1] ?? tool
@@ -133,10 +129,10 @@ export interface BuildHookPayloadInput {
 }
 
 /**
- * Shapes the stdin JSON `hook.mjs` reads. `tool_name` is normalized to its
+ * Shapes the stdin JSON the hook reads. `tool_name` is normalized to its
  * bare form. For `apply_patch` (bare or MCP-suffixed), `tool_input.command`
- * carries the raw patch text so hook.mjs's own `parseApplyPatchPaths` can
- * extract every touched file — hook.mjs only reads `tool_input.command` when
+ * carries the raw patch text so the hook can
+ * extract every touched file — the hook only reads `tool_input.command` when
  * `tool_name === 'apply_patch'` exactly, so a `file_path`-only payload would
  * silently drop all but incidental files. Rename destinations are appended as
  * Update markers (see `withMoveToScanMarkers`). For edit/write, `tool_input.file_path`
@@ -196,7 +192,7 @@ export interface CreateHookOptions {
 }
 
 export interface CreateSpawnRunnerOptions {
-  /** Absolute path to `hook.mjs` (or an ephemeral test fixture). */
+  /** Absolute path to the file the run executes (the launcher, or an ephemeral test fixture). It must exist before the child is spawned. */
   scriptPath: string
   /** Time before the child is sent SIGTERM. Defaults to `DETECTOR_TIMEOUT_MS`. */
   timeoutMs?: number
@@ -206,8 +202,10 @@ export interface CreateSpawnRunnerOptions {
   deadlineSlackMs?: number
   /** Most bytes kept from each of stdout and stderr. Defaults to `DETECTOR_MAX_OUTPUT_BYTES`. */
   maxOutputBytes?: number
-  /** Node executable to spawn. Defaults to literal `node`; override only for tests. */
-  nodeExecutable?: string
+  /** Executable to spawn. Defaults to literal `node`. */
+  command?: string
+  /** Arguments for the executable. Defaults to `[scriptPath]`. */
+  args?: string[]
   /** Pre-spawn check that the script exists; rejecting means it cannot run. Defaults to `fs.access`; override only for tests. */
   checkScript?: (scriptPath: string) => Promise<unknown>
 }
@@ -382,13 +380,14 @@ function decode(chunks: Buffer[]): string {
 }
 
 /**
- * Real `node:child_process.spawn` runner: `node <scriptPath>` (no shell, a
- * literal `node` rather than `process.execPath`, which under a Bun host would
- * be Bun) with the payload piped over stdin and cwd at the worktree.
+ * Real `node:child_process.spawn` runner: `<command> <args>` with no shell, the
+ * payload piped over stdin and cwd at the worktree. The defaults run
+ * `node <scriptPath>`, a literal `node` rather than `process.execPath`, which
+ * under a Bun host would be Bun.
  *
  * The child inherits the environment minus both depth variables, with
  * `IMPECCABLE_HOOK_HARNESS=claude` and `IMPECCABLE_HOOK_QUIET=1` set. A depth
- * variable makes `hook.mjs` a no-op, so the bridge never sets one.
+ * variable makes the hook a no-op, so the bridge never sets one.
  *
  * Each of stdout and stderr is capped at `maxOutputBytes` of UTF-8. Excess
  * bytes are discarded as they arrive, and the run resolves `overflow`.
@@ -409,7 +408,8 @@ export function createSpawnRunner(options: CreateSpawnRunnerOptions): DetectorRu
     deadlineSlackMs: options.deadlineSlackMs ?? DETECTOR_DEADLINE_SLACK_MS,
     maxOutputBytes: options.maxOutputBytes ?? DETECTOR_MAX_OUTPUT_BYTES,
   }
-  const nodeExecutable = options.nodeExecutable ?? 'node'
+  const command = options.command ?? 'node'
+  const args = options.args ?? [options.scriptPath]
   const checkScript = options.checkScript ?? ((path: string) => access(path))
 
   return (payload, opts) =>
@@ -429,7 +429,7 @@ export function createSpawnRunner(options: CreateSpawnRunnerOptions): DetectorRu
 
         try {
           run.attach(
-            spawn(nodeExecutable, [options.scriptPath], { cwd: opts.worktree, env, stdio: ['pipe', 'pipe', 'pipe'] }),
+            spawn(command, args, { cwd: opts.worktree, env, stdio: ['pipe', 'pipe', 'pipe'] }),
             payload,
           )
         } catch {
@@ -444,6 +444,15 @@ export function createSpawnRunner(options: CreateSpawnRunnerOptions): DetectorRu
           run.settle({ by: 'spawn-error' })
         })
     })
+}
+
+/**
+ * The production runner: executes the vendored launcher directly (no `node`,
+ * no shell) with the `hook` subcommand. The launcher resolves the engine
+ * binary for the host platform and execs it, so it needs no Node runtime.
+ */
+export function createLauncherRunner(launcherPath: string): DetectorRunner {
+  return createSpawnRunner({ scriptPath: launcherPath, command: launcherPath, args: ['hook'] })
 }
 
 /** Most UTF-16 code units of feedback appended to a tool's output; longer feedback is truncated. */
@@ -470,7 +479,7 @@ const FEEDBACK_OPEN = '\n\n<impeccable_feedback>\n'
 const FEEDBACK_CLOSE = '\n</impeccable_feedback>'
 
 /**
- * Strictly extracts the human-readable feedback text from hook.mjs's stdout.
+ * Strictly extracts the human-readable feedback text from the hook's stdout.
  * Accepts ONLY the nested Claude-harness `PostToolUse` envelope:
  * `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"…"}}`
  * with a non-empty string `additionalContext`.

@@ -6,15 +6,16 @@
  * Runs under Vitest on Node. The runner spawns a literal `node`, so every test
  * here depends on the host being Node and fails loudly otherwise.
  */
+import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 
-import { buildHookPayload, createHook, createSpawnRunner, HOOK_SCRIPT_RELATIVE_PATH } from './hook-bridge.ts'
+import { buildHookPayload, createHook, createLauncherRunner, createSpawnRunner, HOOK_LAUNCHER_RELATIVE_PATH } from './hook-bridge.ts'
 
 // Split across two literals so this test source does not itself trip the
 // per-line detector; the written fixture line carries both on one line.
@@ -202,7 +203,7 @@ describe('createSpawnRunner', () => {
 
   it('resolves spawn-error, without throwing, when the node executable does not exist', async () => {
     const scriptPath = fixture('process.exit(0);\n')
-    const runner = createSpawnRunner({ scriptPath, nodeExecutable: `/does-not-exist-${randomUUID()}/node` })
+    const runner = createSpawnRunner({ scriptPath, command: `/does-not-exist-${randomUUID()}/node` })
     const result = await runner(payload, { worktree: worktree() })
     expect(result.kind).toBe('spawn-error')
   })
@@ -505,7 +506,71 @@ describe('createSpawnRunner + createHook end-to-end', () => {
   })
 })
 
-describe('real vendored hook.mjs', () => {
+describe('createLauncherRunner', () => {
+  function launcherFixture(body: string): string {
+    const path = join(worktree(), `launcher-${randomUUID()}`)
+    writeFileSync(path, `#!/bin/sh\n${body}\n`, { encoding: 'utf-8', mode: 0o755 })
+    return path
+  }
+
+  it('runs the launcher directly with the hook subcommand and the claude harness and quiet env', async () => {
+    const launcher = launcherFixture(
+      'printf \'{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"argv=%s harness=%s quiet=%s"}}\' "$*" "$IMPECCABLE_HOOK_HARNESS" "$IMPECCABLE_HOOK_QUIET"',
+    )
+    const result = await createLauncherRunner(launcher)(payload, { worktree: worktree() })
+
+    expect(result.kind).toBe('ok')
+    if (result.kind !== 'ok') return
+    expect(result.stdout).toContain('argv=hook harness=claude quiet=1')
+  })
+
+  it('hands the payload to the launcher over stdin', async () => {
+    const launcher = launcherFixture('cat')
+    const result = await createLauncherRunner(launcher)(payload, { worktree: worktree() })
+
+    expect(result).toEqual({ kind: 'ok', stdout: JSON.stringify(payload), stderr: '' })
+  })
+
+  it('resolves spawn-error, without throwing, when the launcher does not exist', async () => {
+    const result = await createLauncherRunner(join(tmpdir(), `no-launcher-${randomUUID()}`))(payload, { worktree: worktree() })
+
+    expect(result).toEqual({ kind: 'spawn-error' })
+  })
+})
+
+/**
+ * The launcher fetches the engine binary for the host platform into
+ * `~/.impeccable/bin/<version>/` the first time it runs, and verifies its sha256.
+ * A cold machine would spend that download inside the 5 s hook timeout, so the
+ * suites below fetch it first, with a budget sized for a slow network. The
+ * cache is the real HOME cache, because that is what the launcher uses in
+ * production.
+ */
+const ENGINE_WARMUP_TIMEOUT_MS = 120_000
+
+function warmEngineCache(): Promise<void> {
+  const launcher = join(REPO_ROOT, HOOK_LAUNCHER_RELATIVE_PATH)
+  return new Promise((resolve, reject) => {
+    execFile(launcher, ['engine-probe'], { timeout: ENGINE_WARMUP_TIMEOUT_MS, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
+      if (error === null && stdout.startsWith('impeccable-engine')) {
+        resolve()
+        return
+      }
+      const detail = error === null ? `unexpected output: ${stdout.trim()}` : error.message
+      reject(
+        new Error(
+          `The Impeccable engine could not be fetched or started (${detail}). ` +
+            `${stderr.trim()} The launcher needs network access to download the engine into ~/.impeccable/bin on first use, ` +
+            'or IMPECCABLE_BIN pointing at an installed engine.',
+        ),
+      )
+    })
+  })
+}
+
+describe('real vendored hook', () => {
+  beforeAll(warmEngineCache, ENGINE_WARMUP_TIMEOUT_MS + 10_000)
+
   // The vendored detector flags `background-clip: text` together with a gradient
   // on one line as `gradient-text`. A crash inside the hook library that exits 0
   // with no output would look like a clean scan at runtime, so this canary pins
@@ -522,7 +587,7 @@ describe('real vendored hook.mjs', () => {
       cwd: projectDir,
       sessionID: `canary-${randomUUID()}`,
     })
-    const runner = createSpawnRunner({ scriptPath: join(REPO_ROOT, HOOK_SCRIPT_RELATIVE_PATH) })
+    const runner = createLauncherRunner(join(REPO_ROOT, HOOK_LAUNCHER_RELATIVE_PATH))
     const result = await runner(hookPayload, { worktree: projectDir })
 
     expect(result.kind).toBe('ok')
@@ -547,7 +612,7 @@ describe('real vendored hook.mjs', () => {
       cwd: projectDir,
       sessionID: `clean-${randomUUID()}`,
     })
-    const runner = createSpawnRunner({ scriptPath: join(REPO_ROOT, HOOK_SCRIPT_RELATIVE_PATH) })
+    const runner = createLauncherRunner(join(REPO_ROOT, HOOK_LAUNCHER_RELATIVE_PATH))
     const result = await runner(hookPayload, { worktree: projectDir })
 
     expect(result).toEqual({ kind: 'ok', stdout: '', stderr: '' })
@@ -563,7 +628,7 @@ describe('real vendored hook.mjs', () => {
     const patchText = ['*** Begin Patch', '*** Update File: old/name.tsx', '*** Move to: new/name.tsx', '*** End Patch'].join('\n')
     const sessionID = `rename-${randomUUID()}`
     const hookPayload = buildHookPayload({ tool: 'apply_patch', args: { patchText }, cwd: projectDir, sessionID })
-    const runner = createSpawnRunner({ scriptPath: join(REPO_ROOT, HOOK_SCRIPT_RELATIVE_PATH) })
+    const runner = createLauncherRunner(join(REPO_ROOT, HOOK_LAUNCHER_RELATIVE_PATH))
     const result = await runner(hookPayload, { worktree: projectDir })
 
     expect(result.kind).toBe('ok')
@@ -582,7 +647,7 @@ describe('real vendored hook.mjs', () => {
     writeFileSync(join(projectDir, 'new', 'name.tsx'), `${GRADIENT_TEXT_LINE}\n`, 'utf-8')
 
     const hook = createHook({
-      runDetector: createSpawnRunner({ scriptPath: join(REPO_ROOT, HOOK_SCRIPT_RELATIVE_PATH) }),
+      runDetector: createLauncherRunner(join(REPO_ROOT, HOOK_LAUNCHER_RELATIVE_PATH)),
       worktree: projectDir,
     })
     const output = { title: 't', output: 'ok', metadata: {} }
@@ -609,7 +674,7 @@ describe('real vendored hook.mjs', () => {
       '*** End Patch',
     ].join('\n')
     const hookPayload = buildHookPayload({ tool: 'apply_patch', args: { patchText }, cwd: projectDir, sessionID: `multi-${randomUUID()}` })
-    const runner = createSpawnRunner({ scriptPath: join(REPO_ROOT, HOOK_SCRIPT_RELATIVE_PATH) })
+    const runner = createLauncherRunner(join(REPO_ROOT, HOOK_LAUNCHER_RELATIVE_PATH))
     const result = await runner(hookPayload, { worktree: projectDir })
 
     expect(result.kind).toBe('ok')

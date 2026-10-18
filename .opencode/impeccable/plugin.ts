@@ -9,11 +9,11 @@
 
 import type { Plugin } from '@opencode-ai/plugin'
 
-import { createHook, createSpawnRunner, HOOK_SCRIPT_RELATIVE_PATH } from './hook-bridge.ts'
+import { createHook, createLauncherRunner, HOOK_LAUNCHER_RELATIVE_PATH } from './hook-bridge.ts'
 
 export const ImpeccablePlugin: Plugin = async (input) => ({
   'tool.execute.after': createHook({
-    runDetector: createSpawnRunner({ scriptPath: `${input.worktree}/${HOOK_SCRIPT_RELATIVE_PATH}` }),
+    runDetector: createLauncherRunner(`${input.worktree}/${HOOK_LAUNCHER_RELATIVE_PATH}`),
     worktree: input.worktree,
   }),
 })
