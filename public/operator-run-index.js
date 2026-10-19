@@ -121,6 +121,28 @@ const VALID_FAILURE_KINDS = new Set([
 ])
 
 /**
+ * Allowlisted OperatorProviderFailureReason values — out-of-set values normalize to absent.
+ * Mirrors src/gateway/operator-contract/provider-failure-reason.ts OPERATOR_PROVIDER_FAILURE_REASONS.
+ */
+const VALID_PROVIDER_FAILURE_REASONS = new Set([
+  'provider-auth-unavailable',
+  'model-not-available',
+  'provider-rejected-request',
+  'unclassified',
+])
+
+/** Longest launch prompt in UTF-16 units. Mirrors src/gateway/operator-contract/launch-prompt.ts OPERATOR_LAUNCH_PROMPT_MAX_LENGTH. */
+const LAUNCH_PROMPT_MAX_LENGTH = 8000
+
+/**
+ * A launch prompt is kept when it is a string, not empty after trim(), and at most
+ * LAUNCH_PROMPT_MAX_LENGTH raw units. It is stored exactly as received. Mirrors the server's isKeptLaunchPrompt.
+ */
+function isKeptLaunchPrompt(value) {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= LAUNCH_PROMPT_MAX_LENGTH
+}
+
+/**
  * Dashboard-owned display labels for known failure reasons — render labels from
  * this map, never the raw failureKind wire string. Must stay identical to the
  * map in public/operator-stream.js (parity is enforced by tests). Every
@@ -176,6 +198,16 @@ export function parseRunSummaryItem(input) {
   // value normalizes to omitted — it never fails validity of the summary.
   const failureKind = VALID_FAILURE_KINDS.has(candidate.failureKind) ? candidate.failureKind : undefined
 
+  // providerFailureReason refines a failed session-error run only; elsewhere it is omitted.
+  const providerFailureReason =
+    candidate.status === 'failed' &&
+    failureKind === 'session-error' &&
+    VALID_PROVIDER_FAILURE_REASONS.has(candidate.providerFailureReason)
+      ? candidate.providerFailureReason
+      : undefined
+
+  const prompt = isKeptLaunchPrompt(candidate.prompt) ? candidate.prompt : undefined
+
   // Closed DTO — copy only declared fields; never spread input.
   const summary = {
     runId: candidate.runId,
@@ -184,6 +216,8 @@ export function parseRunSummaryItem(input) {
     createdAt: candidate.createdAt,
     ...('updatedAt' in candidate ? {updatedAt: candidate.updatedAt} : {}),
     ...(failureKind === undefined ? {} : {failureKind}),
+    ...(providerFailureReason === undefined ? {} : {providerFailureReason}),
+    ...(prompt === undefined ? {} : {prompt}),
   }
 
   return {success: true, data: summary}

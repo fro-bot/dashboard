@@ -356,6 +356,124 @@ describe('parseRunSummaryItem — failureKind', () => {
   })
 })
 
+describe('parseRunSummaryItem — prompt and providerFailureReason', () => {
+  const SESSION_ERROR_FAILED = {status: 'failed', failureKind: 'session-error'}
+  // 7,998 ASCII units plus one surrogate pair is exactly 8,000 UTF-16 units.
+  const PROMPT_AT_LIMIT = `${'a'.repeat(7998)}\u{1F600}`
+
+  it('keeps a multi-line Markdown prompt byte for byte', () => {
+    const prompt = '# Title\r\n\r\n- one\n- two\n\n```js\nconst x = 1\n```\n  trailing  \n<b>html</b> [link](https://example.com)\n'
+    const result = parseRunSummaryItem(makeValidSummary({prompt}))
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data.prompt).toBe(prompt)
+  })
+
+  it('keeps a prompt of exactly 8000 units including a surrogate pair', () => {
+    expect(PROMPT_AT_LIMIT.length).toBe(8000)
+    const result = parseRunSummaryItem(makeValidSummary({prompt: PROMPT_AT_LIMIT}))
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data.prompt).toBe(PROMPT_AT_LIMIT)
+  })
+
+  it('omits a prompt of 8001 units and keeps the run', () => {
+    const result = parseRunSummaryItem(makeValidSummary({prompt: `${PROMPT_AT_LIMIT}x`}))
+    expect(result.success).toBe(true)
+    if (result.success) expect(Object.hasOwn(result.data, 'prompt')).toBe(false)
+  })
+
+  it.each([
+    ['empty', ''],
+    ['whitespace-only', ' \t\r\n  '],
+    ['a number', 42],
+    ['null', null],
+    ['an object', {text: 'hi'}],
+    ['an array', ['hi']],
+    ['a boolean', true],
+  ])('omits a prompt that is %s and keeps the run', (_label, prompt) => {
+    const result = parseRunSummaryItem(makeValidSummary({prompt}))
+    expect(result.success).toBe(true)
+    if (result.success) expect(Object.hasOwn(result.data, 'prompt')).toBe(false)
+  })
+
+  it('omits prompt when the summary has none', () => {
+    const result = parseRunSummaryItem(makeValidSummary())
+    expect(result.success).toBe(true)
+    if (result.success) expect(Object.hasOwn(result.data, 'prompt')).toBe(false)
+  })
+
+  it.each(['provider-auth-unavailable', 'model-not-available', 'provider-rejected-request', 'unclassified'])(
+    'keeps providerFailureReason %s on a failed session-error run',
+    providerFailureReason => {
+      const result = parseRunSummaryItem(makeValidSummary({...SESSION_ERROR_FAILED, providerFailureReason}))
+      expect(result.success).toBe(true)
+      if (result.success) expect(result.data.providerFailureReason).toBe(providerFailureReason)
+    },
+  )
+
+  it.each([['an unknown string', 'some-future-reason'], ['a prototype name', 'constructor'], ['a number', 1], ['null', null]])(
+    'omits providerFailureReason that is %s and keeps the run',
+    (_label, providerFailureReason) => {
+      const result = parseRunSummaryItem(makeValidSummary({...SESSION_ERROR_FAILED, providerFailureReason}))
+      expect(result.success).toBe(true)
+      if (result.success) {
+        expect(Object.hasOwn(result.data, 'providerFailureReason')).toBe(false)
+        expect(result.data.failureKind).toBe('session-error')
+      }
+    },
+  )
+
+  it('omits a known providerFailureReason on a non-session-error failureKind', () => {
+    const result = parseRunSummaryItem(
+      makeValidSummary({status: 'failed', failureKind: 'inactivity-timeout', providerFailureReason: 'model-not-available'}),
+    )
+    expect(result.success).toBe(true)
+    if (result.success) expect(Object.hasOwn(result.data, 'providerFailureReason')).toBe(false)
+  })
+
+  it('omits a known providerFailureReason when failureKind is absent or unrecognized', () => {
+    for (const failureKind of [undefined, 'some-future-kind']) {
+      const result = parseRunSummaryItem(
+        makeValidSummary({status: 'failed', failureKind, providerFailureReason: 'model-not-available'}),
+      )
+      expect(result.success).toBe(true)
+      if (result.success) expect(Object.hasOwn(result.data, 'providerFailureReason')).toBe(false)
+    }
+  })
+
+  it.each(['queued', 'running', 'waiting_for_approval', 'waiting_for_question', 'succeeded', 'cancelled'])(
+    'omits a known providerFailureReason on a %s run',
+    status => {
+      const result = parseRunSummaryItem(
+        makeValidSummary({status, failureKind: 'session-error', providerFailureReason: 'model-not-available'}),
+      )
+      expect(result.success).toBe(true)
+      if (result.success) expect(Object.hasOwn(result.data, 'providerFailureReason')).toBe(false)
+    },
+  )
+
+  it('keeps the same prompt and reason results as the server parser', () => {
+    const inputs = [
+      makeValidSummary({prompt: PROMPT_AT_LIMIT}),
+      makeValidSummary({prompt: `${PROMPT_AT_LIMIT}x`}),
+      makeValidSummary({prompt: '   '}),
+      makeValidSummary({prompt: 7}),
+      makeValidSummary({...SESSION_ERROR_FAILED, providerFailureReason: 'unclassified', prompt: '  keep me  '}),
+      makeValidSummary({...SESSION_ERROR_FAILED, providerFailureReason: 'nope'}),
+      makeValidSummary({status: 'failed', failureKind: 'unknown', providerFailureReason: 'unclassified'}),
+      makeValidSummary({status: 'running', failureKind: 'session-error', providerFailureReason: 'unclassified'}),
+    ]
+    for (const input of inputs) {
+      const browser = parseRunSummaryItem(input)
+      const server = parseServerRunSummary(input)
+      expect(browser.success).toBe(server.success)
+      if (browser.success && server.success) {
+        expect(browser.data.prompt).toBe(server.data.prompt)
+        expect(browser.data.providerFailureReason).toBe(server.data.providerFailureReason)
+      }
+    }
+  })
+})
+
 describe('buildRunSafeView — reasonLabel', () => {
   it('a failed summary with a known failureKind produces a safe view with a display label', () => {
     const summary = {

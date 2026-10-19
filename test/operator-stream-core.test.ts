@@ -129,6 +129,13 @@ const INITIAL_STATE: StreamState = {
   shouldReconnect: false,
 }
 
+function parseStatusData(payload: Record<string, unknown>) {
+  const result = parseSseFrame(`event: status\ndata: ${JSON.stringify(payload)}\n\n`)
+  expect(result?.success).toBe(true)
+  if (result?.success !== true || result.frame.type !== 'status') throw new Error('expected a status frame')
+  return result.frame.data
+}
+
 describe('parseSseFrame — pure parser', () => {
   it('parses a ready frame', () => {
     const text = `event: ready\ndata: {"contractVersion":"1.5.0"}\n\n`
@@ -256,6 +263,74 @@ describe('parseSseFrame — pure parser', () => {
     }
   })
 
+  describe('providerFailureReason', () => {
+    const FAILED_SESSION_ERROR = {...ACTIVE_STATUS, status: 'failed', phase: 'FAILED', failureKind: 'session-error'}
+
+    it.each(['provider-auth-unavailable', 'model-not-available', 'provider-rejected-request', 'unclassified'])(
+      'keeps %s on a FAILED session-error frame',
+      providerFailureReason => {
+        const data = parseStatusData({...FAILED_SESSION_ERROR, providerFailureReason})
+        expect(data.providerFailureReason).toBe(providerFailureReason)
+      },
+    )
+
+    it.each([['an unknown string', 'some-future-reason'], ['a prototype name', 'constructor'], ['a number', 1], ['null', null]])(
+      'omits providerFailureReason that is %s and keeps the frame',
+      (_label, providerFailureReason) => {
+        const data = parseStatusData({...FAILED_SESSION_ERROR, providerFailureReason})
+        expect('providerFailureReason' in data).toBe(false)
+        expect(data.failureKind).toBe('session-error')
+      },
+    )
+
+    it('omits a known reason on a non-session-error failureKind', () => {
+      const data = parseStatusData({...FAILED_SESSION_ERROR, failureKind: 'stream-ended', providerFailureReason: 'model-not-available'})
+      expect('providerFailureReason' in data).toBe(false)
+    })
+
+    it('omits a known reason when failureKind is absent or unrecognized', () => {
+      for (const failureKind of [undefined, 'some-future-kind']) {
+        const data = parseStatusData({...FAILED_SESSION_ERROR, failureKind, providerFailureReason: 'model-not-available'})
+        expect('providerFailureReason' in data).toBe(false)
+      }
+    })
+
+    it.each(['PENDING', 'ACKNOWLEDGED', 'EXECUTING', 'COMPLETED', 'CANCELLED'])(
+      'omits a known reason on a %s frame',
+      phase => {
+        const data = parseStatusData({...ACTIVE_STATUS, phase, failureKind: 'session-error', providerFailureReason: 'model-not-available'})
+        expect('providerFailureReason' in data).toBe(false)
+      },
+    )
+
+    it('omits the field when the frame has none', () => {
+      expect('providerFailureReason' in parseStatusData(FAILED_SESSION_ERROR)).toBe(false)
+    })
+
+    it('never carries a prompt on a status frame', () => {
+      const data = parseStatusData({...FAILED_SESSION_ERROR, prompt: 'do the thing'})
+      expect('prompt' in data).toBe(false)
+    })
+
+    it('keeps the same reason results as the server reader', () => {
+      const payloads = [
+        {...FAILED_SESSION_ERROR, providerFailureReason: 'unclassified'},
+        {...FAILED_SESSION_ERROR, providerFailureReason: 'nope'},
+        {...FAILED_SESSION_ERROR, failureKind: 'unknown', providerFailureReason: 'unclassified'},
+        {...ACTIVE_STATUS, failureKind: 'session-error', providerFailureReason: 'unclassified'},
+      ]
+      for (const payload of payloads) {
+        const text = `event: status\ndata: ${JSON.stringify(payload)}\n\n`
+        const browser = parseSseFrame(text)
+        const server = parseSseChunk(text)[0]
+        if (browser?.success !== true || browser.frame.type !== 'status') throw new Error('expected a browser status frame')
+        if (server === undefined || !server.success || server.frame.type !== 'status') {
+          throw new Error('expected a server status frame')
+        }
+        expect(browser.frame.data.providerFailureReason).toBe(server.frame.data.providerFailureReason)
+      }
+    })
+  })
   it('returns a failure for an unknown event name', () => {
     const text = 'event: unknown-event\ndata: {"foo":"bar"}\n\n'
     const result = parseSseFrame(text)

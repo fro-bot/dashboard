@@ -58,6 +58,13 @@ export type FailureKind =
   | 'workspace-unavailable'
   | 'unknown'
 
+/** Why a `session-error` run failed at the provider. Later gateway versions may add values; the parser drops any not listed. */
+export type ProviderFailureReason =
+  | 'provider-auth-unavailable'
+  | 'model-not-available'
+  | 'provider-rejected-request'
+  | 'unclassified'
+
 /**
  * Dashboard-owned display labels for known failure reasons, keyed by FailureKind.
  * Must stay identical (keys and label values) to the map exported from
@@ -257,6 +264,8 @@ export interface StatusFrameData {
   readonly stale: boolean
   /** Operator-safe failure-reason code. Optional; failed statuses only. */
   readonly failureKind?: FailureKind
+  /** Present only on a FAILED `session-error` frame with a known reason. */
+  readonly providerFailureReason?: ProviderFailureReason
   /** Closed, sanitized DTO. Omitted when absent or invalid. */
   readonly checkoutProvenance?: CheckoutProvenance
   /** Closed, sanitized DTO. Omitted when absent or invalid. */

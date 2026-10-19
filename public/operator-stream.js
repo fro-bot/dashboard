@@ -225,6 +225,17 @@ const VALID_FAILURE_KINDS = new Set([
 ])
 
 /**
+ * Allowlisted OperatorProviderFailureReason values — out-of-set values normalize to absent.
+ * Mirrors src/gateway/operator-contract/provider-failure-reason.ts OPERATOR_PROVIDER_FAILURE_REASONS.
+ */
+const VALID_PROVIDER_FAILURE_REASONS = new Set([
+  'provider-auth-unavailable',
+  'model-not-available',
+  'provider-rejected-request',
+  'unclassified',
+])
+
+/**
  * Dashboard-owned display labels for known failure reasons — render labels from
  * this map, never the raw failureKind wire string. A missing or unmapped reason
  * has no entry here and falls back to generic 'Failed' at the render boundary.
@@ -810,6 +821,14 @@ export function parseSseFrame(record) {
     // failureKind is optional and allowlist-gated; an unrecognized or absent
     // value normalizes to omitted — it never fails validity of the status frame.
     const failureKind = VALID_FAILURE_KINDS.has(parsed.failureKind) ? parsed.failureKind : undefined
+    // providerFailureReason follows the same rule and refines only a FAILED session-error frame; on any
+    // other phase or kind it is omitted. A status frame never carries a prompt.
+    const providerFailureReason =
+      parsed.phase === 'FAILED' &&
+      failureKind === 'session-error' &&
+      VALID_PROVIDER_FAILURE_REASONS.has(parsed.providerFailureReason)
+        ? parsed.providerFailureReason
+        : undefined
     // checkoutProvenance / checkoutPreparation follow the same soft rule: validated
     // field by field, capped and sanitized, closed into a DTO. Invalid or absent →
     // omitted. They never fail the status frame.
@@ -828,6 +847,7 @@ export function parseSseFrame(record) {
           startedAt: parsed.startedAt,
           stale: parsed.stale,
           ...(failureKind === undefined ? {} : {failureKind}),
+          ...(providerFailureReason === undefined ? {} : {providerFailureReason}),
           ...(checkoutProvenance === undefined ? {} : {checkoutProvenance}),
           ...(checkoutPreparation === undefined ? {} : {checkoutPreparation}),
         },

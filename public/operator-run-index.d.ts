@@ -30,6 +30,13 @@ export type FailureKind =
   | 'workspace-unavailable'
   | 'unknown'
 
+/** Why a `session-error` run failed at the provider. Later gateway versions may add values; parsers drop any not listed. */
+export type ProviderFailureReason =
+  | 'provider-auth-unavailable'
+  | 'model-not-available'
+  | 'provider-rejected-request'
+  | 'unclassified'
+
 /** Parsed run summary — closed DTO with only declared fields. */
 export interface ParsedRunSummary {
   readonly runId: string
@@ -38,6 +45,13 @@ export interface ParsedRunSummary {
   readonly createdAt: string
   readonly updatedAt?: string
   readonly failureKind?: FailureKind
+  /** Present only on a failed `session-error` run with a known reason. */
+  readonly providerFailureReason?: ProviderFailureReason
+  /**
+   * The operator's launch prompt exactly as submitted: non-empty after trim(), at most 8000 UTF-16 units.
+   * Untrusted text; render it inertly.
+   */
+  readonly prompt?: string
 }
 
 /** Closed safe-view for rendering — adds statusLabel, excludes unknown fields. */
