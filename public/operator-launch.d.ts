@@ -15,7 +15,7 @@ export type LaunchOutcome =
   | {readonly kind: 'rate-limited'}
   | {readonly kind: 'prompt-too-long'}
   | {readonly kind: 'prompt-required'}
-  | {readonly kind: 'failure'}
+  | {readonly kind: 'failure'; readonly indeterminate?: true}
 
 // ---------------------------------------------------------------------------
 // Pending card hook descriptor
@@ -65,6 +65,9 @@ export declare function validateRepoItem(item: unknown): boolean
 
 /** Longest launch prompt the form sends, in UTF-16 units. Equals the vendored contract's limit. */
 export declare const LAUNCH_PROMPT_MAX_LENGTH: number
+
+/** Deadline in ms for each launch-client request, including its body read. */
+export declare const LAUNCH_FETCH_TIMEOUT_MS: number
 
 /** True when the untrimmed prompt is over the gateway's length limit. */
 export declare function isPromptTooLong(prompt: string): boolean

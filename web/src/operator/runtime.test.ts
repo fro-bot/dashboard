@@ -4513,6 +4513,23 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
     expectRealRenderer(mounted.lastAttach()?.renderOutput)
   })
 
+  describe('a launch that arrives after the runtime stopped owning the page', () => {
+    it.each([
+      ['cleanup', (m: Awaited<ReturnType<typeof mountRenderer>>) => m.runtime.cleanup()],
+      ['a signed-out session', (m: Awaited<ReturnType<typeof mountRenderer>>) => m.authRequired()],
+    ])('attaches no stream and writes no hash after %s', async (_name, stop) => {
+      renderPage()
+      const mounted = await mountRenderer()
+      stop(mounted)
+
+      mounted.launch()
+      await new Promise(resolve => realSetTimeout(resolve, 5))
+
+      expect(mounted.initOperatorStream).not.toHaveBeenCalled()
+      expect(location.hash).toBe('')
+    })
+  })
+
   describe('the prompt renderer handed to the run index', () => {
     const functionCalls = (setPromptRenderer: ReturnType<typeof vi.fn>) =>
       setPromptRenderer.mock.calls.filter(([passed]) => typeof passed === 'function')

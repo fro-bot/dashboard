@@ -5,7 +5,7 @@
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 
-import {LAUNCH_PROMPT_MAX_LENGTH as LAUNCH_FORM_PROMPT_MAX_LENGTH} from '../public/operator-launch.js'
+import {LAUNCH_FETCH_TIMEOUT_MS, LAUNCH_PROMPT_MAX_LENGTH as LAUNCH_FORM_PROMPT_MAX_LENGTH} from '../public/operator-launch.js'
 import {buildRunSafeView, FETCH_TIMEOUT_MS, fetchRunIndex, formatRelativeTime, initOperatorRunIndex, markCardExpandedForLaunch, markRunStreamAttached, parseRunSummaryItem, parseRunSummaryList, refreshOperatorRunIndex, resetRunIndexState, RUN_INDEX_CAP, FAILURE_REASON_LABELS as RUN_INDEX_FAILURE_REASON_LABELS, LAUNCH_PROMPT_MAX_LENGTH as RUN_INDEX_LAUNCH_PROMPT_MAX_LENGTH, PROVIDER_FAILURE_REASON_LABELS as RUN_INDEX_PROVIDER_FAILURE_REASON_LABELS, RUN_STATUS_CLASS_TOKENS, VALID_RUN_SUMMARY_STATUSES} from '../public/operator-run-index.js'
 import {nextStreamState, PINNED_CONTRACT_VERSION, FAILURE_REASON_LABELS as STREAM_FAILURE_REASON_LABELS, PROVIDER_FAILURE_REASON_LABELS as STREAM_PROVIDER_FAILURE_REASON_LABELS} from '../public/operator-stream.js'
 import {formatRelativeTime as sharedFormatRelativeTime} from '../public/operator-time.js'
@@ -2959,6 +2959,12 @@ describe('browser launch prompt limit — parity with the vendored contract', ()
   it('the run index and the launch form use the contract limit', () => {
     expect(RUN_INDEX_LAUNCH_PROMPT_MAX_LENGTH).toBe(OPERATOR_LAUNCH_PROMPT_MAX_LENGTH)
     expect(LAUNCH_FORM_PROMPT_MAX_LENGTH).toBe(OPERATOR_LAUNCH_PROMPT_MAX_LENGTH)
+  })
+})
+
+describe('browser request deadline — parity between the run index and the launch client', () => {
+  it('the launch client uses the run index fetch timeout', () => {
+    expect(LAUNCH_FETCH_TIMEOUT_MS).toBe(FETCH_TIMEOUT_MS)
   })
 })
 

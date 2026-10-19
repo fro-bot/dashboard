@@ -931,6 +931,8 @@ async function defaultRuntimeLoader(opts?: {
   }
 
   const onRunLaunched = (runId: string, card: HTMLElement) => {
+    // A launch can resolve after cleanup or sign-out; this runtime no longer owns a stream or the hash.
+    if (disposed || authRequired) return
     const statusEl = card.querySelector('[data-role="run-status"]') ?? null
     const noticeEl = typeof document !== 'undefined'
       ? document.querySelector('[data-role="stream-status"]')
