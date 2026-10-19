@@ -64,7 +64,15 @@ export interface RunSafeView {
   readonly updatedAt?: string
   /** Pre-resolved dashboard display label for a known failure reason. Never the raw failureKind. */
   readonly reasonLabel?: string
+  /** The launch prompt exactly as parsed. Untrusted text: render it with `textContent` or the prompt renderer. */
+  readonly prompt?: string
 }
+
+/**
+ * Builds the DOM for a prompt body. It has the shape of the output renderer: it receives the document and
+ * the page origin and returns a fragment. It may throw; the body then stays plain text.
+ */
+export type PromptRenderer = (text: string, context: {readonly doc: Document; readonly origin: string}) => DocumentFragment
 
 export type RunIndexResult =
   | {readonly kind: 'loaded'; readonly summaries: ParsedRunSummary[]}
@@ -119,6 +127,14 @@ export declare function markRunStreamAttached(runId: string): void
  * absent or already expanded.
  */
 export declare function markCardExpandedForLaunch(runId: string): void
+
+/**
+ * Set the renderer that expanding a card uses to render its prompt body as Markdown, or clear it with
+ * `undefined`. Nothing repaints: a card renders its body the next time it expands, and a body already
+ * rendered for the current prompt text is kept. Without a renderer, or when it throws, the body stays plain
+ * text. Resetting the run index does not clear it.
+ */
+export declare function setPromptRenderer(renderer: PromptRenderer | undefined): void
 
 /**
  * Refresh the run list in place: fetch, then diff without the loading toggle. Single-flight — a

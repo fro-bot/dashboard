@@ -492,6 +492,9 @@ async function defaultRuntimeLoader(opts?: {
   // RENDERER_LOAD_CAP_MS. A renderer that is missing, fails to load or is too slow is no renderer, and
   // that stream paints plain text.
   let renderer: OutputRenderer | undefined
+  // Hands a loaded renderer to the run index for prompt bodies. Set once the run index module has loaded;
+  // a renderer that loaded earlier is handed over at that point.
+  let applyPromptRenderer: ((loaded: OutputRenderer | undefined) => void) | undefined
   let rendererSettled = false
   let rendererCapTimer: ReturnType<typeof setTimeout> | undefined
   const rendererReady = new Promise<void>(resolve => {
@@ -512,6 +515,7 @@ async function defaultRuntimeLoader(opts?: {
     loading.then(
       loaded => {
         renderer = loaded
+        applyPromptRenderer?.(loaded)
         settle()
       },
       settle,
@@ -529,8 +533,12 @@ async function defaultRuntimeLoader(opts?: {
 
   const runIndexMod = await import(/* @vite-ignore */ _runIndexSpecifier) as Pick<
     typeof RunIndexModule,
-    'initOperatorRunIndex' | 'refreshOperatorRunIndex' | 'resetRunIndexState' | 'markRunStreamAttached' | 'markCardExpandedForLaunch'
+    'initOperatorRunIndex' | 'refreshOperatorRunIndex' | 'resetRunIndexState' | 'markRunStreamAttached' | 'markCardExpandedForLaunch' | 'setPromptRenderer'
   >
+  // The prompt renderer is the same one the streams get, handed over when the load promise resolves — not
+  // when the cap settles it. A renderer that loaded before the run index module did is handed over now.
+  applyPromptRenderer = loaded => runIndexMod.setPromptRenderer(loaded)
+  if (renderer !== undefined) applyPromptRenderer(renderer)
 
   const launchMod = await import(/* @vite-ignore */ _launchSpecifier) as Pick<
     typeof LaunchModule,
@@ -1068,6 +1076,9 @@ async function defaultRuntimeLoader(opts?: {
     _closeActiveStream()
     launchMod.resetLaunchState()
     runIndexMod.resetRunIndexState()
+    // Only the newest loader clears it: an older one cleaning up late must not take the renderer from its successor.
+    applyPromptRenderer = undefined
+    if (_loaderEpoch === epoch) runIndexMod.setPromptRenderer(undefined)
   }
 }
 

@@ -326,6 +326,40 @@
   color: var(--color-text-muted);
 }
 
+/* Launch prompt: a one-line preview on a collapsed card, the full body on an expanded one. Both span the
+   card and hide when empty. Row placement, the body's height cap and the narrow-screen rows belong to the
+   design pass. */
+.run-card .run-prompt-preview,
+.run-card .run-prompt {
+  grid-column: 1 / -1;
+  min-width: 0;
+  font-size: var(--text-body-sm);
+  color: var(--color-text-muted);
+}
+
+.run-card .run-prompt-preview {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.run-card .run-prompt {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A rendered body is elements; only plain text needs pre-wrap. */
+.run-card .run-prompt > :not(pre) {
+  white-space: normal;
+}
+
+.run-card .run-prompt-preview:empty,
+.run-card .run-prompt:empty,
+.run-card:not([data-expanded="true"]) .run-prompt,
+.run-card[data-expanded="true"] .run-prompt-preview {
+  display: none;
+}
+
 /* Expanded substructure */
 [data-role="run-output"],
 [data-role="run-output-coalesced"],

@@ -41,6 +41,7 @@ describe('operator auth recovery after a successful initial load', () => {
       resetRunIndexState: vi.fn(),
       markRunStreamAttached: vi.fn(),
       markCardExpandedForLaunch: vi.fn(),
+      setPromptRenderer: vi.fn(),
     }))
     vi.doMock('/static/operator-launch.js?manual=1', () => ({
       initOperatorLaunch: vi.fn(async () => {}),
@@ -83,6 +84,7 @@ describe('operator auth recovery after a successful initial load', () => {
       resetRunIndexState: vi.fn(),
       markRunStreamAttached: vi.fn(),
       markCardExpandedForLaunch: vi.fn(),
+      setPromptRenderer: vi.fn(),
     }))
     vi.doMock('/static/operator-launch.js?manual=1', () => ({
       initOperatorLaunch: vi.fn(async () => {}),
@@ -115,6 +117,7 @@ describe('operator auth recovery after a successful initial load', () => {
       resetRunIndexState: vi.fn(),
       markRunStreamAttached: vi.fn(),
       markCardExpandedForLaunch: vi.fn(),
+      setPromptRenderer: vi.fn(),
     }))
     vi.doMock('/static/operator-launch.js?manual=1', () => ({
       initOperatorLaunch: vi.fn(async () => {}),

@@ -19,7 +19,8 @@
  *   404 → one uniform unavailable state. A response body is never rendered.
  * - No cause inference from body or timing.
  * - credentials:'include', redirect:'error' on all fetch calls.
- * - The prompt is user-typed and goes only in the POST body — never in logs or DOM.
+ * - The prompt is user-typed. It goes in the POST body and, as plain text only (`textContent`), into the
+ *   launched card's prompt slots — never in logs, attributes or markup.
  * - runId appears only in the data-run-id attribute and the stream URL.
  */
 
@@ -786,6 +787,21 @@ export async function initOperatorLaunch(opts) {
           timeEl.setAttribute('datetime', launchedAt)
           timeEl.textContent = formatRelativeTime(launchedAt)
           card.append(timeEl)
+
+          // Launch prompt slots — same slot as a fetched card: right after the header row, ahead of every
+          // hidden region. Seeded with the exact text that was sent, as plain text. The run index owns
+          // the slots from adoption on and renders the body as Markdown when the card expands.
+          const promptPreviewEl = document.createElement('div')
+          promptPreviewEl.className = 'run-prompt-preview'
+          promptPreviewEl.dataset.role = 'run-prompt-preview'
+          promptPreviewEl.textContent = prompt
+          card.append(promptPreviewEl)
+
+          const promptBodyEl = document.createElement('div')
+          promptBodyEl.className = 'run-prompt'
+          promptBodyEl.dataset.role = 'run-prompt'
+          promptBodyEl.textContent = prompt
+          card.append(promptBodyEl)
 
           // Hidden per-card substructure for the stream renderer.
 

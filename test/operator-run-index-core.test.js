@@ -3053,6 +3053,51 @@ describe('run-index provider failure label on the collapsed card', () => {
   })
 })
 
+describe('prompt on the collapsed card (core)', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  const promptRoles = card => card._children.map(child => child.dataset.role)
+
+  it('buildRunSafeView carries the prompt exactly as received and omits it when absent', () => {
+    const prompt = '  # Heading\r\n\r\n- item  \n'
+    expect(buildRunSafeView(makeValidSummary({prompt})).prompt).toBe(prompt)
+    expect('prompt' in buildRunSafeView(makeValidSummary())).toBe(false)
+  })
+
+  it('a card with a prompt carries the preview and the body as plain text, right after the header row', async () => {
+    const prompt = '# Title\n\n<b>not html</b>'
+    const card = await loadCard(makeValidSummary({runId: 'run-core-prompt-001', updatedAt: '2026-06-26T13:00:00.000Z', prompt}))
+
+    const order = promptRoles(card)
+    expect(order.slice(0, 5)).toEqual(['run-status-group', 'run-repo', 'run-updated-at', 'run-prompt-preview', 'run-prompt'])
+    expect(order[5]).toBe('run-checkout-detail')
+    const preview = card.querySelector('[data-role="run-prompt-preview"]')
+    const body = card.querySelector('[data-role="run-prompt"]')
+    expect(preview.className).toBe('run-prompt-preview')
+    expect(body.className).toBe('run-prompt')
+    expect(preview.textContent).toBe(prompt)
+    expect(body.textContent).toBe(prompt)
+    expect(preview.hidden).toBe(false)
+    expect(body.hidden).toBe(false)
+  })
+
+  it('a card without a prompt carries both elements empty', async () => {
+    const card = await loadCard(makeValidSummary({runId: 'run-core-prompt-002'}))
+    expect(card.querySelector('[data-role="run-prompt-preview"]').textContent).toBe('')
+    expect(card.querySelector('[data-role="run-prompt"]').textContent).toBe('')
+  })
+
+  it('a prompt does not change the card label or add attributes for it', async () => {
+    const card = await loadCard(makeValidSummary({runId: 'run-core-prompt-003', prompt: 'private text'}))
+    expect(JSON.stringify([card.attributes, card.dataset, card.className])).not.toContain('private text')
+    expect(card.querySelector('[data-role="run-prompt"]').attributes).toEqual({})
+    expect(card.querySelector('[data-role="run-prompt-preview"]').attributes).toEqual({})
+  })
+})
+
 describe('summary-seeded label and stream label agree', () => {
   const live = () => nextStreamState({connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
   const frame = extra => ({
@@ -4096,7 +4141,7 @@ describe('checkout-detail region — adopted optimistic cards (ensureRunCardAnat
     await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
 
     const fetched = cards.find(card => card.dataset.runId === 'run-ck-parity-fetched')
-    const hiddenRoles = card => childRoles(card).filter(role => role !== undefined && !['run-status-group', 'run-repo', 'run-updated-at'].includes(role))
+    const hiddenRoles = card => childRoles(card).filter(role => role !== undefined && !['run-status-group', 'run-repo', 'run-updated-at', 'run-prompt-preview', 'run-prompt'].includes(role))
     expect(hiddenRoles(optimistic)).toEqual(hiddenRoles(fetched))
     expect(hiddenRoles(fetched)[0]).toBe(CHECKOUT_ROLE)
     expect(hiddenRoles(fetched)).toEqual(ORDERED_REGION_ROLES)
@@ -4239,7 +4284,7 @@ describe('question region — adopted optimistic cards (ensureRunCardAnatomy)', 
     await initOperatorRunIndex({endpointBase: '/operator', onSelectRun: vi.fn()})
 
     const fetched = cards.find(card => card.dataset.runId === 'run-q-parity-fetched')
-    const hiddenRoles = card => childRoles(card).filter(role => role !== undefined && !['run-status-group', 'run-repo', 'run-updated-at'].includes(role))
+    const hiddenRoles = card => childRoles(card).filter(role => role !== undefined && !['run-status-group', 'run-repo', 'run-updated-at', 'run-prompt-preview', 'run-prompt'].includes(role))
     expect(hiddenRoles(optimistic)).toEqual(hiddenRoles(fetched))
     expect(hiddenRoles(fetched)).toContain(QUESTIONS_ROLE)
     expect(hiddenRoles(fetched)).toEqual(ORDERED_REGION_ROLES)

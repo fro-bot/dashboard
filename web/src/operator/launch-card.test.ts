@@ -69,7 +69,7 @@ describe('optimistic launch card', () => {
     return launched
   }
 
-  it('a successful launch inserts a card with exactly one hidden, empty checkout-detail region right after the header row', async () => {
+  it('a successful launch inserts a card with exactly one hidden, empty checkout-detail region right after the header row and the prompt slots', async () => {
     const card = await launchOptimisticCard()
 
     expect(card.dataset.runId).toBe('run-card-001')
@@ -84,7 +84,7 @@ describe('optimistic launch card', () => {
 
     const roles = Array.from(card.children).map(child => (child as HTMLElement).dataset.role)
     const at = roles.indexOf('run-checkout-detail')
-    expect(roles[at - 1]).toBe('run-updated-at')
+    expect(roles.slice(at - 3, at)).toEqual(['run-updated-at', 'run-prompt-preview', 'run-prompt'])
     expect(roles[at + 1]).toBe('run-waiting')
   })
 
@@ -142,7 +142,7 @@ describe('optimistic launch card', () => {
 
     const roles = Array.from(card.children).map(child => (child as HTMLElement).dataset.role)
     expect(roles.indexOf('run-updated-at')).toBe(roles.indexOf('run-repo') + 1)
-    expect(roles.indexOf('run-updated-at')).toBe(roles.indexOf('run-checkout-detail') - 1)
+    expect(roles.indexOf('run-updated-at')).toBe(roles.indexOf('run-prompt-preview') - 1)
   })
 
   it('the seeded <time> is plain text with no child nodes, and the card gains no other time-related attribute', async () => {

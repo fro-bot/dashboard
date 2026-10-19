@@ -88,6 +88,16 @@ const QUESTIONS_ROLE = 'run-questions'
 const OUTPUT_TOOLS_ROLE = 'run-output-tools'
 
 /**
+ * The launch prompt's two card slots, kept outside SUBSTRUCTURE_ROLES so collapse never hides them. The
+ * preview holds the raw prompt (CSS keeps it to one line on a collapsed card); the body holds the same
+ * text, rendered as Markdown when the card expands. They sit right after the header row (status group,
+ * repo, time) and ahead of the first hidden region on every card shape.
+ */
+const PROMPT_PREVIEW_ROLE = 'run-prompt-preview'
+const PROMPT_ROLE = 'run-prompt'
+const PROMPT_ROLES = [PROMPT_PREVIEW_ROLE, PROMPT_ROLE]
+
+/**
  * The card's hidden substructure regions in DOM order. The checkout-detail region leads the
  * list, so anything inserted "before the first hidden region" lands ahead of it too. The
  * question region sits right after the approvals region on every card shape.
@@ -157,6 +167,22 @@ export const FAILURE_REASON_LABELS = {
   'checkout-substituted': 'Checkout mismatch',
   'workspace-unavailable': 'Workspace unavailable',
   unknown: 'Unknown failure',
+}
+
+// The renderer for prompt bodies, handed over by the runtime once the output renderer has loaded. Without
+// one, a body stays plain text.
+let _promptRenderer
+
+// The prompt text each body is rendered for. A body absent from the map shows plain text.
+const _renderedPromptBodies = new WeakMap()
+
+/**
+ * Set the Markdown renderer that expanding a card uses for its prompt body, or clear it with undefined.
+ * Nothing repaints: a card renders its body the next time it expands. Anything that is not a function
+ * clears the renderer.
+ */
+export function setPromptRenderer(renderer) {
+  _promptRenderer = typeof renderer === 'function' ? renderer : undefined
 }
 
 /**
@@ -268,7 +294,8 @@ export function parseRunSummaryList(input) {
  * construction. reasonLabel is a pre-resolved dashboard display label — never the
  * raw failureKind or providerFailureReason — and is present only for a failed summary
  * carrying a known failureKind. A known providerFailureReason on a `session-error` run
- * selects its provider label. Non-failed statuses ignore any failureKind.
+ * selects its provider label. Non-failed statuses ignore any failureKind. The prompt is
+ * carried exactly as parsed.
  */
 export function buildRunSafeView(summary) {
   const statusLabel = STATUS_LABELS[summary.status] ?? summary.status
@@ -287,6 +314,7 @@ export function buildRunSafeView(summary) {
     createdAt: summary.createdAt,
     ...('updatedAt' in summary ? {updatedAt: summary.updatedAt} : {}),
     ...(reasonLabel === undefined ? {} : {reasonLabel}),
+    ...(summary.prompt === undefined ? {} : {prompt: summary.prompt}),
   }
 }
 
@@ -856,8 +884,8 @@ function adoptLaunchSeededTime(card, view) {
 
 /**
  * Update a card's safe-view-derived fields in place. Closed attribute-mutation set:
- * className (status-* only), textContent (safe-view text children), datetime (on <time>),
- * plus removing a launch-seeded <time> and its data-time-source marker on adoption.
+ * className (status-* only), textContent (safe-view text children, including the two prompt slots),
+ * datetime (on <time>), plus removing a launch-seeded <time> and its data-time-source marker on adoption.
  * Never touches data-run-id or data-expanded on the card itself. The one structural
  * addition is a missing <time> (see below), built with the same safe-DOM shape as renderRunCard.
  * Never called for the active-stream card (the diff write-protects it).
@@ -899,11 +927,13 @@ function updateCardInPlace(card, view) {
         timeEl = document.createElement('time')
         timeEl.className = 'run-updated-at'
         timeEl.dataset.role = 'run-updated-at'
-        insertBeforeFirstRole(card, timeEl, SUBSTRUCTURE_ROLES)
+        insertBeforeFirstRole(card, timeEl, [...PROMPT_ROLES, ...SUBSTRUCTURE_ROLES])
       }
       timeEl.setAttribute('datetime', view.updatedAt)
       timeEl.textContent = formatRelativeTime(view.updatedAt)
     }
+
+    paintPrompt(card, view.prompt)
 
     const reasonEl = card.querySelector('[data-role="run-reason"]')
     if (reasonEl !== null && reasonEl !== undefined) {
@@ -914,6 +944,59 @@ function updateCardInPlace(card, view) {
         reasonEl.dataset.reasonState = 'present'
       }
     }
+  }
+}
+
+/** A prompt slot element: a div carrying the slot's role and class. */
+function createPromptSlot(role) {
+  const el = document.createElement('div')
+  el.className = role
+  el.dataset.role = role
+  return el
+}
+
+/**
+ * Write the list-owned prompt into a card's two slots. The preview holds the raw text and the body holds
+ * the same text as plain text, so a changed prompt resets a rendered body; an unchanged prompt keeps it.
+ * No prompt clears both. Text only, never markup.
+ */
+function paintPrompt(card, prompt) {
+  const previewEl = card.querySelector(`[data-role="${PROMPT_PREVIEW_ROLE}"]`)
+  const bodyEl = card.querySelector(`[data-role="${PROMPT_ROLE}"]`)
+  if (previewEl === null || previewEl === undefined || bodyEl === null || bodyEl === undefined) return
+  paintPromptSlots(previewEl, bodyEl, prompt)
+}
+
+function paintPromptSlots(previewEl, bodyEl, prompt) {
+  const next = prompt ?? ''
+  if (previewEl.textContent === next) return
+  previewEl.textContent = next
+  bodyEl.textContent = next
+  _renderedPromptBodies.delete(bodyEl)
+}
+
+/**
+ * Render a card's prompt body as Markdown with the current prompt renderer, when it is not already rendered
+ * for the current prompt text. Called when a card expands. With no renderer, or a renderer that throws, the
+ * body keeps its plain text: the fragment is built before the body is touched, so a failure leaves no
+ * partial result.
+ */
+function renderPromptBody(card) {
+  if (_promptRenderer === undefined || typeof card.querySelector !== 'function') return
+  const previewEl = card.querySelector(`[data-role="${PROMPT_PREVIEW_ROLE}"]`)
+  const bodyEl = card.querySelector(`[data-role="${PROMPT_ROLE}"]`)
+  if (previewEl === null || previewEl === undefined || bodyEl === null || bodyEl === undefined) return
+
+  const prompt = previewEl.textContent
+  if (typeof prompt !== 'string' || prompt === '' || _renderedPromptBodies.get(bodyEl) === prompt) return
+
+  try {
+    const fragment = _promptRenderer(prompt, {doc: document, origin: globalThis.location?.origin ?? ''})
+    if (fragment === null || fragment === undefined) return
+    bodyEl.replaceChildren(fragment)
+    _renderedPromptBodies.set(bodyEl, prompt)
+  } catch {
+    // The plain text stays. Nothing is logged: errors can carry prompt text.
   }
 }
 
@@ -969,6 +1052,13 @@ function renderRunCard(view, onSelectRun) {
     timeEl.textContent = formatRelativeTime(view.updatedAt)
     card.append(timeEl)
   }
+
+  // Launch prompt — list-owned, so it is painted here and by updateCardInPlace, never by the stream.
+  // SLOT: right after the header row, ahead of every hidden region. Every card shape places it here.
+  const promptPreviewEl = createPromptSlot(PROMPT_PREVIEW_ROLE)
+  const promptBodyEl = createPromptSlot(PROMPT_ROLE)
+  card.append(promptPreviewEl, promptBodyEl)
+  paintPromptSlots(promptPreviewEl, promptBodyEl, view.prompt)
 
   // Hidden per-card substructure — targets for operator-stream.js's updateDOM().
   // Shown only by the stream's paint, never by expand. Safe-DOM only: createElement + textContent/
@@ -1155,7 +1245,17 @@ function ensureRunCardAnatomy(card, view, onSelectRun) {
     const repoSpan = document.createElement('span')
     repoSpan.className = 'run-repo'
     repoSpan.dataset.role = 'run-repo'
-    insertBeforeFirstRole(card, repoSpan, ['run-updated-at', ...SUBSTRUCTURE_ROLES])
+    insertBeforeFirstRole(card, repoSpan, ['run-updated-at', ...PROMPT_ROLES, ...SUBSTRUCTURE_ROLES])
+  }
+
+  // Prompt slots: same position renderRunCard gives them (after the header row, ahead of the first hidden
+  // region). Only created when missing — exactly one of each per card. The text itself is
+  // list-owned and written by updateCardInPlace.
+  if (card.querySelector(`[data-role="${PROMPT_PREVIEW_ROLE}"]`) === null) {
+    insertBeforeFirstRole(card, createPromptSlot(PROMPT_PREVIEW_ROLE), [PROMPT_ROLE, ...SUBSTRUCTURE_ROLES])
+  }
+  if (card.querySelector(`[data-role="${PROMPT_ROLE}"]`) === null) {
+    insertBeforeFirstRole(card, createPromptSlot(PROMPT_ROLE), SUBSTRUCTURE_ROLES)
   }
 
   // Checkout-detail region: same slot renderRunCard gives it (ahead of every other
@@ -1231,6 +1331,7 @@ function toggleCardExpansion(card, runId, onSelectRun) {
   card.dataset.expanded = isExpanded ? 'false' : 'true'
   // Collapse hides; expand shows nothing, since the stream's paint is the only thing that reveals a region.
   if (isExpanded) hideSubstructure(card)
+  else renderPromptBody(card)
   _expandedRunId = isExpanded ? null : runId
 
   onSelectRun(runId)
@@ -1277,6 +1378,7 @@ export function markCardExpandedForLaunch(runId) {
   }
 
   card.dataset.expanded = 'true'
+  renderPromptBody(card)
   _expandedRunId = runId
 }
 
@@ -1310,6 +1412,7 @@ function expandCardForRestore(runId, onExpand) {
   }
 
   card.dataset.expanded = 'true'
+  renderPromptBody(card)
   _expandedRunId = runId
 
   onExpand(runId, card)
