@@ -57,9 +57,12 @@ expect(launch.status).toBe(404)
 
 A `POST` that starts work needs two independent guards:
 
-- **A mandatory fresh idempotency key per submit, REUSED on any retry.** A retry of
+- **A mandatory idempotency key per submission, REUSED on any retry.** A retry of
   a request whose response was lost must dedupe to the same run, not start a second
-  one. The single CSRF-400 retry must pass the *same* key:
+  one. The key goes in the JSON body (the gateway reads it there), with the header
+  as a repeat. The single CSRF-400 retry must pass the *same* key, and so must a
+  re-click of the same repo and prompt after a timeout or network failure. The key
+  is released on any definitive answer. The CSRF retry:
 
 ```js
 const key = mintIdempotencyKey()                 // once per submit; use crypto.randomUUID()
