@@ -64,7 +64,8 @@
   box-shadow: var(--shadow-glow);
 }
 [data-theme="light"] .operator-primary-action { color: var(--color-bg); }
-.operator-primary-action:disabled {
+.operator-primary-action:disabled,
+[data-theme="light"] .operator-primary-action:disabled {
   background: var(--color-surface);
   border-color: var(--color-border);
   color: var(--color-text-muted);
