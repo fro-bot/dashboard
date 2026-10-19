@@ -22,6 +22,8 @@
 export type {OperatorApprovalFrame} from './approval-frame.ts'
 export type {OperatorDecisionState, PermissionReply} from './approval.ts'
 export type {OperatorIdentity} from './identity.ts'
+export {OPERATOR_LAUNCH_PROMPT_MAX_LENGTH, OPERATOR_LAUNCH_PROMPT_TOO_LONG} from './launch-prompt.ts'
+export type {OperatorLaunchPromptRejectionReason} from './launch-prompt.ts'
 export type {OperatorOutputFrame} from './output.ts'
 export {
   parseOperatorCancelResponse,
@@ -54,6 +56,8 @@ export {
   parseOperatorCheckoutProvenance,
   UPDATE_FAILURE_REASONS,
 } from './provenance.ts'
+export type {OperatorProviderFailureReason} from './provider-failure-reason.ts'
+export {OPERATOR_PROVIDER_FAILURE_REASONS} from './provider-failure-reason.ts'
 export type {PushHandoffState, PushInactiveReason, PushSubscriptionListResponse, PushSubscriptionMetadata, VapidKeyResponse} from './push.ts'
 export {parsePushHandoffState, parsePushSubscriptionListResponse, parseVapidKeyResponse} from './push.ts'
 export type {

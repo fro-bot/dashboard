@@ -12,6 +12,7 @@
  */
 
 import type {OperatorCheckoutPreparation, OperatorCheckoutProvenance} from './provenance.ts'
+import type {OperatorProviderFailureReason} from './provider-failure-reason.ts'
 
 // ---------------------------------------------------------------------------
 // Inlined boundary types from @fro-bot/runtime (minimal, frozen literals only)
@@ -85,6 +86,12 @@ export interface OperatorRunStatus {
   readonly startedAt: string
   readonly stale: boolean
   readonly failureKind?: OperatorFailureKind
+  /**
+   * Why a `session-error` run failed at the provider. A closed enum with no user or provider text.
+   * Absent unless the run is FAILED with `failureKind: 'session-error'` and the stored value is a known
+   * wire reason; absence means "no further detail", never a sentinel.
+   */
+  readonly providerFailureReason?: OperatorProviderFailureReason
   /**
    * What this run started from (the checked-out commit/branch, worktree
    * cleanliness, any in-progress operation). Present ONLY on runs that reached

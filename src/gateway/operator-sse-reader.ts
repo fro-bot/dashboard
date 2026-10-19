@@ -26,6 +26,7 @@ import type {OperatorApprovalFrame} from './operator-contract/approval-frame.ts'
 import type {OperatorRunStatus} from './operator-contract/run-status.ts'
 import type {ResetReason, RunStreamFrame} from './operator-contract/sse-frames.ts'
 import {parseOperatorCheckoutPreparation, parseOperatorCheckoutProvenance} from './operator-contract/provenance.ts'
+import {isOperatorProviderFailureReason} from './operator-contract/provider-failure-reason.ts'
 import {parseQuestionFrame} from './operator-contract/question-frame.ts'
 import {isOperatorFailureKind} from './operator-contract/run-status.ts'
 import {OPERATOR_CONTRACT_VERSION} from './operator-contract/version.ts'
@@ -183,6 +184,14 @@ function parseSseRecord(record: string): SseParseResult | null {
     // for a valid status frame — missing or unrecognized values normalize to
     // absent (never echoed, never surfaced as a raw value).
     const failureKind = isOperatorFailureKind(candidate.failureKind) ? candidate.failureKind : undefined
+    // providerFailureReason follows the same rule and refines only a FAILED session-error frame; on
+    // any other phase or kind it is omitted. A status frame never carries a prompt.
+    const providerFailureReason =
+      candidate.phase === 'FAILED' &&
+      failureKind === 'session-error' &&
+      isOperatorProviderFailureReason(candidate.providerFailureReason)
+        ? candidate.providerFailureReason
+        : undefined
     // checkoutProvenance and checkoutPreparation follow the same rule: parsed
     // field-by-field by the vendored validators; malformed or absent values
     // become absent and never reject the frame. No caps or sanitizing here —
@@ -203,6 +212,7 @@ function parseSseRecord(record: string): SseParseResult | null {
           startedAt: candidate.startedAt,
           stale: candidate.stale,
           ...(failureKind === undefined ? {} : {failureKind}),
+          ...(providerFailureReason === undefined ? {} : {providerFailureReason}),
           ...(checkoutProvenance === undefined ? {} : {checkoutProvenance}),
           ...(checkoutPreparation === undefined ? {} : {checkoutPreparation}),
         },

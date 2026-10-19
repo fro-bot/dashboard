@@ -15,6 +15,7 @@
 import type {RunStreamFrame} from '../src/gateway/operator-contract/sse-frames.ts'
 import type {Logger} from '../src/logger.ts'
 import {describe, expect, it, vi} from 'vitest'
+import {OPERATOR_PROVIDER_FAILURE_REASONS} from '../src/gateway/operator-contract/provider-failure-reason.ts'
 import {OPERATOR_CONTRACT_VERSION} from '../src/gateway/operator-contract/version.ts'
 import {FIXTURE_RUN_ID_FOR_TESTS, FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../src/gateway/operator-fixture-sse.ts'
 import {createOperatorSseReader, MAX_SSE_BUFFER_BYTES, parseSseChunk} from '../src/gateway/operator-sse-reader.ts'
@@ -2600,6 +2601,79 @@ describe('parseSseChunk — hard core is unchanged by the soft fields', () => {
       )[0]
       expect(result?.success).toBe(false)
     }
+  })
+})
+
+describe('parseSseChunk — providerFailureReason', () => {
+  const failed = (overrides: Record<string, unknown> = {}) =>
+    statusPayload({phase: 'FAILED', status: 'failed', failureKind: 'session-error', ...overrides})
+  const hasReason = (data: ReturnType<typeof parseStatusData>) => Object.hasOwn(data ?? {}, 'providerFailureReason')
+
+  it.each(OPERATOR_PROVIDER_FAILURE_REASONS)('keeps "%s" on a failed session-error frame', providerFailureReason => {
+    const data = parseStatusData(failed({providerFailureReason}))
+    expect(data?.providerFailureReason).toBe(providerFailureReason)
+    expect(data?.failureKind).toBe('session-error')
+  })
+
+  it('omits an unknown, wrongly cased, internal-spelling or prototype-key reason and keeps the frame', () => {
+    const values = ['fixture-future-reason', 'MODEL-NOT-AVAILABLE', 'model not available', '', 'toString', 'constructor', '__proto__']
+    for (const providerFailureReason of values) {
+      const data = parseStatusData(failed({providerFailureReason}))
+      expect(data, providerFailureReason).toBeDefined()
+      expect(data?.failureKind, providerFailureReason).toBe('session-error')
+      expect(hasReason(data), providerFailureReason).toBe(false)
+    }
+  })
+
+  it('omits a non-string reason and keeps the frame', () => {
+    for (const providerFailureReason of [null, 1, true, {}, ['model-not-available']]) {
+      const data = parseStatusData(failed({providerFailureReason}))
+      expect(data).toBeDefined()
+      expect(hasReason(data)).toBe(false)
+    }
+  })
+
+  it('omits a known reason when failureKind is not session-error', () => {
+    for (const failureKind of ['inactivity-timeout', 'max-duration-timeout', 'stream-ended', 'workspace-unreachable', 'checkout-substituted', 'workspace-unavailable', 'unknown']) {
+      const data = parseStatusData(failed({failureKind, providerFailureReason: 'model-not-available'}))
+      expect(data?.failureKind, failureKind).toBe(failureKind)
+      expect(hasReason(data), failureKind).toBe(false)
+    }
+  })
+
+  it('omits a known reason when failureKind is absent or unrecognized', () => {
+    for (const failureKind of [undefined, 'fixture-future-kind', 7]) {
+      const data = parseStatusData(failed({failureKind, providerFailureReason: 'model-not-available'}))
+      expect(data).toBeDefined()
+      expect(hasReason(data)).toBe(false)
+    }
+  })
+
+  it('omits a known reason on every non-failed phase, even with failureKind session-error', () => {
+    const cases = [
+      {phase: 'PENDING', status: 'queued'},
+      {phase: 'ACKNOWLEDGED', status: 'running'},
+      {phase: 'EXECUTING', status: 'running'},
+      {phase: 'EXECUTING', status: 'waiting_for_approval'},
+      {phase: 'EXECUTING', status: 'waiting_for_question'},
+      {phase: 'COMPLETED', status: 'succeeded'},
+      {phase: 'CANCELLED', status: 'cancelled'},
+    ]
+    for (const overrides of cases) {
+      const data = parseStatusData(failed({...overrides, providerFailureReason: 'model-not-available'}))
+      expect(data?.phase, overrides.phase).toBe(overrides.phase)
+      expect(hasReason(data), `${overrides.phase}/${overrides.status}`).toBe(false)
+    }
+  })
+
+  it('omits the key when the frame has no reason', () => {
+    expect(hasReason(parseStatusData(failed()))).toBe(false)
+  })
+
+  it('does not carry a prompt: a status frame never has one', () => {
+    const data = parseStatusData(failed({providerFailureReason: 'unclassified', prompt: 'fixture prompt'}))
+    expect(data?.providerFailureReason).toBe('unclassified')
+    expect(Object.hasOwn(data ?? {}, 'prompt')).toBe(false)
   })
 })
 

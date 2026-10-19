@@ -12,6 +12,15 @@ inlined boundary types for RunPhase/Surface/RunState).
 - `run-status.ts`, `approval.ts`, `identity.ts`, `parse.ts`, `redaction.ts`,
   `responses.ts`, `version.ts` — vendored from the operator-contract barrel
   (packages/gateway/src/operator-contract/).
+- `launch-prompt.ts` — vendored from the operator-contract barrel, wire constants and the rejection
+  reason type only: `OPERATOR_LAUNCH_PROMPT_MAX_LENGTH`, `OPERATOR_LAUNCH_PROMPT_TOO_LONG` and
+  `OperatorLaunchPromptRejectionReason`. Upstream's projection helper and storage key are gateway-side
+  and are omitted.
+- `provider-failure-reason.ts` — vendored from the operator-contract barrel, wire values only:
+  `OPERATOR_PROVIDER_FAILURE_REASONS` and `OperatorProviderFailureReason`. The dashboard adds
+  `isOperatorProviderFailureReason`, a `Set`-backed membership guard for untrusted input, in the
+  same way `run-status.ts` keeps `isOperatorFailureKind`. Upstream's internal-reason mapping and
+  projection helpers are gateway-side and are omitted.
 - `provenance.ts` — vendored from the operator-contract barrel, whole: it keeps
   upstream's types and parsers (`parseOperatorCheckoutProvenance`,
   `parseOperatorCheckoutPreparation`) as-is. Beyond the comment rewording below,
@@ -27,8 +36,8 @@ inlined boundary types for RunPhase/Surface/RunState).
     the input or its nested parts, so extra input keys cannot reach the reader's frames.
   Comments that name contract versions are reworded so no version literal remains.
   Accept/reject behavior is unchanged. The dashboard server reader calls both parsers on status
-  frames. It applies no length caps or sanitizing: the browser is the sanitization
-  boundary, so any future server-side consumer must apply the same caps first.
+  frames. For these two fields the server applies no length caps or sanitizing: the browser is the
+  sanitization boundary, so any future server-side consumer must apply the same caps first.
 - `output.ts` — carries upstream's note that after `reset` (`no-snapshot`) a terminal run sends
   only the terminal status frame and no output frame, reworded to fit the dashboard's existing
   comment. `run-status.ts` adds `waiting_for_question` to `OperatorWebStatus`, in upstream's
@@ -61,12 +70,26 @@ inlined boundary types for RunPhase/Surface/RunState).
     parsers, which drop extra keys; a question frame is a closed wire shape.
   - `PendingQuestionDTO`, the decision request types, and the decision response types are
     copied as upstream has them. The dashboard server has no caller for them yet.
-- `run-summary.ts` — vendored from the operator-contract barrel. One deviation, an addition:
+- `run-summary.ts` — vendored from the operator-contract barrel. The deviations are additions.
   `RUN_SUMMARY_STATUSES` is an exported `as const` list of the summary statuses, and the
   parser's private allowlist is built from it (it was a hand-listed `Set`). A compile-time check
   (`RunSummaryStatusesAreExact`) fails the type check if the list and `RunSummaryStatus` differ
-  in either direction. Accept/reject behavior is unchanged. The union itself is left as upstream
-  has it, so this needs no upstream coordination to keep working.
+  in either direction. The union itself is left as upstream has it, so this needs no upstream
+  coordination to keep working. The summary carries two further optional fields, which the parser
+  copies into its closed result under fixed rules. A malformed or misplaced value is omitted and the
+  summary stays valid; neither field can reject it:
+  - `providerFailureReason` is kept only when it is a known wire value, the status is `failed` and
+    `failureKind` is `session-error`.
+  - `prompt` is kept only when it is a string, is not empty after `trim()`, and has a raw `.length`
+    of at most `OPERATOR_LAUNCH_PROMPT_MAX_LENGTH`.
+
+  The caps the server applies are exactly that prompt length bound. It applies no sanitizing and
+  never trims or truncates: a kept prompt is stored exactly as received. The prompt is untrusted
+  text, and the browser is the sanitization boundary, so any server-side consumer must render it
+  inertly. The status frame never carries a prompt.
+- `run-status.ts` also adds `providerFailureReason` to `OperatorRunStatus`. The server status-frame
+  reader copies it under the same rule as the summary: a known value on a `FAILED` phase with
+  `failureKind` `session-error`, otherwise omitted.
 - `sse-frames.ts` — dashboard-authored; upstream has no matching file. It types the named
   events that `packages/gateway/src/web/sse/run-stream-route.ts` writes on the run stream
   (`ready`, `status`, `reset`, `output`, `approval`, `question`). `ResetReason` copies the union
@@ -106,6 +129,11 @@ The following upstream exports are omitted because they depend on upstream-only 
 - `toRunSummary` — requires `RunState` from `@fro-bot/runtime`
 - `OperatorPushVapidKeyResponse`, the subscription metadata and request types — not vendored from `responses.ts`;
   `push.ts` is the dashboard's own copy of those shapes.
+- `projectOperatorLaunchPrompt` and the prompt storage key (`launch-prompt.ts`) — require `Surface` from
+  `@fro-bot/runtime`.
+- `toOperatorProviderFailureReason`, `parseOperatorProviderFailureReason`, `projectProviderFailureReason`,
+  the internal-reason mapping and the details key (`provider-failure-reason.ts`) — require `RunPhase` from
+  `@fro-bot/runtime` and the gateway's internal reason type from `../execute/`.
 
 The PUBLIC frozen types (OperatorDecisionState, OperatorWebStatus, OperatorRunStatus,
 OperatorSessionInfo, OperatorCsrfToken, OperatorOk, OperatorError, OperatorIdentity,
@@ -120,3 +148,7 @@ preparation types) are all present and correct.
 - `run-status.ts`: `import type {RunCoreErrorKind} from '../execute/run-core.js'` → removed (projection helpers omitted)
 - `run-status.ts`: the relative import of `./provenance.js` → `./provenance.ts`
 - `approval.ts`: `import type {ApprovalActor, DecisionOutcome} from '../approvals/registry.js'` → removed (dependent helpers omitted)
+- `launch-prompt.ts`: `import type {Surface} from '@fro-bot/runtime'` → removed (projection helper omitted)
+- `provider-failure-reason.ts`: `import type {RunPhase} from '@fro-bot/runtime'` and
+  `import type {ProviderFailureReason} from '../execute/provider-failure.js'` → removed (mapping and projection helpers omitted)
+- `run-status.ts` and `run-summary.ts`: `import type {OperatorProviderFailureReason} from './provider-failure-reason.js'` → `./provider-failure-reason.ts`

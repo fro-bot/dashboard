@@ -15,6 +15,7 @@ import type {
   OperatorLayoutRefusalReason,
   OperatorObstructionKind,
   OperatorOutputFrame,
+  OperatorProviderFailureReason,
   OperatorPushHealthStatus,
   OperatorPushTriggerKind,
   OperatorRunStatus,
@@ -57,6 +58,9 @@ import {
   MAX_QUESTIONS_PER_REQUEST,
   OBSTRUCTION_KINDS,
   OPERATOR_CONTRACT_VERSION,
+  OPERATOR_LAUNCH_PROMPT_MAX_LENGTH,
+  OPERATOR_LAUNCH_PROMPT_TOO_LONG,
+  OPERATOR_PROVIDER_FAILURE_REASONS,
   OPERATOR_PUSH_HEALTH_STATUSES,
   OPERATOR_PUSH_TRIGGER_KINDS,
   parseOperatorCancelResponse,
@@ -254,6 +258,8 @@ describe('OPERATOR_CONTRACT_VERSION', () => {
     expect(files).toContain('README.md')
     expect(files).toContain('provenance.ts')
     expect(files).toContain('question-frame.ts')
+    expect(files).toContain('launch-prompt.ts')
+    expect(files).toContain('provider-failure-reason.ts')
 
     for (const name of files) {
       const text = readFileSync(join(CONTRACT_DIR, name), 'utf8')
@@ -1190,7 +1196,35 @@ const checkRunSummaryWithFailureKind: RunSummaryType = {
   createdAt: '2026-06-01T00:00:00.000Z',
   failureKind: 'workspace-unreachable',
 }
-export {checkRunSummaryMinimal, checkRunSummaryWithFailureKind, checkRunSummaryWithUpdatedAt}
+// RunSummary: must accept a launch prompt and a provider failure reason
+const checkRunSummaryWithPromptAndReason: RunSummaryType = {
+  runId: 'run-abc-123',
+  repo: 'fro-bot/agent',
+  status: 'failed',
+  createdAt: '2026-06-01T00:00:00.000Z',
+  failureKind: 'session-error',
+  providerFailureReason: 'model-not-available',
+  prompt: 'Summarize the open pull requests',
+}
+// OperatorRunStatus: must accept a provider failure reason, and carries no prompt
+const checkRunStatusWithProviderReason: OperatorRunStatus = {
+  runId: 'run-abc-123',
+  entityRef: 'fro-bot/agent',
+  surface: 'web',
+  phase: 'FAILED',
+  status: 'failed',
+  startedAt: '2026-06-01T00:00:00.000Z',
+  stale: false,
+  failureKind: 'session-error',
+  providerFailureReason: 'provider-auth-unavailable',
+}
+export {
+  checkRunStatusWithProviderReason,
+  checkRunSummaryMinimal,
+  checkRunSummaryWithFailureKind,
+  checkRunSummaryWithPromptAndReason,
+  checkRunSummaryWithUpdatedAt,
+}
 
 // ---------------------------------------------------------------------------
 // RunsListResponse type-level check (compile-time)
@@ -1659,6 +1693,149 @@ describe('parseRunSummary', () => {
       // ignoring of non-failed reasons is a browser-module concern.
       expect(result.data.status).toBe('running')
     }
+  })
+})
+
+// Exhaustive over the union: adding or removing a member without updating this record fails tsc.
+const PROVIDER_FAILURE_REASON_RECORD = {
+  'provider-auth-unavailable': true,
+  'model-not-available': true,
+  'provider-rejected-request': true,
+  unclassified: true,
+} satisfies Record<OperatorProviderFailureReason, true>
+
+describe('launch prompt and provider failure reason vocabularies', () => {
+  it('provider failure reasons: the exported list equals the union, with no duplicates', () => {
+    expect([...OPERATOR_PROVIDER_FAILURE_REASONS].toSorted()).toEqual(Object.keys(PROVIDER_FAILURE_REASON_RECORD).toSorted())
+    expect(new Set(OPERATOR_PROVIDER_FAILURE_REASONS).size).toBe(OPERATOR_PROVIDER_FAILURE_REASONS.length)
+  })
+
+  it('exports the upstream prompt bound and rejection reason', () => {
+    expect(OPERATOR_LAUNCH_PROMPT_MAX_LENGTH).toBe(8000)
+    expect(OPERATOR_LAUNCH_PROMPT_TOO_LONG).toBe('prompt-too-long')
+  })
+})
+
+describe('parseRunSummary — prompt', () => {
+  const base = {runId: 'run-1', repo: 'fro-bot/agent', status: 'succeeded', createdAt: '2026-06-01T00:00:00.000Z'}
+  const parse = (prompt: unknown) => {
+    const result = parseRunSummary({...base, prompt})
+    return result.success ? result.data : undefined
+  }
+  const hasPrompt = (summary: RunSummaryType | undefined) => Object.hasOwn(summary ?? {}, 'prompt')
+
+  it('keeps a multi-line Markdown prompt exactly as received, whitespace included', () => {
+    const prompt = '  # Title\n\n- item `code`\n\n```ts\nconst x = 1\n```\n<b>html</b> [x](https://example.test)  \n'
+    expect(parse(prompt)?.prompt).toBe(prompt)
+  })
+
+  it('keeps a prompt of exactly the bound, counted in UTF-16 units, including a surrogate pair', () => {
+    const prompt = `${'a'.repeat(OPERATOR_LAUNCH_PROMPT_MAX_LENGTH - 2)}\u{1F600}`
+    expect(prompt.length).toBe(OPERATOR_LAUNCH_PROMPT_MAX_LENGTH)
+    expect(parse(prompt)?.prompt).toBe(prompt)
+  })
+
+  it('omits a prompt one unit over the bound and keeps the summary valid', () => {
+    const prompt = `${'a'.repeat(OPERATOR_LAUNCH_PROMPT_MAX_LENGTH - 1)}\u{1F600}`
+    expect(prompt.length).toBe(OPERATOR_LAUNCH_PROMPT_MAX_LENGTH + 1)
+    const summary = parse(prompt)
+    expect(summary).toBeDefined()
+    expect(summary?.runId).toBe('run-1')
+    expect(hasPrompt(summary)).toBe(false)
+  })
+
+  it('omits an empty or whitespace-only prompt', () => {
+    for (const prompt of ['', ' ', '\n\t  \r\n', '\u00A0\u2003']) {
+      const summary = parse(prompt)
+      expect(summary, JSON.stringify(prompt)).toBeDefined()
+      expect(hasPrompt(summary), JSON.stringify(prompt)).toBe(false)
+    }
+  })
+
+  it('omits a non-string prompt', () => {
+    for (const prompt of [null, 0, 12, true, {text: 'x'}, ['x'], undefined]) {
+      const summary = parse(prompt)
+      expect(summary, JSON.stringify(prompt)).toBeDefined()
+      expect(hasPrompt(summary), JSON.stringify(prompt)).toBe(false)
+    }
+  })
+
+  it('omits the key when the input has no prompt', () => {
+    const result = parseRunSummary(base)
+    expect(result.success && Object.hasOwn(result.data, 'prompt')).toBe(false)
+  })
+})
+
+describe('parseRunSummary — providerFailureReason', () => {
+  const failed = {
+    runId: 'run-1',
+    repo: 'fro-bot/agent',
+    status: 'failed',
+    createdAt: '2026-06-01T00:00:00.000Z',
+    failureKind: 'session-error',
+  }
+  const parse = (overrides: Record<string, unknown>) => {
+    const result = parseRunSummary({...failed, ...overrides})
+    return result.success ? result.data : undefined
+  }
+  const hasReason = (summary: RunSummaryType | undefined) => Object.hasOwn(summary ?? {}, 'providerFailureReason')
+
+  it.each(OPERATOR_PROVIDER_FAILURE_REASONS)('keeps "%s" on a failed session-error summary', providerFailureReason => {
+    expect(parse({providerFailureReason})?.providerFailureReason).toBe(providerFailureReason)
+  })
+
+  it('parses a summary with both a prompt and a reason', () => {
+    const summary = parse({prompt: 'Check the build', providerFailureReason: 'model-not-available'})
+    expect(summary).toEqual({...failed, prompt: 'Check the build', providerFailureReason: 'model-not-available'})
+  })
+
+  it('omits an unknown, wrongly cased, internal-spelling or prototype-key reason and keeps the summary', () => {
+    const values = ['fixture-future-reason', 'MODEL-NOT-AVAILABLE', 'model not available', '', 'toString', 'constructor', '__proto__']
+    for (const providerFailureReason of values) {
+      const summary = parse({providerFailureReason})
+      expect(summary, providerFailureReason).toBeDefined()
+      expect(summary?.failureKind, providerFailureReason).toBe('session-error')
+      expect(hasReason(summary), providerFailureReason).toBe(false)
+    }
+  })
+
+  it('omits a non-string reason', () => {
+    for (const providerFailureReason of [null, 1, true, {}, ['model-not-available']]) {
+      const summary = parse({providerFailureReason})
+      expect(summary).toBeDefined()
+      expect(hasReason(summary)).toBe(false)
+    }
+  })
+
+  it('omits a known reason when failureKind is not session-error', () => {
+    for (const failureKind of ['inactivity-timeout', 'max-duration-timeout', 'stream-ended', 'workspace-unreachable', 'checkout-substituted', 'workspace-unavailable', 'unknown']) {
+      const summary = parse({failureKind, providerFailureReason: 'model-not-available'})
+      expect(summary?.failureKind, failureKind).toBe(failureKind)
+      expect(hasReason(summary), failureKind).toBe(false)
+    }
+  })
+
+  it('omits a known reason when failureKind is absent or unrecognized', () => {
+    for (const failureKind of [undefined, 'fixture-future-kind', 7]) {
+      const summary = parse({failureKind, providerFailureReason: 'model-not-available'})
+      expect(summary).toBeDefined()
+      expect(hasReason(summary)).toBe(false)
+    }
+  })
+
+  it('omits a known reason on every non-failed status, even with failureKind session-error', () => {
+    for (const status of RUN_SUMMARY_STATUSES.filter(s => s !== 'failed')) {
+      const summary = parse({status, providerFailureReason: 'model-not-available'})
+      expect(summary?.status, status).toBe(status)
+      expect(hasReason(summary), status).toBe(false)
+    }
+  })
+
+  it('drops unknown extra keys: the result is a closed copy', () => {
+    const summary = parse({prompt: 'p', providerFailureReason: 'unclassified', fixtureExtra: 'x'})
+    expect(Object.keys(summary ?? {}).toSorted()).toEqual(
+      ['createdAt', 'failureKind', 'prompt', 'providerFailureReason', 'repo', 'runId', 'status'],
+    )
   })
 })
 
