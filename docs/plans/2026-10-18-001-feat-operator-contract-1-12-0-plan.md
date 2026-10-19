@@ -217,7 +217,7 @@ flowchart LR
   U5 --> U6
 ```
 
-- [ ] **Unit 1: Contract bump and server parsers**
+- [x] **Unit 1: Contract bump and server parsers**
 
 **Goal:** Pin 1.12.0 everywhere and accept the new fields on the server side.
 
@@ -252,7 +252,7 @@ flowchart LR
 
 **Verification:** check-types, lint and the contract and reader tests pass, and no hand-typed version literal exists outside the two allowed constants.
 
-- [ ] **Unit 2: Browser parsers**
+- [x] **Unit 2: Browser parsers**
 
 **Goal:** Accept the new fields in the browser.
 
@@ -281,7 +281,7 @@ flowchart LR
 
 **Verification:** browser parser tests pass with the same keep and drop results as Unit 1's server tests.
 
-- [ ] **Unit 3: Provider failure labels**
+- [x] **Unit 3: Provider failure labels**
 
 **Goal:** Name the provider failure on failed session-error runs in both the collapsed card and the stream.
 
@@ -311,7 +311,7 @@ flowchart LR
 
 **Verification:** label parity tests pass, and no raw reason code appears in text, attributes, classes or accessible names.
 
-- [ ] **Unit 4: Prompt on run cards**
+- [x] **Unit 4: Prompt on run cards**
 
 **Goal:** Show the prompt on every card: a one-line preview collapsed, rendered Markdown expanded. Closes #628.
 
@@ -350,7 +350,7 @@ flowchart LR
 
 **Verification:** jsdom and core tests pass, selector parity holds, and a fixture browser pass shows collapsed and expanded prompts in light and dark at desktop and 390px.
 
-- [ ] **Unit 5: Launch prompt limit and rejections**
+- [x] **Unit 5: Launch prompt limit and rejections**
 
 **Goal:** Block over-limit prompts in the form and handle the gateway's prompt rejections.
 
@@ -384,7 +384,7 @@ flowchart LR
 
 **Verification:** launch and fixture tests pass, and the existing CSRF 400 tests still pass.
 
-- [ ] **Unit 6: Fixtures, service-worker tests and docs**
+- [x] **Unit 6: Fixtures, service-worker tests and docs**
 
 **Goal:** Cover the acceptance cases in fixtures, pin the notification behavior, and update docs.
 
