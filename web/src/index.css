@@ -64,7 +64,15 @@
   box-shadow: var(--shadow-glow);
 }
 [data-theme="light"] .operator-primary-action { color: var(--color-bg); }
-.operator-primary-action:hover { background: var(--color-accent-hover); }
+.operator-primary-action:disabled {
+  background: var(--color-surface);
+  border-color: var(--color-border);
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+  opacity: 1;
+  box-shadow: none;
+}
+.operator-primary-action:hover:not(:disabled) { background: var(--color-accent-hover); }
 
 /* Branded State Treatments on Operator Headline */
 [data-state="auth-required"] .operator-headline {
