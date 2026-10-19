@@ -21,6 +21,7 @@ import type {
   QuestionReconcileEvent,
   RunEntry,
   RunSummaryStatus,
+  StatusFrameData,
   StreamHandle,
   StreamState,
 } from '../public/operator-stream.js'
@@ -62,6 +63,7 @@ import {
   parseSseFrame,
   PHASE_TO_WEB_STATUS,
   PINNED_CONTRACT_VERSION,
+  PROVIDER_FAILURE_REASON_LABELS,
   pruneFinishedRuns,
   QUESTION_CLAIM_RECHECK_DELAYS_MS,
   QUESTION_DECISION_STATES,
@@ -87,6 +89,7 @@ import {
   MAX_QUESTIONS_PER_REQUEST,
   OBSTRUCTION_KINDS,
   OPERATOR_CONTRACT_VERSION,
+  OPERATOR_PROVIDER_FAILURE_REASONS,
   QUESTION_HEADER_MAX_LENGTH,
   QUESTION_OPTION_DESCRIPTION_MAX_LENGTH,
   QUESTION_OPTION_LABEL_MAX_LENGTH,
@@ -927,6 +930,109 @@ describe('nextStreamState — failure reason label', () => {
       data: ACTIVE_STATUS,
     })
     expect(withLateFrame.runs['run-abc']?.reasonLabel).toBe('Session error')
+  })
+
+  describe('provider failure label', () => {
+    const providerCopy: readonly (readonly [string, string])[] = [
+      ['provider-auth-unavailable', 'Model provider unavailable'],
+      ['model-not-available', 'Model not available'],
+      ['provider-rejected-request', 'Model provider rejected the request'],
+    ]
+    const failed = (extra: Record<string, unknown>) => ({
+      type: 'status' as const,
+      data: {...ACTIVE_STATUS, status: 'failed', phase: 'FAILED', ...extra} as StatusFrameData,
+    })
+
+    // A terminal frame closes the stream once every observed run is terminal, so a second frame for the
+    // same run reaches the reducer only while another run is still active.
+    const liveWithPeer = (): StreamState =>
+      nextStreamState(live(), {type: 'status', data: {...ACTIVE_STATUS, runId: 'run-peer'}})
+
+    it('labels every reason the contract defines, and only unclassified is unlabeled', () => {
+      for (const reason of OPERATOR_PROVIDER_FAILURE_REASONS) {
+        expect(PROVIDER_FAILURE_REASON_LABELS.has(reason)).toBe(reason !== 'unclassified')
+      }
+      expect([...PROVIDER_FAILURE_REASON_LABELS]).toEqual(providerCopy)
+    })
+
+    it.each(providerCopy)('a failed session-error frame with %s stores "%s"', (providerFailureReason, label) => {
+      const state = nextStreamState(live(), failed({failureKind: 'session-error', providerFailureReason}))
+      expect(state.runs['run-abc']?.reasonLabel).toBe(label)
+    })
+
+    it.each([['unclassified', 'unclassified'], ['an unknown value', 'some-future-reason'], ['no reason', undefined]])(
+      'a failed session-error frame with %s stores the session-error label',
+      (_name, providerFailureReason) => {
+        const state = nextStreamState(live(), failed({failureKind: 'session-error', providerFailureReason}))
+        expect(state.runs['run-abc']?.reasonLabel).toBe('Session error')
+      },
+    )
+
+    it('a prototype member name is not a reason', () => {
+      const state = nextStreamState(live(), failed({failureKind: 'session-error', providerFailureReason: 'constructor'}))
+      expect(state.runs['run-abc']?.reasonLabel).toBe('Session error')
+    })
+
+    it('a held provider label survives a later failed session-error frame with no reason', () => {
+      const first = nextStreamState(liveWithPeer(), failed({failureKind: 'session-error', providerFailureReason: 'model-not-available'}))
+      const second = nextStreamState(first, failed({failureKind: 'session-error'}))
+      expect(second.runs['run-abc']?.reasonLabel).toBe('Model not available')
+    })
+
+    it('a held provider label survives a later failed session-error frame with unclassified', () => {
+      const first = nextStreamState(liveWithPeer(), failed({failureKind: 'session-error', providerFailureReason: 'provider-auth-unavailable'}))
+      const second = nextStreamState(first, failed({failureKind: 'session-error', providerFailureReason: 'unclassified'}))
+      expect(second.runs['run-abc']?.reasonLabel).toBe('Model provider unavailable')
+    })
+
+    it('a generic session-error label is replaced when a provider reason arrives later', () => {
+      const first = nextStreamState(liveWithPeer(), failed({failureKind: 'session-error'}))
+      const second = nextStreamState(first, failed({failureKind: 'session-error', providerFailureReason: 'provider-rejected-request'}))
+      expect(second.runs['run-abc']?.reasonLabel).toBe('Model provider rejected the request')
+    })
+
+    it('a later provider reason replaces an earlier provider reason', () => {
+      const first = nextStreamState(liveWithPeer(), failed({failureKind: 'session-error', providerFailureReason: 'model-not-available'}))
+      const second = nextStreamState(first, failed({failureKind: 'session-error', providerFailureReason: 'provider-auth-unavailable'}))
+      expect(second.runs['run-abc']?.reasonLabel).toBe('Model provider unavailable')
+    })
+
+    it('a held provider label survives a late non-terminal frame', () => {
+      const first = nextStreamState(liveWithPeer(), failed({failureKind: 'session-error', providerFailureReason: 'model-not-available'}))
+      const second = nextStreamState(first, {type: 'status', data: ACTIVE_STATUS})
+      expect(second.runs['run-abc']?.reasonLabel).toBe('Model not available')
+    })
+
+    it('a held provider label does not replace a different failure kind\'s label', () => {
+      const first = nextStreamState(liveWithPeer(), failed({failureKind: 'session-error', providerFailureReason: 'model-not-available'}))
+      const second = nextStreamState(first, failed({failureKind: 'stream-ended'}))
+      expect(second.runs['run-abc']?.reasonLabel).toBe('Stream ended early')
+    })
+
+    it('a reason on a different failure kind shows that kind\'s label', () => {
+      const state = nextStreamState(live(), failed({failureKind: 'stream-ended', providerFailureReason: 'model-not-available'}))
+      expect(state.runs['run-abc']?.reasonLabel).toBe('Stream ended early')
+    })
+
+    it('a reason on a failed frame with no failureKind stores no label', () => {
+      const state = nextStreamState(live(), failed({providerFailureReason: 'model-not-available'}))
+      expect(state.runs['run-abc']?.reasonLabel).toBeUndefined()
+    })
+
+    it('a reason on a non-failed frame stores no label', () => {
+      const state = nextStreamState(live(), {
+        type: 'status',
+        data: {...ACTIVE_STATUS, failureKind: 'session-error', providerFailureReason: 'model-not-available'},
+      })
+      expect(state.runs['run-abc']?.reasonLabel).toBeUndefined()
+    })
+
+    it('the raw reason code never reaches the stored state or the safe view', () => {
+      const state = nextStreamState(live(), failed({failureKind: 'session-error', providerFailureReason: 'model-not-available'}))
+      const entry = state.runs['run-abc']
+      expect(JSON.stringify(state)).not.toContain('model-not-available')
+      expect(JSON.stringify(entry === undefined ? {} : toSafeRunView(entry))).not.toContain('model-not-available')
+    })
   })
 
   it('terminal failed status with a reason preserves already-rendered output text', () => {
@@ -12213,6 +12319,20 @@ describe('finished-run store — recording', () => {
     expect(Object.keys(record ?? {}).toSorted()).toEqual(
       ['outputCoalesced', 'outputText', 'outputTruncated', 'phase', 'reasonLabel', 'runId', 'stale', 'startedAt', 'status', 'terminal'],
     )
+  })
+
+  it('records the provider label a failed run displayed, and a recorded init paints that same label', async () => {
+    await fcFinish('run-fc-prov', {status: 'failed', extra: {failureKind: 'session-error', providerFailureReason: 'model-not-available'}})
+
+    const record = fcRecord('run-fc-prov')
+    expect(record?.reasonLabel).toBe('Model not available')
+    expect(JSON.stringify(record)).not.toContain('model-not-available')
+
+    fcStubDocument()
+    const regions = fcRegions()
+    fcInitRecorded('run-fc-prov', regions)
+    expect(regions.reasonEl.textContent).toBe('Model not available')
+    expect(JSON.stringify([regions.reasonEl.textContent, regions.reasonEl.className, regions.reasonEl.dataset, regions.statusEl.textContent, regions.statusEl.className, regions.statusEl.attributes])).not.toContain('model-not-available')
   })
 
   it('records a failed run without a reason when the frame carried none', async () => {

@@ -5,8 +5,8 @@
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 
-import {buildRunSafeView, FETCH_TIMEOUT_MS, fetchRunIndex, formatRelativeTime, initOperatorRunIndex, markCardExpandedForLaunch, markRunStreamAttached, parseRunSummaryItem, parseRunSummaryList, refreshOperatorRunIndex, resetRunIndexState, RUN_INDEX_CAP, FAILURE_REASON_LABELS as RUN_INDEX_FAILURE_REASON_LABELS, RUN_STATUS_CLASS_TOKENS, VALID_RUN_SUMMARY_STATUSES} from '../public/operator-run-index.js'
-import {FAILURE_REASON_LABELS as STREAM_FAILURE_REASON_LABELS} from '../public/operator-stream.js'
+import {buildRunSafeView, FETCH_TIMEOUT_MS, fetchRunIndex, formatRelativeTime, initOperatorRunIndex, markCardExpandedForLaunch, markRunStreamAttached, parseRunSummaryItem, parseRunSummaryList, refreshOperatorRunIndex, resetRunIndexState, RUN_INDEX_CAP, FAILURE_REASON_LABELS as RUN_INDEX_FAILURE_REASON_LABELS, PROVIDER_FAILURE_REASON_LABELS as RUN_INDEX_PROVIDER_FAILURE_REASON_LABELS, RUN_STATUS_CLASS_TOKENS, VALID_RUN_SUMMARY_STATUSES} from '../public/operator-run-index.js'
+import {nextStreamState, PINNED_CONTRACT_VERSION, FAILURE_REASON_LABELS as STREAM_FAILURE_REASON_LABELS, PROVIDER_FAILURE_REASON_LABELS as STREAM_PROVIDER_FAILURE_REASON_LABELS} from '../public/operator-stream.js'
 import {formatRelativeTime as sharedFormatRelativeTime} from '../public/operator-time.js'
 import {isOperatorFailureKind, OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
 import {parseRunSummary as parseServerRunSummary} from '../src/gateway/operator-contract/run-summary.ts'
@@ -2926,6 +2926,145 @@ describe('failure reason label map parity (stream ↔ run-index)', () => {
     for (const key of Object.keys(STREAM_FAILURE_REASON_LABELS)) {
       expect(RUN_INDEX_FAILURE_REASON_LABELS[key]).toBe(STREAM_FAILURE_REASON_LABELS[key])
     }
+  })
+})
+
+const PROVIDER_LABEL_COPY = [
+  ['provider-auth-unavailable', 'Model provider unavailable'],
+  ['model-not-available', 'Model not available'],
+  ['provider-rejected-request', 'Model provider rejected the request'],
+]
+
+describe('provider failure reason label map parity (stream ↔ run-index)', () => {
+  it('both modules map each known provider reason to the same dashboard copy', () => {
+    expect([...RUN_INDEX_PROVIDER_FAILURE_REASON_LABELS]).toEqual(PROVIDER_LABEL_COPY)
+    expect([...STREAM_PROVIDER_FAILURE_REASON_LABELS]).toEqual(PROVIDER_LABEL_COPY)
+  })
+
+  it('unclassified has no entry, so it keeps the session-error label', () => {
+    expect(RUN_INDEX_PROVIDER_FAILURE_REASON_LABELS.has('unclassified')).toBe(false)
+    expect(STREAM_PROVIDER_FAILURE_REASON_LABELS.has('unclassified')).toBe(false)
+  })
+
+  it('the provider copy is distinct from every failure-kind label', () => {
+    const kindLabels = new Set(Object.values(RUN_INDEX_FAILURE_REASON_LABELS))
+    for (const [, label] of PROVIDER_LABEL_COPY) expect(kindLabels.has(label)).toBe(false)
+  })
+})
+
+describe('buildRunSafeView — provider failure label', () => {
+  const failedSessionError = extra => makeValidSummary({status: 'failed', failureKind: 'session-error', ...extra})
+
+  it.each(PROVIDER_LABEL_COPY)('a failed session-error run with %s shows %s', (providerFailureReason, label) => {
+    expect(buildRunSafeView(failedSessionError({providerFailureReason})).reasonLabel).toBe(label)
+  })
+
+  it.each([['unclassified', 'unclassified'], ['an unknown value', 'some-future-reason'], ['no reason', undefined]])(
+    'a failed session-error run with %s keeps the session-error label',
+    (_name, providerFailureReason) => {
+      expect(buildRunSafeView(failedSessionError({providerFailureReason})).reasonLabel).toBe('Session error')
+    },
+  )
+
+  it('a prototype member name is not a reason', () => {
+    expect(buildRunSafeView(failedSessionError({providerFailureReason: 'constructor'})).reasonLabel).toBe('Session error')
+  })
+
+  it('a reason on a non-session-error failure keeps that kind\'s label', () => {
+    const view = buildRunSafeView(
+      makeValidSummary({status: 'failed', failureKind: 'inactivity-timeout', providerFailureReason: 'model-not-available'}),
+    )
+    expect(view.reasonLabel).toBe('No recent activity')
+  })
+
+  it('a reason on a failed run with no failureKind shows no reason label', () => {
+    const view = buildRunSafeView(makeValidSummary({status: 'failed', providerFailureReason: 'model-not-available'}))
+    expect('reasonLabel' in view).toBe(false)
+  })
+
+  it.each(['queued', 'running', 'waiting_for_approval', 'waiting_for_question', 'succeeded', 'cancelled'])(
+    'a reason on a %s run shows no reason label',
+    status => {
+      const view = buildRunSafeView(
+        makeValidSummary({status, failureKind: 'session-error', providerFailureReason: 'model-not-available'}),
+      )
+      expect('reasonLabel' in view).toBe(false)
+    },
+  )
+
+  it('the safe view never carries the raw reason code', () => {
+    const view = buildRunSafeView(failedSessionError({providerFailureReason: 'model-not-available'}))
+    expect('providerFailureReason' in view).toBe(false)
+    expect(JSON.stringify(view)).not.toContain('model-not-available')
+  })
+})
+
+async function loadCard(summary) {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ok: true, status: 200, json: async () => ({runs: [summary]})}))
+  const cards = []
+  stubDOMWithSubstructureCards(cards)
+  await initOperatorRunIndex({endpointBase: '/operator'})
+  expect(cards).toHaveLength(1)
+  return cards[0]
+}
+
+describe('run-index provider failure label on the collapsed card', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  it.each(PROVIDER_LABEL_COPY)('shows the %s label as %s and no raw code anywhere on the card', async (providerFailureReason, label) => {
+    const card = await loadCard(
+      makeValidSummary({runId: 'run-provider-001', status: 'failed', failureKind: 'session-error', providerFailureReason}),
+    )
+    const reasonEl = card.querySelector('[data-role="run-reason"]')
+    expect(reasonEl?.textContent).toBe(label)
+    expect(reasonEl?.dataset.reasonState).toBe('present')
+    expect(card.attributes['aria-label']).toContain(label)
+    for (const el of [card, reasonEl, card.querySelector('[data-role="run-status"]')]) {
+      const surface = JSON.stringify([el.textContent, el.className, el.attributes, el.dataset])
+      expect(surface).not.toContain(providerFailureReason)
+    }
+  })
+
+  it('shows the session-error label for unclassified and for an unknown value', async () => {
+    for (const providerFailureReason of ['unclassified', 'some-future-reason']) {
+      const card = await loadCard(
+        makeValidSummary({runId: 'run-provider-002', status: 'failed', failureKind: 'session-error', providerFailureReason}),
+      )
+      expect(card.querySelector('[data-role="run-reason"]')?.textContent).toBe('Session error')
+      resetRunIndexState()
+    }
+  })
+
+  it('a reason on a non-session-error failure shows that kind\'s label', async () => {
+    const card = await loadCard(
+      makeValidSummary({runId: 'run-provider-003', status: 'failed', failureKind: 'stream-ended', providerFailureReason: 'model-not-available'}),
+    )
+    expect(card.querySelector('[data-role="run-reason"]')?.textContent).toBe('Stream ended early')
+  })
+
+  it('a reason on a running run shows no reason', async () => {
+    const card = await loadCard(
+      makeValidSummary({runId: 'run-provider-004', status: 'running', failureKind: 'session-error', providerFailureReason: 'model-not-available'}),
+    )
+    expect(card.querySelector('[data-role="run-reason"]')?.textContent).toBe('')
+  })
+})
+
+describe('summary-seeded label and stream label agree', () => {
+  const live = () => nextStreamState({connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+  const frame = extra => ({
+    type: 'status',
+    data: {runId: 'run-agree', entityRef: 'fro-bot/agent', surface: 'web', phase: 'FAILED', status: 'failed', startedAt: '2026-10-06T10:00:00Z', stale: false, ...extra},
+  })
+
+  it.each([...PROVIDER_LABEL_COPY.map(([reason]) => reason), 'unclassified', undefined])('reason %s resolves to the same label in both modules', providerFailureReason => {
+    const fields = {failureKind: 'session-error', ...(providerFailureReason === undefined ? {} : {providerFailureReason})}
+    const fromSummary = buildRunSafeView(makeValidSummary({status: 'failed', ...fields})).reasonLabel
+    const fromStream = nextStreamState(live(), frame(fields)).runs['run-agree'].reasonLabel
+    expect(fromStream).toBe(fromSummary)
   })
 })
 

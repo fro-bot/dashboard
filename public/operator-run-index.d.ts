@@ -80,6 +80,13 @@ export declare const VALID_RUN_SUMMARY_STATUSES: ReadonlySet<string>
  */
 export declare const FAILURE_REASON_LABELS: Readonly<Record<FailureKind, string>>
 
+/**
+ * Dashboard-owned display labels for known provider failure reasons. `unclassified` has no entry and
+ * keeps the session-error label. Must stay identical to the map exported from
+ * public/operator-stream.js — parity is enforced by tests.
+ */
+export declare const PROVIDER_FAILURE_REASON_LABELS: ReadonlyMap<ProviderFailureReason, string>
+
 export declare function parseRunSummaryItem(
   input: unknown,
 ): {success: true; data: ParsedRunSummary} | {success: false; error: string}

@@ -72,6 +72,13 @@ export type ProviderFailureReason =
  */
 export declare const FAILURE_REASON_LABELS: Readonly<Record<FailureKind, string>>
 
+/**
+ * Dashboard-owned display labels for known provider failure reasons. `unclassified` has no entry and
+ * keeps the session-error label. Must stay identical to the map exported from
+ * public/operator-run-index.js — parity is enforced by tests.
+ */
+export declare const PROVIDER_FAILURE_REASON_LABELS: ReadonlyMap<ProviderFailureReason, string>
+
 // ---------------------------------------------------------------------------
 // Checkout provenance / checkout preparation (closed browser DTOs)
 //

@@ -160,6 +160,18 @@ export const FAILURE_REASON_LABELS = {
 }
 
 /**
+ * Dashboard-owned display labels for known provider failure reasons — render labels from this map,
+ * never the raw wire string. Applies only to a failed `session-error` run; `unclassified`, an unknown
+ * value and an absent reason have no entry and keep the session-error label. Must stay identical to the
+ * map in public/operator-stream.js (parity is enforced by tests).
+ */
+export const PROVIDER_FAILURE_REASON_LABELS = new Map([
+  ['provider-auth-unavailable', 'Model provider unavailable'],
+  ['model-not-available', 'Model not available'],
+  ['provider-rejected-request', 'Model provider rejected the request'],
+])
+
+/**
  * Parse a single run summary item from the Gateway response.
  * Error strings are fixed — never echo or interpolate any part of the input.
  */
@@ -254,14 +266,17 @@ export function parseRunSummaryList(input) {
 /**
  * Build a closed safe-view from a parsed run summary. Unknown fields excluded by
  * construction. reasonLabel is a pre-resolved dashboard display label — never the
- * raw failureKind — and is present only for a failed summary carrying a known
- * failureKind. Non-failed statuses ignore any failureKind.
+ * raw failureKind or providerFailureReason — and is present only for a failed summary
+ * carrying a known failureKind. A known providerFailureReason on a `session-error` run
+ * selects its provider label. Non-failed statuses ignore any failureKind.
  */
 export function buildRunSafeView(summary) {
   const statusLabel = STATUS_LABELS[summary.status] ?? summary.status
   const reasonLabel =
     summary.status === 'failed' && summary.failureKind !== undefined
-      ? FAILURE_REASON_LABELS[summary.failureKind]
+      ? (summary.failureKind === 'session-error'
+          ? PROVIDER_FAILURE_REASON_LABELS.get(summary.providerFailureReason)
+          : undefined) ?? FAILURE_REASON_LABELS[summary.failureKind]
       : undefined
 
   return {

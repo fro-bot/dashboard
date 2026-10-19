@@ -252,6 +252,20 @@ export const FAILURE_REASON_LABELS = {
   unknown: 'Unknown failure',
 }
 
+/**
+ * Dashboard-owned display labels for known provider failure reasons — render labels from this map,
+ * never the raw wire string. Applies only to a failed `session-error` run; `unclassified`, an unknown
+ * value and an absent reason have no entry and keep the session-error label. Must stay identical to the
+ * map in public/operator-run-index.js (parity is enforced by tests).
+ */
+export const PROVIDER_FAILURE_REASON_LABELS = new Map([
+  ['provider-auth-unavailable', 'Model provider unavailable'],
+  ['model-not-available', 'Model not available'],
+  ['provider-rejected-request', 'Model provider rejected the request'],
+])
+
+const PROVIDER_FAILURE_LABELS = new Set(PROVIDER_FAILURE_REASON_LABELS.values())
+
 // ---------------------------------------------------------------------------
 // Checkout provenance / checkout preparation — labels
 //
@@ -1242,7 +1256,8 @@ export function nextStreamState(current, event) {
       if (current.connection !== 'live') {
         return current
       }
-      const {runId, status, phase, startedAt, stale, failureKind, checkoutProvenance, checkoutPreparation} = event.data
+      const {runId, status, phase, startedAt, stale, failureKind, providerFailureReason, checkoutProvenance, checkoutPreparation} =
+        event.data
       const isTerminal = TERMINAL_STATUSES.has(status)
       // Use a null-prototype object to guard against __proto__ key pollution.
       // Spread the prior entry so accumulated output fields (outputText/outputSeq/
@@ -1253,9 +1268,16 @@ export function nextStreamState(current, event) {
       // A non-failed status ignores any failureKind entirely. Once set, the label
       // is sticky — a later non-terminal frame for the same run (e.g. a stale/duplicate
       // frame) must not clear a previously stored terminal-failure label.
+      // A known provider reason refines a failed session-error run's label. The label is monotonic per
+      // run: a generic session-error label never replaces a held provider-specific one.
+      const providerLabel = failureKind === 'session-error' ? PROVIDER_FAILURE_REASON_LABELS.get(providerFailureReason) : undefined
       const derivedReasonLabel =
-        status === 'failed' && failureKind !== undefined ? FAILURE_REASON_LABELS[failureKind] : undefined
-      const reasonLabel = derivedReasonLabel ?? prevStatusEntry?.reasonLabel
+        status === 'failed' && failureKind !== undefined ? (providerLabel ?? FAILURE_REASON_LABELS[failureKind]) : undefined
+      const heldReasonLabel = prevStatusEntry?.reasonLabel
+      const reasonLabel =
+        derivedReasonLabel === FAILURE_REASON_LABELS['session-error'] && PROVIDER_FAILURE_LABELS.has(heldReasonLabel)
+          ? heldReasonLabel
+          : (derivedReasonLabel ?? heldReasonLabel)
       // On terminal status, clear all open approval prompts for this run.
       // Terminal is absorbing for approvals: once terminal, no open prompt can reappear.
       // Tombstones are preserved so that any late open frames are still ignored.
