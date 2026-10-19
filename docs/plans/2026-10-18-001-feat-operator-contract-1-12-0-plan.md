@@ -32,7 +32,7 @@ Without this work, a 1.12.0 gateway drops every operator stream into drift. The 
 ## Requirements Trace
 
 - R1. Server, browser and fixture pins move to 1.12.0 together. Drift still fails closed.
-- R2. All four parsers (server run summary, server SSE reader, browser run index, browser stream) accept `prompt` and `providerFailureReason`. Unknown, malformed or misplaced values are dropped and never reject the run or frame.
+- R2. The two run-summary parsers (server and browser) accept `prompt` and `providerFailureReason`; the two status-frame parsers (server SSE reader and browser stream) accept `providerFailureReason`. Unknown, malformed or misplaced values are dropped and never reject the run or frame.
 - R3. The prompt is Markdown. A collapsed card shows a one-line plain-text preview. An expanded card renders the full prompt through the run-output Markdown renderer, which builds DOM nodes from tokens, so HTML in a prompt stays literal text.
 - R4. A known provider reason replaces the generic session-error label with a dashboard-owned label. Unknown, `unclassified` or absent reasons keep the generic label. Raw codes never reach the DOM.
 - R5. The approval push opens the waiting run with an open window and on a cold start. An approval and a question for the same run stay separate notifications.
@@ -61,16 +61,16 @@ Without this work, a 1.12.0 gateway drops every operator stream into drift. The 
 - Parsers (closed copies that drop unknown fields): `parseRunSummary` in `src/gateway/operator-contract/run-summary.ts`, the status branch of `src/gateway/operator-sse-reader.ts`, `parseRunSummaryItem` in `public/operator-run-index.js`, and the status branch of `parseSseFrame` in `public/operator-stream.js`.
 - Failure labels: label maps in `public/operator-stream.js` and `public/operator-run-index.js`, the stream vs run-index parity test in `test/operator-run-index-core.test.js`, and the service-worker copy in `web/src/push/sw-notification.ts`. `reasonLabel` is sticky across frames (`derived ?? prev` in `nextStreamState`).
 - Card anatomy: three builders insert slots by hand (`renderRunCard` and `ensureRunCardAnatomy` in `public/operator-run-index.js`, the optimistic card in `public/operator-launch.js`). `SUBSTRUCTURE_ROLES` lists stream-owned regions that collapse hides. `updateCardInPlace` repaints list-owned fields, and `diffRunIndexList` write-protects the active-stream card.
-- Text helpers: `capCheckoutText` (surrogate-safe truncation) in `public/operator-stream.js`. The existing strip helpers flatten newlines, so the prompt needs its own sanitizer. The `innerHTML`-family ban scan in `test/static-assets.test.ts` covers `public/` and `web/src/operator/`.
+- Rendering: the run-output Markdown renderer in `web/src/operator/markdown-output.ts`, loaded by `web/src/operator/renderer-source.ts` and handed to the stream by `web/src/operator/runtime.ts`. The `innerHTML`-family ban scan in `test/static-assets.test.ts` covers `public/` and `web/src/operator/`.
 - Click guard: `clickBelongsToContent` and `bindCardActivation` in `public/operator-run-index.js`.
 - Launch: `submitLaunch` and `launchRun` in `public/operator-launch.js` (a 400 triggers one CSRF refresh and retry, and the body is discarded). Form markup in `web/src/views/Operator.tsx`.
 - Service worker: `buildNotification`, `readWireRunId` and `RUN_JUMP_TYPES` in `web/src/push/sw-notification.ts` already accept an approval `runId`. `web/src/push/notification-click.ts` routes it, and `web/src/sw.ts` builds `showNotification` options as `{body, data}`.
-- Privacy: the `payloadContents` claim in `web/src/privacy/claims.ts` already says approval pushes can carry a run ID. Its `sourceNote` still says the gateway sends none.
+- Privacy: the `payloadContents` claim in `web/src/privacy/claims.ts` already says approval pushes can carry a run ID. Its `sourceNote` says the gateway sends none.
 - Fixtures: scenario tables and `statusFrame` in `src/gateway/operator-fixture-sse.ts`, summary rows and the launch route in `src/routes/operator-fixture-harness.ts`, the allowed-field check in `test/operator-fixture-harness.test.ts`, and the literal scan in `test/operator-fixture-sanitization.test.ts`.
 
 ### Institutional Learnings
 
-- `docs/solutions/best-practices/consume-gateway-operator-contract-1-8-0-2026-10-07.md`: move all pins together, parse new optional fields softly into closed objects, render text only, build fixtures from real wire shapes. Its statement that summaries carry only status and failure kind becomes stale.
+- `docs/solutions/best-practices/consume-gateway-operator-contract-1-8-0-2026-10-07.md`: move all pins together, parse new optional fields softly into closed objects, render text only, build fixtures from real wire shapes. Its statement that summaries carry only status and failure kind needs the 1.12.0 fields.
 - `docs/solutions/best-practices/operator-failure-reason-rendering-contract-1-6-0-2026-07-08.md`: unknown reason values never reject; dashboard-owned labels with a generic fallback; raw codes never in text, attributes, classes or accessible names.
 - `docs/solutions/best-practices/local-fixture-harness-must-mirror-wire-contract-2026-07-03.md`: fixtures mirror upstream wire shapes exactly.
 - `docs/solutions/ui-bugs/nested-control-click-bubbles-to-run-card-2026-10-10.md`: content inside the toggle card must not toggle it; test with a parent click counter. DOM tests live under `web/src/**`.
@@ -135,8 +135,8 @@ Without this work, a 1.12.0 gateway drops every operator stream into drift. The 
       "disposition": "extend"
     },
     {
-      "path_or_symbol": "public/operator-stream.js capCheckoutText",
-      "description": "surrogate-safe truncation",
+      "path_or_symbol": "web/src/operator/markdown-output.ts",
+      "description": "token-to-DOM Markdown renderer used for run output",
       "disposition": "reuse"
     },
     {
@@ -175,17 +175,17 @@ Without this work, a 1.12.0 gateway drops every operator stream into drift. The 
 
 ## Key Technical Decisions
 
-- **The prompt is list-owned.** It comes from the run summary and is painted by the run index, like repo and time. The stream never paints it, so expanding reveals nothing and a finished-run cache hit needs no new field. On the active-stream card, which `diffRunIndexList` write-protects, the launch seed stays until the card collapses and the list adopts it; the seed matches the stored prompt.
-- **Two prompt elements, both list-owned.** A preview line shows on a collapsed card: the prompt with line breaks folded to spaces, as plain text with an ellipsis. A prompt body shows on an expanded card: the full prompt rendered as Markdown, capped at about 12 lines' height with its own scroll. CSS switches between them on `data-expanded`. Neither is in `SUBSTRUCTURE_ROLES`.
-- **Reuse the run-output Markdown renderer unchanged.** The runtime already loads it for run output (`web/src/operator/renderer-source.ts`) and passes it to the stream. It passes the same renderer to the run index for the prompt body. The renderer builds DOM nodes from tokens, keeps its http(s)-only link check, node cap and plain-text fallback, and needs no new gate because nothing about it changes. Without a loaded renderer, or after it throws or hits the node cap, the body falls back to plain `pre-wrap` text.
-- **A dedicated prompt sanitizer runs before both elements.** It keeps `\n` and `\t`, normalizes `\r\n`, U+2028 and U+2029 to `\n`, keeps ZWJ, ZWNJ and variation selectors, and strips other C0 and C1 controls and bidi controls. An empty or whitespace-only result means no prompt. It lives in `public/operator-run-index.js` and is exported for the launch seed, so no new public module is needed. Plain-text paths use `textContent` only, with `dir="auto"`.
-- **Bound-check before sanitizing.** A prompt whose raw `.length` is over 8,000 is dropped and the summary stays valid.
-- **Provider labels are specific and monotonic.** A known reason replaces the session-error label only when the status is failed and `failureKind` is `session-error`. A reason on any other kind is ignored. A generic session-error label never replaces a provider-specific label for the same run. Lookups use a `Map`, so `__proto__`-style keys cannot match. Copy:
+- **The prompt is list-owned.** It comes from the run summary and is painted by the run index, like repo and time. The stream never paints it, so a finished-run cache hit needs no new field. On the active-stream card, which `diffRunIndexList` write-protects, the launch seed stays until the card collapses and the list adopts it. The seed is the exact text that was sent, so it matches the stored prompt.
+- **Two prompt elements.** A preview line shows on a collapsed card: the raw prompt as `textContent`, kept to one line by CSS `white-space: nowrap` with an ellipsis, which also folds line breaks. A prompt body shows on an expanded card: the full prompt rendered as Markdown, capped at about 12 lines' height with its own scroll. CSS switches between them on `data-expanded`. Neither is in `SUBSTRUCTURE_ROLES`.
+- **The body is rendered on expand, with the run-output Markdown renderer unchanged.** The runtime already loads the renderer (`web/src/operator/renderer-source.ts`). When it loads, the runtime hands it to the run index through a new `setPromptRenderer`. A card renders its prompt body when it expands, including the expand right after a launch, and keeps the result until the prompt text changes. If the renderer isn't loaded yet, or throws, the body is the raw text with `pre-wrap`, and the next expand renders Markdown. Nothing repaints bodies globally, so the write-protected active card is never touched outside its own expand. The renderer builds DOM nodes from tokens with `html:false`, http(s)-only links and its node cap, and needs no new gate because nothing about it changes.
+- **No prompt sanitizer.** The prompt renders through `textContent` or the token renderer, exactly as submitted.
+- **One prompt rule for every parser.** A prompt is kept when it is a string, not empty after `trim()`, and at most 8,000 in raw `.length`. Anything else is omitted and the summary stays valid. Only the two run-summary parsers carry `prompt`; the status frame never has it.
+- **Provider labels are specific and monotonic.** A known reason replaces the session-error label only when the status is failed and `failureKind` is `session-error`. A reason on any other kind is ignored. A generic session-error label never replaces a provider-specific label for the same run, so `nextStreamState` keeps a held provider label over a derived generic one. Lookups use a `Map`. Copy:
   - `provider-auth-unavailable`: "Model provider unavailable"
   - `model-not-available`: "Model not available"
   - `provider-rejected-request`: "Model provider rejected the request"
-- **Launch limit from one string.** A single `readPrompt()` produces the string that is counted and sent. The disabled state comes from one function (`inFlight || tooLong`) called on input, reset and after the in-flight `finally`. The submit handler re-checks the length, because `requestSubmit()` bypasses a disabled button.
-- **The too-long message has its own status node.** It is a `role="status"` node linked to the textarea with `aria-describedby`, with `aria-invalid` on the textarea, and it is announced only when the prompt crosses the limit either way. `#launch-error` stays for submit outcomes. Copy: "Prompt is too long. Keep it under 8,000 characters (emoji count as two)."
+- **Launch limit matches the gateway.** A single `readPrompt()` returns the untrimmed textarea value, which is counted, sent and seeded. Emptiness is checked with `trim()`. The disabled state comes from one function (`inFlight || tooLong`) called on input, reset and after the in-flight `finally`. The submit handler re-checks the length, because `requestSubmit()` bypasses a disabled button.
+- **The too-long message has its own status node.** It is a `role="status"` node linked to the textarea with `aria-describedby`, with `aria-invalid` on the textarea, and it is announced only when the prompt crosses the limit either way. `#launch-error` stays for submit outcomes. Copy: "Prompt is too long. Keep it to 8,000 characters or fewer; emoji can count as more than one."
 - **Prompt rejections are not retried.** On a 400, `launchRun` parses the body inside a try/catch. `reason === 'prompt-too-long'` and `error === 'prompt is required'` map to fixed copy with no CSRF retry. Any other 400 keeps the existing refresh-and-retry path. The body is never rendered.
 - **No notification tag.** With no tag nothing replaces anything, so an approval and a question for the same run stay separate. A test pins that the `showNotification` options have no `tag` or `renotify`.
 
@@ -195,20 +195,20 @@ Without this work, a 1.12.0 gateway drops every operator stream into drift. The 
 
 - Should the prompt be stream-painted? No. It is summary data, and stream painting would break on a finished-run cache hit.
 - Does the approval deep link need service-worker changes? No. #640 already admits an approval `runId`. This plan adds tests only.
-- Does `reasonLabel` stickiness need to change? No. FAILED is terminal. The monotonic rule covers the one real flip (a later generic frame overwriting a specific label).
+- Does `reasonLabel` derivation change? Yes. A held provider label survives a later generic session-error frame (Unit 3).
 - Does showing the prompt change the privacy page? No. It is an in-session display with no new off-device flow.
 
 ### Deferred to Implementation
 
 - The exact grid rows for the prompt at desktop and at 480px and below: the designer decides, keeping the existing row rules intact.
-- Whether `ensureRunCardAnatomy` needs an extra `insertBeforeFirstRole` anchor for the prompt: settle it when wiring the three builders; the parity test decides.
-- How the fixture launch route treats a non-string prompt: mirror whatever the gateway route does at `v0.124.0`.
+- Whether `ensureRunCardAnatomy` needs an extra `insertBeforeFirstRole` anchor for the prompt: settle it when wiring the three builders; the anatomy test decides.
+- How the fixture launch route treats a non-string prompt: mirror the gateway route at `v0.124.0`.
 
 ## Implementation Units
 
 ```mermaid
 flowchart LR
-  U1[U1 Contract bump + server parsers] --> U2[U2 Browser parsers + sanitizer]
+  U1[U1 Contract bump + server parsers] --> U2[U2 Browser parsers]
   U2 --> U3[U3 Provider failure labels]
   U2 --> U4[U4 Prompt on run cards]
   U1 --> U5[U5 Launch limit + rejections]
@@ -229,13 +229,13 @@ flowchart LR
 
 - Modify: `src/gateway/operator-contract/version.ts`, `src/gateway/operator-contract/run-summary.ts`, `src/gateway/operator-contract/run-status.ts`, `src/gateway/operator-contract/index.ts`, `src/gateway/operator-contract/README.md`, `src/gateway/operator-sse-reader.ts`, `public/operator-stream.js` (pin only)
 - Create: `src/gateway/operator-contract/launch-prompt.ts`, `src/gateway/operator-contract/provider-failure-reason.ts` (wire types and constants only)
-- Test: `test/operator-contract-run-summary.test.ts` (or the existing run-summary test), `test/operator-sse-reader.test.ts`, `test/static-assets.test.ts`, `test/operator-stream-core.test.ts`
+- Test: the existing run-summary contract test, `test/operator-sse-reader.test.ts`, `test/static-assets.test.ts`, `test/operator-stream-core.test.ts`
 
 **Approach:**
 
 - Diff the vendored files against `v0.124.0` and copy the wire types, `OPERATOR_LAUNCH_PROMPT_MAX_LENGTH`, `OPERATOR_LAUNCH_PROMPT_TOO_LONG` and `OPERATOR_PROVIDER_FAILURE_REASONS`. Leave out helpers that import gateway or runtime code.
-- Server parsers copy `prompt` (bound-checked, non-empty) and `providerFailureReason` (known value, failed plus `session-error` only) into the closed objects. Anything else is omitted.
-- The README lists the new files without naming a version.
+- The server run-summary parser copies `prompt` under the shared prompt rule. Both server parsers copy `providerFailureReason` when it is a known value on a failed `session-error` run. Anything else is omitted.
+- The README lists the new files without naming a version, and its paragraph on caps states that the server applies the prompt length bound and no sanitizing.
 
 **Execution note:** Test-first for the parser cases.
 
@@ -246,44 +246,40 @@ flowchart LR
 - Happy path: a summary with a valid prompt and `failureKind: 'session-error'` plus `providerFailureReason: 'model-not-available'` parses with both fields.
 - Edge case: a prompt of exactly 8,000 units including a surrogate pair is kept; 8,001 is omitted and the summary stays valid.
 - Edge case: an empty, whitespace-only or non-string prompt is omitted.
-- Error path: an unknown, non-string or `__proto__` reason is omitted and the summary or frame is kept.
+- Error path: an unknown reason is omitted and the summary or frame is kept.
 - Error path: a known reason with `failureKind: 'inactivity-timeout'`, or on a non-failed status, is omitted.
-- Integration: the server and browser pins are equal and read `1.12.0`; a `ready` frame with `1.11.0` is drift.
+- Integration: the server and browser pins are equal, and a `ready` frame whose version differs from `OPERATOR_CONTRACT_VERSION` is drift. No test types a version literal.
 
 **Verification:** check-types, lint and the contract and reader tests pass, and no hand-typed version literal exists outside the two allowed constants.
 
-- [ ] **Unit 2: Browser parsers and prompt sanitizer**
+- [ ] **Unit 2: Browser parsers**
 
-**Goal:** Accept the new fields in the browser and add the shared prompt sanitizer.
+**Goal:** Accept the new fields in the browser.
 
-**Requirements:** R2, R3
+**Requirements:** R2
 
 **Dependencies:** Unit 1
 
 **Files:**
 
 - Modify: `public/operator-run-index.js`, `public/operator-run-index.d.ts`, `public/operator-stream.js`, `public/operator-stream.d.ts`
-- Test: `test/operator-run-index-core.test.js`, `test/operator-stream-core.test.ts`, a shared-corpus parity test under `test/`
+- Test: `test/operator-run-index-core.test.js`, `test/operator-stream-core.test.ts`
 
 **Approach:**
 
-- `parseRunSummaryItem` copies a sanitized `prompt` and a valid `providerFailureReason`. The stream's status branch copies `providerFailureReason` only.
-- Add `sanitizePromptText` with the rules in Key Technical Decisions, exported from the run index.
-- One shared input corpus runs through all four parsers and asserts the same kept or dropped result.
+- `parseRunSummaryItem` copies `prompt` under the shared prompt rule and a valid `providerFailureReason`. The stream's status branch copies `providerFailureReason` only.
 
 **Execution note:** Test-first.
 
-**Patterns to follow:** soft `failureKind` handling in both browser parsers; `capCheckoutText` for surrogate safety.
+**Patterns to follow:** soft `failureKind` handling in both browser parsers.
 
 **Test scenarios:**
 
-- Happy path: a multi-line prompt keeps its newlines and tabs; `\r\n` becomes `\n`.
-- Edge case: an emoji ZWJ sequence and variation selectors survive; bidi overrides, U+061C and C0 and C1 controls are removed.
-- Edge case: a prompt of only zero-width or control characters becomes no prompt.
-- Edge case: a prompt containing HTML (`<img src=x onerror=…>`) or Markdown syntax comes out of the sanitizer unchanged; rendering is Unit 4's job.
-- Integration: the shared corpus gives identical results in the server run summary, server reader, browser run index and browser stream parsers.
+- Happy path: a multi-line Markdown prompt is kept byte for byte.
+- Edge case: 8,000 vs 8,001 units including a surrogate pair; empty, whitespace-only and non-string prompts are omitted.
+- Error path: an unknown reason, or a known reason on a non-`session-error` kind, is omitted and the run or frame is kept.
 
-**Verification:** the parity test passes across all four parsers, and the sink-ban scan stays green.
+**Verification:** browser parser tests pass with the same keep and drop results as Unit 1's server tests.
 
 - [ ] **Unit 3: Provider failure labels**
 
@@ -301,7 +297,7 @@ flowchart LR
 **Approach:**
 
 - One label `Map` per module, held equal by the existing stream vs run-index parity test.
-- In `nextStreamState`, a provider-specific label wins over a generic session-error label for the same run (monotonic). The collapsed card applies the same mapping from the summary.
+- In `nextStreamState`, a held provider-specific label wins over a derived generic session-error label for the same run. The collapsed card applies the same mapping from the summary.
 
 **Execution note:** Test-first.
 
@@ -317,7 +313,7 @@ flowchart LR
 
 - [ ] **Unit 4: Prompt on run cards**
 
-**Goal:** Show the prompt on every card: a plain one-line preview collapsed, rendered Markdown expanded. Closes #628.
+**Goal:** Show the prompt on every card: a one-line preview collapsed, rendered Markdown expanded. Closes #628.
 
 **Requirements:** R3, R7
 
@@ -325,31 +321,31 @@ flowchart LR
 
 **Files:**
 
-- Modify: `public/operator-run-index.js` (`renderRunCard`, `ensureRunCardAnatomy`, `updateCardInPlace`, click guard), `public/operator-run-index.d.ts`, `public/operator-launch.js` (optimistic card seed), `web/src/operator/runtime.ts` (pass the renderer to the run index), `web/src/index.css`
+- Modify: `public/operator-run-index.js` (`renderRunCard`, `ensureRunCardAnatomy`, `updateCardInPlace`, expand path, `setPromptRenderer`), `public/operator-run-index.d.ts`, `public/operator-launch.js` (optimistic card seed), `web/src/operator/runtime.ts` (hand the renderer to the run index), `web/src/index.css`
 - Test: `test/operator-run-index-core.test.js`, `web/src/operator/run-card-prompt.test.ts` (jsdom), `web/src/operator/runtime.test.ts`, `test/static-assets.test.ts` (selector parity and sink scan)
 
 **Approach:**
 
-- Add a `run-prompt-preview` and a `run-prompt` element in the same position in all three builders, outside `SUBSTRUCTURE_ROLES`. Keep `insertBeforeFirstRole` anchors consistent so a launch-adopted card and a fetched card have the same DOM order.
-- `updateCardInPlace` sets both when the view has a prompt and clears both when it has none. Runs without a prompt render empty elements hidden by `:empty`.
-- The launch card seeds the submitted, sanitized text.
-- Clicks inside the prompt body never toggle the card when text is selected, when `event.detail > 1`, or when the target is a link. The body has `user-select: text` and `cursor: text`.
-- The run index takes an optional prompt renderer from the runtime, the same one the stream gets. The prompt body is rendered when the card is painted or the list view changes the prompt, and again when a renderer that loaded late becomes available.
+- Add `run-prompt-preview` and `run-prompt` elements in the same position in all three builders, outside `SUBSTRUCTURE_ROLES`. Keep `insertBeforeFirstRole` anchors consistent so a launch-adopted card and a fetched card have the same DOM order.
+- `updateCardInPlace` sets the preview and resets the body when the view's prompt changes, and clears both when the view has none. Runs without a prompt render empty elements hidden by `:empty`.
+- The launch card seeds the preview and body text with the exact text that was sent.
+- The expand path, including `markCardExpandedForLaunch`, renders the body with the current prompt renderer when the body isn't rendered for the current text yet; otherwise it keeps plain text.
+- Clicks in the body rely on the existing `clickBelongsToContent` guard (selection and controls), with a parent click-counter test.
 - CSS (designer): the preview is one line with an ellipsis; the body uses the run-output Markdown styles, about a 12-line cap with its own scroll, `overflow-wrap: anywhere` and `min-width: 0`, with the desktop and 480px grid rows and the skeleton updated.
 
-**Execution note:** Test-first for the anatomy and click behavior; the designer owns the CSS and a browser pass.
+**Execution note:** Test-first for the anatomy, expand rendering and click behavior; the designer owns the CSS and a browser pass.
 
 **Patterns to follow:** list-owned repo and time slots; `adoptLaunchSeededTime`; the click-bubbling guard and its parent click-counter test.
 
 **Test scenarios:**
 
 - Happy path: a fetched card, a launch card and an upgraded card all have `run-prompt-preview` and `run-prompt` in the same DOM position.
-- Happy path: a collapsed card shows the one-line preview; expanding shows the body with headings, lists and code rendered, without any reveal step.
+- Happy path: expanding a card with a Markdown prompt renders headings, lists and code; collapsing shows the one-line preview.
 - Edge case: a card whose list view loses its prompt clears both elements; an older run with no prompt shows nothing.
-- Edge case: HTML in a prompt renders as literal text, and a `javascript:` link is not a link.
-- Edge case: with no renderer, or when it throws, the body shows the plain text; a renderer that loads late re-renders the bodies already painted.
-- Integration: clicking a link inside the body opens it and does not toggle the card.
-- Integration: double-clicking or drag-selecting prompt text leaves the card's expanded state unchanged (parent click counter).
+- Edge case: HTML in a prompt shows as literal text on the assembled card.
+- Edge case: expanding before the renderer loads shows plain text; after `setPromptRenderer`, the next expand renders Markdown; a renderer that throws leaves plain text.
+- Integration: a launched run's card, expanded at launch, shows the sent prompt.
+- Integration: clicking a link or selecting text in the body does not toggle the card (parent click counter).
 - Integration: a finished-run cache hit leaves the prompt in place.
 
 **Verification:** jsdom and core tests pass, selector parity holds, and a fixture browser pass shows collapsed and expanded prompts in light and dark at desktop and 390px.
@@ -365,26 +361,26 @@ flowchart LR
 **Files:**
 
 - Modify: `public/operator-launch.js`, `web/src/views/Operator.tsx`, `src/routes/operator-fixture-harness.ts` (launch route), `web/src/index.css` if the status line needs styling
-- Test: `web/src/operator/launch-form.test.ts` (jsdom) or the existing launch tests, `test/operator-fixture-harness.test.ts`
+- Test: `web/src/operator/launch-form.test.ts` (jsdom), `test/operator-fixture-harness.test.ts`
 
 **Approach:**
 
 - Use `readPrompt()`, one disabled-state function, the status node and the copy from Key Technical Decisions.
 - `launchRun` returns the parsed 400 reason. `submitLaunch` maps the two prompt rejections to fixed copy and skips the retry.
-- The fixture launch route checks the untrimmed `.length > 8000`, then whitespace-only, before scenario and idempotency checks, and stores the prompt per run so the list returns it.
+- The fixture launch route checks the untrimmed `.length > 8000`, then whitespace-only, before scenario and idempotency checks.
 
 **Execution note:** Test-first.
 
 **Test scenarios:**
 
-- Happy path: a prompt of exactly 8,000 units (including emoji counted as two) submits.
+- Happy path: a prompt of exactly 8,000 units, including emoji, submits untrimmed.
 - Edge case: 8,001 units disables Launch and shows the message once; going back under the limit clears it and re-enables Launch.
 - Edge case: after an in-flight launch finishes, an over-limit prompt keeps Launch disabled.
 - Edge case: `requestSubmit()` with an over-limit prompt sends nothing.
 - Error path: a 400 with `reason: 'prompt-too-long'` shows the fixed copy and makes no second request.
 - Error path: a 400 with `error: 'prompt is required'` shows fixed copy and makes no second request.
 - Error path: a 400 with no body or another shape keeps the existing CSRF refresh-and-retry.
-- Integration: the fixture launch route returns both 400 shapes, and a launched fixture run's prompt appears in the next list response.
+- Integration: the fixture launch route returns both 400 shapes.
 
 **Verification:** launch and fixture tests pass, and the existing CSRF 400 tests still pass.
 
@@ -403,10 +399,10 @@ flowchart LR
 
 **Approach:**
 
-- Fixture scenarios: each known provider reason, `unclassified`, an unknown value, and `session-error` with no reason. Summary rows: a Markdown prompt (headings, lists, code, a link), an 8,000-unit prompt, a prompt containing HTML and a `javascript:` link, a bidi/control prompt, and no prompt. All prompts are synthetic.
+- Fixture scenarios: each known provider reason, `unclassified`, an unknown value, and `session-error` with no reason. Static summary rows: a Markdown prompt (headings, lists, code, a link), an 8,000-unit prompt, a prompt containing HTML and a `javascript:` link, and no prompt. All prompts are synthetic.
 - Extend the fixture allowed-field and literal-scan tests to the new keys.
 - Service-worker tests: approval with a valid `runId` jumps; an invalid route falls back to `/`; cold start opens `/#<runId>`; an approval and a question for the same run produce two notifications; options carry no `tag` or `renotify`.
-- Rewrite the `claims.ts` `sourceNote` to the current fact. Rewrite the 1.8.0 doc's summary-fields statement to the current shape. Both state only the current decision.
+- Rewrite the `claims.ts` `sourceNote` and the 1.8.0 doc's statement of summary fields to the current facts.
 
 **Test scenarios:**
 
@@ -418,21 +414,21 @@ flowchart LR
 
 ## System-Wide Impact
 
-- **Interaction graph:** run index (list-owned prompt and labels), stream (labels), launch (seed and limit), service worker (tests only), fixture harness.
+- **Interaction graph:** run index (list-owned prompt, expand rendering, labels), runtime (renderer handoff), stream (labels), launch (seed and limit), service worker (tests only), fixture harness.
 - **Error propagation:** new optional fields never reject a summary or frame. Prompt rejections end the launch with fixed copy. Other 400s keep the CSRF retry.
-- **State lifecycle risks:** the active-stream card keeps the launch seed until collapse; the label rule is monotonic per run.
-- **API surface parity:** four parsers stay aligned through the shared corpus test; two label maps stay aligned through the parity test.
-- **Unchanged invariants:** exact contract pin, the `innerHTML`-family ban, stream-only reveal for stream-owned regions, terminal-sticky cards, and the finished-run cache record shape.
+- **State lifecycle risks:** the active-stream card keeps the launch seed until collapse; a rendered body is kept until its prompt text changes; the label rule is monotonic per run.
+- **API surface parity:** server and browser parsers share one prompt rule and one reason rule; two label maps stay aligned through the parity test.
+- **Unchanged invariants:** exact contract pin, the `innerHTML`-family ban, stream-only reveal for stream-owned regions, terminal-sticky cards, the Markdown renderer, and the finished-run cache record shape.
 
 ## Risks & Dependencies
 
-| Risk                                                                                   | Mitigation                                                                                             |
-| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| Deploy skew: either side alone drops every stream while the list and launch still work | Ship as one infra rollout with paired rollback; confirm the drift notice tells the operator to reload. |
-| Open tabs and the cached shell keep the old pin until reload                           | Same drift notice; the service worker update flow from #638 picks up the new bundle.                   |
-| An 8,000-unit prompt with many lines or a long token breaks the card layout            | Expanded cap with its own scroll, `overflow-wrap: anywhere`, `min-width: 0`; browser pass at 390px.    |
-| A generic frame overwrites a provider label                                            | Monotonic label rule with a test.                                                                      |
-| Up to the run-index cap of 8,000-unit prompts in the DOM                               | Acceptable; no further handling.                                                                       |
+| Risk                                                                                   | Mitigation                                                                                                                                                                                                  |
+| -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Deploy skew: either side alone drops every stream while the list and launch still work | Merging only cuts a release; infra deploys after its own approvals. Never approve the dashboard deploy without the gateway; roll back both together. Confirm the drift notice tells the operator to reload. |
+| Open tabs and the cached shell keep the old pin until reload                           | Same drift notice; the service worker update flow from #638 picks up the new bundle.                                                                                                                        |
+| An 8,000-unit prompt with many lines or a long token breaks the card layout            | Expanded cap with its own scroll, `overflow-wrap: anywhere`, `min-width: 0`; browser pass at 390px.                                                                                                         |
+| An expand before the renderer loads shows plain text                                   | Accepted; the next expand renders Markdown.                                                                                                                                                                 |
+| A generic frame overwrites a provider label                                            | Monotonic label rule with a test.                                                                                                                                                                           |
 
 ## Documentation / Operational Notes
 
