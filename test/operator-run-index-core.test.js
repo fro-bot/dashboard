@@ -5,9 +5,12 @@
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 
-import {buildRunSafeView, FETCH_TIMEOUT_MS, fetchRunIndex, formatRelativeTime, initOperatorRunIndex, markCardExpandedForLaunch, markRunStreamAttached, parseRunSummaryItem, parseRunSummaryList, refreshOperatorRunIndex, resetRunIndexState, RUN_INDEX_CAP, FAILURE_REASON_LABELS as RUN_INDEX_FAILURE_REASON_LABELS, PROVIDER_FAILURE_REASON_LABELS as RUN_INDEX_PROVIDER_FAILURE_REASON_LABELS, RUN_STATUS_CLASS_TOKENS, VALID_RUN_SUMMARY_STATUSES} from '../public/operator-run-index.js'
+import {LAUNCH_PROMPT_MAX_LENGTH as LAUNCH_FORM_PROMPT_MAX_LENGTH} from '../public/operator-launch.js'
+import {buildRunSafeView, FETCH_TIMEOUT_MS, fetchRunIndex, formatRelativeTime, initOperatorRunIndex, markCardExpandedForLaunch, markRunStreamAttached, parseRunSummaryItem, parseRunSummaryList, refreshOperatorRunIndex, resetRunIndexState, RUN_INDEX_CAP, FAILURE_REASON_LABELS as RUN_INDEX_FAILURE_REASON_LABELS, LAUNCH_PROMPT_MAX_LENGTH as RUN_INDEX_LAUNCH_PROMPT_MAX_LENGTH, PROVIDER_FAILURE_REASON_LABELS as RUN_INDEX_PROVIDER_FAILURE_REASON_LABELS, RUN_STATUS_CLASS_TOKENS, VALID_RUN_SUMMARY_STATUSES} from '../public/operator-run-index.js'
 import {nextStreamState, PINNED_CONTRACT_VERSION, FAILURE_REASON_LABELS as STREAM_FAILURE_REASON_LABELS, PROVIDER_FAILURE_REASON_LABELS as STREAM_PROVIDER_FAILURE_REASON_LABELS} from '../public/operator-stream.js'
 import {formatRelativeTime as sharedFormatRelativeTime} from '../public/operator-time.js'
+import {OPERATOR_LAUNCH_PROMPT_MAX_LENGTH} from '../src/gateway/operator-contract/launch-prompt.ts'
+import {OPERATOR_PROVIDER_FAILURE_REASONS} from '../src/gateway/operator-contract/provider-failure-reason.ts'
 import {isOperatorFailureKind, OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
 import {parseRunSummary as parseServerRunSummary} from '../src/gateway/operator-contract/run-summary.ts'
 
@@ -401,7 +404,7 @@ describe('parseRunSummaryItem — prompt and providerFailureReason', () => {
     if (result.success) expect(Object.hasOwn(result.data, 'prompt')).toBe(false)
   })
 
-  it.each(['provider-auth-unavailable', 'model-not-available', 'provider-rejected-request', 'unclassified'])(
+  it.each(OPERATOR_PROVIDER_FAILURE_REASONS)(
     'keeps providerFailureReason %s on a failed session-error run',
     providerFailureReason => {
       const result = parseRunSummaryItem(makeValidSummary({...SESSION_ERROR_FAILED, providerFailureReason}))
@@ -2949,6 +2952,21 @@ describe('provider failure reason label map parity (stream ↔ run-index)', () =
   it('the provider copy is distinct from every failure-kind label', () => {
     const kindLabels = new Set(Object.values(RUN_INDEX_FAILURE_REASON_LABELS))
     for (const [, label] of PROVIDER_LABEL_COPY) expect(kindLabels.has(label)).toBe(false)
+  })
+})
+
+describe('browser launch prompt limit — parity with the vendored contract', () => {
+  it('the run index and the launch form use the contract limit', () => {
+    expect(RUN_INDEX_LAUNCH_PROMPT_MAX_LENGTH).toBe(OPERATOR_LAUNCH_PROMPT_MAX_LENGTH)
+    expect(LAUNCH_FORM_PROMPT_MAX_LENGTH).toBe(OPERATOR_LAUNCH_PROMPT_MAX_LENGTH)
+  })
+})
+
+describe('run-index provider reasons — parity with the vendored contract', () => {
+  it('every contract reason except unclassified has a run-index label', () => {
+    for (const reason of OPERATOR_PROVIDER_FAILURE_REASONS) {
+      expect(RUN_INDEX_PROVIDER_FAILURE_REASON_LABELS.has(reason)).toBe(reason !== 'unclassified')
+    }
   })
 })
 

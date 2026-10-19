@@ -537,8 +537,17 @@ async function defaultRuntimeLoader(opts?: {
   >
   // The prompt renderer is the same one the streams get, handed over when the load promise resolves — not
   // when the cap settles it. A renderer that loaded before the run index module did is handed over now.
-  applyPromptRenderer = loaded => runIndexMod.setPromptRenderer(loaded)
-  if (renderer !== undefined) applyPromptRenderer(renderer)
+  // A loader that a newer one superseded, or whose runtime was cleaned up, hands over nothing: the same
+  // guards the other post-await work uses.
+  applyPromptRenderer = loaded => {
+    if (_loaderEpoch !== epoch || opts?.isMounted?.() === false) return
+    runIndexMod.setPromptRenderer(loaded)
+  }
+  // Read through a function: the load promise assigns `renderer` from a callback TypeScript does not follow,
+  // so a direct read here is narrowed to `undefined`.
+  const loadedRenderer = () => renderer
+  const earlyRenderer = loadedRenderer()
+  if (earlyRenderer !== undefined) applyPromptRenderer(earlyRenderer)
 
   const launchMod = await import(/* @vite-ignore */ _launchSpecifier) as Pick<
     typeof LaunchModule,

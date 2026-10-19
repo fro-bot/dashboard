@@ -141,8 +141,11 @@ const VALID_PROVIDER_FAILURE_REASONS = new Set([
   'unclassified',
 ])
 
-/** Longest launch prompt in UTF-16 units. Mirrors src/gateway/operator-contract/launch-prompt.ts OPERATOR_LAUNCH_PROMPT_MAX_LENGTH. */
-const LAUNCH_PROMPT_MAX_LENGTH = 8000
+/**
+ * Longest launch prompt in UTF-16 units. Mirrors src/gateway/operator-contract/launch-prompt.ts
+ * OPERATOR_LAUNCH_PROMPT_MAX_LENGTH. Exported so a node-side test holds it equal to the server constant.
+ */
+export const LAUNCH_PROMPT_MAX_LENGTH = 8000
 
 /**
  * A launch prompt is kept when it is a string, not empty after trim(), and at most

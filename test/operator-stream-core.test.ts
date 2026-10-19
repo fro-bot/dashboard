@@ -10230,6 +10230,39 @@ describe('question status — label, wire acceptance and styling', () => {
     expect(css).toMatch(/\.run-card\[data-expanded="true"\]\s+\.run-updated-at\s*\{\s*color:\s*var\(--color-text-muted\);/)
   })
 
+  it('shows the prompt preview only on a collapsed card and the prompt body only on an expanded one', async () => {
+    const fs = await import('node:fs/promises')
+    const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
+    const hideRule = css.match(/\.run-card\s+\.run-prompt-preview:empty,\s*\.run-card\s+\.run-prompt:empty,\s*\.run-card:not\(\[data-expanded="true"\]\)\s+\.run-prompt,\s*\.run-card\[data-expanded="true"\]\s+\.run-prompt-preview\s*\{([^}]*)\}/)
+    expect(hideRule, 'expected one rule hiding empty, collapsed-body and expanded-preview prompt slots').not.toBeNull()
+    expect(hideRule?.[1]).toMatch(/display:\s*none;/)
+  })
+
+  it('keeps the prompt preview to one line', async () => {
+    const fs = await import('node:fs/promises')
+    const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
+    const previewStyles = css.match(/\.run-card\s+\.run-prompt-preview\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(previewStyles).toMatch(/white-space:\s*nowrap;/)
+    expect(previewStyles).toMatch(/overflow:\s*hidden;/)
+    expect(previewStyles).toMatch(/text-overflow:\s*ellipsis;/)
+  })
+
+  it('places the prompt slots on one grid row on desktop and on a lower one at 480px and below', async () => {
+    const fs = await import('node:fs/promises')
+    const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
+    const slotRule = /\.run-card\s+\.run-prompt-preview,\s*\.run-card\s+\.run-prompt\s*\{([^}]*)\}/g
+    const rules = [...css.matchAll(slotRule)]
+    expect(rules, 'expected a desktop and a narrow-screen placement rule for the prompt slots').toHaveLength(2)
+    const [desktop, narrow] = rules
+    const row = (rule: RegExpMatchArray | undefined) => Number(rule?.[1]?.match(/grid-row:\s*(\d+);/)?.[1])
+    expect(desktop?.[1]).toMatch(/grid-column:\s*1\s*\/\s*-1;/)
+    expect(row(desktop)).toBe(4)
+    // The second rule sits inside the last 480px media block.
+    const narrowBlockStart = css.lastIndexOf('@media (max-width: 480px)', narrow?.index)
+    expect(narrowBlockStart).toBeGreaterThan(-1)
+    expect(row(narrow)).toBe(5)
+  })
+
   it('keeps jump notices visible while the run list is scrolled', async () => {
     const fs = await import('node:fs/promises')
     const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')

@@ -63,6 +63,9 @@ export interface LaunchClient {
  */
 export declare function validateRepoItem(item: unknown): boolean
 
+/** Longest launch prompt the form sends, in UTF-16 units. Equals the vendored contract's limit. */
+export declare const LAUNCH_PROMPT_MAX_LENGTH: number
+
 /** True when the untrimmed prompt is over the gateway's length limit. */
 export declare function isPromptTooLong(prompt: string): boolean
 

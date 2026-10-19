@@ -391,7 +391,16 @@ describe('launched card', () => {
   })
 })
 
+// The document-level listener that keeps a link click inert; removed after each test so it never
+// cancels a later test's clicks.
+let cancelClicks: ((event: Event) => void) | undefined
+
 describe('clicks inside the prompt body', () => {
+  afterEach(() => {
+    if (cancelClicks !== undefined) document.removeEventListener('click', cancelClicks)
+    cancelClicks = undefined
+  })
+
   // A parent click counter proves the click reached the card's ancestors: the card's own guard is the only
   // thing that keeps the toggle from firing.
   async function expandedMarkdownCard() {
@@ -404,7 +413,8 @@ describe('clicks inside the prompt body', () => {
     const parentClicks = vi.fn()
     list.addEventListener('click', parentClicks)
     // jsdom does not navigate; cancel the default so a link click stays inert.
-    document.addEventListener('click', event => event.preventDefault())
+    cancelClicks = event => event.preventDefault()
+    document.addEventListener('click', cancelClicks)
     return {card, onSelectRun, parentClicks}
   }
 
@@ -436,6 +446,18 @@ describe('clicks inside the prompt body', () => {
     expect(onSelectRun).toHaveBeenCalledTimes(1)
     expect(card.dataset.expanded).toBe('true')
     selection.removeAllRanges()
+  })
+})
+
+describe('document click listeners between tests', () => {
+  it('leaves no listener behind that cancels a later click', () => {
+    const target = document.createElement('div')
+    document.body.append(target)
+    const click = new MouseEvent('click', {bubbles: true, cancelable: true})
+
+    target.dispatchEvent(click)
+
+    expect(click.defaultPrevented).toBe(false)
   })
 })
 

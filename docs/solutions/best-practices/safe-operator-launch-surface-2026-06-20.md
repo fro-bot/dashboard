@@ -85,9 +85,12 @@ finally { launching = false; submitBtn.disabled = false }   // also un-stick the
 ### 3. No oracle on a mutating path
 
 A mutating route's error responses are an information surface. Collapse them:
-- ALL post-submit `400`s → one generic failure. Do NOT special-case the gateway's
-  post-authz `400 "prompt is required"` — surfacing it reveals the repo was found
-  and authorized. The only prompt-required signal is a LOCAL pre-fetch validation.
+- Post-submit `400`s → one generic failure, except the two prompt rejections: `400`
+  with `reason: 'prompt-too-long'`, and `400` with `error: 'prompt is required'` and
+  no `reason`. The gateway checks prompt length, then whitespace-only, before any
+  repo access, so neither response reveals whether the repo was found or authorized.
+  Both map to fixed copy and are not retried. Every other post-submit `400` stays one
+  generic failure. The response body is never rendered.
 - `404` → one uniform unavailable state (no cause).
 - The repo picker renders from a single normalized success shape — no
   count/ordering/timing/per-item-denial inference (denied repos are simply absent).

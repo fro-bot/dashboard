@@ -107,6 +107,9 @@ export declare function buildRunSafeView(summary: ParsedRunSummary): RunSafeView
 
 export declare const FETCH_TIMEOUT_MS: number
 
+/** Longest launch prompt a run summary keeps, in UTF-16 units. Equals the vendored contract's limit. */
+export declare const LAUNCH_PROMPT_MAX_LENGTH: number
+
 export declare function fetchRunIndex(opts?: {endpointBase?: string; fixtureSessionId?: string}): Promise<RunIndexResult>
 
 /** Increment generation to invalidate pending inits. Called by the React runtime seam cleanup. */

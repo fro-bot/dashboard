@@ -4408,7 +4408,7 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
   })
 
   /** Mount the real default loader over mocked public modules; a run index that loads, so jumps apply. */
-  async function mountRenderer(options: {finishedRecord?: unknown; streamGate?: Promise<void>} = {}) {
+  async function mountRenderer(options: {finishedRecord?: unknown; streamGate?: Promise<void>; runIndexGate?: Promise<void>} = {}) {
     const handle = {close: vi.fn(), getConnectionStatus: vi.fn(() => 'active')}
     const initOperatorStream = vi.fn((_opts: AttachOpts) => handle)
     const resetOutputView = vi.fn()
@@ -4433,17 +4433,21 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
         resetOutputView,
       }
     })
-    vi.doMock('/static/operator-run-index.js?manual=1', () => ({
-      initOperatorRunIndex: async (opts: NonNullable<typeof captured>) => {
-        captured = opts
-        return 'loaded'
-      },
-      refreshOperatorRunIndex: vi.fn(async () => true),
-      resetRunIndexState: vi.fn(),
-      markRunStreamAttached: vi.fn(),
-      markCardExpandedForLaunch: vi.fn(),
-      setPromptRenderer,
-    }))
+    vi.doMock('/static/operator-run-index.js?manual=1', async () => {
+      // A gate holds the run index module's import, as a slow network would.
+      await options.runIndexGate
+      return {
+        initOperatorRunIndex: async (opts: NonNullable<typeof captured>) => {
+          captured = opts
+          return 'loaded'
+        },
+        refreshOperatorRunIndex: vi.fn(async () => true),
+        resetRunIndexState: vi.fn(),
+        markRunStreamAttached: vi.fn(),
+        markCardExpandedForLaunch: vi.fn(),
+        setPromptRenderer,
+      }
+    })
     vi.doMock('/static/operator-launch.js?manual=1', () => ({
       initOperatorLaunch: vi.fn(async (opts: {onRunLaunched: (runId: string, card: HTMLElement) => void}) => {
         onRunLaunched = opts.onRunLaunched
@@ -4461,7 +4465,7 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
       // The loader arms jumps a few microtasks after the launch module's init.
       await new Promise(resolve => realSetTimeout(resolve, 5))
     }
-    if (options.streamGate === undefined) await awaitInit()
+    if (options.streamGate === undefined && options.runIndexGate === undefined) await awaitInit()
     const card = () => document.querySelector(`[data-run-id="${RUN_ID}"]`) as HTMLElement
     return {
       awaitInit,
@@ -4579,6 +4583,21 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
       renderPage()
       const mounted = await mountRenderer()
       await new Promise(resolve => realSetTimeout(resolve, 10))
+
+      expect(functionCalls(mounted.setPromptRenderer)).toHaveLength(0)
+    })
+
+    it('is not handed over when the runtime is cleaned up while the run index import is pending', async () => {
+      let release: (() => void) | undefined
+      const runIndexGate = new Promise<void>(resolve => {
+        release = resolve
+      })
+      renderPage()
+      const mounted = await mountRenderer({runIndexGate})
+
+      mounted.runtime.cleanup()
+      release?.()
+      await new Promise(resolve => realSetTimeout(resolve, 20))
 
       expect(functionCalls(mounted.setPromptRenderer)).toHaveLength(0)
     })

@@ -277,6 +277,24 @@ describe('launch form prompt limit and rejections', () => {
     expect(harness.runCalls()).toHaveLength(2)
   })
 
+  it.each([
+    ['prompt-too-long', {error: 'bad request', reason: 'prompt-too-long'}, TOO_LONG_COPY],
+    ['prompt is required', {error: 'prompt is required'}, REQUIRED_COPY],
+  ])('a %s 400 on the CSRF retry shows the same fixed copy and makes no third request', async (_name, body, copy) => {
+    let attempt = 0
+    const harness = await setup(() => {
+      attempt += 1
+      return attempt === 1 ? new Response(null, {status: 400}) : jsonResponse(400, body)
+    })
+    type(harness, 'a prompt')
+    submit(harness)
+
+    await vi.waitFor(() => expect(harness.error.hidden).toBe(false))
+    expect(harness.error.textContent).toBe(copy)
+    expect(harness.csrfCalls()).toBe(2)
+    expect(harness.runCalls()).toHaveLength(2)
+  })
+
   it('a 400 that a refreshed CSRF token clears launches on the retry', async () => {
     let attempt = 0
     const harness = await setup(() => {

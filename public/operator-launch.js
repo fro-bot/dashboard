@@ -36,8 +36,9 @@ const LAUNCH_RUN_INDEX_CAP = 100
 
 // Mirrors OPERATOR_LAUNCH_PROMPT_MAX_LENGTH in src/gateway/operator-contract/launch-prompt.ts, for the
 // same reason as the cap above: browser code cannot import server modules. Counted in UTF-16 units
-// (`.length`) over the untrimmed prompt, which is what the gateway counts.
-const LAUNCH_PROMPT_MAX_LENGTH = 8000
+// (`.length`) over the untrimmed prompt, which is what the gateway counts. Exported so a node-side test
+// holds it equal to the server constant.
+export const LAUNCH_PROMPT_MAX_LENGTH = 8000
 // The `reason` of the gateway's 400 for a prompt over the limit.
 const PROMPT_TOO_LONG_REASON = 'prompt-too-long'
 // The `error` of the gateway's 400 for a whitespace-only prompt.
@@ -45,6 +46,19 @@ const PROMPT_REQUIRED_ERROR = 'prompt is required'
 
 const PROMPT_TOO_LONG_COPY = 'Prompt is too long. Keep it to 8,000 characters or fewer; emoji can count as more than one.'
 const PROMPT_REQUIRED_COPY = 'Please enter a prompt before launching.'
+
+/**
+ * The launch outcome for a 400 that names a prompt rejection, or undefined for any other error.
+ *
+ * @param {{kind: string, status?: number, reason?: string, code?: string}} error - A launchRun error.
+ * @returns {{kind: 'prompt-too-long'} | {kind: 'prompt-required'} | undefined} The fixed-copy outcome.
+ */
+function promptRejectionOutcome(error) {
+  if (error.kind !== 'http' || error.status !== 400) return undefined
+  if (error.reason === PROMPT_TOO_LONG_REASON) return {kind: 'prompt-too-long'}
+  if (error.code === PROMPT_REQUIRED_ERROR) return {kind: 'prompt-required'}
+  return undefined
+}
 
 /**
  * True when the untrimmed prompt is over the gateway's length limit.
@@ -162,10 +176,8 @@ export async function submitLaunch(client, params, idempotencyKey) {
   }
 
   // 400 naming a prompt rejection → fixed copy; a fresh CSRF token cannot change the answer.
-  if (error.kind === 'http' && error.status === 400) {
-    if (error.reason === PROMPT_TOO_LONG_REASON) return {kind: 'prompt-too-long'}
-    if (error.code === PROMPT_REQUIRED_ERROR) return {kind: 'prompt-required'}
-  }
+  const promptRejection = promptRejectionOutcome(error)
+  if (promptRejection !== undefined) return promptRejection
 
   // Any other 400 → refresh CSRF once and retry ONCE reusing the SAME idempotency key
   if (error.kind === 'http' && error.status === 400) {
@@ -186,8 +198,9 @@ export async function submitLaunch(client, params, idempotencyKey) {
       return {kind: 'launched', runId: retryResult.data.runId}
     }
 
-    // Second failure (any status) → generic failure, no further retry
-    return {kind: 'failure'}
+    // A prompt rejection on the retry maps to the same fixed copy; any other second failure is the
+    // generic failure, with no further retry.
+    return promptRejectionOutcome(retryResult.error) ?? {kind: 'failure'}
   }
 
   // Any other error (network, protocol, non-400/404/429 http) → failure
