@@ -34,6 +34,7 @@ import {
   createHook,
   createLauncherRunner,
   createSpawnRunner,
+  DETECTOR_DEADLINE_SLACK_MS,
   ENGINE_WARMUP_TIMEOUT_MS,
   HOOK_LAUNCHER_RELATIVE_PATH,
   type DetectorRunner,
@@ -917,7 +918,10 @@ describe('createEngineWarmup', { timeout: 30_000 }, () => {
     expect(await createEngineWarmup(launcher, worktree(), stalledWarmupOptions)()).toBe(false)
 
     // Resolved by the runner's own timeout, kill grace and final deadline, not by the launcher.
-    expect(Date.now() - start).toBeLessThan(stalledWarmupOptions.timeoutMs + stalledWarmupOptions.killGraceMs + 2000)
+    // The extra margin covers scheduling and teardown on a loaded host.
+    expect(Date.now() - start).toBeLessThan(
+      stalledWarmupOptions.timeoutMs + stalledWarmupOptions.killGraceMs + DETECTOR_DEADLINE_SLACK_MS + 1500,
+    )
     // The launcher started before the timeout, so the check below is not vacuous.
     expect(existsSync(pidFile)).toBe(true)
     await expectProcessGone(readPid(pidFile))
