@@ -46,6 +46,9 @@ const GRADIENT_TEXT_LINE = ['.gradient-heading { background-clip: text;', 'backg
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 let tmpDir: string | undefined
+// Node timers can fire a millisecond or two early against Date.now(), so lower bounds allow that much.
+const TIMER_EARLY_MS = 5
+
 const trackedPidFiles: string[] = []
 const trackedProcessMarkers: string[] = []
 
@@ -448,7 +451,7 @@ describe('createSpawnRunner', () => {
     expect(result.kind).toBe('timeout')
     // Resolved by the deadline, not by waiting for the grandchild to release the pipes.
     expect(elapsedMs).toBeLessThan(400 + 100 + 2000)
-    expect(elapsedMs).toBeGreaterThanOrEqual(400)
+    expect(elapsedMs).toBeGreaterThanOrEqual(400 - TIMER_EARLY_MS)
     // A grandchild that leaves the child's process group is outside the group kill's reach; the afterEach safety net reaps it.
     expect(isAlive(readPid(grandchildPidFile))).toBe(true)
   }, 15_000)
@@ -521,7 +524,7 @@ describe('createSpawnRunner', () => {
     const elapsedMs = Date.now() - start
 
     expect(result).toEqual({ kind: 'spawn-error' })
-    expect(elapsedMs).toBeGreaterThanOrEqual(200)
+    expect(elapsedMs).toBeGreaterThanOrEqual(200 - TIMER_EARLY_MS)
     expect(elapsedMs).toBeLessThan(200 + 1000)
     await new Promise((resolve) => setTimeout(resolve, 500))
     expect(existsSync(markerFile)).toBe(false)
@@ -586,7 +589,7 @@ describe('createSpawnRunner', () => {
     if (result.kind !== 'overflow') return
     expect(Buffer.byteLength(result.stdout, 'utf-8')).toBeLessThanOrEqual(64)
     // Resolved by the deadline, not by waiting for the grandchild to release the pipes.
-    expect(elapsedMs).toBeGreaterThanOrEqual(400)
+    expect(elapsedMs).toBeGreaterThanOrEqual(400 - TIMER_EARLY_MS)
     expect(elapsedMs).toBeLessThan(400 + 100 + 2000)
     // A grandchild that leaves the child's process group is outside the group kill's reach; the afterEach safety net reaps it.
     expect(isAlive(readPid(grandchildPidFile))).toBe(true)
