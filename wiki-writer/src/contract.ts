@@ -1,4 +1,4 @@
-import type {RecordCorrectionInput} from '@fro-bot/wiki-write-core'
+import type {RecordCorrectionInput} from '@fro.bot/wiki-write-core'
 
 /**
  * Narrow wire contract for the private wiki writer boundary.

@@ -1,4 +1,4 @@
-import {GATE_CONTRACT_VERSION} from '@fro-bot/wiki-write-core'
+import {GATE_CONTRACT_VERSION} from '@fro.bot/wiki-write-core'
 import {afterEach, describe, expect, it, vi} from 'vitest'
 import {
   createGateContractChecker,

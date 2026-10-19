@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto'
-import {GATE_CONTRACT_VERSION} from '@fro-bot/wiki-write-core'
+import {GATE_CONTRACT_VERSION} from '@fro.bot/wiki-write-core'
 import {describe, expect, it, vi} from 'vitest'
 import {WIKI_REF, WIKI_REPOSITORY, type GitHubDataClient} from '../src/github-data-client.ts'
 import {createOperationLedger} from '../src/operation-ledger.ts'

@@ -65,12 +65,13 @@ subset (`pull_requests`/`checks`/`issues`/`contents`/`metadata:read`, with
 `security_events`/`vulnerability_alerts:read` optional). `DASHBOARD_GITHUB_APP_*` may never
 mint write-scoped tokens. The dashboard web/runtime has no GitHub write authority today. The
 `wiki-writer` service is implemented in `wiki-writer/` but is not deployed, not integrated, and
-holds no runtime authority — no workflow deploys it, nothing in `src/` reaches it, and its source
-never enters the dashboard runtime image. When it ships it will be the only such authority —
+holds no runtime authority — no workflow deploys it, nothing in `src/` reaches it, and neither its
+source nor its writer-only dependencies enter the dashboard runtime image. It is a Bun workspace
+member covered by the root gates, and its security-boundary test enforces the import boundary. When it ships it will be the only such authority —
 separately deployed, authenticated as the Fro Bot App (the same App `release.yaml` uses via
 `APPLICATION_ID`, distinct from the read-only Agent App behind `DASHBOARD_GITHUB_APP_*`), able
 to target only the `fro-bot/.github` `data` branch under the explicit wiki/corrections path
-allowlist, executing gates from the shared `@fro-bot/wiki-write-core` package. The dashboard never receives
+allowlist, executing gates from the shared `@fro.bot/wiki-write-core` package. The dashboard never receives
 the App private key or a derived installation token. Repository CI/release automation is
 separately credentialed and outside this web/runtime boundary. This separation prevents
 credential exfiltration and

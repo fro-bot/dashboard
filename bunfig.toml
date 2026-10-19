@@ -8,4 +8,5 @@ minimumReleaseAgeExcludes = [
   "@bfra.me/es",
   "@bfra.me/eslint-config",
   "@bfra.me/tsconfig",
+  "@fro.bot/wiki-write-core",
 ]

@@ -12,7 +12,7 @@ import {
   validateRenderingPolicy,
   type CorrectionsFile,
   type RecordCorrectionInput,
-} from '@fro-bot/wiki-write-core'
+} from '@fro.bot/wiki-write-core'
 import {
   assertAllowedTarget,
   type GitHubDataClient,

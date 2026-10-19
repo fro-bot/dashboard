@@ -4,6 +4,9 @@
   "private": true,
   "description": "Fro Bot monitoring dashboard with an isolated wiki-write capability",
   "type": "module",
+  "workspaces": [
+    "wiki-writer"
+  ],
   "scripts": {
     "bootstrap": "bun install",
     "dev": "node --env-file-if-exists=.env --watch src/server.ts",

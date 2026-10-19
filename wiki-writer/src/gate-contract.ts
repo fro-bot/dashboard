@@ -1,7 +1,7 @@
-// package.json pins this package to a main-ancestor commit. The upstream
-// `Check Wiki Write Core Dist` status check tree-compares committed `dist/`
-// with a fresh build, so the compiled Node 24 import is the verified artifact.
-import {GATE_CONTRACT_VERSION} from '@fro-bot/wiki-write-core'
+// The published package ships the compiled gate contract and package.json pins its
+// exact version. The marker URL below points at the authoritative source in
+// fro-bot/.github, which the readiness check compares against.
+import {GATE_CONTRACT_VERSION} from '@fro.bot/wiki-write-core'
 
 export const GATE_CONTRACT_HEAD_URL = 'https://api.github.com/repos/fro-bot/.github/git/ref/heads/main'
 export const GATE_CONTRACT_MARKER_URL = 'https://raw.githubusercontent.com/fro-bot/.github/main/packages/wiki-write-core/dist/gate-contract.json'

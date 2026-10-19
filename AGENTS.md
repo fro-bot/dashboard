@@ -19,10 +19,13 @@ view of Fro Bot's cross-repo footprint.
    **Today the dashboard web/runtime has no GitHub write authority at all.** The
    `wiki-writer` service below is implemented in `wiki-writer/` but is not
    deployed, not integrated, and holds no runtime authority: no workflow builds
-   or deploys it, nothing in `src/` reaches it, and its source never enters the
-    dashboard runtime image (`Dockerfile` copies nothing from `wiki-writer/`;
-    it is not a Bun workspace member and is not installed).
-    `wiki-writer/test/security-boundary.test.ts` still runs and enforces
+    or deploys it, nothing in `src/` reaches it, and neither its source nor its
+    writer-only dependencies enter the dashboard runtime image. `wiki-writer/` is a
+    Bun workspace member, so the root type-check, lint and test gates cover it.
+    The `Dockerfile` copies only `wiki-writer/package.json` into the build stages,
+    and the prod-deps stage installs with `--filter './'`, so the runtime image holds
+    only the root package's production dependencies.
+    `wiki-writer/test/security-boundary.test.ts` enforces
     that `src/` and `web/src/` cannot import writer code or key-loading symbols.
 
    When it ships, it will be the ONLY GitHub write authority available to the
@@ -31,7 +34,7 @@ view of Fro Bot's cross-repo footprint.
    distinct from the read-only Agent App behind `DASHBOARD_GITHUB_APP_*`. It will
    target only the `fro-bot/.github` repository's `data` branch, under an explicit
    wiki/corrections path allowlist, executing gates from the shared
-   `@fro-bot/wiki-write-core` package. The dashboard web process must never receive
+   `@fro.bot/wiki-write-core` package. The dashboard web process must never receive
    the Fro Bot App private key or an installation token derived from it. Any
    additional write target or credential requires explicit owner approval and a new
    threat model.

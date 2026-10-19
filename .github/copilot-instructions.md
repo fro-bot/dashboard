@@ -16,13 +16,14 @@ load-bearing rules for code suggestions.
    credentials may never mint write-scoped tokens. The dashboard web/runtime has no
    GitHub write authority today — the `wiki-writer` service is implemented in
    `wiki-writer/` but is not deployed, not integrated, and holds no runtime authority
-   (nothing in `src/` reaches it, and its source never enters the dashboard runtime
-   image). When it ships it will be the only such authority: separately deployed,
+   (nothing in `src/` reaches it, and neither its source nor its writer-only
+   dependencies enter the dashboard runtime image; it is a Bun workspace member covered
+   by the root gates, and its security-boundary test enforces the import boundary). When it ships it will be the only such authority: separately deployed,
    authenticated as the
    Fro Bot App (the same App `release.yaml` uses via `APPLICATION_ID`, distinct from the
    read-only Agent App behind `DASHBOARD_GITHUB_APP_*`), able to target only the
    `fro-bot/.github` repository's `data` branch, under an explicit wiki/corrections path
-   allowlist, executing gates from the shared `@fro-bot/wiki-write-core` package. The dashboard web process must never receive the
+   allowlist, executing gates from the shared `@fro.bot/wiki-write-core` package. The dashboard web process must never receive the
    Fro Bot App private key or an installation token derived from it. Any additional
    write target or credential requires explicit owner approval and a new threat model.
    This invariant does not govern separately credentialed repository CI/release automation,
