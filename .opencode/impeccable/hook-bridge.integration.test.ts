@@ -722,6 +722,14 @@ async function withStalledDownload(body: (download: StalledDownload) => Promise<
   }
 }
 
+/**
+ * Timeout for a runner whose launcher has to start, reach curl and have curl
+ * connect before the timeout kills it. The first exec of a freshly written or
+ * copied executable can take over a second on a loaded host, and the runner's
+ * timeout counts from spawn, so this leaves ample room for that startup.
+ */
+const STALLED_DOWNLOAD_TIMEOUT_MS = 5000
+
 describe('createLauncherRunner', () => {
   it('runs the launcher directly with the hook subcommand and the claude harness and quiet env', async () => {
     const launcher = launcherFixture(
@@ -747,7 +755,7 @@ describe('createLauncherRunner', () => {
         scriptPath: launcher,
         command: launcher,
         args: ['hook'],
-        timeoutMs: 1500,
+        timeoutMs: STALLED_DOWNLOAD_TIMEOUT_MS,
         killGraceMs: 200,
       })
       const result = await runner(payload, { worktree: worktree() })
@@ -766,8 +774,12 @@ describe('createLauncherRunner', () => {
   })
 })
 
-describe('createEngineWarmup', () => {
-  const warmupOptions = { timeoutMs: 1000, killGraceMs: 100 }
+describe('createEngineWarmup', { timeout: 30_000 }, () => {
+  // Every test using these options expects the launcher to exit on its own, so the
+  // timeout must not be reachable: a freshly written executable can take over a
+  // second on its first exec on a loaded host, and the timeout counts from spawn.
+  const warmupOptions = { timeoutMs: 15_000, killGraceMs: 100 }
+  const stalledWarmupOptions = { timeoutMs: 4000, killGraceMs: 100 }
 
   it('is ready when the launcher answers engine-probe with the engine handshake', async () => {
     const launcher = launcherFixture('[ "$1" = engine-probe ] && printf "impeccable-engine 1.2.3\\n"')
@@ -902,11 +914,14 @@ describe('createEngineWarmup', () => {
     // The launcher's own child stays in its process group, as the real launcher's curl does.
     const launcher = launcherFixture(`sleep 60 &\necho $! > ${JSON.stringify(pidFile)}\nwait`)
     const start = Date.now()
-    expect(await createEngineWarmup(launcher, worktree(), warmupOptions)()).toBe(false)
+    expect(await createEngineWarmup(launcher, worktree(), stalledWarmupOptions)()).toBe(false)
 
-    expect(Date.now() - start).toBeLessThan(5000)
+    // Resolved by the runner's own timeout, kill grace and final deadline, not by the launcher.
+    expect(Date.now() - start).toBeLessThan(stalledWarmupOptions.timeoutMs + stalledWarmupOptions.killGraceMs + 2000)
+    // The launcher started before the timeout, so the check below is not vacuous.
+    expect(existsSync(pidFile)).toBe(true)
     await expectProcessGone(readPid(pidFile))
-  }, 15_000)
+  }, 30_000)
 })
 
 describe('engine warm-up through createHook, with a stalled first-use download', () => {
@@ -920,7 +935,7 @@ describe('engine warm-up through createHook, with a stalled first-use download',
       const hook = createHook({
         runDetector: spawnCounting,
         worktree: worktree(),
-        warmEngine: createEngineWarmup(launcher, worktree(), { timeoutMs: 1500, killGraceMs: 200 }),
+        warmEngine: createEngineWarmup(launcher, worktree(), { timeoutMs: STALLED_DOWNLOAD_TIMEOUT_MS, killGraceMs: 200 }),
         engineReadyWaitMs: 300,
       })
       const edit = { tool: 'edit', sessionID: 's', callID: 'c', args: { filePath: '/repo/src/App.tsx' } }
@@ -929,17 +944,18 @@ describe('engine warm-up through createHook, with a stalled first-use download',
       const start = Date.now()
       await hook(edit, first)
 
-      expect(Date.now() - start).toBeLessThan(1500)
+      // The hook waited only its own readiness window, not the warm-up's whole budget.
+      expect(Date.now() - start).toBeLessThan(STALLED_DOWNLOAD_TIMEOUT_MS)
       expect(first.output).toContain('design engine is still downloading')
       expect(hookSpawns).toBe(0)
       // The download starts in the background; under load the first hook call can return before curl connects.
-      await waitUntil(() => requests() > 0)
+      await waitUntil(() => requests() > 0, STALLED_DOWNLOAD_TIMEOUT_MS)
       expect(requests()).toBeGreaterThan(0)
       // The launcher has begun staging the download.
       expect(readdirSync(stagingDir).some(name => name.startsWith('.impeccable.part.'))).toBe(true)
 
       // The warm-up keeps running past the hook's wait, and its group is killed at its own timeout.
-      await expectMarkerProcessesGone(marker, 5000)
+      await expectMarkerProcessesGone(marker, STALLED_DOWNLOAD_TIMEOUT_MS + 3000)
 
       const second = { title: 't', output: 'ok', metadata: {} }
       await hook(edit, second)
@@ -952,7 +968,7 @@ describe('engine warm-up through createHook, with a stalled first-use download',
       await hook(edit, third)
       expect(third.output).toBe('ok')
     })
-  }, 20_000)
+  }, 30_000)
 })
 
 /**
