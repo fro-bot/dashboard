@@ -16,6 +16,9 @@ const STREAM_SPECIFIER = '/static/operator-stream.js?manual=1'
 // The gateway rejects a longer key.
 const GATEWAY_KEY_MAX_LENGTH = 256
 
+// Comfortably past the launch request deadline.
+const LAUNCH_TIMEOUT_MS = 60_000
+
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {status, headers: {'content-type': 'application/json'}})
 }
@@ -55,6 +58,8 @@ describe('launch idempotency key', () => {
       clearFinishedRuns: vi.fn(),
       resetOutputView: vi.fn(),
     }))
+    // The held key is module state: a fresh copy per test keeps one test's key out of the next.
+    vi.resetModules()
     launchModule = await import('../../../public/operator-launch.js')
 
     const sent: SentRun[] = []
@@ -200,7 +205,6 @@ describe('launch idempotency key', () => {
     ['a generic 400', () => jsonResponse(400, {error: 'bad request'})],
     ['a prompt rejection', () => jsonResponse(400, {error: 'bad request', reason: 'prompt-too-long'})],
     ['a 404', () => jsonResponse(404, {})],
-    ['a 429', () => jsonResponse(429, {})],
     ['a 500', () => jsonResponse(500, {})],
     ['a 202 without a run id', () => jsonResponse(202, {})],
   ])('after %s the next submit gets a new key', async (_name, respond) => {
@@ -284,14 +288,104 @@ describe('launch idempotency key', () => {
     expect(m.sent[1]?.bodyKey).not.toBe(m.sent[0]?.bodyKey)
   })
 
-  it('tearing the launch UI down drops the held key', async () => {
-    const m = await mount(attempt => (attempt === 1 ? never<Response>() : jsonResponse(202, {runId: 'run-idem-013'})))
-    await m.submit('same prompt', {stall: true})
+  it('a 429 keeps the key, shows the rate-limited copy, and the next click reuses the key', async () => {
+    const m = await mount(attempt => (attempt === 1 ? jsonResponse(429, {}) : jsonResponse(202, {runId: 'run-idem-014'})))
+    await m.submit('same prompt')
+
+    expect(document.querySelector('#launch-error')?.textContent).toBe('Too many launch requests. Please wait before trying again.')
+    await m.submit('same prompt')
+
+    expect(m.sent).toHaveLength(2)
+    expect(typeof m.sent[0]?.bodyKey).toBe('string')
+    expect(m.sent[1]?.bodyKey).toBe(m.sent[0]?.bodyKey)
+  })
+
+  it('a launch torn down in flight keeps its key for the same repo and prompt after a remount', async () => {
+    const m = await mount(attempt => (attempt === 1 ? never<Response>() : jsonResponse(202, {runId: 'run-idem-015'})))
+    await m.submit('same prompt')
     launchModule?.resetLaunchState()
     await m.remount()
     await m.submit('same prompt')
 
     expect(m.sent).toHaveLength(2)
+    expect(typeof m.sent[0]?.bodyKey).toBe('string')
+    expect(m.sent[1]?.bodyKey).toBe(m.sent[0]?.bodyKey)
+  })
+
+  it('a changed prompt after a teardown and remount still gets a new key', async () => {
+    const m = await mount(attempt => (attempt === 1 ? never<Response>() : jsonResponse(202, {runId: 'run-idem-016'})))
+    await m.submit('first prompt')
+    launchModule?.resetLaunchState()
+    await m.remount()
+    await m.submit('another prompt')
+
+    expect(m.sent).toHaveLength(2)
     expect(m.sent[1]?.bodyKey).not.toBe(m.sent[0]?.bodyKey)
+  })
+
+  it('a definitive answer that reaches the stale submit after a remount releases its key', async () => {
+    let answerStale: (response: Response) => void = () => {}
+    const m = await mount(attempt => {
+      if (attempt === 1) {
+        return new Promise<Response>(resolve => {
+          answerStale = resolve
+        })
+      }
+      return jsonResponse(202, {runId: 'run-idem-017'})
+    })
+    await m.submit('same prompt')
+    launchModule?.resetLaunchState()
+    await m.remount()
+
+    answerStale(jsonResponse(404, {}))
+    await vi.advanceTimersByTimeAsync(0)
+    await m.submit('same prompt')
+
+    expect(m.sent).toHaveLength(2)
+    expect(typeof m.sent[0]?.bodyKey).toBe('string')
+    expect(m.sent[1]?.bodyKey).not.toBe(m.sent[0]?.bodyKey)
+  })
+
+  it('a stale submit does not release or clear the key a newer submit holds', async () => {
+    let answerStale: (response: Response) => void = () => {}
+    const m = await mount(attempt => {
+      if (attempt === 1) {
+        return new Promise<Response>(resolve => {
+          answerStale = resolve
+        })
+      }
+      return attempt === 2 ? never<Response>() : jsonResponse(202, {runId: 'run-idem-018'})
+    })
+    await m.submit('stale prompt')
+    launchModule?.resetLaunchState()
+    await m.remount()
+    await m.submit('newer prompt')
+
+    // The stale submit ends with a definitive answer for a different key, then the newer one times out.
+    answerStale(jsonResponse(404, {}))
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(LAUNCH_TIMEOUT_MS + 1)
+    await m.submit('newer prompt')
+
+    expect(m.sent).toHaveLength(3)
+    expect(typeof m.sent[1]?.bodyKey).toBe('string')
+    expect(m.sent[2]?.bodyKey).toBe(m.sent[1]?.bodyKey)
+    expect(m.sent[1]?.bodyKey).not.toBe(m.sent[0]?.bodyKey)
+  })
+
+  it('a stale submit that times out does not clear the key a newer submit holds', async () => {
+    const m = await mount(attempt => (attempt <= 2 ? never<Response>() : jsonResponse(202, {runId: 'run-idem-019'})))
+    await m.submit('stale prompt')
+    launchModule?.resetLaunchState()
+    await m.remount()
+    await m.submit('newer prompt')
+
+    // Both requests pass their deadline together; both are indeterminate.
+    await vi.advanceTimersByTimeAsync(LAUNCH_TIMEOUT_MS + 1)
+    await m.submit('newer prompt')
+
+    expect(m.sent).toHaveLength(3)
+    expect(typeof m.sent[1]?.bodyKey).toBe('string')
+    expect(m.sent[2]?.bodyKey).toBe(m.sent[1]?.bodyKey)
   })
 })

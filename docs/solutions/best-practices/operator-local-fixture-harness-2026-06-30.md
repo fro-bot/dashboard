@@ -266,6 +266,12 @@ Fixture-only routing fields (`scenario`, `fixtureSessionId`) stay out of product
 bodies. Tests should assert the production body holds exactly `repo`, `prompt` and
 `idempotencyKey`, and that the header carries the same key.
 
+The client holds one key per pending submission (same repo, same exact prompt) and
+reuses it after a timeout, a network failure or a 429, across a teardown, a remount
+and a sign-out. A definitive answer or a form reset releases it. A reused key dedupes
+only within the gateway's idempotency window, not indefinitely. The fixture harness
+scopes its own dedupe by `(fixtureSessionId, idempotencyKey)` and has no such window.
+
 ### Verify the assembled browser surface
 
 Unit tests are not enough for this pattern. The fixture harness must be verified in

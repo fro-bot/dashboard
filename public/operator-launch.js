@@ -129,15 +129,17 @@ export function mintIdempotencyKey() {
 
 /**
  * The generic failure outcome for a client error. A network error (which includes a timeout) leaves
- * it unknown whether the gateway accepted the request, so that failure is marked indeterminate and
- * the caller keeps the idempotency key for a repeat of the same launch. Every other error is an
- * answer, or a request that never went out, and ends the submission.
+ * it unknown whether the gateway accepted the request, and so does a 429, which the gateway answers
+ * before it looks at the idempotency key. Those failures are marked indeterminate and the caller
+ * keeps the idempotency key for a repeat of the same launch. Every other error is an answer, or a
+ * request that never went out, and ends the submission.
  *
- * @param {{kind: string}} error - A client error.
+ * @param {{kind: string, status?: number}} error - A client error.
  * @returns {{kind: 'failure', indeterminate?: true}} The failure outcome.
  */
 function failureOutcome(error) {
-  return error.kind === 'network' ? {kind: 'failure', indeterminate: true} : {kind: 'failure'}
+  const isIndeterminate = error.kind === 'network' || (error.kind === 'http' && error.status === 429)
+  return isIndeterminate ? {kind: 'failure', indeterminate: true} : {kind: 'failure'}
 }
 
 /**
@@ -154,7 +156,8 @@ function failureOutcome(error) {
  *        error 'prompt is required' → {kind:'prompt-required'}) → no CSRF refresh and no retry
  *      - 404 → {kind:'not-found'} (uniform, no cause)
  *      - 429 → {kind:'rate-limited'}
- *   - any other error → {kind:'failure'}, marked `indeterminate` when it is a network error
+ *   - any other error → {kind:'failure'}, marked `indeterminate` when it is a network error or a 429 on
+ *     the CSRF retry
  *
  * The idempotency key is passed in (not minted here) so the caller can reuse it
  * across retries and the function remains pure/testable.
@@ -473,9 +476,12 @@ let _launching = false
 // mount still blocks a double-fire, because its generation still matches.
 let _launchingGeneration = null
 // The idempotency key of a submission that has no definitive answer yet, with the repo and the exact
-// prompt it was minted for and the init generation that holds it; null when none is held. A re-click
-// with the same repo and prompt reuses the key so the gateway can dedupe a request it already accepted.
-// It is released on any definitive answer, on a form reset and by resetLaunchState().
+// prompt it was minted for; null when none is held. A re-click with the same repo and prompt reuses the
+// key, so the gateway can dedupe a request it already accepted, for as long as the gateway's idempotency
+// window lasts. A timeout, a network failure and a 429 keep the key, because none of them says whether an
+// earlier attempt with this key was accepted. It lives outside any init generation, so it outlives a
+// teardown, a remount and a sign-out, and resetLaunchState() leaves it alone. It is released on any
+// definitive answer (compared by key, so a stale submit releases only its own) and on a form reset.
 let _heldLaunch = null
 
 /**
@@ -770,9 +776,9 @@ export async function initOperatorLaunch(opts) {
 
       // Reuse the held key when this is a repeat of the same repo and prompt; otherwise mint one.
       const held = _heldLaunch
-      const isRepeat = held !== null && held.generation === myGeneration && held.repo === repo && held.prompt === prompt
+      const isRepeat = held !== null && held.repo === repo && held.prompt === prompt
       const idempotencyKey = isRepeat ? held.idempotencyKey : mintIdempotencyKey()
-      _heldLaunch = {generation: myGeneration, repo, prompt, idempotencyKey}
+      _heldLaunch = {repo, prompt, idempotencyKey}
 
       let outcome
       try {
@@ -798,10 +804,10 @@ export async function initOperatorLaunch(opts) {
         syncPromptState()
       }
 
-      // Any answer but an indeterminate failure ends the submission, so its key is released. The key
-      // is compared so a stale submit cannot release a newer init's key.
-      const isIndeterminate = outcome.kind === 'failure' && outcome.indeterminate === true
-      if (!isIndeterminate && _heldLaunch?.idempotencyKey === idempotencyKey) _heldLaunch = null
+      // A definitive answer ends the submission, so its key is released. An indeterminate failure and a
+      // 429 keep it. The key is compared so a stale submit cannot release a newer submit's key.
+      const keepsKey = outcome.kind === 'rate-limited' || (outcome.kind === 'failure' && outcome.indeterminate === true)
+      if (!keepsKey && _heldLaunch?.idempotencyKey === idempotencyKey) _heldLaunch = null
 
       // Guard: the lock is released above either way. If a reset or newer init superseded this one
       // while the launch was in flight, this page no longer owns the card, the stream, the hash or
@@ -1026,6 +1032,7 @@ export async function initOperatorLaunch(opts) {
  * the active submit listener controller (removing the listener from the form).
  * Called by the React runtime seam cleanup so that a remount can re-initialize
  * the launch UI without double-registering submit handlers. Also used in tests.
+ * A held idempotency key is not part of this state and survives the reset.
  *
  * Incrementing (not nulling) the generation means a fresh init that starts after
  * this reset will capture a new generation and pass its own staleness guards,
@@ -1044,7 +1051,6 @@ export function resetLaunchState() {
     _launchListenerController = null
     _launchListenerGeneration = -1
   }
-  _heldLaunch = null
   // Close the launch-created stream handle to prevent leaked connections/timers.
   if (_launchStreamHandle !== null) {
     try {

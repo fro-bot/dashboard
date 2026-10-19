@@ -299,6 +299,11 @@ describe('submitLaunch — indeterminate failures', () => {
     expect(outcome).toEqual({kind: 'failure', indeterminate: true})
   })
 
+  it('a 429 on the CSRF retry is a failure marked indeterminate, since it says nothing about an earlier attempt', async () => {
+    const outcome = await submitLaunch(clientWith([{kind: 'http', status: 400}, {kind: 'http', status: 429}]), {repo: 'o/r', prompt: 'p'}, 'key-429-retry')
+    expect(outcome).toEqual({kind: 'failure', indeterminate: true})
+  })
+
   it('a network failure on the CSRF refresh is a failure marked indeterminate', async () => {
     const outcome = await submitLaunch(clientWith([], fail({kind: 'network'})), {repo: 'o/r', prompt: 'p'}, 'key-net-csrf')
     expect(outcome).toEqual({kind: 'failure', indeterminate: true})

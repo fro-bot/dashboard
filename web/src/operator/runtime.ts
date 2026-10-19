@@ -914,6 +914,9 @@ async function defaultRuntimeLoader(opts?: {
     streamMod.resetOutputView()
     streamMod.clearFinishedRuns()
     stopRefreshTimer()
+    // A launch still in flight is stale now: it inserts no card and attaches no stream. Its idempotency
+    // key stays held, so a repeat of the same launch after the next sign-in reuses it.
+    launchMod.resetLaunchState()
     // No session: a pending or arriving jump has nothing to open.
     _setJumpSlot(epoch, {mode: 'refuse'})
     opts?.onStateChange?.('auth-required')
