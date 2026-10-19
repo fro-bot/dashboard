@@ -1,5 +1,6 @@
 import type {CsrfDto, LaunchRunRequest, LaunchRunResponse, RunApprovalDecisionResponse, RunApprovalsResponse, RunApprovalSummary, RunSnapshotDto, RunStreamEvent, SessionDto} from './operator-client.ts'
 
+import {OPERATOR_LAUNCH_PROMPT_MAX_LENGTH} from './operator-contract/launch-prompt.ts'
 import {OPERATOR_CONTRACT_VERSION} from './operator-contract/version.ts'
 
 /**
@@ -124,6 +125,50 @@ export const FIXTURE_KNOWN_FAILURE_REASON = 'inactivity-timeout'
  * normalize to absent and never reach renderers, logs, or sanitizer output.
  */
 export const FIXTURE_UNKNOWN_FAILURE_REASON = 'fixture-unrecognized-reason'
+
+/**
+ * A visibly synthetic, fixture-prefixed `providerFailureReason` outside the known set. Proves an
+ * unrecognized provider reason keeps the generic session-error label and never reaches the DOM.
+ */
+export const FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON = 'fixture-unrecognized-provider-reason'
+
+// ---------------------------------------------------------------------------
+// Launch prompt fixtures — synthetic text for the `prompt` field on run-summary rows
+// ---------------------------------------------------------------------------
+
+/** A Markdown prompt: heading, list, fenced code and a link. */
+export const FIXTURE_PROMPT_MARKDOWN = [
+  '## Fixture prompt',
+  '',
+  'Please review the synthetic **fixture** module and report back:',
+  '',
+  '- Check the `fixture.config` file',
+  '- Run the synthetic checks',
+  '- Summarize the findings',
+  '',
+  '```ts',
+  'const fixture = {answer: 42}',
+  '```',
+  '',
+  'Reference: [the fixture guide](https://docs.fixture.invalid/guide)',
+].join('\n')
+
+/**
+ * A prompt of exactly OPERATOR_LAUNCH_PROMPT_MAX_LENGTH UTF-16 units, the most the gateway accepts. It opens
+ * with an emoji, which counts as two units, and ends on padding so no surrogate pair is split.
+ */
+export const FIXTURE_PROMPT_AT_LIMIT = `\u{1F600} Fixture prompt at the length limit. ${'fixture words '.repeat(
+  Math.floor((OPERATOR_LAUNCH_PROMPT_MAX_LENGTH - 40) / 14),
+)}`.padEnd(OPERATOR_LAUNCH_PROMPT_MAX_LENGTH, '.')
+
+/** A prompt holding raw HTML and an unsafe link scheme. It must render as literal text. */
+export const FIXTURE_PROMPT_HTML = [
+  'Fixture prompt with raw HTML and an unsafe link.',
+  '',
+  '<img src=x onerror=alert(1)>',
+  '',
+  '[click](javascript:alert(1))',
+].join('\n')
 
 // ---------------------------------------------------------------------------
 // Run stream event timeline fixture

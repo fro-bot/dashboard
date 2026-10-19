@@ -17,6 +17,7 @@ import type {
   OperatorCheckoutProvenance,
   OperatorRemoteFreshness,
 } from './operator-contract/provenance.ts'
+import type {OperatorProviderFailureReason} from './operator-contract/provider-failure-reason.ts'
 import type {
   PendingQuestionDTO,
   QuestionDecisionErrorResponse,
@@ -24,7 +25,11 @@ import type {
 } from './operator-contract/question-frame.ts'
 import type {OperatorFailureKind} from './operator-contract/run-status.ts'
 import {OPERATOR_CONTRACT_VERSION} from './operator-contract/version.ts'
-import {FIXTURE_KNOWN_FAILURE_REASON, FIXTURE_UNKNOWN_FAILURE_REASON} from './operator-fixtures.ts'
+import {
+  FIXTURE_KNOWN_FAILURE_REASON,
+  FIXTURE_UNKNOWN_FAILURE_REASON,
+  FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON,
+} from './operator-fixtures.ts'
 
 /** Canonical scenario names. Code-safe: lowercase with underscores, no spaces. */
 export const FIXTURE_SCENARIO_NAMES = {
@@ -139,6 +144,20 @@ export const FIXTURE_SCENARIO_NAMES = {
   markdown_streamed: 'markdown_streamed',
   /** Final output made of raw HTML, unsafe link schemes, a same-origin link, userinfo, an image and a spoofed link label. */
   markdown_malicious: 'markdown_malicious',
+
+  // -- Provider failure reasons: a FAILED session-error run, refined by `providerFailureReason`. --
+  /** providerFailureReason provider-auth-unavailable. */
+  provider_failure_auth_unavailable: 'provider_failure_auth_unavailable',
+  /** providerFailureReason model-not-available. */
+  provider_failure_model_not_available: 'provider_failure_model_not_available',
+  /** providerFailureReason provider-rejected-request. */
+  provider_failure_rejected_request: 'provider_failure_rejected_request',
+  /** providerFailureReason unclassified: keeps the generic session-error label. */
+  provider_failure_unclassified: 'provider_failure_unclassified',
+  /** A visibly synthetic providerFailureReason outside the known set: keeps the generic session-error label. */
+  provider_failure_unknown_reason: 'provider_failure_unknown_reason',
+  /** session-error with no providerFailureReason: the generic session-error label. */
+  provider_failure_no_reason: 'provider_failure_no_reason',
 } as const
 
 /** Union of all canonical scenario name values. */
@@ -192,6 +211,15 @@ export type QuestionScenarioName =
 /** The scenarios that exercise Markdown rendering of run output. */
 export type MarkdownScenarioName = 'markdown_streamed' | 'markdown_malicious'
 
+/** The scenarios that fail a run with `session-error`, with or without a `providerFailureReason`. */
+export type ProviderFailureScenarioName =
+  | 'provider_failure_auth_unavailable'
+  | 'provider_failure_model_not_available'
+  | 'provider_failure_rejected_request'
+  | 'provider_failure_unclassified'
+  | 'provider_failure_unknown_reason'
+  | 'provider_failure_no_reason'
+
 const FIXTURE_RUN_ID_MALFORMED = 'run-fixture-malformed-001'
 
 /**
@@ -222,10 +250,12 @@ function readyFrame(contractVersion: string): string {
 }
 
 /**
- * Optional checkout fields on a status frame, typed from the vendored contract so a fixture
- * can only emit the wire shape the gateway defines (timestamps included).
+ * Optional fields on a status frame beyond the base shape. The checkout fields are typed from the
+ * vendored contract so a fixture can only emit the wire shape the gateway defines (timestamps included).
  */
 interface CheckoutFrameFields {
+  /** Emitted verbatim: a known reason, or a synthetic out-of-set value for the unknown-reason scenario. */
+  readonly providerFailureReason?: string
   readonly checkoutProvenance?: OperatorCheckoutProvenance
   readonly checkoutPreparation?: OperatorCheckoutPreparation
   /** Emitted as `checkoutPreparation` verbatim, untyped: only for scenarios that violate the contract on purpose. */
@@ -249,6 +279,7 @@ function statusFrame(
     startedAt,
     stale: false,
     ...(failureKind === undefined ? {} : {failureKind}),
+    ...(checkout.providerFailureReason === undefined ? {} : {providerFailureReason: checkout.providerFailureReason}),
     ...(checkout.checkoutProvenance === undefined ? {} : {checkoutProvenance: checkout.checkoutProvenance}),
     ...(checkout.checkoutPreparation === undefined ? {} : {checkoutPreparation: checkout.checkoutPreparation}),
     ...(checkout.rawCheckoutPreparation === undefined ? {} : {checkoutPreparation: checkout.rawCheckoutPreparation}),
@@ -1085,6 +1116,60 @@ export function isNoApprovalScenario(scenarioName: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Provider failure scenarios
+//
+// Wire shape is the gateway's: a FAILED status frame with `failureKind: 'session-error'` carries
+// `providerFailureReason` when the gateway classified the provider failure, and omits it otherwise. The
+// terminal output frame precedes the terminal status. The summary row carries the same two fields.
+// ---------------------------------------------------------------------------
+
+const PROVIDER_FAILURE_STARTED_AT = '2026-10-18T10:00:00Z'
+
+const PROVIDER_FAILURE_SCENARIO_SPECS: Readonly<
+  Record<
+    ProviderFailureScenarioName,
+    {readonly providerFailureReason?: OperatorProviderFailureReason | typeof FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON}
+  >
+> = {
+  provider_failure_auth_unavailable: {providerFailureReason: 'provider-auth-unavailable'},
+  provider_failure_model_not_available: {providerFailureReason: 'model-not-available'},
+  provider_failure_rejected_request: {providerFailureReason: 'provider-rejected-request'},
+  provider_failure_unclassified: {providerFailureReason: 'unclassified'},
+  provider_failure_unknown_reason: {providerFailureReason: FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON},
+  provider_failure_no_reason: {},
+}
+
+/** Rows for the recent-runs list: one per provider failure scenario, failed with `session-error`. */
+export const FIXTURE_PROVIDER_FAILURE_SCENARIO_ROWS: readonly {
+  readonly scenario: ProviderFailureScenarioName
+  readonly summaryStatus: 'failed'
+  readonly failureKind: 'session-error'
+  readonly providerFailureReason?: string
+}[] = (Object.keys(PROVIDER_FAILURE_SCENARIO_SPECS) as ProviderFailureScenarioName[]).map(scenario => {
+  const {providerFailureReason} = PROVIDER_FAILURE_SCENARIO_SPECS[scenario]
+  return {
+    scenario,
+    summaryStatus: 'failed',
+    failureKind: 'session-error',
+    ...(providerFailureReason === undefined ? {} : {providerFailureReason}),
+  }
+})
+
+const PROVIDER_FAILURE_SCENARIO_BUILDERS = Object.fromEntries(
+  (Object.keys(PROVIDER_FAILURE_SCENARIO_SPECS) as ProviderFailureScenarioName[]).map(scenario => [
+    scenario,
+    (activeRunId: string) =>
+      readyFrame(OPERATOR_CONTRACT_VERSION) +
+      statusFrame(activeRunId, 'running', 'EXECUTING', PROVIDER_FAILURE_STARTED_AT) +
+      outputFrame(activeRunId, '[Fixture output — synthetic partial result before failure]', false, 0) +
+      outputFrame(activeRunId, '[Fixture output — synthetic partial result before failure (final)]', true, 1) +
+      statusFrame(activeRunId, 'failed', 'FAILED', PROVIDER_FAILURE_STARTED_AT, 'session-error', {
+        providerFailureReason: PROVIDER_FAILURE_SCENARIO_SPECS[scenario].providerFailureReason,
+      }),
+  ]),
+) as Readonly<Record<ProviderFailureScenarioName, (activeRunId: string) => string>>
+
+// ---------------------------------------------------------------------------
 // Markdown output scenarios
 //
 // Wire shape is the gateway's: non-final `output` frames are deltas that the reducer appends in strictly
@@ -1193,6 +1278,7 @@ const SCENARIO_BUILDERS: Readonly<Record<FixtureScenarioName, (activeRunId: stri
   ...CHECKOUT_SCENARIO_BUILDERS,
   ...QUESTION_SCENARIO_BUILDERS,
   ...MARKDOWN_SCENARIO_BUILDERS,
+  ...PROVIDER_FAILURE_SCENARIO_BUILDERS,
   [FIXTURE_SCENARIO_NAMES.success]: buildSuccessScenario,
   [FIXTURE_SCENARIO_NAMES.terminal_failure]: buildTerminalFailureScenario,
   [FIXTURE_SCENARIO_NAMES.terminal_failure_known_reason]: buildTerminalFailureKnownReasonScenario,

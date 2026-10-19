@@ -370,6 +370,15 @@ describe('question runId (discriminated data)', () => {
     expect(buildNotification(approvalWire({route: `/operator#${RUN_ID}`})).data).toEqual({type: 'approval', route: '/'})
   })
 
+  it('an approval and a question for the same run are distinct notifications that share the run', () => {
+    const approval = buildNotification(approvalWire({route: `/operator#${RUN_ID}`, runId: RUN_ID}))
+    const question = buildNotification({data: {type: 'question', route: `/operator#${RUN_ID}`, runId: RUN_ID}})
+    expect(approval.data).toEqual({type: 'approval', route: '/', runId: RUN_ID})
+    expect(question.data).toEqual({type: 'question', route: '/', runId: RUN_ID})
+    expect(approval.title).not.toBe(question.title)
+    expect(approval.body).not.toBe(question.body)
+  })
+
   it('a top-level runId outside data is ignored', () => {
     const result = buildNotification({runId: RUN_ID, data: {type: 'question', route: `/operator#${RUN_ID}`}})
     expect(result.data).toEqual({type: 'question', route: '/'})

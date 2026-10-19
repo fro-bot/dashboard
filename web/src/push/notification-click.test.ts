@@ -2,6 +2,7 @@ import {readFileSync} from 'node:fs'
 import {resolve} from 'node:path'
 import {afterEach, describe, expect, it, vi} from 'vitest'
 import {handleNotificationClick, type ClickClients, type ClickWindowClient} from './notification-click.ts'
+import {buildNotification} from './sw-notification.ts'
 
 const RUN_ID = '3f2b9c1e-7a4d-4e8b-9c55-0d1e2f3a4b5c'
 
@@ -439,6 +440,90 @@ describe('handleNotificationClick: a question without a valid runId falls back t
     const {clients, opened} = makeClients([])
     await handleNotificationClick(clients, questionData(runId))
     expect(opened).toEqual([`/#${runId}`])
+  })
+})
+
+/**
+ * The wire payload as the gateway sends it, run through `buildNotification` and then clicked: the stored
+ * `data` is whatever the builder produced, so these pin the whole path from push to jump.
+ */
+const approvalWire = (data: Record<string, unknown>) => ({
+  title: 'operator.approval_needed.title',
+  body: 'operator.approval_needed.body',
+  data: {type: 'approval', ...data},
+})
+
+describe('approval push to click', () => {
+  it('route /operator#<runId> focuses the open controlled window and sends OPEN_RUN to it', async () => {
+    const app = makeClient('https://dash.example/', {focused: true, visibilityState: 'visible'})
+    const {clients, opened, matchAllOptions} = makeClients([app])
+
+    const {data} = buildNotification(approvalWire({route: `/operator#${RUN_ID}`, runId: RUN_ID}))
+    await handleNotificationClick(clients, data)
+
+    expect(matchAllOptions).toEqual([{type: 'window', includeUncontrolled: false}])
+    expect(app.focusCalls).toHaveLength(1)
+    expect(app.messages).toEqual([{type: 'OPEN_RUN', runId: RUN_ID}])
+    expect(opened).toEqual([])
+  })
+
+  it('opens /#<runId> when no controlled window is open (a cold start)', async () => {
+    const uncontrolled = makeClient('https://dash.example/', {focused: true, controlled: false})
+    const {clients, opened} = makeClients([uncontrolled])
+
+    const {data} = buildNotification(approvalWire({route: `/operator#${RUN_ID}`, runId: RUN_ID}))
+    await handleNotificationClick(clients, data)
+
+    expect(opened).toEqual([`/#${RUN_ID}`])
+    expect(uncontrolled.messages).toEqual([])
+    expect(uncontrolled.focusCalls).toHaveLength(0)
+  })
+
+  it('the gateway fallback (route / and no runId) focuses an app window with no jump, or opens /', async () => {
+    const app = makeClient('https://dash.example/', {focused: true})
+    const withWindow = makeClients([app])
+    const {data} = buildNotification(approvalWire({route: '/'}))
+    await handleNotificationClick(withWindow.clients, data)
+    expect(app.focusCalls).toHaveLength(1)
+    expect(app.messages).toEqual([])
+    expect(withWindow.opened).toEqual([])
+
+    const noWindow = makeClients([])
+    await handleNotificationClick(noWindow.clients, data)
+    expect(noWindow.opened).toEqual(['/'])
+  })
+
+  it.each([
+    ['a runId that fails the pattern', {route: '/operator#../x', runId: '../x'}],
+    ['a runId over 128 characters', {route: `/operator#${'a'.repeat(129)}`, runId: 'a'.repeat(129)}],
+    ['a route that does not match the runId', {route: '/operator#other', runId: RUN_ID}],
+    ['an off-origin route', {route: `https://evil.example/operator#${RUN_ID}`, runId: RUN_ID}],
+  ])('%s falls back to / with no jump and no message', async (_name, wire) => {
+    const app = makeClient('https://dash.example/', {focused: true})
+    const withWindow = makeClients([app])
+    const {data} = buildNotification(approvalWire(wire))
+    await handleNotificationClick(withWindow.clients, data)
+    expect(app.messages).toEqual([])
+    expect(withWindow.opened).toEqual([])
+
+    const noWindow = makeClients([])
+    await handleNotificationClick(noWindow.clients, data)
+    expect(noWindow.opened).toEqual(['/'])
+  })
+
+  it('two approvals for different runs each open their own run', async () => {
+    const otherRunId = 'run-other-0002'
+    const app = makeClient('https://dash.example/', {focused: true, visibilityState: 'visible'})
+    const {clients, opened} = makeClients([app])
+
+    await handleNotificationClick(clients, buildNotification(approvalWire({route: `/operator#${RUN_ID}`, runId: RUN_ID})).data)
+    await handleNotificationClick(clients, buildNotification(approvalWire({route: `/operator#${otherRunId}`, runId: otherRunId})).data)
+
+    expect(app.messages).toEqual([
+      {type: 'OPEN_RUN', runId: RUN_ID},
+      {type: 'OPEN_RUN', runId: otherRunId},
+    ])
+    expect(opened).toEqual([])
   })
 })
 

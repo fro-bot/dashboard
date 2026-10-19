@@ -11,15 +11,25 @@ import {readFileSync} from 'node:fs'
 import {resolve} from 'node:path'
 import process from 'node:process'
 import {describe, expect, it} from 'vitest'
+import {OPERATOR_LAUNCH_PROMPT_MAX_LENGTH} from '../src/gateway/operator-contract/launch-prompt.ts'
+import {OPERATOR_PROVIDER_FAILURE_REASONS} from '../src/gateway/operator-contract/provider-failure-reason.ts'
 import {OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
 import {
   FIXTURE_APPROVAL_SCENARIO_ROWS,
+  FIXTURE_PROVIDER_FAILURE_SCENARIO_ROWS,
   FIXTURE_QUESTION_SCENARIO_ROWS,
   FIXTURE_SCENARIO_NAMES,
   fixtureQuestionScript,
   serializeScenarioToSse,
 } from '../src/gateway/operator-fixture-sse.ts'
-import {FIXTURE_KNOWN_FAILURE_REASON, FIXTURE_UNKNOWN_FAILURE_REASON} from '../src/gateway/operator-fixtures.ts'
+import {
+  FIXTURE_KNOWN_FAILURE_REASON,
+  FIXTURE_PROMPT_AT_LIMIT,
+  FIXTURE_PROMPT_HTML,
+  FIXTURE_PROMPT_MARKDOWN,
+  FIXTURE_UNKNOWN_FAILURE_REASON,
+  FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON,
+} from '../src/gateway/operator-fixtures.ts'
 
 const FIXTURE_FILES = [
   'src/gateway/operator-fixtures.ts',
@@ -496,6 +506,89 @@ describe('fixture no-leak guard — waiting scenarios', () => {
   it('their run IDs derive to the fixture-prefixed waiting row IDs', () => {
     for (const row of FIXTURE_WAITING_SCENARIO_ROWS) {
       expect(runIdFor(row.scenario)).toMatch(/^run-fixture-index-waiting-/)
+    }
+  })
+})
+
+describe('fixture no-leak guard — provider failure reasons', () => {
+  const KNOWN_PROVIDER_REASONS = new Set<string>(OPERATOR_PROVIDER_FAILURE_REASONS)
+  const providerRunIdFor = (scenario: string): string => `run-fixture-index-${scenario.replaceAll('_', '-')}`
+
+  it('every providerFailureReason literal in the fixture files is a known wire value or fixture-prefixed', () => {
+    const PROVIDER_REASON_LITERAL_PATTERN = /providerFailureReason:\s*['"]([^'"]+)['"]/g
+    for (const filePath of FIXTURE_FILES) {
+      const source = readFixtureFile(filePath)
+      for (const match of source.matchAll(PROVIDER_REASON_LITERAL_PATTERN)) {
+        const value = match[1] ?? ''
+        expect(KNOWN_PROVIDER_REASONS.has(value) || value.startsWith('fixture-'), `providerFailureReason literal "${value}" in ${filePath}`).toBe(true)
+      }
+    }
+  })
+
+  it('the unknown provider reason constant is fixture-prefixed, outside the known set, and trips no forbidden pattern', () => {
+    expect(FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON.startsWith('fixture-')).toBe(true)
+    expect(KNOWN_PROVIDER_REASONS.has(FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON)).toBe(false)
+    for (const [label, pattern] of FORBIDDEN_PATTERNS) {
+      expect(pattern.test(FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON), label).toBe(false)
+    }
+  })
+
+  it('the provider failure scenarios emit only the bound run ID and synthetic status fields, plus the reason when set', () => {
+    expect(FIXTURE_PROVIDER_FAILURE_SCENARIO_ROWS).toHaveLength(6)
+    for (const row of FIXTURE_PROVIDER_FAILURE_SCENARIO_ROWS) {
+      const sse = serializeScenarioToSse(row.scenario, providerRunIdFor(row.scenario))
+      const statuses = sse
+        .split('\n\n')
+        .filter(record => record.startsWith('event: status'))
+        .map(record => JSON.parse(record.split('data: ')[1] ?? '{}') as Record<string, unknown>)
+      expect(statuses.length, row.scenario).toBe(2)
+      for (const status of statuses) {
+        expect(status.runId).toBe(providerRunIdFor(row.scenario))
+        expect(String(status.entityRef)).toMatch(/^fixture-/)
+        const allowed = new Set(['entityRef', 'phase', 'runId', 'stale', 'startedAt', 'status', 'surface', 'failureKind', 'providerFailureReason'])
+        for (const key of Object.keys(status)) expect(allowed.has(key), `${row.scenario}: ${key}`).toBe(true)
+      }
+      expect(sse, row.scenario).not.toContain('"prompt"')
+    }
+  })
+})
+
+describe('fixture no-leak guard — launch prompt fixtures', () => {
+  const PROMPTS = {
+    markdown: FIXTURE_PROMPT_MARKDOWN,
+    atLimit: FIXTURE_PROMPT_AT_LIMIT,
+    html: FIXTURE_PROMPT_HTML,
+  }
+
+  it('no prompt trips a forbidden pattern', () => {
+    for (const [name, prompt] of Object.entries(PROMPTS)) {
+      for (const [label, pattern] of FORBIDDEN_PATTERNS) {
+        expect(pattern.test(prompt), `${name} prompt tripped "${label}"`).toBe(false)
+      }
+    }
+  })
+
+  it('every prompt is synthetic: it names the fixture, and any absolute URL is on the reserved .invalid domain', () => {
+    for (const [name, prompt] of Object.entries(PROMPTS)) {
+      expect(prompt, name).toMatch(/[Ff]ixture/)
+      for (const match of prompt.matchAll(/https?:\/\/([^/\s)]+)/g)) {
+        expect(match[1], name).toMatch(/\.invalid$/)
+      }
+    }
+  })
+
+  it('the at-limit prompt is exactly the contract maximum; the others are well under it', () => {
+    expect(FIXTURE_PROMPT_AT_LIMIT.length).toBe(OPERATOR_LAUNCH_PROMPT_MAX_LENGTH)
+    expect(FIXTURE_PROMPT_MARKDOWN.length).toBeLessThan(OPERATOR_LAUNCH_PROMPT_MAX_LENGTH)
+    expect(FIXTURE_PROMPT_HTML.length).toBeLessThan(OPERATOR_LAUNCH_PROMPT_MAX_LENGTH)
+  })
+
+  it('the HTML prompt is the only one carrying raw HTML or an unsafe scheme', () => {
+    expect(FIXTURE_PROMPT_HTML).toContain('<img')
+    expect(FIXTURE_PROMPT_HTML).toContain('javascript:')
+    for (const prompt of [FIXTURE_PROMPT_MARKDOWN, FIXTURE_PROMPT_AT_LIMIT]) {
+      expect(prompt).not.toMatch(/<[a-z]/i)
+      expect(prompt).not.toContain('javascript:')
     }
   })
 })

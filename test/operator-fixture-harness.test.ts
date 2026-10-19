@@ -24,10 +24,12 @@ import process from 'node:process'
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {parseSseFrame as browserParseSseFrame, nextStreamState, PINNED_CONTRACT_VERSION} from '../public/operator-stream.js'
 import {CHECKOUT_REFUSAL_REASONS, OBSTRUCTION_KINDS, OPERATOR_CONTRACT_VERSION, OPERATOR_LAUNCH_PROMPT_MAX_LENGTH, OPERATOR_LAUNCH_PROMPT_TOO_LONG, QUESTION_DECISION_STATES} from '../src/gateway/operator-contract/index.ts'
+import {isOperatorProviderFailureReason} from '../src/gateway/operator-contract/provider-failure-reason.ts'
 import {isOperatorFailureKind} from '../src/gateway/operator-contract/run-status.ts'
 import {FIXTURE_OPERATOR_PREFIX} from '../src/gateway/operator-fixture-routes.ts'
 import {
   FIXTURE_MARKDOWN_SCENARIO_ROWS,
+  FIXTURE_PROVIDER_FAILURE_SCENARIO_ROWS,
   FIXTURE_QUESTION_SCENARIO_ROWS,
   FIXTURE_SCENARIO_NAMES,
   fixtureQuestionScript,
@@ -35,6 +37,7 @@ import {
   isNoApprovalScenario,
   serializeScenarioToSse,
 } from '../src/gateway/operator-fixture-sse.ts'
+import {FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON} from '../src/gateway/operator-fixtures.ts'
 import {parseSseChunk as serverParseSseChunk} from '../src/gateway/operator-sse-reader.ts'
 import {resetFixtureHarnessForTesting} from '../src/routes/operator-fixture-harness.ts'
 import {buildDashboardApp, resetRateLimitForTesting} from '../src/server.ts'
@@ -1171,7 +1174,7 @@ describe('fixture runs index — GET /runs', () => {
   })
 
   it('entries contain only allowed fields (no extra sensitive fields)', async () => {
-    const ALLOWED_FIELDS = new Set(['runId', 'repo', 'status', 'createdAt', 'updatedAt', 'failureKind'])
+    const ALLOWED_FIELDS = new Set(['runId', 'repo', 'status', 'createdAt', 'updatedAt', 'failureKind', 'providerFailureReason', 'prompt'])
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
     const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`)
     const {runs: body} = await res.json() as {runs: Record<string, unknown>[]}
@@ -2734,12 +2737,16 @@ describe('question fixture scenarios — registry and manifest', () => {
     ])
   })
 
-  it('the scenario select in Operator.tsx lists exactly the manifest\'s question, expired-snapshot and Markdown scenarios', async () => {
+  it('the scenario select in Operator.tsx lists exactly the manifest\'s question, expired-snapshot, Markdown and provider failure scenarios', async () => {
     const fs = await import('node:fs/promises')
     const source = await fs.readFile('web/src/views/Operator.tsx', 'utf8')
     const block = source.slice(source.indexOf('QUESTION_FIXTURE_SCENARIOS'), source.indexOf('interface OperatorProps'))
     const values = [...block.matchAll(/value: '([a-z0-9_]+)'/g)].map(match => match[1])
-    expect(values).toEqual([...QUESTION_SCENARIO_KEYS, ...FIXTURE_MARKDOWN_SCENARIO_ROWS.map(row => row.scenario)])
+    expect(values).toEqual([
+      ...QUESTION_SCENARIO_KEYS,
+      ...FIXTURE_MARKDOWN_SCENARIO_ROWS.map(row => row.scenario),
+      ...FIXTURE_PROVIDER_FAILURE_SCENARIO_ROWS.map(row => row.scenario),
+    ])
   })
 })
 
@@ -3756,5 +3763,177 @@ describe('fixture launch — prompt rejections mirror the gateway order', () => 
     expect(rejected.status).toBe(400)
     const accepted = await postPromptLaunch(app, {}, fixtureSessionId)
     expect(accepted.status).toBe(200)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Provider failure scenarios and launch prompt rows
+// ---------------------------------------------------------------------------
+
+const PROVIDER_FAILURE_EXPECTED: Readonly<Record<string, {readonly emitted: string | undefined; readonly parsed: string | undefined}>> = {
+  provider_failure_auth_unavailable: {emitted: 'provider-auth-unavailable', parsed: 'provider-auth-unavailable'},
+  provider_failure_model_not_available: {emitted: 'model-not-available', parsed: 'model-not-available'},
+  provider_failure_rejected_request: {emitted: 'provider-rejected-request', parsed: 'provider-rejected-request'},
+  provider_failure_unclassified: {emitted: 'unclassified', parsed: 'unclassified'},
+  provider_failure_unknown_reason: {emitted: FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON, parsed: undefined},
+  provider_failure_no_reason: {emitted: undefined, parsed: undefined},
+}
+const PROVIDER_FAILURE_KEYS = Object.keys(PROVIDER_FAILURE_EXPECTED)
+const providerRunId = (key: string): string => `run-fixture-index-${key.replaceAll('_', '-')}`
+
+function lastStatusRecord(sse: string): Record<string, unknown> {
+  const records = sse.split('\n\n').filter(record => record.startsWith('event: status'))
+  return JSON.parse((records.at(-1) ?? '').split('data: ')[1] ?? '{}') as Record<string, unknown>
+}
+
+describe('provider failure fixture scenarios — registry and manifest', () => {
+  it('registers the six scenarios, in order, and lists them in the manifest', async () => {
+    expect(FIXTURE_PROVIDER_FAILURE_SCENARIO_ROWS.map(row => row.scenario)).toEqual(PROVIDER_FAILURE_KEYS)
+    expect(Object.values(FIXTURE_SCENARIO_NAMES)).toEqual(expect.arrayContaining(PROVIDER_FAILURE_KEYS))
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const body = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}`)).json() as {scenarios: string[]}
+    for (const key of PROVIDER_FAILURE_KEYS) expect(body.scenarios).toContain(key)
+  })
+
+  it('the scenario select in Operator.tsx lists every provider failure scenario', async () => {
+    const fs = await import('node:fs/promises')
+    const source = await fs.readFile('web/src/views/Operator.tsx', 'utf8')
+    const block = source.slice(source.indexOf('QUESTION_FIXTURE_SCENARIOS'), source.indexOf('interface OperatorProps'))
+    const values = [...block.matchAll(/value: '([a-z0-9_]+)'/g)].map(match => match[1])
+    expect(values.filter(value => value?.startsWith('provider_failure_'))).toEqual(PROVIDER_FAILURE_KEYS)
+  })
+
+  it('each scenario has a failed session-error summary row carrying the matching reason', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const {fixtureSessionId} = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)).json() as {fixtureSessionId: string}
+    const {runs} = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)).json() as {runs: Record<string, unknown>[]}
+    for (const key of PROVIDER_FAILURE_KEYS) {
+      const row = runs.find(candidate => candidate.runId === providerRunId(key))
+      expect(row, key).toBeDefined()
+      expect(row?.status, key).toBe('failed')
+      expect(row?.failureKind, key).toBe('session-error')
+      expect(row?.repo).toMatch(/fixture/)
+      expect(row?.providerFailureReason, key).toBe(PROVIDER_FAILURE_EXPECTED[key]?.emitted)
+      expect('prompt' in (row ?? {}), key).toBe(false)
+    }
+  })
+})
+
+describe('provider failure fixture scenarios — frames', () => {
+  for (const key of PROVIDER_FAILURE_KEYS) {
+    it(`${key}: a FAILED session-error terminal frame, and both parsers keep or drop the reason`, () => {
+      const expected = PROVIDER_FAILURE_EXPECTED[key]
+      const sse = serializeScenarioToSse(FIXTURE_SCENARIO_NAMES[key as keyof typeof FIXTURE_SCENARIO_NAMES], providerRunId(key))
+
+      const terminal = lastStatusRecord(sse)
+      expect(terminal.phase).toBe('FAILED')
+      expect(terminal.status).toBe('failed')
+      expect(terminal.failureKind).toBe('session-error')
+      expect(terminal.providerFailureReason).toBe(expected?.emitted)
+      expect('providerFailureReason' in terminal).toBe(expected?.emitted !== undefined)
+
+      // The reason rides only on the terminal frame; the running frame has none.
+      const statuses = sse.split('\n\n').filter(record => record.startsWith('event: status'))
+      expect(statuses.slice(0, -1).every(record => !record.includes('providerFailureReason'))).toBe(true)
+
+      const serverTerminal = serverParseSseChunk(sse).findLast(result => result.success && result.frame.type === 'status')
+      const serverData = serverTerminal?.success && serverTerminal.frame.type === 'status' ? serverTerminal.frame.data : undefined
+      expect(serverData?.providerFailureReason).toBe(expected?.parsed)
+      expect(browserTerminalStatus(sse)?.providerFailureReason).toBe(expected?.parsed)
+    })
+  }
+
+  it('the unknown scenario uses a fixture-prefixed value outside the known set', () => {
+    expect(FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON.startsWith('fixture-')).toBe(true)
+    expect(isOperatorProviderFailureReason(FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON)).toBe(false)
+  })
+
+  it('every non-fixture reason a scenario emits is a known wire value', () => {
+    for (const key of PROVIDER_FAILURE_KEYS) {
+      const emitted = PROVIDER_FAILURE_EXPECTED[key]?.emitted
+      if (emitted === undefined || emitted === FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON) continue
+      expect(isOperatorProviderFailureReason(emitted), key).toBe(true)
+    }
+  })
+})
+
+async function fetchRuns(): Promise<Record<string, unknown>[]> {
+  const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+  const {fixtureSessionId} = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)).json() as {fixtureSessionId: string}
+  const {runs} = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)).json() as {runs: Record<string, unknown>[]}
+  return runs
+}
+
+describe('launch prompt fixture rows', () => {
+  const byId = (runs: Record<string, unknown>[], runId: string): Record<string, unknown> | undefined =>
+    runs.find(candidate => candidate.runId === runId)
+
+  it('a Markdown prompt row carries a heading, a list, fenced code and a link', async () => {
+    const prompt = String(byId(await fetchRuns(), 'run-fixture-index-prompt-markdown')?.prompt)
+    expect(prompt).toMatch(/^## /m)
+    expect(prompt).toMatch(/^- /m)
+    expect(prompt).toContain('```')
+    expect(prompt).toMatch(/\]\(https:\/\/docs\.fixture\.invalid\//)
+  })
+
+  it('the limit row is exactly the contract maximum in UTF-16 units and keeps its emoji whole', async () => {
+    const prompt = String(byId(await fetchRuns(), 'run-fixture-index-prompt-limit')?.prompt)
+    expect(prompt.length).toBe(OPERATOR_LAUNCH_PROMPT_MAX_LENGTH)
+    expect(prompt.startsWith('\u{1F600}')).toBe(true)
+    expect(prompt.at(-1)).toBe('.')
+  })
+
+  it('the HTML row carries raw HTML and an unsafe link as plain strings', async () => {
+    const prompt = String(byId(await fetchRuns(), 'run-fixture-index-prompt-html')?.prompt)
+    expect(prompt).toContain('<img src=x onerror=alert(1)>')
+    expect(prompt).toContain('[click](javascript:alert(1))')
+  })
+
+  it('the no-prompt row has no prompt key', async () => {
+    const row = byId(await fetchRuns(), 'run-fixture-index-prompt-none')
+    expect(row).toBeDefined()
+    expect('prompt' in (row ?? {})).toBe(false)
+  })
+
+  it('every prompt row is a succeeded fixture run that sorts after the scenario rows and before the transition row', async () => {
+    const runs = await fetchRuns()
+    const ids = runs.map(run => String(run.runId))
+    const promptIds = ids.filter(id => id.startsWith('run-fixture-index-prompt-'))
+    expect(promptIds).toHaveLength(4)
+    for (const id of promptIds) expect(byId(runs, id)?.status).toBe('succeeded')
+    expect(ids.indexOf(promptIds[0] ?? '')).toBeGreaterThan(ids.indexOf(providerRunId('provider_failure_no_reason')))
+    expect(ids.at(-1)).toBe('run-fixture-index-transition-question')
+    const created = runs.map(run => String(run.createdAt))
+    expect(created.slice(9)).toEqual(created.slice(9).toSorted().toReversed())
+  })
+
+  it('the prompt rows serve the default success stream', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const {fixtureSessionId} = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)).json() as {fixtureSessionId: string}
+    await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/run-fixture-index-prompt-markdown/stream?fixtureSessionId=${fixtureSessionId}`)
+    expect(res.status).toBe(200)
+    expect(lastStatusRecord(await res.text()).status).toBe('succeeded')
+  })
+})
+
+describe('provider failure and prompt fixtures — production artifacts carry no scenario names or row IDs', () => {
+  it('web/dist, the service worker, and the shipped browser modules contain neither', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const files = ['web/dist/sw.js', 'web/dist/index.html', 'public/operator-stream.js', 'public/operator-launch.js', 'public/operator-run-index.js', 'public/operator-time.js']
+    for (const file of await fs.readdir('web/dist/assets')) {
+      if (file.endsWith('.js') || file.endsWith('.css')) files.push(path.join('web/dist/assets', file))
+    }
+    const needles = [
+      ...PROVIDER_FAILURE_KEYS,
+      ...PROVIDER_FAILURE_KEYS.map(providerRunId),
+      FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON,
+      'run-fixture-index-prompt-',
+    ]
+    for (const file of files) {
+      const src = await fs.readFile(file, 'utf8')
+      for (const needle of needles) expect(src, `${file} must not contain ${needle}`).not.toContain(needle)
+    }
   })
 })

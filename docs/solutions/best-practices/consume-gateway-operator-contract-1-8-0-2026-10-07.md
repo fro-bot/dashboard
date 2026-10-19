@@ -235,11 +235,11 @@ gateway catches up.
 - Dashboard and gateway pins have to move in the same infra deploy.
 
 Do not apply the rendering parts to collapsed run-list summaries unless the summary
-contract carries the new fields. Here the run summaries carry only a status and a failure kind,
-and a static test pins that `public/operator-run-index.js` never reads checkout fields. A
-summary status that gains values (the waiting statuses) is a different change: it needs a label,
-a class token and a style rule on the collapsed card, and a terminal card must not take a
-non-terminal one back.
+contract carries the new fields. Here a run summary carries its run ID, repo, status, timestamps,
+failure kind, and the optional `providerFailureReason` and `prompt`, and a static test pins that
+`public/operator-run-index.js` never reads checkout fields. A summary status that gains values (the
+waiting statuses) is a different change: it needs a label, a class token and a style rule on the
+collapsed card, and a terminal card must not take a non-terminal one back.
 
 ## Examples
 

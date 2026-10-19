@@ -373,3 +373,135 @@ describe('sw.ts message handler (behavioral)', () => {
     expect(skipWaiting).not.toHaveBeenCalled()
   })
 })
+
+// The push and notificationclick listeners, run against stubbed `registration` and `clients` globals so the
+// options handed to showNotification and the jump a click makes are what the worker really does.
+describe('sw.ts push and notificationclick handlers (behavioral)', () => {
+  type Listener = (event: Event) => void
+  const RUN_A = 'run-approval-0001'
+  const RUN_B = 'run-approval-0002'
+
+  let listeners: Record<string, Listener>
+  let showNotification: ReturnType<typeof vi.fn>
+  let openWindow: ReturnType<typeof vi.fn>
+  let appWindow: {url: string; focused: boolean; visibilityState: string; focus: ReturnType<typeof vi.fn>; postMessage: ReturnType<typeof vi.fn>}
+  let controlledWindows: unknown[]
+
+  const wire = (type: string, runId?: string) => ({
+    title: `operator.${type}.title`,
+    body: `operator.${type}.body`,
+    data: runId === undefined ? {type, route: '/'} : {type, route: `/operator#${runId}`, runId},
+  })
+
+  function push(payload: unknown): void {
+    const waitUntil = vi.fn()
+    listeners.push?.(Object.assign(new Event('push'), {data: {json: () => payload}, waitUntil}))
+  }
+
+  async function click(data: unknown): Promise<void> {
+    const waitUntil = vi.fn()
+    listeners.notificationclick?.(
+      Object.assign(new Event('notificationclick'), {notification: {data, close: vi.fn()}, waitUntil}),
+    )
+    await waitUntil.mock.calls[0]?.[0]
+  }
+
+  /** The data of the nth notification the worker showed. */
+  const shownData = (index: number): unknown => (showNotification.mock.calls[index]?.[1] as {data: unknown}).data
+
+  beforeEach(async () => {
+    vi.resetModules()
+    listeners = {}
+    showNotification = vi.fn(() => Promise.resolve())
+    openWindow = vi.fn(() => Promise.resolve())
+    appWindow = {
+      url: 'https://dash.example/',
+      focused: true,
+      visibilityState: 'visible',
+      focus: vi.fn(() => Promise.resolve()),
+      postMessage: vi.fn(),
+    }
+    controlledWindows = [appWindow]
+    vi.spyOn(globalThis, 'addEventListener').mockImplementation(((type: string, listener: Listener) => {
+      listeners[type] = listener
+    }) as typeof globalThis.addEventListener)
+    vi.stubGlobal('skipWaiting', vi.fn(() => Promise.resolve()))
+    vi.stubGlobal('caches', {delete: vi.fn(() => Promise.resolve(true))})
+    vi.stubGlobal('registration', {showNotification})
+    vi.stubGlobal('clients', {
+      matchAll: vi.fn(() => Promise.resolve(controlledWindows)),
+      openWindow,
+    })
+    await import('./sw.ts')
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('shows every push with options of exactly {body, data}: no tag and no renotify', () => {
+    for (const payload of [wire('approval', RUN_A), wire('question', RUN_A), wire('run_failed'), null]) push(payload)
+
+    expect(showNotification).toHaveBeenCalledTimes(4)
+    for (const call of showNotification.mock.calls) {
+      const options = call[1] as Record<string, unknown>
+      expect(Object.keys(options).toSorted()).toEqual(['body', 'data'])
+      expect('tag' in options).toBe(false)
+      expect('renotify' in options).toBe(false)
+    }
+  })
+
+  it('an approval and a question for the same run are two separate notifications', () => {
+    push(wire('approval', RUN_A))
+    push(wire('question', RUN_A))
+
+    expect(showNotification).toHaveBeenCalledTimes(2)
+    expect(showNotification.mock.calls[0]?.[0]).toBe('Approval needed')
+    expect(showNotification.mock.calls[1]?.[0]).toBe('Answer needed')
+    expect(shownData(0)).toEqual({type: 'approval', route: '/', runId: RUN_A})
+    expect(shownData(1)).toEqual({type: 'question', route: '/', runId: RUN_A})
+  })
+
+  it('two approvals for different runs are two notifications, each opening its own run', async () => {
+    push(wire('approval', RUN_A))
+    push(wire('approval', RUN_B))
+    expect(showNotification).toHaveBeenCalledTimes(2)
+
+    await click(shownData(0))
+    await click(shownData(1))
+
+    expect(appWindow.postMessage.mock.calls.map(call => call[0])).toEqual([
+      {type: 'OPEN_RUN', runId: RUN_A},
+      {type: 'OPEN_RUN', runId: RUN_B},
+    ])
+    expect(openWindow).not.toHaveBeenCalled()
+  })
+
+  it('clicking an approval focuses the open controlled window and sends OPEN_RUN', async () => {
+    push(wire('approval', RUN_A))
+    await click(shownData(0))
+
+    expect(appWindow.focus).toHaveBeenCalledTimes(1)
+    expect(appWindow.postMessage).toHaveBeenCalledWith({type: 'OPEN_RUN', runId: RUN_A})
+    expect(openWindow).not.toHaveBeenCalled()
+  })
+
+  it('clicking an approval with no window opens /#<runId>', async () => {
+    controlledWindows = []
+    push(wire('approval', RUN_A))
+    await click(shownData(0))
+
+    expect(openWindow).toHaveBeenCalledWith(`/#${RUN_A}`)
+  })
+
+  it('an approval whose runId fails the pattern shows with no runId and a click opens / with no jump', async () => {
+    controlledWindows = []
+    push({data: {type: 'approval', route: '/operator#../x', runId: '../x'}})
+
+    expect(shownData(0)).toEqual({type: 'approval', route: '/'})
+    await click(shownData(0))
+    expect(openWindow).toHaveBeenCalledWith('/')
+    expect(appWindow.postMessage).not.toHaveBeenCalled()
+  })
+})

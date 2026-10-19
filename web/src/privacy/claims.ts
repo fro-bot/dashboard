@@ -182,7 +182,7 @@ export const CLAIMS = {
     value:
       'Notification payloads use fixed, neutral copy plus a small set of allowlisted failure labels. They never include repository names, prompts, run output, endpoints, signing keys, tokens, cookies, or session data. Question and approval notifications can carry the ID of the run they are about, used only to open that run.',
     sourceNote:
-      'Gateway payload construction, per the fro-bot/agent survey. The one dynamic value is the run ID of a question push (`buildQuestionPayload`). Today the gateway sends no run ID for approvals; fro-bot/agent#1840 asks for one.',
+      'Gateway payload construction, per the fro-bot/agent survey. The one dynamic value is the run ID of a question or approval push, carried only when the ID matches the run ID pattern; otherwise the payload carries no run ID.',
   },
   exportSurface: {
     status: 'published',

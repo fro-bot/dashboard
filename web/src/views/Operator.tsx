@@ -29,7 +29,7 @@ import {navigateToGatewaySignIn} from '../operator/sign-in-recovery.ts'
 import {isActionDisabled} from '../operator/state.ts'
 import type {OperatorState} from '../operator/state.ts'
 
-// Question, expired-snapshot, waiting and Markdown-output fixture scenarios. Gated on DEV (replaced at build time) so their
+// Question, expired-snapshot, waiting, Markdown-output and provider-failure fixture scenarios. Gated on DEV (replaced at build time) so their
 // names never reach the production bundle; the fixture build and tests keep them.
 const QUESTION_FIXTURE_SCENARIOS: readonly {readonly value: string; readonly label: string}[] = import.meta.env.DEV
   ? [
@@ -50,6 +50,12 @@ const QUESTION_FIXTURE_SCENARIOS: readonly {readonly value: string; readonly lab
       {value: 'waiting_queued', label: 'Waiting: queued'},
       {value: 'markdown_streamed', label: 'Markdown: streamed in pieces'},
       {value: 'markdown_malicious', label: 'Markdown: malicious output'},
+      {value: 'provider_failure_auth_unavailable', label: 'Provider failure: auth unavailable'},
+      {value: 'provider_failure_model_not_available', label: 'Provider failure: model not available'},
+      {value: 'provider_failure_rejected_request', label: 'Provider failure: request rejected'},
+      {value: 'provider_failure_unclassified', label: 'Provider failure: unclassified'},
+      {value: 'provider_failure_unknown_reason', label: 'Provider failure: unknown reason'},
+      {value: 'provider_failure_no_reason', label: 'Provider failure: no reason'},
     ]
   : []
 
