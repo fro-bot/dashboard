@@ -550,11 +550,13 @@ export function createOperatorClient(options: OperatorClientOptions): OperatorCl
     const idemGuard = requireIdempotencyKey(req.idempotencyKey)
     if (idemGuard !== null) return err(idemGuard)
 
-    // Build request body — exclude csrfToken and idempotencyKey from body;
-    // they travel as headers. Never include prompt in logs.
+    // Build request body — the gateway reads the idempotency key from the body, so the key is sent
+    // there and repeated in the header. The CSRF token travels only as a header. Never include prompt
+    // in logs.
     const body = JSON.stringify({
       repo: req.repo,
       prompt: req.prompt,
+      idempotencyKey: req.idempotencyKey,
     })
 
     return fetchJson<LaunchRunResponse>(

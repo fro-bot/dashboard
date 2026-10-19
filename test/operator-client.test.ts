@@ -199,7 +199,7 @@ describe('launchRun', () => {
     }
   })
 
-  it('sends body with only repo and prompt — no csrf or idempotency in body', async () => {
+  it('sends body with repo, prompt and idempotencyKey — the key is the field the gateway reads, and no csrf in the body', async () => {
     let capturedBody: unknown
     const client = createOperatorClient({
       fetch: async (_input, init) => {
@@ -212,7 +212,8 @@ describe('launchRun', () => {
       createEventStream: makeEventStream([]),
     })
     await client.launchRun({repo: 'owner/repo', prompt: 'p', csrfToken: 'csrf-token-xyz', idempotencyKey: 'idem-key-abc'})
-    expect(capturedBody).toEqual({repo: 'owner/repo', prompt: 'p'})
+    expect(capturedBody).toEqual({repo: 'owner/repo', prompt: 'p', idempotencyKey: 'idem-key-abc'})
+    expect(JSON.stringify(capturedBody)).not.toContain('csrf-token-xyz')
   })
 
   it('rejects before fetch when csrfToken is blank — fetchCalled is false', async () => {

@@ -267,8 +267,10 @@ bodies. Tests should assert the production body holds exactly `repo`, `prompt` a
 `idempotencyKey`, and that the header carries the same key.
 
 The client holds one key per pending submission (same repo, same exact prompt) and
-reuses it after a timeout, a network failure or a 429, across a teardown, a remount
-and a sign-out. A definitive answer or a form reset releases it. A reused key dedupes
+reuses it after a timeout, a network failure, a 429, a 502, 503 or 504, or a launch
+that succeeded after a teardown or sign-out, across a teardown, a remount and a
+sign-out. A definitive answer, a launch that succeeded on a live page, or a form reset
+releases it. A reused key dedupes
 only within the gateway's idempotency window, not indefinitely. The fixture harness
 scopes its own dedupe by `(fixtureSessionId, idempotencyKey)` and has no such window.
 

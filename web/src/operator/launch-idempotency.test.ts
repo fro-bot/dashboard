@@ -300,6 +300,39 @@ describe('launch idempotency key', () => {
     expect(m.sent[1]?.bodyKey).toBe(m.sent[0]?.bodyKey)
   })
 
+  it.each([502, 503, 504])('a %i keeps the key, and the next click reuses it', async status => {
+    const m = await mount(attempt => (attempt === 1 ? jsonResponse(status, {}) : jsonResponse(202, {runId: 'run-idem-020'})))
+    await m.submit('same prompt')
+    await m.submit('same prompt')
+
+    expect(m.sent).toHaveLength(2)
+    expect(typeof m.sent[0]?.bodyKey).toBe('string')
+    expect(m.sent[1]?.bodyKey).toBe(m.sent[0]?.bodyKey)
+  })
+
+  it('a launch that succeeds after teardown keeps its key, so the same repo and prompt after a remount dedupes', async () => {
+    let answerStale: (response: Response) => void = () => {}
+    const m = await mount(attempt => {
+      if (attempt === 1) {
+        return new Promise<Response>(resolve => {
+          answerStale = resolve
+        })
+      }
+      return jsonResponse(202, {runId: 'run-idem-021'})
+    })
+    await m.submit('same prompt')
+    launchModule?.resetLaunchState()
+    await m.remount()
+
+    answerStale(jsonResponse(202, {runId: 'run-idem-021'}))
+    await vi.advanceTimersByTimeAsync(0)
+    await m.submit('same prompt')
+
+    expect(m.sent).toHaveLength(2)
+    expect(typeof m.sent[0]?.bodyKey).toBe('string')
+    expect(m.sent[1]?.bodyKey).toBe(m.sent[0]?.bodyKey)
+  })
+
   it('a launch torn down in flight keeps its key for the same repo and prompt after a remount', async () => {
     const m = await mount(attempt => (attempt === 1 ? never<Response>() : jsonResponse(202, {runId: 'run-idem-015'})))
     await m.submit('same prompt')

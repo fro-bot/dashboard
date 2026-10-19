@@ -309,8 +309,20 @@ describe('submitLaunch — indeterminate failures', () => {
     expect(outcome).toEqual({kind: 'failure', indeterminate: true})
   })
 
+  it.each([502, 503, 504])('a %i on the launch is a failure marked indeterminate, since a proxy can answer it after the gateway accepted the launch', async status => {
+    const outcome = await submitLaunch(clientWith([{kind: 'http', status}]), {repo: 'o/r', prompt: 'p'}, 'key-proxy')
+    expect(outcome).toEqual({kind: 'failure', indeterminate: true})
+  })
+
+  it.each([502, 503, 504])('a %i on the CSRF retry is a failure marked indeterminate', async status => {
+    const outcome = await submitLaunch(clientWith([{kind: 'http', status: 400}, {kind: 'http', status}]), {repo: 'o/r', prompt: 'p'}, 'key-proxy-retry')
+    expect(outcome).toEqual({kind: 'failure', indeterminate: true})
+  })
+
   it.each([
     ['a 500', [{kind: 'http', status: 500}]],
+    ['a 500 on the CSRF retry', [{kind: 'http', status: 400}, {kind: 'http', status: 500}]],
+    ['a 501', [{kind: 'http', status: 501}]],
     ['a protocol error', [{kind: 'protocol', message: 'invalid runId in launch response'}]],
     ['two 400s', [{kind: 'http', status: 400}, {kind: 'http', status: 400}]],
   ])('%s is a definitive failure', async (_name, errors) => {

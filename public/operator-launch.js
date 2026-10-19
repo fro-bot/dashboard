@@ -49,6 +49,10 @@ const PROMPT_REQUIRED_ERROR = 'prompt is required'
 // Exported so a node-side test holds it equal to the run-index value.
 export const LAUNCH_FETCH_TIMEOUT_MS = 10_000
 
+// HTTP statuses that leave a launch's outcome unknown: the rate limit (answered before the gateway
+// checks the idempotency key) and the proxy's gateway errors (which can follow an accepted launch).
+const INDETERMINATE_HTTP_STATUSES = new Set([429, 502, 503, 504])
+
 const PROMPT_TOO_LONG_COPY = 'Prompt is too long. Keep it to 8,000 characters or fewer; emoji can count as more than one.'
 const PROMPT_REQUIRED_COPY = 'Please enter a prompt before launching.'
 
@@ -129,16 +133,17 @@ export function mintIdempotencyKey() {
 
 /**
  * The generic failure outcome for a client error. A network error (which includes a timeout) leaves
- * it unknown whether the gateway accepted the request, and so does a 429, which the gateway answers
- * before it looks at the idempotency key. Those failures are marked indeterminate and the caller
- * keeps the idempotency key for a repeat of the same launch. Every other error is an answer, or a
- * request that never went out, and ends the submission.
+ * it unknown whether the gateway accepted the request. So does a 429, which the gateway answers
+ * before it looks at the idempotency key, and so does a 502, 503 or 504, which the reverse proxy in
+ * front of the gateway can return after the gateway accepted the launch. Those failures are marked
+ * indeterminate and the caller keeps the idempotency key for a repeat of the same launch. Every
+ * other error (500 included) is an answer, or a request that never went out, and ends the submission.
  *
  * @param {{kind: string, status?: number}} error - A client error.
  * @returns {{kind: 'failure', indeterminate?: true}} The failure outcome.
  */
 function failureOutcome(error) {
-  const isIndeterminate = error.kind === 'network' || (error.kind === 'http' && error.status === 429)
+  const isIndeterminate = error.kind === 'network' || (error.kind === 'http' && INDETERMINATE_HTTP_STATUSES.has(error.status))
   return isIndeterminate ? {kind: 'failure', indeterminate: true} : {kind: 'failure'}
 }
 
@@ -156,8 +161,8 @@ function failureOutcome(error) {
  *        error 'prompt is required' → {kind:'prompt-required'}) → no CSRF refresh and no retry
  *      - 404 → {kind:'not-found'} (uniform, no cause)
  *      - 429 → {kind:'rate-limited'}
- *   - any other error → {kind:'failure'}, marked `indeterminate` when it is a network error or a 429 on
- *     the CSRF retry
+ *   - any other error → {kind:'failure'}, marked `indeterminate` when it is a network error, a 502,
+ *     503 or 504, or a 429 on the CSRF retry (a 429 on the first launch is {kind:'rate-limited'})
  *
  * The idempotency key is passed in (not minted here) so the caller can reuse it
  * across retries and the function remains pure/testable.
@@ -805,14 +810,20 @@ export async function initOperatorLaunch(opts) {
       }
 
       // A definitive answer ends the submission, so its key is released. An indeterminate failure and a
-      // 429 keep it. The key is compared so a stale submit cannot release a newer submit's key.
-      const keepsKey = outcome.kind === 'rate-limited' || (outcome.kind === 'failure' && outcome.indeterminate === true)
+      // 429 keep it. So does a launch that succeeded on a stale init: no card, stream or hash attaches
+      // for it, so the operator may click again, and the same repo and prompt then dedupes to the run
+      // that exists. The key is compared so a stale submit cannot release a newer submit's key.
+      const isStale = isInitStale(abortController, myGeneration)
+      const keepsKey =
+        outcome.kind === 'rate-limited' ||
+        (outcome.kind === 'failure' && outcome.indeterminate === true) ||
+        (outcome.kind === 'launched' && isStale)
       if (!keepsKey && _heldLaunch?.idempotencyKey === idempotencyKey) _heldLaunch = null
 
       // Guard: the lock is released above either way. If a reset or newer init superseded this one
       // while the launch was in flight, this page no longer owns the card, the stream, the hash or
       // the form, so none of the outcome handling below runs.
-      if (isInitStale(abortController, myGeneration)) return
+      if (isStale) return
 
       if (outcome.kind === 'launched') {
         const {runId} = outcome

@@ -61,11 +61,15 @@ A `POST` that starts work needs two independent guards:
   a request whose response was lost must dedupe to the same run, not start a second
   one. The key goes in the JSON body (the gateway reads it there), with the header
   as a repeat. The single CSRF-400 retry must pass the *same* key, and so must a
-  re-click of the same repo and prompt after a timeout, a network failure or a 429.
-  A 429 keeps the key because the gateway checks its rate limit before it checks the
-  key, so a 429 says nothing about whether an earlier attempt was accepted. The key
-  is held at module level, not per mount, so it outlives a teardown, a remount and a
-  sign-out. It is released on any definitive answer and on a form reset. A reused key
+  re-click of the same repo and prompt after a timeout, a network failure, a 429, a
+  502, 503 or 504, or a launch that succeeded after a teardown or sign-out (nothing
+  attached for it, so the operator may click again). A 429 keeps the key because the
+  gateway checks its rate limit before it checks the key, so a 429 says nothing about
+  whether an earlier attempt was accepted. A 502, 503 or 504 keeps it because the
+  reverse proxy can return one after the gateway accepted the launch. Other statuses,
+  500 included, are definitive. The key is held at module level, not per mount, so it
+  outlives a teardown, a remount and a sign-out. It is released on any definitive
+  answer, on a launch that succeeded on a live page, and on a form reset. A reused key
   dedupes only within the gateway's idempotency window; after that window a repeat
   can start a second run. The CSRF retry:
 
