@@ -1,7 +1,7 @@
 ---
 title: "fix: Harden the OpenCode Impeccable bridge and move Impeccable to v4"
 type: fix
-status: active
+status: completed
 date: 2026-10-17
 ---
 
@@ -456,7 +456,7 @@ The v4 detector uses these exit codes for `detect`: 0 clean, 1 target not scanna
 - `.impeccable/config.json` is unchanged by the installer.
 - Repeat the Unit 4 live checks on the refreshed skill.
 
-- [ ] **Unit 8: Approve the Renovate v4 branch**
+- [x] **Unit 8: Approve the Renovate v4 branch**
 
 **Goal:** Move the CI detector to the skill's version through Renovate.
 
