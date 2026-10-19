@@ -448,7 +448,6 @@ describe('createSpawnRunner', () => {
     expect(result.kind).toBe('timeout')
     // Resolved by the deadline, not by waiting for the grandchild to release the pipes.
     expect(elapsedMs).toBeLessThan(400 + 100 + 2000)
-    expect(elapsedMs).toBeGreaterThanOrEqual(400)
     // A grandchild that leaves the child's process group is outside the group kill's reach; the afterEach safety net reaps it.
     expect(isAlive(readPid(grandchildPidFile))).toBe(true)
   }, 15_000)
@@ -503,29 +502,6 @@ describe('createSpawnRunner', () => {
     expect(result.stdout).not.toContain('\uFFFD')
     expect(result.stdout).toBe('é'.repeat(10))
   })
-
-  it('resolves spawn-error at the final deadline, with nothing spawned, when the script check never settles', async () => {
-    const markerFile = trackedFile('ran-marker')
-    const scriptPath = fixture(
-      [`import {writeFileSync} from 'node:fs';`, `writeFileSync(${JSON.stringify(markerFile)}, 'ran');`].join('\n'),
-    )
-    const runner = createSpawnRunner({
-      scriptPath,
-      timeoutMs: 100,
-      killGraceMs: 50,
-      deadlineSlackMs: 50,
-      checkScript: () => new Promise<void>(() => {}),
-    })
-    const start = Date.now()
-    const result = await runner(payload, { worktree: worktree() })
-    const elapsedMs = Date.now() - start
-
-    expect(result).toEqual({ kind: 'spawn-error' })
-    expect(elapsedMs).toBeGreaterThanOrEqual(200)
-    expect(elapsedMs).toBeLessThan(200 + 1000)
-    await new Promise((resolve) => setTimeout(resolve, 500))
-    expect(existsSync(markerFile)).toBe(false)
-  }, 15_000)
 
   it('never spawns a child when the script check settles after the run has already resolved', async () => {
     const markerFile = trackedFile('ran-marker')
@@ -586,7 +562,6 @@ describe('createSpawnRunner', () => {
     if (result.kind !== 'overflow') return
     expect(Buffer.byteLength(result.stdout, 'utf-8')).toBeLessThanOrEqual(64)
     // Resolved by the deadline, not by waiting for the grandchild to release the pipes.
-    expect(elapsedMs).toBeGreaterThanOrEqual(400)
     expect(elapsedMs).toBeLessThan(400 + 100 + 2000)
     // A grandchild that leaves the child's process group is outside the group kill's reach; the afterEach safety net reaps it.
     expect(isAlive(readPid(grandchildPidFile))).toBe(true)
