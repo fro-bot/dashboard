@@ -10093,6 +10093,13 @@ async function paintedStatus(records: string[]) {
 describe('question status — label, wire acceptance and styling', () => {
   afterEach(() => vi.unstubAllGlobals())
 
+  const gridRow = (css: string, selector: RegExp) => {
+    const rule = css.match(selector)
+    const row = rule?.[1]?.match(/grid-row:\s*(\d+);/)
+    expect(row, `expected a grid-row declaration matching ${selector}`).not.toBeNull()
+    return Number(row?.[1])
+  }
+
   it('accepts waiting_for_question on a status frame', () => {
     const result = parseSseFrame(`event: status\ndata: ${JSON.stringify(ckStatusPayload({status: 'waiting_for_question'}))}\n\n`)
     expect(result?.success).toBe(true)
@@ -10184,24 +10191,37 @@ describe('question status — label, wire acceptance and styling', () => {
     expect(css).toMatch(/\.run-card\s+\[data-role="run-waiting"\]:not\(\[hidden\]\)\s*\{[^}]*color:\s*var\(--color-text-muted\);/)
     expect(css).toMatch(/\.run-card\s+\[data-role="run-waiting"\]:not\(\[hidden\]\)\s*\{[^}]*font-size:\s*var\(--text-body-sm\);/)
     expect(css).toMatch(/\[data-role="run-output"\],\s*\[data-role="run-output-tools"\],\s*\[data-role="run-output-coalesced"\],\s*\[data-role="run-approvals"\],\s*\[data-role="run-waiting"\],\s*\[data-role="approval-badge"\]\s*\{\s*grid-column:\s*1\s*\/\s*-1;/)
-    expect(css).toMatch(/\[data-role="run-waiting"\]\s*\{[^}]*grid-row:\s*5;/)
-    expect(css).toMatch(/\.run-card:has\(\[data-role="run-waiting"\]:not\(\[hidden\]\)\)\s+\[data-role="run-output"\]\s*\{[^}]*grid-row:\s*6;/)
+    const waitingRow = gridRow(css, /\[data-role="run-waiting"\]\s*\{([^}]*)\}/)
+    const outputAfterWaitingRow = gridRow(css, /\.run-card:has\(\[data-role="run-waiting"\]:not\(\[hidden\]\)\)\s+\[data-role="run-output"\]\s*\{([^}]*)\}/)
+    expect(waitingRow).toBe(6)
+    expect(outputAfterWaitingRow).toBeGreaterThan(waitingRow)
   })
 
   it('pins the output toolbar to the row right after the output on desktop and on every mobile row', async () => {
     const fs = await import('node:fs/promises')
     const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
-    expect(css).toMatch(/\[data-role="run-output"\]\s*\{\s*grid-row:\s*4;\s*\}/)
-    expect(css).toMatch(/\[data-role="run-output-tools"\]\s*\{\s*grid-row:\s*5;\s*\}/)
-    expect(css).toMatch(/\.run-card:has\(\[data-role="run-checkout-detail"\]:not\(\[hidden\]\)\)\s+\[data-role="run-output-tools"\]\s*\{[^}]*grid-row:\s*6;/)
-    expect(css).toMatch(/\.run-card:has\(\[data-role="run-waiting"\]:not\(\[hidden\]\)\)\s+\[data-role="run-output-tools"\]\s*\{[^}]*grid-row:\s*7;/)
+    const desktopOutputRow = gridRow(css, /\[data-role="run-output"\]\s*\{([^}]*)\}/)
+    const desktopToolbarRow = gridRow(css, /\[data-role="run-output-tools"\]\s*\{([^}]*)\}/)
+    expect(desktopToolbarRow).toBe(desktopOutputRow + 1)
+
+    const mobileOutputRow = gridRow(css, /\.run-card\s+\[data-role="run-output"\]\s*\{([^}]*)\}/)
+    const mobileToolbarRow = gridRow(css, /\.run-card\s+\[data-role="run-output-tools"\]\s*\{([^}]*)\}/)
+    const checkoutOutputRow = gridRow(css, /\.run-card:has\(\[data-role="run-checkout-detail"\]:not\(\[hidden\]\)\)\s+\[data-role="run-output"\]\s*\{([^}]*)\}/)
+    const checkoutToolbarRow = gridRow(css, /\.run-card:has\(\[data-role="run-checkout-detail"\]:not\(\[hidden\]\)\)\s+\[data-role="run-output-tools"\]\s*\{([^}]*)\}/)
+    const waitingOutputRow = gridRow(css, /\.run-card:has\(\[data-role="run-waiting"\]:not\(\[hidden\]\)\)\s+\[data-role="run-output"\]\s*\{([^}]*)\}/)
+    const waitingToolbarRow = gridRow(css, /\.run-card:has\(\[data-role="run-waiting"\]:not\(\[hidden\]\)\)\s+\[data-role="run-output-tools"\]\s*\{([^}]*)\}/)
+    expect(mobileToolbarRow).toBe(mobileOutputRow + 1)
+    expect(checkoutToolbarRow).toBe(checkoutOutputRow + 1)
+    expect(waitingToolbarRow).toBe(waitingOutputRow + 1)
   })
 
   it('keeps cancel controls out of the status track and after the mobile waiting line', async () => {
     const fs = await import('node:fs/promises')
     const css = await fs.readFile(new URL('../web/src/index.css', import.meta.url).pathname, 'utf8')
     expect(css).toMatch(/\.run-card\s+\[data-role="run-cancel"\]\s*\{[^}]*grid-column:\s*1\s*\/\s*-1;/)
-    expect(css).toMatch(/\.run-card:has\(\[data-role="run-waiting"\]:not\(\[hidden\]\)\)\s+\[data-role="run-cancel"\]\s*\{[^}]*grid-row:\s*6;/)
+    const waitingRow = gridRow(css, /\[data-role="run-waiting"\]\s*\{([^}]*)\}/)
+    const cancelRow = gridRow(css, /\.run-card:has\(\[data-role="run-waiting"\]:not\(\[hidden\]\)\)\s+\[data-role="run-cancel"\]\s*\{([^}]*)\}/)
+    expect(cancelRow).toBeGreaterThan(waitingRow)
   })
 
   it('keeps the expanded run time legible on the raised card surface', async () => {

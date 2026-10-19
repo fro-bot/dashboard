@@ -326,12 +326,11 @@
   color: var(--color-text-muted);
 }
 
-/* Launch prompt: a one-line preview on a collapsed card, the full body on an expanded one. Both span the
-   card and hide when empty. Row placement, the body's height cap and the narrow-screen rows belong to the
-   design pass. */
+/* Launch prompt is operator-authored context, visually quieter than generated run output. */
 .run-card .run-prompt-preview,
 .run-card .run-prompt {
   grid-column: 1 / -1;
+  grid-row: 4;
   min-width: 0;
   font-size: var(--text-body-sm);
   color: var(--color-text-muted);
@@ -344,14 +343,103 @@
 }
 
 .run-card .run-prompt {
+  max-height: 19.2em;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-/* A rendered body is elements; only plain text needs pre-wrap. */
-.run-card .run-prompt > :not(pre) {
+/* Rendered prompt Markdown shares the run-output prose rhythm; plain text keeps pre-wrap. */
+.run-card .run-prompt > :not(pre),
+.run-card .run-prompt h4,
+.run-card .run-prompt h5,
+.run-card .run-prompt h6,
+.run-card .run-prompt p,
+.run-card .run-prompt ul,
+.run-card .run-prompt ol {
   white-space: normal;
 }
+
+.run-card .run-prompt h4,
+.run-card .run-prompt h5,
+.run-card .run-prompt h6 {
+  margin: var(--space-4) 0 var(--space-2);
+  color: var(--color-text);
+  line-height: 1.35;
+  font-weight: 650;
+  letter-spacing: var(--tracking-heading);
+  overflow-wrap: anywhere;
+}
+
+.run-card .run-prompt h4 { font-size: var(--text-body-lg); }
+.run-card .run-prompt h5 { font-size: var(--text-body); }
+.run-card .run-prompt h6 { font-size: var(--text-body-sm); }
+
+.run-card .run-prompt p { margin: var(--space-2) 0; line-height: 1.6; }
+
+.run-card .run-prompt ul,
+.run-card .run-prompt ol {
+  margin: var(--space-2) 0;
+  padding-inline-start: var(--space-5);
+  list-style-position: outside;
+  line-height: 1.55;
+}
+
+.run-card .run-prompt ul { list-style-type: disc; }
+.run-card .run-prompt ol { list-style-type: decimal; }
+.run-card .run-prompt ul ul { list-style-type: circle; }
+.run-card .run-prompt ul ul ul { list-style-type: square; }
+.run-card .run-prompt li + li { margin-top: var(--space-1); }
+
+.run-card .run-prompt a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.16em;
+  overflow-wrap: anywhere;
+}
+
+.run-card .run-prompt a:hover { color: var(--color-accent-hover); }
+
+.run-card .run-prompt a:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.run-card .run-prompt code {
+  padding: 0.08em 0.3em;
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-text) 7%, var(--color-bg));
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+}
+
+.run-card .run-prompt pre {
+  max-width: 100%;
+  margin: var(--space-3) 0;
+  padding: var(--space-3);
+  overflow: hidden;
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-text) 5%, var(--color-bg));
+  color: var(--color-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+}
+
+.run-card .run-prompt > :first-child { margin-top: 0; }
+.run-card .run-prompt > :last-child { margin-bottom: 0; }
 
 .run-card .run-prompt-preview:empty,
 .run-card .run-prompt:empty,
@@ -389,8 +477,8 @@
   grid-column: 1 / -1;
 }
 
-[data-role="run-output"] { grid-row: 4; }
-[data-role="run-output-tools"] { grid-row: 5; }
+[data-role="run-output"] { grid-row: 5; }
+[data-role="run-output-tools"] { grid-row: 6; }
 
 [data-role="run-checkout-detail"][hidden] {
   display: none;
@@ -449,7 +537,7 @@
 [data-role="run-questions"],
 .question-region {
   grid-column: 1 / -1;
-  grid-row: 5;
+  grid-row: 7;
   width: 100%;
   min-width: 0;
   margin-top: var(--space-3);
@@ -1591,6 +1679,18 @@
   overflow: hidden;
 }
 
+.run-card-skeleton::after {
+  content: "";
+  grid-column: 1 / -1;
+  grid-row: 4;
+  width: 72%;
+  height: 1em;
+  background: linear-gradient(90deg, var(--color-surface-raised) 25%, var(--color-border-muted) 50%, var(--color-surface-raised) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.5s infinite linear;
+  border-radius: var(--radius-sm);
+}
+
 @keyframes skeleton-shimmer {
   0% {
     background-position: -200% 0;
@@ -1614,7 +1714,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .skeleton-item {
+  .skeleton-item,
+  .run-card-skeleton::after {
     animation: none;
     background: var(--color-surface-raised);
   }
@@ -1709,36 +1810,46 @@
     grid-row: 4;
   }
 
-  .run-card [data-role="run-output"] {
+  .run-card .run-prompt-preview,
+  .run-card .run-prompt {
     grid-row: 5;
+  }
+
+  .run-card [data-role="run-output"] {
+    grid-row: 6;
   }
 
   .run-card [data-role="run-output-tools"] {
-    grid-row: 6;
-  }
-
-  [data-role="run-waiting"] {
-    grid-row: 5;
-  }
-
-  .run-card:has([data-role="run-checkout-detail"]:not([hidden])) [data-role="run-output"] {
-    grid-row: 5;
-  }
-
-  .run-card:has([data-role="run-waiting"]:not([hidden])) [data-role="run-output"] {
-    grid-row: 6;
-  }
-
-  .run-card:has([data-role="run-checkout-detail"]:not([hidden])) [data-role="run-output-tools"] {
-    grid-row: 6;
-  }
-
-  .run-card:has([data-role="run-waiting"]:not([hidden])) [data-role="run-output-tools"] {
     grid-row: 7;
   }
 
-  .run-card:has([data-role="run-waiting"]:not([hidden])) [data-role="run-cancel"] {
+  [data-role="run-waiting"] {
     grid-row: 6;
+  }
+
+  .run-card:has([data-role="run-checkout-detail"]:not([hidden])) [data-role="run-output"] {
+    grid-row: 6;
+  }
+
+  .run-card:has([data-role="run-waiting"]:not([hidden])) [data-role="run-output"] {
+    grid-row: 7;
+  }
+
+  .run-card:has([data-role="run-checkout-detail"]:not([hidden])) [data-role="run-output-tools"] {
+    grid-row: 7;
+  }
+
+  .run-card:has([data-role="run-waiting"]:not([hidden])) [data-role="run-output-tools"] {
+    grid-row: 8;
+  }
+
+  .run-card:has([data-role="run-waiting"]:not([hidden])) [data-role="run-cancel"] {
+    grid-row: 9;
+  }
+
+  .run-card [data-role="run-questions"],
+  .run-card .question-region {
+    grid-row: 10;
   }
 
   .run-card-skeleton {
@@ -1763,6 +1874,10 @@
     grid-row: 2;
     width: 100%;
     max-width: 100%;
+  }
+
+  .run-card-skeleton::after {
+    grid-row: 3;
   }
 
   .operator-drawer-panel {
