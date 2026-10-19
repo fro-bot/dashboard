@@ -17,6 +17,7 @@ import type {RunSummary} from '../gateway/operator-contract/run-summary.ts'
 import type {FixtureQuestionDecisionOutcome} from '../gateway/operator-fixture-sse.ts'
 import {createHash} from 'node:crypto'
 import {Hono} from 'hono'
+import {OPERATOR_LAUNCH_PROMPT_MAX_LENGTH, OPERATOR_LAUNCH_PROMPT_TOO_LONG} from '../gateway/operator-contract/launch-prompt.ts'
 import {FIXTURE_OPERATOR_PREFIX} from '../gateway/operator-fixture-routes.ts'
 import {
   FIXTURE_APPROVAL_SCENARIO_ROWS,
@@ -506,6 +507,28 @@ export function buildFixtureHarnessRouter(): Hono {
     }
 
     const req = body as Record<string, unknown>
+
+    // Prompt checks run in the gateway's order and before the scenario and idempotency checks:
+    // a non-string prompt, then the untrimmed length cap, then a whitespace-only prompt.
+    const prompt = req.prompt
+    if (typeof prompt !== 'string') {
+      logger.debug('fixture-harness: POST /runs', {status: 400, errorClass: 'missing-prompt'})
+      const res = c.json({error: 'bad request'}, 400)
+      setNoStore(res.headers)
+      return res
+    }
+    if (prompt.length > OPERATOR_LAUNCH_PROMPT_MAX_LENGTH) {
+      logger.debug('fixture-harness: POST /runs', {status: 400, errorClass: OPERATOR_LAUNCH_PROMPT_TOO_LONG})
+      const res = c.json({error: 'bad request', reason: OPERATOR_LAUNCH_PROMPT_TOO_LONG}, 400)
+      setNoStore(res.headers)
+      return res
+    }
+    if (prompt.trim().length === 0) {
+      logger.debug('fixture-harness: POST /runs', {status: 400, errorClass: 'empty-prompt'})
+      const res = c.json({error: 'prompt is required'}, 400)
+      setNoStore(res.headers)
+      return res
+    }
 
     if (!isValidScenario(req.scenario)) {
       logger.debug('fixture-harness: POST /runs', {status: 400, errorClass: 'invalid-scenario'})

@@ -482,7 +482,13 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
                     className="operator-input"
                     rows={3}
                     placeholder="Describe what you want the agent to do…"
+                    aria-describedby="launch-prompt-status"
                     style={{ resize: 'vertical' }}
+                  />
+                  <div
+                    id="launch-prompt-status"
+                    role="status"
+                    className="operator-launch-prompt-status"
                   />
                   <div
                     id="launch-error"

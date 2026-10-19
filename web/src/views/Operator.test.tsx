@@ -558,6 +558,19 @@ describe('Operator — data-fixture-mode attribute for agent detection', () => {
 
 // Recent-runs section presence
 
+describe('Operator — launch prompt field', () => {
+  it('links the prompt to an empty status node, with no maxlength', () => {
+    render(<Operator state="ready" />)
+    const prompt = document.querySelector('#launch-prompt')
+    const status = document.querySelector('#launch-prompt-status')
+    expect(prompt?.getAttribute('aria-describedby')).toBe('launch-prompt-status')
+    expect(status?.getAttribute('role')).toBe('status')
+    expect(status?.textContent).toBe('')
+    expect(status?.closest('#launch-form')).not.toBeNull()
+    expect(prompt?.hasAttribute('maxlength')).toBe(false)
+  })
+})
+
 describe('Operator — recent-runs section', () => {
   it('ready state renders a recent-runs section', () => {
     render(<Operator state="ready" />)

@@ -820,6 +820,16 @@
   margin-top: var(--space-2);
 }
 
+.operator-launch-prompt-status {
+  font-size: var(--text-body-sm);
+  color: var(--color-error);
+}
+
+/* An empty live region has no height, so it cancels the form's flex gap above it. */
+.operator-launch-prompt-status:empty {
+  margin-top: calc(-1 * var(--space-3));
+}
+
 .operator-submit-btn {
   align-self: flex-start;
 }

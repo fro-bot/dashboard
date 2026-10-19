@@ -23,7 +23,7 @@ import {createHash} from 'node:crypto'
 import process from 'node:process'
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {parseSseFrame as browserParseSseFrame, nextStreamState, PINNED_CONTRACT_VERSION} from '../public/operator-stream.js'
-import {CHECKOUT_REFUSAL_REASONS, OBSTRUCTION_KINDS, OPERATOR_CONTRACT_VERSION, QUESTION_DECISION_STATES} from '../src/gateway/operator-contract/index.ts'
+import {CHECKOUT_REFUSAL_REASONS, OBSTRUCTION_KINDS, OPERATOR_CONTRACT_VERSION, OPERATOR_LAUNCH_PROMPT_MAX_LENGTH, OPERATOR_LAUNCH_PROMPT_TOO_LONG, QUESTION_DECISION_STATES} from '../src/gateway/operator-contract/index.ts'
 import {isOperatorFailureKind} from '../src/gateway/operator-contract/run-status.ts'
 import {FIXTURE_OPERATOR_PREFIX} from '../src/gateway/operator-fixture-routes.ts'
 import {
@@ -3662,5 +3662,99 @@ describe('markdown fixture scenarios — production artifacts carry no scenario 
         expect(src, `${file} must not contain ${markdownRunId(key)}`).not.toContain(markdownRunId(key))
       }
     }
+  })
+})
+
+async function postPromptLaunch(app: Awaited<ReturnType<typeof buildFixtureTestApp>>, overrides: Record<string, unknown>, session?: string) {
+  const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+  const fixtureSessionId = session ?? (await sessionRes.json() as {fixtureSessionId: string}).fixtureSessionId
+  return app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+    method: 'POST',
+    headers: {'content-type': 'application/json'},
+    body: JSON.stringify({
+      scenario: FIXTURE_SCENARIO_NAMES.success,
+      idempotencyKey: 'fixture-idem-key-prompt-001',
+      fixtureSessionId,
+      csrfToken: 'fixture-csrf-placeholder',
+      repo: 'fixture-org/fixture-repo',
+      prompt: '[Fixture prompt]',
+      ...overrides,
+    }),
+  })
+}
+
+describe('fixture launch — prompt rejections mirror the gateway order', () => {
+  const MAX = OPERATOR_LAUNCH_PROMPT_MAX_LENGTH
+
+  it('an untrimmed prompt over the limit is 400 {error:bad request, reason:prompt-too-long}', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await postPromptLaunch(app, {prompt: 'a'.repeat(MAX + 1)})
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({error: 'bad request', reason: OPERATOR_LAUNCH_PROMPT_TOO_LONG})
+  })
+
+  it('surrounding whitespace counts toward the limit', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await postPromptLaunch(app, {prompt: `${'a'.repeat(MAX)} `})
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({error: 'bad request', reason: OPERATOR_LAUNCH_PROMPT_TOO_LONG})
+  })
+
+  it('exactly the limit, counted in UTF-16 units including emoji, is accepted', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await postPromptLaunch(app, {prompt: `${'\u{1F600}'.repeat(MAX / 2)}`})
+    expect(res.status).toBe(200)
+    // One more unit is over, even though it is only half an emoji's worth.
+    const over = await postPromptLaunch(app, {prompt: `${'\u{1F600}'.repeat(MAX / 2)}x`, idempotencyKey: 'fixture-idem-key-prompt-002'})
+    expect(over.status).toBe(400)
+  })
+
+  it('a whitespace-only prompt is 400 {error:prompt is required}', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await postPromptLaunch(app, {prompt: ' \n\t '})
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({error: 'prompt is required'})
+  })
+
+  it('an empty prompt is 400 {error:prompt is required}', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await postPromptLaunch(app, {prompt: ''})
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({error: 'prompt is required'})
+  })
+
+  it('a whitespace-only prompt over the limit reports the length first', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const res = await postPromptLaunch(app, {prompt: ' '.repeat(MAX + 1)})
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({error: 'bad request', reason: OPERATOR_LAUNCH_PROMPT_TOO_LONG})
+  })
+
+  it('a missing or non-string prompt is 400 {error:bad request} with no reason', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const missing = await postPromptLaunch(app, {prompt: undefined})
+    expect(missing.status).toBe(400)
+    expect(await missing.json()).toEqual({error: 'bad request'})
+    const nonString = await postPromptLaunch(app, {prompt: 42})
+    expect(nonString.status).toBe(400)
+    expect(await nonString.json()).toEqual({error: 'bad request'})
+  })
+
+  it('both prompt checks run before the scenario and idempotency checks', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const tooLong = await postPromptLaunch(app, {prompt: 'a'.repeat(MAX + 1), scenario: 'not-a-scenario', idempotencyKey: ''})
+    expect(await tooLong.json()).toEqual({error: 'bad request', reason: OPERATOR_LAUNCH_PROMPT_TOO_LONG})
+    const empty = await postPromptLaunch(app, {prompt: '  ', scenario: 'not-a-scenario', idempotencyKey: ''})
+    expect(await empty.json()).toEqual({error: 'prompt is required'})
+  })
+
+  it('a rejected prompt stores nothing: the same session and key launch normally afterwards', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const sessionRes = await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)
+    const {fixtureSessionId} = await sessionRes.json() as {fixtureSessionId: string}
+    const rejected = await postPromptLaunch(app, {prompt: 'a'.repeat(MAX + 1)}, fixtureSessionId)
+    expect(rejected.status).toBe(400)
+    const accepted = await postPromptLaunch(app, {}, fixtureSessionId)
+    expect(accepted.status).toBe(200)
   })
 })

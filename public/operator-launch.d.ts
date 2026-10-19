@@ -13,6 +13,8 @@ export type LaunchOutcome =
   | {readonly kind: 'launched'; readonly runId: string}
   | {readonly kind: 'not-found'}
   | {readonly kind: 'rate-limited'}
+  | {readonly kind: 'prompt-too-long'}
+  | {readonly kind: 'prompt-required'}
   | {readonly kind: 'failure'}
 
 // ---------------------------------------------------------------------------
@@ -34,7 +36,7 @@ export interface PendingCardHooks {
 export interface LaunchClient {
   readonly refreshCsrf: () => Promise<
     | {readonly success: true; readonly data: {readonly csrfToken: string}}
-    | {readonly success: false; readonly error: {readonly kind: string; readonly status?: number; readonly message?: string}}
+    | {readonly success: false; readonly error: {readonly kind: string; readonly status?: number; readonly message?: string; readonly reason?: string; readonly code?: string}}
   >
   readonly launchRun: (req: {
     readonly repo: string
@@ -43,7 +45,7 @@ export interface LaunchClient {
     readonly idempotencyKey: string
   }) => Promise<
     | {readonly success: true; readonly data: {readonly runId: string}}
-    | {readonly success: false; readonly error: {readonly kind: string; readonly status?: number; readonly message?: string}}
+    | {readonly success: false; readonly error: {readonly kind: string; readonly status?: number; readonly message?: string; readonly reason?: string; readonly code?: string}}
   >
 }
 
@@ -60,6 +62,9 @@ export interface LaunchClient {
  * Returns true if the item is valid, false otherwise.
  */
 export declare function validateRepoItem(item: unknown): boolean
+
+/** True when the untrimmed prompt is over the gateway's length limit. */
+export declare function isPromptTooLong(prompt: string): boolean
 
 /**
  * Mint a fresh unique idempotency key for a launch submission.
@@ -112,11 +117,11 @@ export declare function buildLaunchClient(opts?: {
 }): {
   readonly refreshCsrf: () => Promise<
     | {readonly success: true; readonly data: {readonly csrfToken: string}}
-    | {readonly success: false; readonly error: {readonly kind: string; readonly status?: number; readonly message?: string}}
+    | {readonly success: false; readonly error: {readonly kind: string; readonly status?: number; readonly message?: string; readonly reason?: string; readonly code?: string}}
   >
   readonly listRepos: () => Promise<
     | {readonly success: true; readonly data: readonly {readonly owner: string; readonly repo: string; readonly channelName?: string}[]}
-    | {readonly success: false; readonly error: {readonly kind: string; readonly status?: number; readonly message?: string}}
+    | {readonly success: false; readonly error: {readonly kind: string; readonly status?: number; readonly message?: string; readonly reason?: string; readonly code?: string}}
   >
   readonly launchRun: (req: {
     readonly repo: string
@@ -125,7 +130,7 @@ export declare function buildLaunchClient(opts?: {
     readonly idempotencyKey: string
   }) => Promise<
     | {readonly success: true; readonly data: {readonly runId: string}}
-    | {readonly success: false; readonly error: {readonly kind: string; readonly status?: number; readonly message?: string}}
+    | {readonly success: false; readonly error: {readonly kind: string; readonly status?: number; readonly message?: string; readonly reason?: string; readonly code?: string}}
   >
 }
 
