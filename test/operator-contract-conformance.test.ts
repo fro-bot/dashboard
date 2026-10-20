@@ -1700,6 +1700,7 @@ describe('parseRunSummary', () => {
 const PROVIDER_FAILURE_REASON_RECORD = {
   'provider-auth-unavailable': true,
   'model-not-available': true,
+  'provider-quota-exceeded': true,
   'provider-rejected-request': true,
   unclassified: true,
 } satisfies Record<OperatorProviderFailureReason, true>

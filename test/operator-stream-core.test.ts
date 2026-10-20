@@ -269,7 +269,7 @@ describe('parseSseFrame — pure parser', () => {
   describe('providerFailureReason', () => {
     const FAILED_SESSION_ERROR = {...ACTIVE_STATUS, status: 'failed', phase: 'FAILED', failureKind: 'session-error'}
 
-    it.each(['provider-auth-unavailable', 'model-not-available', 'provider-rejected-request', 'unclassified'])(
+    it.each(OPERATOR_PROVIDER_FAILURE_REASONS)(
       'keeps %s on a FAILED session-error frame',
       providerFailureReason => {
         const data = parseStatusData({...FAILED_SESSION_ERROR, providerFailureReason})
@@ -936,6 +936,7 @@ describe('nextStreamState — failure reason label', () => {
     const providerCopy: readonly (readonly [string, string])[] = [
       ['provider-auth-unavailable', 'Model provider unavailable'],
       ['model-not-available', 'Model not available'],
+      ['provider-quota-exceeded', 'Provider quota exceeded'],
       ['provider-rejected-request', 'Model provider rejected the request'],
     ]
     const failed = (extra: Record<string, unknown>) => ({
@@ -989,6 +990,25 @@ describe('nextStreamState — failure reason label', () => {
       const first = nextStreamState(liveWithPeer(), failed({failureKind: 'session-error'}))
       const second = nextStreamState(first, failed({failureKind: 'session-error', providerFailureReason: 'provider-rejected-request'}))
       expect(second.runs['run-abc']?.reasonLabel).toBe('Model provider rejected the request')
+    })
+
+    it('a held quota label survives a later failed session-error frame with no reason or unclassified', () => {
+      const first = nextStreamState(liveWithPeer(), failed({failureKind: 'session-error', providerFailureReason: 'provider-quota-exceeded'}))
+      const noReason = nextStreamState(first, failed({failureKind: 'session-error'}))
+      expect(noReason.runs['run-abc']?.reasonLabel).toBe('Provider quota exceeded')
+      const unclassified = nextStreamState(first, failed({failureKind: 'session-error', providerFailureReason: 'unclassified'}))
+      expect(unclassified.runs['run-abc']?.reasonLabel).toBe('Provider quota exceeded')
+    })
+
+    it('a generic session-error label is replaced when a quota reason arrives later', () => {
+      const first = nextStreamState(liveWithPeer(), failed({failureKind: 'session-error'}))
+      const second = nextStreamState(first, failed({failureKind: 'session-error', providerFailureReason: 'provider-quota-exceeded'}))
+      expect(second.runs['run-abc']?.reasonLabel).toBe('Provider quota exceeded')
+    })
+
+    it('a quota reason on a non-session-error failure shows that kind\'s label', () => {
+      const state = nextStreamState(live(), failed({failureKind: 'stream-ended', providerFailureReason: 'provider-quota-exceeded'}))
+      expect(state.runs['run-abc']?.reasonLabel).toBe('Stream ended early')
     })
 
     it('a later provider reason replaces an earlier provider reason', () => {

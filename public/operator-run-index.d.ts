@@ -34,6 +34,7 @@ export type FailureKind =
 export type ProviderFailureReason =
   | 'provider-auth-unavailable'
   | 'model-not-available'
+  | 'provider-quota-exceeded'
   | 'provider-rejected-request'
   | 'unclassified'
 

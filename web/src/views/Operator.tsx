@@ -52,6 +52,7 @@ const QUESTION_FIXTURE_SCENARIOS: readonly {readonly value: string; readonly lab
       {value: 'markdown_malicious', label: 'Markdown: malicious output'},
       {value: 'provider_failure_auth_unavailable', label: 'Provider failure: auth unavailable'},
       {value: 'provider_failure_model_not_available', label: 'Provider failure: model not available'},
+      {value: 'provider_failure_quota_exceeded', label: 'Provider failure: quota exceeded'},
       {value: 'provider_failure_rejected_request', label: 'Provider failure: request rejected'},
       {value: 'provider_failure_unclassified', label: 'Provider failure: unclassified'},
       {value: 'provider_failure_unknown_reason', label: 'Provider failure: unknown reason'},

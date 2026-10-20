@@ -534,7 +534,7 @@ describe('fixture no-leak guard — provider failure reasons', () => {
   })
 
   it('the provider failure scenarios emit only the bound run ID and synthetic status fields, plus the reason when set', () => {
-    expect(FIXTURE_PROVIDER_FAILURE_SCENARIO_ROWS).toHaveLength(6)
+    expect(FIXTURE_PROVIDER_FAILURE_SCENARIO_ROWS).toHaveLength(7)
     for (const row of FIXTURE_PROVIDER_FAILURE_SCENARIO_ROWS) {
       const sse = serializeScenarioToSse(row.scenario, providerRunIdFor(row.scenario))
       const statuses = sse

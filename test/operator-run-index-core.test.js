@@ -2935,6 +2935,7 @@ describe('failure reason label map parity (stream ↔ run-index)', () => {
 const PROVIDER_LABEL_COPY = [
   ['provider-auth-unavailable', 'Model provider unavailable'],
   ['model-not-available', 'Model not available'],
+  ['provider-quota-exceeded', 'Provider quota exceeded'],
   ['provider-rejected-request', 'Model provider rejected the request'],
 ]
 

@@ -21,6 +21,7 @@
 export const OPERATOR_PROVIDER_FAILURE_REASONS = [
   'provider-auth-unavailable',
   'model-not-available',
+  'provider-quota-exceeded',
   'provider-rejected-request',
   'unclassified',
 ] as const

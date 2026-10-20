@@ -361,6 +361,7 @@ describe('Operator — fixture scenario selector', () => {
         'markdown_malicious',
         'provider_failure_auth_unavailable',
         'provider_failure_model_not_available',
+        'provider_failure_quota_exceeded',
         'provider_failure_rejected_request',
         'provider_failure_unclassified',
         'provider_failure_unknown_reason',

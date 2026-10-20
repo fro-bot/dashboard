@@ -3773,6 +3773,7 @@ describe('fixture launch — prompt rejections mirror the gateway order', () => 
 const PROVIDER_FAILURE_EXPECTED: Readonly<Record<string, {readonly emitted: string | undefined; readonly parsed: string | undefined}>> = {
   provider_failure_auth_unavailable: {emitted: 'provider-auth-unavailable', parsed: 'provider-auth-unavailable'},
   provider_failure_model_not_available: {emitted: 'model-not-available', parsed: 'model-not-available'},
+  provider_failure_quota_exceeded: {emitted: 'provider-quota-exceeded', parsed: 'provider-quota-exceeded'},
   provider_failure_rejected_request: {emitted: 'provider-rejected-request', parsed: 'provider-rejected-request'},
   provider_failure_unclassified: {emitted: 'unclassified', parsed: 'unclassified'},
   provider_failure_unknown_reason: {emitted: FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON, parsed: undefined},
@@ -3787,7 +3788,7 @@ function lastStatusRecord(sse: string): Record<string, unknown> {
 }
 
 describe('provider failure fixture scenarios — registry and manifest', () => {
-  it('registers the six scenarios, in order, and lists them in the manifest', async () => {
+  it('registers the seven scenarios, in order, and lists them in the manifest', async () => {
     expect(FIXTURE_PROVIDER_FAILURE_SCENARIO_ROWS.map(row => row.scenario)).toEqual(PROVIDER_FAILURE_KEYS)
     expect(Object.values(FIXTURE_SCENARIO_NAMES)).toEqual(expect.arrayContaining(PROVIDER_FAILURE_KEYS))
     const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})

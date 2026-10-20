@@ -137,6 +137,7 @@ const VALID_FAILURE_KINDS = new Set([
 const VALID_PROVIDER_FAILURE_REASONS = new Set([
   'provider-auth-unavailable',
   'model-not-available',
+  'provider-quota-exceeded',
   'provider-rejected-request',
   'unclassified',
 ])
@@ -197,6 +198,7 @@ export function setPromptRenderer(renderer) {
 export const PROVIDER_FAILURE_REASON_LABELS = new Map([
   ['provider-auth-unavailable', 'Model provider unavailable'],
   ['model-not-available', 'Model not available'],
+  ['provider-quota-exceeded', 'Provider quota exceeded'],
   ['provider-rejected-request', 'Model provider rejected the request'],
 ])
 

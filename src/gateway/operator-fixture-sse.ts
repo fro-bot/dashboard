@@ -150,6 +150,8 @@ export const FIXTURE_SCENARIO_NAMES = {
   provider_failure_auth_unavailable: 'provider_failure_auth_unavailable',
   /** providerFailureReason model-not-available. */
   provider_failure_model_not_available: 'provider_failure_model_not_available',
+  /** providerFailureReason provider-quota-exceeded. */
+  provider_failure_quota_exceeded: 'provider_failure_quota_exceeded',
   /** providerFailureReason provider-rejected-request. */
   provider_failure_rejected_request: 'provider_failure_rejected_request',
   /** providerFailureReason unclassified: keeps the generic session-error label. */
@@ -215,6 +217,7 @@ export type MarkdownScenarioName = 'markdown_streamed' | 'markdown_malicious'
 export type ProviderFailureScenarioName =
   | 'provider_failure_auth_unavailable'
   | 'provider_failure_model_not_available'
+  | 'provider_failure_quota_exceeded'
   | 'provider_failure_rejected_request'
   | 'provider_failure_unclassified'
   | 'provider_failure_unknown_reason'
@@ -1133,6 +1136,7 @@ const PROVIDER_FAILURE_SCENARIO_SPECS: Readonly<
 > = {
   provider_failure_auth_unavailable: {providerFailureReason: 'provider-auth-unavailable'},
   provider_failure_model_not_available: {providerFailureReason: 'model-not-available'},
+  provider_failure_quota_exceeded: {providerFailureReason: 'provider-quota-exceeded'},
   provider_failure_rejected_request: {providerFailureReason: 'provider-rejected-request'},
   provider_failure_unclassified: {providerFailureReason: 'unclassified'},
   provider_failure_unknown_reason: {providerFailureReason: FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON},

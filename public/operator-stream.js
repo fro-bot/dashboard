@@ -32,7 +32,7 @@ import {formatRelativeTime, normalizeIsoTimestamp} from './operator-time.js'
 // ---------------------------------------------------------------------------
 
 /** Contract version this client expects on the ready frame. */
-export const PINNED_CONTRACT_VERSION = '1.12.0'
+export const PINNED_CONTRACT_VERSION = '1.13.0'
 
 /** Base delay in milliseconds for exponential backoff. */
 export const RETRY_BASE_MS = 1000
@@ -231,6 +231,7 @@ const VALID_FAILURE_KINDS = new Set([
 const VALID_PROVIDER_FAILURE_REASONS = new Set([
   'provider-auth-unavailable',
   'model-not-available',
+  'provider-quota-exceeded',
   'provider-rejected-request',
   'unclassified',
 ])
@@ -261,6 +262,7 @@ export const FAILURE_REASON_LABELS = {
 export const PROVIDER_FAILURE_REASON_LABELS = new Map([
   ['provider-auth-unavailable', 'Model provider unavailable'],
   ['model-not-available', 'Model not available'],
+  ['provider-quota-exceeded', 'Provider quota exceeded'],
   ['provider-rejected-request', 'Model provider rejected the request'],
 ])
 
