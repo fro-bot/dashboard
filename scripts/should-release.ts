@@ -145,10 +145,15 @@ function loadPkg(path: string, label: string): LoadResult {
 // File pattern matching
 // ---------------------------------------------------------------------------
 
+/** Vitest test-file names under web/, which are never imported into the bundle. */
+const WEB_TEST_FILE_PATTERN = /\.test\.(?:ts|tsx|js|mjs)$/
+
 /**
  * Returns true if the file path matches a "hard release" pattern:
  *   - src/**
- *   - web/**  (SPA source — built into the image by the builder stage)
+ *   - web/**  (SPA source — built into the image by the builder stage), except
+ *     Vitest test files (`*.test.ts`, `*.test.tsx`, `*.test.js`, `*.test.mjs`),
+ *     which are never imported into the bundle
  *   - public/**  (static assets copied into the image)
  *   - Dockerfile
  *   - bunfig.toml
@@ -159,9 +164,12 @@ function loadPkg(path: string, label: string): LoadResult {
  */
 function isHardReleasePath(filePath: string): boolean {
   if (filePath.startsWith('src/') || filePath === 'src') return true
-  // web/** — SPA source is built into the image by the Dockerfile builder stage;
-  // any change to web/ must trigger a new image build and release.
-  if (filePath.startsWith('web/') || filePath === 'web') return true
+  // web/** — SPA source is built into the image by the Dockerfile builder stage,
+  // so a change to web/ triggers a new image build and release. Vitest test files
+  // are the exception: they are never imported into the bundle. Test setup and
+  // config files (e.g. vitest.config.ts) do not match and still release.
+  if (filePath === 'web') return true
+  if (filePath.startsWith('web/')) return !WEB_TEST_FILE_PATTERN.test(filePath)
   // public/** — static assets (operator browser client, manifest, icons) are
   // copied into the image (Dockerfile `COPY public/ ./public/`); changes must
   // trigger a new image build and release.
