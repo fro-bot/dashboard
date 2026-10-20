@@ -4614,7 +4614,8 @@ describe('defaultRuntimeLoader — output renderer wiring', () => {
 
       mounted.runtime.cleanup()
       release?.()
-      await new Promise(resolve => realSetTimeout(resolve, 20))
+      // A cleaned-up loader still runs to its end, so wait for that before the next test mounts.
+      await mounted.awaitInit()
 
       expect(functionCalls(mounted.setPromptRenderer)).toHaveLength(0)
     })
