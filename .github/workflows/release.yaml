@@ -32,7 +32,7 @@ defaults:
 jobs:
   guard:
     name: Release guard
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
       should-release: ${{ steps.check.outputs.should-release }}
@@ -116,7 +116,7 @@ jobs:
     name: Release
     needs: [guard]
     if: needs.guard.outputs.should-release == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -505,7 +505,7 @@ jobs:
     name: Dispatch infra deploy
     needs: [release]
     if: needs.release.result == 'success' && needs.release.outputs.tag != '' && needs.release.outputs.digest != ''
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     # Best-effort for the WHOLE job: the release is already published, so nothing here
     # may fail the workflow run. continue-on-error covers every step — validation,
