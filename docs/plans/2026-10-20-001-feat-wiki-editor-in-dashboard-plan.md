@@ -578,7 +578,7 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 
 ### U2. Data client, gate-contract check, and page read models
 
-- [ ] Landed
+- [x] Landed
 
 **Goal:** Move the allowlist, the Git Data client, and the gate-contract check into `src/wiki/`. Add a content-addressed blob cache, path-scoped history, and the page list and read models. Measure the cold read.
 
@@ -603,13 +603,14 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 
 - `paths.ts` holds the page-path allowlist (the four page directories, one level deep, `.md`) and the corrections path, moved from the writer. It maps a page ID to a path only by finding the ID in the current tree.
 - `data-client.ts` keeps the transport seam and the writer's full snapshot read. The transport gains list-commits-by-path, create-dispatch, list-pulls, list-workflow-runs, and list-run-jobs.
-- A blob cache keyed by blob SHA sits in front of the per-blob fetch. Blob SHAs are content-addressed, so a head change refetches only changed blobs. The cache is in process, bounded by total bytes, never written to disk, and never logged. The gates take the full file map, so every read is a full snapshot.
+- A blob cache keyed by blob SHA sits in front of the per-blob fetch. Blob SHAs are content-addressed, so a head change refetches only changed blobs. The cache is in process, bounded by total bytes, never written to disk, and never logged.
+- The snapshot reads the full tree listing but fetches blobs only under `SNAPSHOT_PATH_PREFIXES` (`knowledge/` and `metadata/repos.yaml`), which is every path the core gates read. The `data` branch carries the whole repository, so a full blob read is about 550 requests. Commits use the full tree SHA as `base_tree`, so files outside the snapshot are kept.
 - List and page reads take a read-token provider, which uses the existing read mint. The save path and promotion-status reads take the write-token provider from U1. The two providers have different types.
 - The tree call reports truncation. A truncated tree fails closed.
 - `pages.ts` builds the list (ID, title, type, updated, whether the page can carry marks) and the read model. The read model holds the body without frontmatter, the page blob SHA, the page's corrections entries with status and a stale flag, the digest of those entries (the corrections base), the head commit SHA, the contract state, and `canWrite` with its reason. Frontmatter is parsed with the core package, and `node_id` decides mark capability.
 - A missing `knowledge/corrections.yaml` is an empty set with the digest of the empty set. An unreadable or empty one is corrupt, because the core `parseCorrections` throws on an empty file. A corrupt file is an error state, never an empty list.
 - `gate-contract.ts` keeps the cache, stale ceiling, and timeout, and maps a decision to mismatch (no retry) or unreadable (retryable).
-- A measurement step times a cold full read against the live `data` tree, counting requests and wall time, and records both in the runbook. Nothing beyond the blob cache is added unless the measurement shows a need.
+- A measurement step times a cold snapshot read against the live `data` tree, counting requests and wall time, and records both in the runbook. The narrowed snapshot measured 56 requests and 3.3 to 3.9 s cold, and 3 requests and 0.7 s warm.
 
 **Patterns to follow:**
 
