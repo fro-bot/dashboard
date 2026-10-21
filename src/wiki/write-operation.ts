@@ -22,7 +22,7 @@ import {Buffer} from 'node:buffer'
 import {randomUUID} from 'node:crypto'
 import {parseFrontmatterDocument, reconstructFrontmatter} from '@fro.bot/wiki-write-core'
 import {logger} from '../logger.ts'
-import {rateLimitOf, WikiDataUnavailableError} from './data-client.ts'
+import {isRefusal, rateLimitOf, RequestNotSentError, WikiDataUnavailableError} from './data-client.ts'
 import {classifyGateContract} from './gate-contract.ts'
 import {
   applyCorrectionChanges,
@@ -30,6 +30,7 @@ import {
   readCorrectionsFile,
   runWikiGates,
 } from './gates.ts'
+import {isRecord, statusOf} from './guards.ts'
 import {correctionsDigest, toPageCorrections} from './pages.ts'
 import {CORRECTIONS_PATH, parsePageId, resolvePagePath, writableSetFor} from './paths.ts'
 
@@ -37,6 +38,8 @@ export const MAX_BODY_BYTES = 512 * 1024
 export const MAX_HEAD_ATTEMPTS = 3
 /** Allowance for clock difference between this host and GitHub when listing history. */
 export const RECONCILE_SKEW_MS = 60_000
+/** The latest time a JavaScript Date can hold, in ms since the epoch. */
+export const MAX_DATE_MS = 8.64e15
 export const OPERATION_TRAILER = 'Fro-Operation-Id'
 export const OPERATOR_TRAILER = 'Fro-Operator'
 
@@ -104,7 +107,7 @@ export type SaveResult =
     readonly currentCorrections: readonly PageCorrection[]
     readonly correctionsBase: string
   }
-  | {readonly state: 'failed'; readonly operationId: string; readonly retryable: true}
+  | {readonly state: 'failed'; readonly operationId: string; readonly retryable: boolean}
   | {readonly state: 'contract-rejected'; readonly kind: 'mismatch' | 'unreadable'; readonly retry: boolean}
   | {readonly state: 'indeterminate'; readonly operationId: string}
   | {readonly state: 'rate-limited'; readonly retryAfterSeconds: number | null}
@@ -139,8 +142,6 @@ export interface WikiWriteDeps {
   readonly dispatch: DispatchPort
   readonly now?: (() => number) | undefined
   readonly newId?: (() => string) | undefined
-  /** Replaces the shared gates. Tests only. */
-  readonly runGates?: typeof runWikiGates | undefined
 }
 
 export interface WikiWriteOperation {
@@ -158,8 +159,8 @@ type ParsedRequest =
 
 const INVALID = {ok: false, reason: 'invalid-request'} as const
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+function isTransitionAction(value: string): value is TransitionAction {
+  return (TRANSITION_ACTIONS as readonly string[]).includes(value)
 }
 
 function parseMark(value: unknown, bodyLength: number): SaveMark | null {
@@ -176,8 +177,8 @@ function parseTransition(value: unknown): SaveTransition | null {
   if (!isRecord(value)) return null
   const {id, action} = value
   if (typeof id !== 'string' || id === '' || id.length > MAX_ID_LENGTH) return null
-  if (typeof action !== 'string' || !TRANSITION_ACTIONS.includes(action as TransitionAction)) return null
-  return {id, action: action as TransitionAction}
+  if (typeof action !== 'string' || !isTransitionAction(action)) return null
+  return {id, action}
 }
 
 /** Parse the request into a value that carries only the fields a save uses. */
@@ -192,9 +193,10 @@ export function parseSaveRequest(input: unknown): ParsedRequest {
   if (!Array.isArray(marks) || marks.length > MAX_MARKS) return INVALID
   if (!Array.isArray(transitions) || transitions.length > MAX_TRANSITIONS) return INVALID
 
-  const parsedMarks = (marks as unknown[]).map(mark => parseMark(mark, body.length))
-  const parsedTransitions = (transitions as unknown[]).map(parseTransition)
-  if (parsedMarks.includes(null) || parsedTransitions.includes(null)) return INVALID
+  // A null from the element parser drops the element, so a shorter result means invalid input.
+  const parsedMarks = marks.flatMap((mark: unknown) => parseMark(mark, body.length) ?? [])
+  const parsedTransitions = transitions.flatMap((transition: unknown) => parseTransition(transition) ?? [])
+  if (parsedMarks.length !== marks.length || parsedTransitions.length !== transitions.length) return INVALID
   if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES) return {ok: false, reason: 'content-too-large'}
 
   return {
@@ -205,8 +207,8 @@ export function parseSaveRequest(input: unknown): ParsedRequest {
       pageBlobSha,
       correctionsBase,
       body,
-      marks: parsedMarks as SaveMark[],
-      transitions: parsedTransitions as SaveTransition[],
+      marks: parsedMarks,
+      transitions: parsedTransitions,
     },
   }
 }
@@ -255,8 +257,9 @@ export async function lookupOperation(
   if (
     page === null ||
     !OPERATION_ID.test(input.operationId) ||
-    !Number.isFinite(input.startedAt) ||
-    input.startedAt < 0
+    !Number.isSafeInteger(input.startedAt) ||
+    input.startedAt < 0 ||
+    input.startedAt > MAX_DATE_MS
   ) {
     return {state: 'invalid-request'}
   }
@@ -270,15 +273,15 @@ export async function lookupOperation(
 // Failure classification
 // ---------------------------------------------------------------------------
 
-function statusOf(error: unknown): number | undefined {
-  const status = typeof error === 'object' && error !== null ? (error as {status?: unknown}).status : undefined
-  return typeof status === 'number' ? status : undefined
-}
-
-/** A ref update whose outcome is unknown: no response, a timeout, or a server error. */
+/**
+ * A ref update whose outcome is unknown: no response, a timeout, or a server error.
+ * A request that was never sent, because the token could not be obtained, is known
+ * not to have landed.
+ */
 function isAmbiguous(error: unknown): boolean {
+  if (error instanceof RequestNotSentError) return false
   const status = statusOf(error)
-  return status === undefined || status === 408 || status >= 500
+  return status === null || status === 408 || status >= 500
 }
 
 function pageNodeId(content: string): string | null {
@@ -296,9 +299,9 @@ function pageNodeId(content: string): string | null {
 
 function failureOf(error: unknown, operationId: string): SaveResult {
   const limit = error instanceof WikiDataUnavailableError ? error.rateLimit : rateLimitOf(error)
-  return limit === null
-    ? {state: 'failed', operationId, retryable: true}
-    : {state: 'rate-limited', retryAfterSeconds: limit.retryAfterSeconds}
+  if (limit !== null) return {state: 'rate-limited', retryAfterSeconds: limit.retryAfterSeconds}
+  // A refused credential or target is a configuration fault; retrying cannot fix it.
+  return {state: 'failed', operationId, retryable: !isRefusal(error)}
 }
 
 function describeResult(result: SaveResult): Record<string, string> {
@@ -322,7 +325,6 @@ type Attempt = {readonly kind: 'done'; readonly result: SaveResult} | {readonly 
 export function createWikiWriteOperation(deps: WikiWriteDeps): WikiWriteOperation {
   const now = deps.now ?? Date.now
   const newId = deps.newId ?? randomUUID
-  const runGates = deps.runGates ?? runWikiGates
   const {client} = deps
 
   async function contractVerdict(): Promise<GateContractVerdict> {
@@ -393,17 +395,16 @@ export function createWikiWriteOperation(deps: WikiWriteDeps): WikiWriteOperatio
     const nodeId = pageNodeId(current)
     const records: readonly CorrectionRecord[] =
       nodeId === null ? [] : corrections.corrections.filter(record => record.page_node_id === nodeId)
-    const writesCorrections = request.marks.length > 0 || request.transitions.length > 0
-    if (writesCorrections) {
-      const digest = correctionsDigest(records)
-      if (digest !== request.correctionsBase) {
-        return done({
-          state: 'conflict',
-          kind: 'corrections',
-          currentCorrections: toPageCorrections(pagePath, current, records),
-          correctionsBase: digest,
-        })
-      }
+    // Every save carries the digest of this page's entries as the editor loaded them, so a
+    // body edit cannot erase a marked span after its record changed or vanished upstream.
+    const digest = correctionsDigest(records)
+    if (digest !== request.correctionsBase) {
+      return done({
+        state: 'conflict',
+        kind: 'corrections',
+        currentCorrections: toPageCorrections(pagePath, current, records),
+        correctionsBase: digest,
+      })
     }
 
     let pageContent: string
@@ -426,7 +427,7 @@ export function createWikiWriteOperation(deps: WikiWriteDeps): WikiWriteOperatio
 
     let gated
     try {
-      gated = runGates({
+      gated = runWikiGates({
         pagePath,
         pageContent,
         files: snapshot.files,
@@ -480,7 +481,7 @@ export function createWikiWriteOperation(deps: WikiWriteDeps): WikiWriteOperatio
       } catch (headError) {
         return done(failureOf(headError, request.operationId))
       }
-      return done({state: 'failed', operationId: request.operationId, retryable: true})
+      return done(failureOf(error, request.operationId))
     }
 
     const committedAt = commit.committedAt ?? new Date(now()).toISOString()

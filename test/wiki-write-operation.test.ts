@@ -1,12 +1,14 @@
 import type {GateContractDecision} from '../src/wiki/gate-contract.ts'
-import type {runWikiGates} from '../src/wiki/gates.ts'
+import type {runWikiGates as RunWikiGates} from '../src/wiki/gates.ts'
 import type {DispatchResult, SaveResult} from '../src/wiki/write-operation.ts'
 
 import {Buffer} from 'node:buffer'
 import {GATE_CONTRACT_VERSION, parseCorrections} from '@fro.bot/wiki-write-core'
 import {afterEach, describe, expect, it, vi, type Mock} from 'vitest'
+import {WriteCredentialError} from '../src/github/fro-bot-app-client.ts'
 import {logger} from '../src/logger.ts'
-import {createBlobCache, createWikiDataClient} from '../src/wiki/data-client.ts'
+import {createBlobCache, createWikiDataClient, RequestNotSentError} from '../src/wiki/data-client.ts'
+import {createGateContractChecker} from '../src/wiki/gate-contract.ts'
 import {correctionsDigest, EMPTY_CORRECTIONS_DIGEST} from '../src/wiki/pages.ts'
 import {
   createWikiWriteOperation,
@@ -57,6 +59,18 @@ const UNREADABLE: GateContractDecision = {
   readiness: {ready: false, stale: true, mainHeadSha: null},
 }
 
+// Replaces the shared gates for the tests that need a result real content cannot produce.
+const gateOverride = vi.hoisted(() => ({current: null as null | ((...args: unknown[]) => unknown)}))
+
+vi.mock('../src/wiki/gates.ts', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/wiki/gates.ts')>()
+  return {
+    ...actual,
+    runWikiGates: ((...args: Parameters<typeof RunWikiGates>) =>
+      gateOverride.current === null ? actual.runWikiGates(...args) : gateOverride.current(...args)) as typeof RunWikiGates,
+  }
+})
+
 const CONTEXT = {operatorLogin: 'octocat'}
 const EDITED_BODY = ALPHA_BODY.replace('widgets', 'gadgets')
 
@@ -78,7 +92,6 @@ function setup(
     files?: Record<string, string>
     decision?: GateContractDecision
     dispatchResult?: {ok: boolean}
-    runGates?: typeof runWikiGates
   } = {},
 ): Harness {
   const repo = new FakeRepo({files: options.files ?? wikiFiles()})
@@ -95,7 +108,6 @@ function setup(
       minted += 1
       return `mint-${minted}`
     },
-    ...(options.runGates === undefined ? {} : {runGates: options.runGates}),
   })
   return {repo, dispatch, checkContract, operation, client, headBefore: repo.head}
 }
@@ -139,6 +151,7 @@ function savedCorrections(repo: FakeRepo) {
 }
 
 afterEach(() => {
+  gateOverride.current = null
   vi.restoreAllMocks()
   vi.useRealTimers()
 })
@@ -392,13 +405,16 @@ describe('save: edge cases', () => {
     expect(savedCorrections(h.repo)[0]?.state).toBe('retired')
   })
 
-  it('never runs the corrections guard for a save with no marks and no transitions', async () => {
+  it('runs the corrections guard on a save with no marks and no transitions, and leaves the file alone when the base matches', async () => {
     const files = wikiFiles({[CORRECTIONS]: correctionsYaml(correctionRecord('c1', 'R_alpha', 'for factories'))})
     const h = setup({files})
+    const base = correctionsDigest(parseCorrections(files[CORRECTIONS] ?? '').corrections)
 
-    const result = await h.operation.save(request(h, {correctionsBase: EMPTY_CORRECTIONS_DIGEST}), CONTEXT)
+    const stale = await h.operation.save(request(h, {correctionsBase: EMPTY_CORRECTIONS_DIGEST}), CONTEXT)
+    const current = await h.operation.save(request(h, {correctionsBase: base, operationId: opId(2)}), CONTEXT)
 
-    expectState(result, 'saved')
+    expect(stale).toMatchObject({state: 'conflict', kind: 'corrections'})
+    expectState(current, 'saved')
     expect(h.repo.commit(h.repo.head).touched.has(CORRECTIONS)).toBe(false)
   })
 
@@ -531,10 +547,11 @@ describe('save: moved head', () => {
   })
 
   it.each([
-    ['a ruleset refusal', new HttpError('Repository rule violations found', 403)],
-    ['a validation failure', new HttpError('Validation Failed', 422)],
-    ['a not-found response', new HttpError('Not Found', 404)],
-  ])('fails without retry or conflict when the head is unchanged after %s', async (_label, error) => {
+    ['an unauthorized response', new HttpError('Bad credentials', 401), false],
+    ['a ruleset refusal', new HttpError('Repository rule violations found', 403), false],
+    ['a not-found response', new HttpError('Not Found', 404), false],
+    ['a validation failure', new HttpError('Validation Failed', 422), true],
+  ])('fails without a retry or conflict when the head is unchanged after %s', async (_label, error, retryable) => {
     const h = setup()
     h.repo.hooks.beforeUpdateRef = () => {
       throw error
@@ -542,8 +559,8 @@ describe('save: moved head', () => {
 
     const result = expectState(await h.operation.save(request(h), CONTEXT), 'failed')
 
-    expect(result.retryable).toBe(true)
-    expect(h.repo.count('updateRef')).toBe(0)
+    expect(result.retryable).toBe(retryable)
+    expect(h.repo.count('updateRef')).toBe(1) // exactly one attempt: no retry
     expect(h.repo.count('getRef')).toBeGreaterThanOrEqual(2)
     expect(h.dispatch).not.toHaveBeenCalled()
   })
@@ -649,6 +666,56 @@ describe('save: guards', () => {
     expect(h.repo.count('createCommit')).toBe(0)
   })
 
+  it('conflicts a body-only save when this page entries were removed upstream, and commits nothing', async () => {
+    const record = correctionRecord('c1', 'R_alpha', 'Alpha builds widgets')
+    const files = wikiFiles({[CORRECTIONS]: correctionsYaml(record)})
+    const h = setup({files})
+    const loadedDigest = correctionsDigest(parseCorrections(files[CORRECTIONS] ?? '').corrections)
+    const loaded = request(h, {correctionsBase: loadedDigest, body: EDITED_BODY.replace('Alpha builds widgets', 'Alpha builds things')})
+    h.repo.pipelineCommit({[CORRECTIONS]: correctionsYaml()}, 'chore(pipeline): drop corrections')
+
+    const result = expectState(await h.operation.save(loaded, CONTEXT), 'conflict')
+
+    expect(result.kind).toBe('corrections')
+    if (result.kind !== 'corrections') return
+    expect(result.currentCorrections).toEqual([])
+    expect(result.correctionsBase).toBe(EMPTY_CORRECTIONS_DIGEST)
+    expect(h.repo.count('createCommit')).toBe(0)
+    expect(h.dispatch).not.toHaveBeenCalled()
+  })
+
+  it('conflicts a body-only save when this page gained an entry upstream', async () => {
+    const h = setup()
+    const loaded = request(h)
+    h.repo.pipelineCommit(
+      {[CORRECTIONS]: correctionsYaml(correctionRecord('c9', 'R_alpha', 'Alpha builds widgets'))},
+      'chore(pipeline): add correction',
+    )
+
+    const result = await h.operation.save(loaded, CONTEXT)
+
+    expect(result).toMatchObject({state: 'conflict', kind: 'corrections'})
+    expect(h.repo.count('createCommit')).toBe(0)
+  })
+
+  it('saves a body-only edit when this page entries are unchanged since it was loaded', async () => {
+    const files = wikiFiles({[CORRECTIONS]: correctionsYaml(correctionRecord('c1', 'R_alpha', 'for factories'))})
+    const h = setup({files})
+    const base = correctionsDigest(parseCorrections(files[CORRECTIONS] ?? '').corrections)
+
+    const result = await h.operation.save(request(h, {correctionsBase: base}), CONTEXT)
+
+    expectState(result, 'saved')
+  })
+
+  it('checks a page without a node id against the empty set', async () => {
+    const files = wikiFiles()
+    files[ALPHA] = files[ALPHA]?.replace(/^node_id:.*\n/mu, '') ?? ''
+    const h = setup({files})
+
+    expectState(await h.operation.save(request(h, {pageBlobSha: h.repo.blobShaAt(ALPHA)}), CONTEXT), 'saved')
+  })
+
   it('does not conflict on drift in another page entries', async () => {
     const files = wikiFiles({[CORRECTIONS]: correctionsYaml(correctionRecord('b1', 'R_beta', 'Beta ships gadgets'))})
     const h = setup({files})
@@ -718,9 +785,8 @@ describe('save: gates and request checks', () => {
   })
 
   it('rejects when the gates would write outside the page, log, index, and corrections', async () => {
-    const h = setup({
-      runGates: () => ({ok: true, files: {[ALPHA]: 'x', [WORKFLOW]: 'name: evil\n'}}),
-    })
+    gateOverride.current = () => ({ok: true, files: {[ALPHA]: 'x', [WORKFLOW]: 'name: evil\n'}})
+    const h = setup()
 
     const result = expectState(await h.operation.save(request(h), CONTEXT), 'rejected')
 
@@ -735,7 +801,8 @@ describe('save: gates and request checks', () => {
     ['a nested page', 'knowledge/wiki/repos/nested/x.md'],
     ['the metadata file', 'metadata/repos.yaml'],
   ])('rejects a gate result that writes %s', async (_label, path) => {
-    const h = setup({runGates: () => ({ok: true, files: {[ALPHA]: 'x', [path]: 'y'}})})
+    gateOverride.current = () => ({ok: true, files: {[ALPHA]: 'x', [path]: 'y'}})
+    const h = setup()
 
     expectState(await h.operation.save(request(h), CONTEXT), 'rejected')
 
@@ -863,12 +930,87 @@ describe('save: reconcile', () => {
     const result = expectState(await h.operation.save(request(h), CONTEXT), 'indeterminate')
 
     expect(result.operationId).toBe(opId(1))
-    expect(h.repo.count('updateRef')).toBe(0)
+    expect(h.repo.count('updateRef')).toBe(1) // exactly one attempt: no retry
     expect(h.repo.count('createCommit')).toBe(1)
     expect(h.dispatch).not.toHaveBeenCalled()
     await expect(
       lookupOperation(h.client, {operationId: opId(1), pageId: ALPHA_ID, startedAt: h.repo.clockMs - 5000}),
     ).resolves.toEqual({state: 'missing'})
+  })
+
+  describe('a request that was never sent', () => {
+    it.each([
+      ['a token timeout', new RequestNotSentError('GitHub request timed out', null)],
+      ['a malformed mint response', new RequestNotSentError('Token mint returned an unexpected response', null)],
+    ])('fails, safe to retry, with no reconcile after %s on the ref update', async (_label, error) => {
+      const h = setup()
+      h.repo.hooks.beforeUpdateRef = () => {
+        throw error
+      }
+
+      const result = expectState(await h.operation.save(request(h), CONTEXT), 'failed')
+
+      expect(result.retryable).toBe(true)
+      expect(h.repo.count('listCommitsByPath')).toBe(0)
+      expect(h.dispatch).not.toHaveBeenCalled()
+    })
+
+    it('fails without retry when the request was never sent because the credential was refused', async () => {
+      const h = setup()
+      h.repo.hooks.beforeUpdateRef = () => {
+        throw new RequestNotSentError('Failed to mint a write token: refused', 403)
+      }
+
+      const result = expectState(await h.operation.save(request(h), CONTEXT), 'failed')
+
+      expect(result.retryable).toBe(false)
+      expect(h.repo.count('listCommitsByPath')).toBe(0)
+    })
+
+    it('stays indeterminate for a timeout after the request was sent', async () => {
+      const h = setup()
+      h.repo.hooks.beforeUpdateRef = () => {
+        throw new Error('The operation was aborted due to timeout')
+      }
+
+      const result = expectState(await h.operation.save(request(h), CONTEXT), 'indeterminate')
+
+      expect(result.operationId).toBe(opId(1))
+      expect(h.repo.count('listCommitsByPath')).toBeGreaterThan(0)
+    })
+  })
+
+  it('rejects saves as unreadable and retryable inside the failure window, with one marker fetch', async () => {
+    const fetch = vi.fn().mockRejectedValue(new Error('network unavailable'))
+    let now = 0
+    const checker = createGateContractChecker({fetch, now: () => now})
+    const repo = new FakeRepo({files: wikiFiles()})
+    const dispatch = vi.fn<() => Promise<DispatchResult>>(async () => ({ok: true}))
+    const operation = createWikiWriteOperation({
+      client: createWikiDataClient(repo.transport(), {blobCache: createBlobCache()}),
+      checkContract: async () => checker.check(),
+      dispatch: {dispatch},
+      now: () => repo.clockMs,
+    })
+    const input = (n: number) => ({
+      operationId: opId(n),
+      pageId: ALPHA_ID,
+      pageBlobSha: repo.blobShaAt(ALPHA),
+      correctionsBase: EMPTY_CORRECTIONS_DIGEST,
+      body: EDITED_BODY,
+      marks: [],
+      transitions: [],
+    })
+
+    const first = await operation.save(input(1), CONTEXT)
+    now += 5000
+    const second = await operation.save(input(2), CONTEXT)
+
+    for (const result of [first, second]) expect(result).toEqual({state: 'contract-rejected', kind: 'unreadable', retry: true})
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(repo.count('createBlob')).toBe(0)
+    expect(repo.count('createCommit')).toBe(0)
+    expect(dispatch).not.toHaveBeenCalled()
   })
 
   it('reports indeterminate when the path history listing fails', async () => {
@@ -1086,6 +1228,82 @@ describe('save: GitHub failures', () => {
     nothingCommitted(h)
   })
 
+  describe('a refused credential', () => {
+    const refused = (status: number) => new WriteCredentialError('Failed to mint a write token: refused', status)
+
+    it.each([401, 403, 404])('fails without retry when the write credential is refused with %d', async status => {
+      const h = setup()
+      h.repo.hooks.onCall = method => {
+        if (method === 'getRef') throw refused(status)
+      }
+
+      const result = expectState(await h.operation.save(request(h), CONTEXT), 'failed')
+
+      expect(result.retryable).toBe(false)
+      expect(result.operationId).toBe(opId(1))
+      nothingCommitted(h)
+    })
+
+    it.each([401, 403, 404])('fails without retry when a GitHub %d refuses the snapshot read', async status => {
+      const h = setup()
+      h.repo.hooks.onCall = method => {
+        if (method === 'getTree') throw new HttpError('Refused', status)
+      }
+
+      const result = expectState(await h.operation.save(request(h), CONTEXT), 'failed')
+
+      expect(result.retryable).toBe(false)
+      nothingCommitted(h)
+    })
+
+    it.each([
+      ['a server error', refused(502)],
+      ['a credential failure with no status', new WriteCredentialError('Failed to mint a write token: timeout')],
+      ['a rate limit on the mint', Object.assign(new WriteCredentialError('rate limit', 403), {})],
+    ])('keeps %s retryable or rate-limited, never non-retryable', async (label, error) => {
+      const h = setup()
+      h.repo.hooks.onCall = method => {
+        if (method === 'getRef') throw error
+      }
+
+      const result = await h.operation.save(request(h), CONTEXT)
+
+      if (label === 'a rate limit on the mint') {
+        // A 403 whose message names a rate limit is a rate limit, not a refusal.
+        expect(result).toMatchObject({state: 'rate-limited'})
+      } else {
+        expect(expectState(result, 'failed').retryable).toBe(true)
+      }
+      nothingCommitted(h)
+    })
+
+    it.each([401, 403, 404])('fails without retry when the ref update is refused with %d by the write credential', async status => {
+      const h = setup()
+      h.repo.hooks.beforeUpdateRef = () => {
+        throw refused(status)
+      }
+
+      const result = expectState(await h.operation.save(request(h), CONTEXT), 'failed')
+
+      expect(result.retryable).toBe(false)
+      expect(h.repo.count('updateRef')).toBe(1)
+      expect(h.dispatch).not.toHaveBeenCalled()
+    })
+
+    it('keeps a refusal during the writes non-retryable and commits nothing', async () => {
+      const h = setup()
+      h.repo.hooks.onCall = method => {
+        if (method === 'createBlob') throw refused(403)
+      }
+
+      const result = expectState(await h.operation.save(request(h), CONTEXT), 'failed')
+
+      expect(result.retryable).toBe(false)
+      expect(h.repo.count('createCommit')).toBe(0)
+      expect(h.dispatch).not.toHaveBeenCalled()
+    })
+  })
+
   it.each(['createBlob', 'createTree', 'createCommit'])('fails with nothing committed when %s fails', async method => {
     const h = setup()
     h.repo.hooks.onCall = called => {
@@ -1176,11 +1394,10 @@ describe('save: GitHub failures', () => {
   })
 
   it('never throws on an unexpected error', async () => {
-    const h = setup({
-      runGates: () => {
-        throw new Error('unexpected')
-      },
-    })
+    gateOverride.current = () => {
+      throw new Error('unexpected')
+    }
+    const h = setup()
 
     const result = await h.operation.save(request(h), CONTEXT)
 

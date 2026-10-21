@@ -14,8 +14,8 @@ load-bearing rules for code suggestions.
    (`pull_requests`/`checks`/`issues`/`contents`/`metadata: read`, with
    `security_events`/`vulnerability_alerts: read` optional and graceful), and those
    credentials may never mint write-scoped tokens. The dashboard holds GitHub write
-   authority scoped to the single operator (`DASHBOARD_OPERATOR_ID`): a write runs only for
-   a gateway session whose `operatorId` equals it. That authority comes through a separate
+   authority scoped to the single operator (`DASHBOARD_OPERATOR_ID`): outside the dev fixture
+   harness, a write runs only for a gateway session whose `operatorId` equals it. That authority comes through a separate
    Fro Bot App credential (`DASHBOARD_FRO_BOT_APP_ID` / `DASHBOARD_FRO_BOT_APP_KEY(_FILE)`;
    the same App `release.yaml` uses via `APPLICATION_ID`, distinct from the read-only Agent
    App). Its client (`src/github/fro-bot-app-client.ts`) mints installation tokens on demand
@@ -23,8 +23,8 @@ load-bearing rules for code suggestions.
    other scope. Commits go to the `data` branch and are limited to wiki pages,
    `knowledge/log.md`, `knowledge/index.md` and `knowledge/corrections.yaml`, after the
    shared `@fro.bot/wiki-write-core` gates pass; the only other write is one `promote-data`
-   repository dispatch. Only `src/server.ts`, `src/wiki/write-operation.ts` and
-   `src/wiki/fixture-target.ts` may import the write client, and nothing under `web/src` may
+   repository dispatch. Only `src/wiki/wiring.ts` and `src/wiki/write-operation.ts`
+   may import the write client, and nothing under `web/src` may
    touch key material, Octokit or the write path. Any additional write target, scope or
    credential requires explicit owner approval and a new threat model. This invariant does
    not govern separately credentialed repository CI/release automation, which is not

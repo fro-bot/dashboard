@@ -16,6 +16,7 @@ import {join} from 'node:path'
 import {env} from 'node:process'
 import {GATE_CONTRACT_VERSION} from '@fro.bot/wiki-write-core'
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
+import {WriteCredentialError} from '../src/github/fro-bot-app-client.ts'
 import {ok} from '../src/result.ts'
 import {MAX_REQUEST_BODY_BYTES} from '../src/routes/wiki.ts'
 import {
@@ -721,12 +722,22 @@ describe('save: outcome to response mapping', () => {
     ['rate-limited', {state: 'rate-limited', retryAfterSeconds: 12}, 429],
   ]
 
-  it('gives every outcome its own status family', () => {
-    const statuses = OUTCOMES.map(([, outcome, status]) => [outcome.state, status] as const)
-    const byState = new Map(statuses)
+  // Exhaustive over the save outcomes: a new state fails type-check until it has a status family.
+  const STATUS_FAMILY = {
+    saved: 200,
+    'saved-not-promoted': 202,
+    rejected: 422,
+    conflict: 409,
+    failed: 502,
+    'contract-rejected': 424,
+    indeterminate: 504,
+    'rate-limited': 429,
+  } as const satisfies Record<SaveResult['state'], number>
 
-    expect(byState.size).toBe(8)
-    expect(new Set(byState.values()).size).toBe(8)
+  it('gives every outcome its own status family', () => {
+    expect(new Set(Object.values(STATUS_FAMILY)).size).toBe(Object.keys(STATUS_FAMILY).length)
+    for (const [, outcome, status] of OUTCOMES) expect(status, outcome.state).toBe(STATUS_FAMILY[outcome.state])
+    expect(new Set(OUTCOMES.map(([, outcome]) => outcome.state))).toEqual(new Set(Object.keys(STATUS_FAMILY)))
   })
 
   it.each(OUTCOMES)('maps %s to %d with the outcome as the body', async (_label, outcome, status) => {
@@ -905,6 +916,9 @@ describe('GET /api/wiki/operations/:operationId', () => {
     ['a missing start time', `pageId=${ALPHA_ID}`],
     ['a fractional start time', `pageId=${ALPHA_ID}&startedAt=1.5`],
     ['a non-numeric start time', `pageId=${ALPHA_ID}&startedAt=soon`],
+    ['a start time above the Date range', `pageId=${ALPHA_ID}&startedAt=9999999999999999`],
+    ['a start time just above the Date range', `pageId=${ALPHA_ID}&startedAt=8640000000000001`],
+    ['an unsafe integer start time', `pageId=${ALPHA_ID}&startedAt=9007199254740993`],
   ])('answers 400 for %s', async (_label, query) => {
     const world = makeWorld()
 
@@ -913,6 +927,14 @@ describe('GET /api/wiki/operations/:operationId', () => {
     expect(res.status).toBe(400)
     expect(await res.json()).toEqual({state: 'invalid-request'})
     expect(world.repo.calls).toHaveLength(0)
+  })
+
+  it('accepts the largest start time the Date range holds', async () => {
+    const world = makeWorld()
+
+    const res = await lookup(await gatewayApp(world.deps), `pageId=${ALPHA_ID}&startedAt=8640000000000000`)
+
+    expect(res.status).toBe(200)
   })
 
   it('answers 400 for a malformed operation ID', async () => {
@@ -975,6 +997,31 @@ describe('GET /api/wiki/promotion/status', () => {
     const fault = await get(app, '/api/wiki/promotion/status')
     expect(fault.status).toBe(502)
     expect(await fault.json()).toEqual({state: 'configuration-fault'})
+  })
+
+  it.each([
+    ['text', 'yesterday'],
+    ['a malformed date', '2030-13-45T99:99:99Z'],
+    ['an empty value', ''],
+    ['an out-of-range date', '+275760-09-13T00:00:01.000Z'],
+  ])('rejects a since of %s with 400 and does not read GitHub', async (_label, since) => {
+    const world = makeWorld()
+    const app = await gatewayApp(world.deps)
+    const before = world.repo.calls.length
+
+    const res = await get(app, `/api/wiki/promotion/status?since=${encodeURIComponent(since)}`)
+
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({state: 'bad-request'})
+    expect(world.repo.calls.length).toBe(before)
+  })
+
+  it('accepts a valid ISO since', async () => {
+    const world = makeWorld()
+
+    const res = await get(await gatewayApp(world.deps), `/api/wiki/promotion/status?since=${encodeURIComponent('2030-01-02T00:00:00.000Z')}`)
+
+    expect(res.status).toBe(200)
   })
 
   it('rejects an overlong since with 400', async () => {
@@ -1197,6 +1244,13 @@ describe('logging', () => {
 // Wire conformance
 // ---------------------------------------------------------------------------
 
+/** Regenerating the sample file moves the contract the client parser reads. It is a local act, never a CI one. */
+function assertSamplesMayBeRewritten(environment: Record<string, string | undefined>): void {
+  if (environment.CI !== undefined && environment.CI !== '') {
+    throw new Error('WIKI_WIRE_SAMPLES_UPDATE must not be set in CI')
+  }
+}
+
 describe('wire conformance', () => {
   interface Sample {
     readonly status: number
@@ -1223,6 +1277,18 @@ describe('wire conformance', () => {
       }
     }
     const withCorrection = {files: wikiFiles({[CORRECTIONS]: correctionsYaml(correctionRecord('c1', 'R_alpha', 'Alpha builds widgets'))})}
+    const mismatchDecision: GateContractDecision = {
+      proceed: false,
+      reason: 'version_mismatch',
+      marker: {version: GATE_CONTRACT_VERSION + 1, sourceTreeHash: 's'},
+      readiness: {ready: false, stale: false, mainHeadSha: null},
+    }
+    const unreadableDecision: GateContractDecision = {
+      proceed: false,
+      reason: 'unavailable',
+      readiness: {ready: false, stale: true, mainHeadSha: null},
+    }
+    const treeFails = failOn('getTree', new HttpError('Bad Gateway', 502))
     const lookupPath = (_world: World, id: number, startedAt: number) =>
       `/api/wiki/operations/${opId(id)}?pageId=${ALPHA_ID}&startedAt=${startedAt}`
     const dispatchRequest = async (app: Awaited<ReturnType<typeof gatewayApp>>) =>
@@ -1251,26 +1317,31 @@ describe('wire conformance', () => {
     })()
 
     return {
-      list: {ok: await run(withCorrection, async app => get(app, '/api/wiki/pages'))},
+      list: {
+        ok: await run(withCorrection, async app => get(app, '/api/wiki/pages')),
+        unavailable: await run({}, async app => get(app, '/api/wiki/pages'), treeFails),
+      },
       page: {
         ok: await run(withCorrection, async app => get(app, `/api/wiki/pages/${ALPHA_ID}`)),
+        contractMismatch: await run({decision: mismatchDecision}, async app => get(app, `/api/wiki/pages/${ALPHA_ID}`)),
+        contractUnreadable: await run({decision: unreadableDecision}, async app => get(app, `/api/wiki/pages/${ALPHA_ID}`)),
         notFound: await run({}, async app => get(app, '/api/wiki/pages/repos.no-such-page')),
+        unavailable: await run({}, async app => get(app, `/api/wiki/pages/${ALPHA_ID}`), treeFails),
+        correctionsCorrupt: await run({files: wikiFiles({[CORRECTIONS]: ''})}, async app => get(app, `/api/wiki/pages/${ALPHA_ID}`)),
+        pageInvalid: await run(
+          {files: wikiFiles({[ALPHA]: 'no frontmatter at all\n'})},
+          async app => get(app, `/api/wiki/pages/${ALPHA_ID}`),
+        ),
       },
       save: {
         saved: savedLookup.saved,
         notPromoted: await run({}, async (app, w) => save(app, saveBody(w)), failOn('createDispatch', new HttpError('Bad Gateway', 502))),
         rejected: await run({}, async (app, w) => save(app, saveBody(w, {body: `${ALPHA_BODY}\n<script>x</script>\n`}))),
-        contractRejected: await run(
-          {
-            decision: {
-              proceed: false,
-              reason: 'version_mismatch',
-              marker: {version: GATE_CONTRACT_VERSION + 1, sourceTreeHash: 's'},
-              readiness: {ready: false, stale: false, mainHeadSha: null},
-            },
-          },
-          async (app, w) => save(app, saveBody(w)),
+        rejectedWithTarget: await run({}, async (app, w) =>
+          save(app, saveBody(w, {body: `${ALPHA_BODY}\nSee [x](./secret-page-name.md).\n`})),
         ),
+        contractRejected: await run({decision: mismatchDecision}, async (app, w) => save(app, saveBody(w))),
+        contractUnreadable: await run({decision: unreadableDecision}, async (app, w) => save(app, saveBody(w))),
         conflictPage: await run({}, async (app, w) => save(app, saveBody(w, {pageBlobSha: 'stale-blob'}))),
         conflictPageRemoved: await run({}, async (app, w) => {
           const body = saveBody(w)
@@ -1282,6 +1353,11 @@ describe('wire conformance', () => {
           async (app, w) => save(app, saveBody(w, {transitions: [{id: 'c1', action: 'retire'}], correctionsBase: 'f'.repeat(64)})),
         ),
         failed: await run({}, async (app, w) => save(app, saveBody(w)), failOn('createBlob', new HttpError('Bad Gateway', 502))),
+        failedRefused: await run(
+          {},
+          async (app, w) => save(app, saveBody(w)),
+          failOn('getRef', new WriteCredentialError('Failed to mint a write token: refused', 403)),
+        ),
         indeterminate: await run({}, async (app, w) => save(app, saveBody(w)), w => {
           w.repo.hooks.beforeUpdateRef = () => {
             throw new HttpError('Request timed out', 500)
@@ -1301,6 +1377,8 @@ describe('wire conformance', () => {
         found: savedLookup.found,
         missing: await run({}, async (app, w) => get(app, lookupPath(w, 7, w.repo.clockMs))),
         unknown: await run({}, async (app, w) => get(app, lookupPath(w, 5, w.repo.clockMs)), failOn('listCommitsByPath', new HttpError('Bad Gateway', 502))),
+        invalidRequest: await run({}, async app => get(app, `/api/wiki/operations/${opId(5)}?pageId=${ALPHA_ID}`)),
+        forbidden: await run({capabilityOff: true}, async (app, w) => get(app, lookupPath(w, 5, w.repo.clockMs))),
       },
       dispatch: {
         dispatched: await run({}, async app => dispatchRequest(app)),
@@ -1325,6 +1403,8 @@ describe('wire conformance', () => {
         }),
         unavailable: await run({}, async app => status(app), failOn('listWorkflowRuns', new HttpError('Bad Gateway', 502))),
         configurationFault: await run({}, async app => status(app), failOn('listWorkflowRuns', new HttpError('Not Found', 404))),
+        badRequest: await run({}, async app => get(app, '/api/wiki/promotion/status?since=yesterday')),
+        forbidden: await run({capabilityOff: true}, async app => status(app)),
       },
     }
   }
@@ -1333,11 +1413,19 @@ describe('wire conformance', () => {
     const produced = await produce()
 
     if (env.WIKI_WIRE_SAMPLES_UPDATE === '1') {
+      assertSamplesMayBeRewritten(env)
       writeFileSync(SAMPLES_PATH, `${JSON.stringify(produced, null, 2)}\n`)
     }
     const samples = JSON.parse(readFileSync(SAMPLES_PATH, 'utf8')) as unknown
 
     expect(produced).toEqual(samples)
+  })
+
+  it('refuses to rewrite the samples when CI is set', () => {
+    expect(() => assertSamplesMayBeRewritten({CI: 'true'})).toThrow(/CI/u)
+    expect(() => assertSamplesMayBeRewritten({CI: '1'})).toThrow(/CI/u)
+    expect(() => assertSamplesMayBeRewritten({})).not.toThrow()
+    expect(() => assertSamplesMayBeRewritten({CI: ''})).not.toThrow()
   })
 
   it('keeps the sample file free of repository secrets and raw records', () => {

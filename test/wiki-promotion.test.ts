@@ -1,6 +1,7 @@
 import type {DispatchPort} from '../src/wiki/write-operation.ts'
 
 import {afterEach, describe, expect, it, vi} from 'vitest'
+import {WriteCredentialError} from '../src/github/fro-bot-app-client.ts'
 import {createWikiDataClient} from '../src/wiki/data-client.ts'
 import {
   createDispatchPort,
@@ -616,6 +617,25 @@ describe('promotion status: errors', () => {
 
     await expect(w.reader.getStatus()).resolves.toEqual({state: 'configuration-fault'})
     expect(logs.error).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([401, 403, 404])('reports a configuration fault when the write credential is refused with %d', async status => {
+    const logs = capture()
+    const w = build(world({runs: [run()]}))
+    w.errors.listWorkflowRuns = new WriteCredentialError('Failed to mint a write token: refused', status)
+
+    await expect(w.reader.getStatus()).resolves.toEqual({state: 'configuration-fault'})
+    expect(logs.error).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['a server error', new WriteCredentialError('Failed to mint a write token: down', 502)],
+    ['no status', new WriteCredentialError('Failed to mint a write token: timeout')],
+  ])('reports unavailable when the credential failure carries %s', async (_label, error) => {
+    const w = build(world({runs: [run()]}))
+    w.errors.listWorkflowRuns = error
+
+    await expect(w.reader.getStatus()).resolves.toEqual({state: 'unavailable'})
   })
 
   it.each(['listPulls', 'listWorkflowRuns'] as const)('treats a refused %s read as a configuration fault', async name => {

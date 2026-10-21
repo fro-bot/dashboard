@@ -14,7 +14,8 @@
 import type {PromotionPull, PromotionRun, RateLimitInfo, RunJob, WikiDataClient} from './data-client.ts'
 
 import {logger} from '../logger.ts'
-import {rateLimitOf} from './data-client.ts'
+import {isRefusal, rateLimitOf} from './data-client.ts'
+import {statusOf} from './guards.ts'
 import {WIKI_REPOSITORY} from './paths.ts'
 
 /** Shorter than the client's 15 s poll, so each poll reads fresh while bursts coalesce. */
@@ -72,20 +73,13 @@ export interface PromotionStatusReader {
 // Errors
 // ---------------------------------------------------------------------------
 
-function statusOf(error: unknown): number | null {
-  const status = typeof error === 'object' && error !== null ? (error as {status?: unknown}).status : undefined
-  return typeof status === 'number' ? status : null
-}
-
 /**
  * A rate limit is transient. A refusal (401, 403, 404) is a configuration fault
  * that retrying cannot fix. Everything else, including a timeout, a network
  * failure, a server error, or an unexpected response, is transient.
  */
 function classify(error: unknown): {readonly fault: boolean; readonly status: number | null} {
-  const status = statusOf(error)
-  if (rateLimitOf(error) !== null) return {fault: false, status}
-  return {fault: status === 401 || status === 403 || status === 404, status}
+  return {fault: isRefusal(error), status: statusOf(error)}
 }
 
 // ---------------------------------------------------------------------------

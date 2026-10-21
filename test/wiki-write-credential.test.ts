@@ -11,11 +11,18 @@ import {mkdtemp, rm, writeFile} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {createFroBotAppClient, WRITE_PERMISSIONS, WriteCredentialError} from '../src/github/fro-bot-app-client.ts'
+import {
+  createFroBotAppClient,
+  JWT_REQUEST_TIMEOUT_MS,
+  MAX_RATE_LIMIT_WAIT_SECONDS,
+  shouldRetryRateLimit,
+  WRITE_PERMISSIONS,
+  WriteCredentialError,
+} from '../src/github/fro-bot-app-client.ts'
 import {mintReadOnlyToken} from '../src/github/installations.ts'
 import {logger} from '../src/logger.ts'
-import {buildWikiWriteWiring} from '../src/server.ts'
 import {readWikiWriteConfig} from '../src/wiki/config.ts'
+import {buildWikiWriteWiring} from '../src/wiki/wiring.ts'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -38,7 +45,8 @@ function makeHarness(options: {installationId?: number; tokenLifetimeMs?: number
   const calls: RequestCall[] = []
 
   const request = vi.fn(async (route: string, params: Record<string, unknown>) => {
-    calls.push({route, params})
+    const body = Object.fromEntries(Object.entries(params).filter(([key]) => key !== 'request'))
+    calls.push({route, params: body})
     if (route === INSTALLATION_ROUTE) return {data: {id: installationId}}
     if (route === TOKEN_ROUTE) {
       state.minted += 1
@@ -289,6 +297,130 @@ describe('write token failures', () => {
   })
 })
 
+function clientFailing(route: string, error: unknown) {
+  return createFroBotAppClient({
+    appId: '12345',
+    privateKey: FAKE_PEM,
+    now: () => START,
+    request: async (requested: string) => {
+      if (requested === route) throw error
+      if (requested === INSTALLATION_ROUTE) return {data: {id: 1}}
+      return {data: {token: 'unused', expires_at: new Date(START + 3_600_000).toISOString()}}
+    },
+  })
+}
+
+describe('write token failures keep the HTTP status', () => {
+  const statusError = (status: number) => Object.assign(new Error(`HTTP ${status} ghs_abcdefghijklmnopqrstuvwxyz0123456789`), {status})
+
+  it.each([401, 403, 404, 422, 500, 502])('carries %d from a refused mint as a number', async status => {
+    const failure = await clientFailing(TOKEN_ROUTE, statusError(status))
+      .getWriteToken()
+      .catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(WriteCredentialError)
+    expect((failure as WriteCredentialError).status).toBe(status)
+    expect((failure as WriteCredentialError).message).not.toContain('ghs_')
+  })
+
+  it('carries the status of a failed installation lookup', async () => {
+    const failure = await clientFailing(INSTALLATION_ROUTE, statusError(404))
+      .getWriteToken()
+      .catch((error: unknown) => error)
+
+    expect((failure as WriteCredentialError).status).toBe(404)
+  })
+
+  it.each([
+    ['a network failure', new Error('socket hang up')],
+    ['a non-error throw', 'boom'],
+    ['a non-numeric status', Object.assign(new Error('x'), {status: '403'})],
+  ])('has no status for %s', async (_label, thrown) => {
+    const failure = await clientFailing(TOKEN_ROUTE, thrown)
+      .getWriteToken()
+      .catch((error: unknown) => error)
+
+    expect((failure as WriteCredentialError).status).toBeNull()
+  })
+
+  it('has no status for an unexpected response shape', async () => {
+    const client = createFroBotAppClient({appId: '12345', privateKey: FAKE_PEM, now: () => START, request: async () => ({data: {}})})
+
+    const failure = await client.getWriteToken().catch((error: unknown) => error)
+
+    expect((failure as WriteCredentialError).status).toBeNull()
+  })
+})
+
+describe('write token requests are bounded', () => {
+  it('passes an abort signal on the installation lookup and on the mint', async () => {
+    const harness = makeHarness()
+
+    await harness.client.getWriteToken()
+
+    expect(harness.request.mock.calls).toHaveLength(2)
+    for (const [route, params] of harness.request.mock.calls) {
+      const request = params.request as {signal?: unknown} | undefined
+      expect(request?.signal, route).toBeInstanceOf(AbortSignal)
+    }
+  })
+
+  it('rejects a lookup that never answers, with a credential error, inside the bound', async () => {
+    const client = createFroBotAppClient({
+      appId: '12345',
+      privateKey: FAKE_PEM,
+      timeoutMs: 40,
+      request: async () => new Promise<never>(() => {}),
+    })
+    const started = Date.now()
+
+    await expect(client.getWriteToken()).rejects.toBeInstanceOf(WriteCredentialError)
+
+    expect(Date.now() - started).toBeLessThan(2000)
+  })
+
+  it('rejects a mint that never answers, and does not cache the failure', async () => {
+    let stall = true
+    const client = createFroBotAppClient({
+      appId: '12345',
+      privateKey: FAKE_PEM,
+      timeoutMs: 40,
+      request: async (route: string) => {
+        if (route === INSTALLATION_ROUTE) return {data: {id: 1}}
+        if (stall) return new Promise<never>(() => {})
+        return {data: {token: 'recovered', expires_at: new Date(Date.now() + 3_600_000).toISOString()}}
+      },
+    })
+
+    await expect(client.getWriteToken()).rejects.toBeInstanceOf(WriteCredentialError)
+    stall = false
+
+    await expect(client.getWriteToken()).resolves.toBe('recovered')
+  })
+
+  it('has a default bound well under the data client request bound', () => {
+    expect(JWT_REQUEST_TIMEOUT_MS).toBeGreaterThan(0)
+    expect(JWT_REQUEST_TIMEOUT_MS).toBeLessThanOrEqual(30_000)
+  })
+})
+
+describe('rate-limit retry policy', () => {
+  it('retries a short wait, for at most two retries', () => {
+    expect(shouldRetryRateLimit(1, 0)).toBe(true)
+    expect(shouldRetryRateLimit(MAX_RATE_LIMIT_WAIT_SECONDS, 1)).toBe(true)
+    expect(shouldRetryRateLimit(1, 2)).toBe(false)
+  })
+
+  it('does not wait out a long reset window', () => {
+    expect(shouldRetryRateLimit(MAX_RATE_LIMIT_WAIT_SECONDS + 1, 0)).toBe(false)
+    expect(shouldRetryRateLimit(3600, 0)).toBe(false)
+  })
+
+  it.each([Number.NaN, -1, Number.POSITIVE_INFINITY])('does not retry an unusable wait of %s', wait => {
+    expect(shouldRetryRateLimit(wait, 0)).toBe(false)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -406,6 +538,39 @@ describe('readWikiWriteConfig', () => {
     vi.stubEnv('DASHBOARD_GATEWAY_OPERATOR_ORIGIN', 'not a url')
 
     expect(readWikiWriteConfig()).toEqual({enabled: false, reason: 'app-credentials-absent'})
+  })
+
+  it.each(['0', '-1', '1.5', 'abc', '1e3', '0x10', '007', '+5', '12 34', 'Iv1.abc123', '9007199254740993'])(
+    'throws when the App ID is %j, naming the variable and not the value',
+    value => {
+      vi.stubEnv('DASHBOARD_FRO_BOT_APP_ID', value)
+      vi.stubEnv('DASHBOARD_FRO_BOT_APP_KEY', FAKE_PEM)
+      vi.stubEnv('DASHBOARD_OPERATOR_ID', '42')
+
+      let message = ''
+      try {
+        readWikiWriteConfig()
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error)
+      }
+
+      expect(message).toMatch(/DASHBOARD_FRO_BOT_APP_ID/)
+      expect(message).not.toContain(value)
+    },
+  )
+
+  it('throws on an invalid App ID even when the key is absent', () => {
+    vi.stubEnv('DASHBOARD_FRO_BOT_APP_ID', 'not-a-number')
+
+    expect(() => readWikiWriteConfig()).toThrow(/DASHBOARD_FRO_BOT_APP_ID/)
+  })
+
+  it('trims whitespace around a valid App ID', () => {
+    vi.stubEnv('DASHBOARD_FRO_BOT_APP_ID', '  98765  ')
+    vi.stubEnv('DASHBOARD_FRO_BOT_APP_KEY', FAKE_PEM)
+    vi.stubEnv('DASHBOARD_OPERATOR_ID', '42')
+
+    expect(readWikiWriteConfig()).toMatchObject({enabled: true, appId: '98765'})
   })
 
   it('throws when the App ID contains a line break', () => {

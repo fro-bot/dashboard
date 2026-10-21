@@ -25,6 +25,7 @@ import {Hono} from 'hono'
 import {logger} from '../logger.ts'
 import {isJsonContentType, operatorRateLimitKey, originMatches, resolveWriteAccess} from '../wiki/authorize.ts'
 import {parsePageId} from '../wiki/paths.ts'
+import {MAX_DATE_MS} from '../wiki/write-operation.ts'
 
 /** Largest request body read. A save body is at most 512 KiB of text before JSON escaping. */
 export const MAX_REQUEST_BODY_BYTES = 1024 * 1024
@@ -161,6 +162,8 @@ function guardWrite(c: WikiContext, deps: WikiRouterDeps): WriteGuard {
   return {ok: true, session, write: deps.write}
 }
 
+// The platform reader resolves to `any` under the project's lint types, so the read loop is
+// typed by this shape instead.
 interface StreamReader {
   read: () => Promise<{done: boolean; value?: Uint8Array}>
   cancel: () => Promise<void>
@@ -293,12 +296,18 @@ export function buildWikiRouter(deps: WikiRouterDeps): Hono<{Variables: WikiVari
     const operationId = c.req.param('operationId')
     const pageId = c.req.query('pageId')
     const startedAt = c.req.query('startedAt')
-    if (!OPERATION_ID.test(operationId) || pageId === undefined || startedAt === undefined || !/^\d{1,16}$/u.test(startedAt)) {
+    const startedAtMs = startedAt !== undefined && /^\d{1,16}$/u.test(startedAt) ? Number(startedAt) : Number.NaN
+    if (
+      !OPERATION_ID.test(operationId) ||
+      pageId === undefined ||
+      !Number.isSafeInteger(startedAtMs) ||
+      startedAtMs > MAX_DATE_MS
+    ) {
       return respond(c, 400, {state: 'invalid-request'})
     }
     c.set('wikiOperationId', operationId)
 
-    const result = await deps.write.operation.lookup({operationId, pageId, startedAt: Number(startedAt)})
+    const result = await deps.write.operation.lookup({operationId, pageId, startedAt: startedAtMs})
     return result.state === 'invalid-request' ? respond(c, 400, result) : respond(c, 200, result)
   })
 
@@ -307,7 +316,9 @@ export function buildWikiRouter(deps: WikiRouterDeps): Hono<{Variables: WikiVari
     if (deps.write === null) return forbidden(c)
 
     const since = c.req.query('since')
-    if (since !== undefined && since.length > MAX_SINCE_LENGTH) return respond(c, 400, {state: 'bad-request'})
+    if (since !== undefined && (since.length > MAX_SINCE_LENGTH || Number.isNaN(Date.parse(since)))) {
+      return respond(c, 400, {state: 'bad-request'})
+    }
 
     const status = await deps.write.status.getStatus(since)
     if (status.state === 'unavailable') return respond(c, 503, status)

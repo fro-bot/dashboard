@@ -66,7 +66,8 @@ subset (`pull_requests`/`checks`/`issues`/`contents`/`metadata:read`, with
 mint write-scoped tokens.
 
 The dashboard holds GitHub write authority scoped to the single operator
-(`DASHBOARD_OPERATOR_ID`): a write runs only for a gateway session whose `operatorId` equals it.
+(`DASHBOARD_OPERATOR_ID`): outside the dev fixture harness, a write runs only for a gateway
+session whose `operatorId` equals it.
 That authority comes through a separate Fro Bot App credential (`DASHBOARD_FRO_BOT_APP_ID` /
 `DASHBOARD_FRO_BOT_APP_KEY(_FILE)`) — the same App `release.yaml` uses via `APPLICATION_ID`,
 distinct from the read-only Agent App behind `DASHBOARD_GITHUB_APP_*`. It mints installation

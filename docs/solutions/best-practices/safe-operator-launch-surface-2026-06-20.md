@@ -22,11 +22,12 @@ issue: fro-bot/dashboard#47
 
 ## Context
 
-The dashboard is read-only by construction, but the operator surface needed a
-single write action: launch a run (`POST /operator/runs`) plus a repo picker
-(`GET /operator/repos`), against the released gateway operator contract 1.2.0.
+The dashboard's GitHub data path is read-only, and its one GitHub write
+capability is the scoped wiki write under `/api/wiki`. The operator surface needed
+a single write action of its own: launch a run (`POST /operator/runs`) plus a repo
+picker (`GET /operator/repos`), against the released gateway operator contract 1.2.0.
 This was the dashboard's first mutating-route consumer and first client-side
-operator client. Introducing write capability into a read-only app — safely — is
+operator client. Introducing write capability into a read-mostly app — safely — is
 the load-bearing problem, and several decisions are non-obvious.
 
 ## Guidance

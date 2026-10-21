@@ -4,9 +4,12 @@ import {afterEach, describe, expect, it, vi} from 'vitest'
 import {
   classifyGateContract,
   createGateContractChecker,
+  GATE_CONTRACT_CACHE_TTL_MS,
+  GATE_CONTRACT_FAILURE_TTL_MS,
   GATE_CONTRACT_FETCH_TIMEOUT_MS,
   GATE_CONTRACT_HEAD_URL,
   GATE_CONTRACT_MARKER_URL,
+  GATE_CONTRACT_STALE_CEILING_MS,
   type GateContractCheckerOptions,
 } from '../src/wiki/gate-contract.ts'
 
@@ -93,6 +96,165 @@ describe('gate contract drift checker', () => {
       proceed: false,
       reason: 'unavailable',
       readiness: {stale: true},
+    })
+  })
+
+  describe('concurrent checks share one fetch', () => {
+    it('makes exactly one marker fetch for simultaneous checks during an outage', async () => {
+      const fetch = vi.fn().mockRejectedValue(new Error('network unavailable'))
+      const checker = createGateContractChecker({fetch})
+
+      const decisions = await Promise.all(Array.from({length: 8}, async () => checker.check()))
+
+      expect(fetch).toHaveBeenCalledTimes(1)
+      for (const decision of decisions) expect(decision).toMatchObject({proceed: false, reason: 'unavailable'})
+    })
+
+    it('shares one fetch pair for simultaneous checks on a healthy cold start', async () => {
+      const fetch = transport()
+      const checker = createGateContractChecker({fetch})
+
+      const decisions = await Promise.all(Array.from({length: 5}, async () => checker.check()))
+
+      expect(fetch).toHaveBeenCalledTimes(2)
+      for (const decision of decisions) expect(decision).toMatchObject({proceed: true})
+    })
+
+    it('shares a fetch that is still pending, and starts a new one after it settles', async () => {
+      const gate: {release: (() => void) | undefined} = {release: undefined}
+      const fetch = vi.fn<GateContractCheckerOptions['fetch']>(async (url: string) => {
+        if (url === GATE_CONTRACT_HEAD_URL) return response(JSON.stringify({object: {sha: HEAD_SHA}}))
+        await new Promise<void>(resolve => {
+          gate.release = resolve
+        })
+        return response(MATCHING_MARKER)
+      })
+      const releaseNow = (): void => gate.release?.()
+      let now = 0
+      const checker = createGateContractChecker({fetch, now: () => now})
+
+      const first = checker.check()
+      const second = checker.check()
+      await vi.waitFor(() => {
+        expect(gate.release).toBeDefined()
+      })
+      releaseNow()
+      await Promise.all([first, second])
+      expect(fetch).toHaveBeenCalledTimes(2)
+
+      now = GATE_CONTRACT_CACHE_TTL_MS
+      gate.release = undefined
+      const third = checker.check()
+      await vi.waitFor(() => {
+        expect(gate.release).toBeDefined()
+      })
+      releaseNow()
+      await third
+      expect(fetch).toHaveBeenCalledTimes(4)
+    })
+
+    it('does not cache a rejection from the shared flight', async () => {
+      const fetch = transport()
+      fetch.mockRejectedValueOnce(new Error('network unavailable'))
+      let now = 0
+      const checker = createGateContractChecker({fetch, now: () => now})
+
+      await checker.check()
+      now += GATE_CONTRACT_FAILURE_TTL_MS
+
+      await expect(checker.check()).resolves.toMatchObject({proceed: true})
+    })
+  })
+
+  describe('a failed marker fetch is remembered briefly', () => {
+    it('does not refetch inside the failure window, and answers unavailable each time', async () => {
+      let now = 0
+      const fetch = vi.fn().mockRejectedValue(new Error('network unavailable'))
+      const checker = createGateContractChecker({fetch, now: () => now})
+
+      const first = await checker.check()
+      now += GATE_CONTRACT_FAILURE_TTL_MS - 1
+      const second = await checker.check()
+
+      expect(fetch).toHaveBeenCalledTimes(1)
+      expect(first).toMatchObject({proceed: false, reason: 'unavailable'})
+      expect(second).toEqual(first)
+    })
+
+    it('refetches once the failure window ends', async () => {
+      let now = 0
+      const fetch = vi.fn().mockRejectedValue(new Error('network unavailable'))
+      const checker = createGateContractChecker({fetch, now: () => now})
+
+      await checker.check()
+      now += GATE_CONTRACT_FAILURE_TTL_MS
+      await checker.check()
+
+      expect(fetch).toHaveBeenCalledTimes(2)
+    })
+
+    it('recovers on the first successful refetch after the window and stops answering from the failure', async () => {
+      let now = 0
+      const fetch = transport()
+      fetch.mockRejectedValueOnce(new Error('network unavailable'))
+      const checker = createGateContractChecker({fetch, now: () => now})
+
+      await expect(checker.check()).resolves.toMatchObject({proceed: false, reason: 'unavailable'})
+      now += GATE_CONTRACT_FAILURE_TTL_MS
+
+      await expect(checker.check()).resolves.toMatchObject({proceed: true, readiness: {stale: false}})
+      await expect(checker.check()).resolves.toMatchObject({proceed: true})
+    })
+
+    it('answers from the stale cache inside the failure window without refetching', async () => {
+      let now = 0
+      const fetch = transport()
+      const checker = createGateContractChecker({fetch, now: () => now})
+      await checker.check()
+      now = GATE_CONTRACT_CACHE_TTL_MS + 1
+      fetch.mockClear()
+      fetch.mockRejectedValue(new Error('network unavailable'))
+
+      const first = await checker.check()
+      now += 1000
+      const second = await checker.check()
+
+      expect(fetch).toHaveBeenCalledTimes(1)
+      expect(first).toMatchObject({proceed: true, readiness: {stale: true, mainHeadSha: HEAD_SHA}})
+      expect(second).toMatchObject({proceed: true, readiness: {stale: true, mainHeadSha: HEAD_SHA}})
+    })
+
+    it('still enforces the staleness ceiling against the current time inside the failure window', async () => {
+      let now = 0
+      const fetch = transport()
+      const checker = createGateContractChecker({fetch, now: () => now})
+      await checker.check()
+      now = GATE_CONTRACT_STALE_CEILING_MS - 1000
+      fetch.mockRejectedValue(new Error('network unavailable'))
+
+      await expect(checker.check()).resolves.toMatchObject({proceed: true, readiness: {stale: true}})
+      now = GATE_CONTRACT_STALE_CEILING_MS + 1
+
+      await expect(checker.check()).resolves.toMatchObject({proceed: false, reason: 'unavailable'})
+      expect(fetch).toHaveBeenCalledTimes(3)
+    })
+
+    it('does not remember an invalid marker, which is an answer and not an outage', async () => {
+      let now = 0
+      const fetch = transport('{')
+      const checker = createGateContractChecker({fetch, now: () => now})
+
+      await checker.check()
+      now += 1000
+      await checker.check()
+
+      // One marker fetch per check; an invalid marker stops before the head fetch.
+      expect(fetch).toHaveBeenCalledTimes(2)
+    })
+
+    it('keeps the failure window much shorter than the success cache', () => {
+      expect(GATE_CONTRACT_FAILURE_TTL_MS).toBeGreaterThan(0)
+      expect(GATE_CONTRACT_FAILURE_TTL_MS).toBeLessThan(GATE_CONTRACT_CACHE_TTL_MS)
     })
   })
 

@@ -237,9 +237,9 @@ describe('fixture target import graph', () => {
     for (const file of sources.filter(item => item.path.startsWith('web/src/'))) {
       expect(file.source, file.path).not.toMatch(/fixture-target/u)
     }
-    const server = sources.find(file => file.path === 'src/server.ts')?.source ?? ''
-    const start = server.indexOf('export function buildWikiAppDeps')
-    const buildWikiAppDeps = server.slice(start, server.indexOf('\n}\n', start))
+    const wiring = sources.find(file => file.path === 'src/wiki/wiring.ts')?.source ?? ''
+    const start = wiring.indexOf('export function buildWikiAppDeps')
+    const buildWikiAppDeps = wiring.slice(start, wiring.indexOf('\n}\n', start))
     expect(start).toBeGreaterThan(-1)
     expect(buildWikiAppDeps).not.toMatch(/fixture-target|buildFixture|FIXTURE_|fixtureHarness/u)
     // The production wiring never confers a fixture identity.

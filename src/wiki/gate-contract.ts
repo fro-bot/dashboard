@@ -8,6 +8,9 @@ export const GATE_CONTRACT_MARKER_URL = 'https://raw.githubusercontent.com/fro-b
 
 export const GATE_CONTRACT_CACHE_TTL_MS = 5 * 60 * 1000
 export const GATE_CONTRACT_STALE_CEILING_MS = 60 * 60 * 1000
+// A failed fetch is remembered this long, so a run of page reads during an outage
+// does not each wait out the fetch timeout. Far shorter than the success cache.
+export const GATE_CONTRACT_FAILURE_TTL_MS = 15 * 1000
 // Ten seconds is far below the five-minute cache TTL, so a hung public request
 // degrades to bounded stale-cache behavior instead of stalling a write.
 export const GATE_CONTRACT_FETCH_TIMEOUT_MS = 10 * 1000
@@ -70,13 +73,27 @@ interface MainRefResponse {
  */
 export function createGateContractChecker(options: GateContractCheckerOptions) {
   let latestCacheEntry: GateContractCacheEntry | undefined
+  let lastFailureAt: number | undefined
+  let inflight: Promise<GateContractDecision> | undefined
   const now = options.now ?? (() => Date.now())
 
+  /** Concurrent callers share one evaluation, and so one fetch, until it settles. */
   async function check(): Promise<GateContractDecision> {
+    inflight ??= evaluate().finally(() => {
+      inflight = undefined
+    })
+    return inflight
+  }
+
+  async function evaluate(): Promise<GateContractDecision> {
     const checkedAt = now()
     const latest = latestCacheEntry
     if (latest !== undefined && checkedAt - latest.fetchedAt < GATE_CONTRACT_CACHE_TTL_MS) {
       return evaluateMarker(latest.marker, readinessFor(latest, checkedAt, false))
+    }
+
+    if (lastFailureAt !== undefined && checkedAt - lastFailureAt < GATE_CONTRACT_FAILURE_TTL_MS) {
+      return degraded(latest, checkedAt)
     }
 
     try {
@@ -89,6 +106,7 @@ export function createGateContractChecker(options: GateContractCheckerOptions) {
       }
       const entry: GateContractCacheEntry = {mainHeadSha, marker, fetchedAt: checkedAt}
       latestCacheEntry = entry
+      lastFailureAt = undefined
       return evaluateMarker(marker, readinessFor(entry, checkedAt, false))
     } catch (error) {
       if (error instanceof InvalidMarkerError) {
@@ -99,33 +117,39 @@ export function createGateContractChecker(options: GateContractCheckerOptions) {
         }
       }
 
-      if (latest !== undefined) {
-        const cacheAgeMs = checkedAt - latest.fetchedAt
-        if (cacheAgeMs <= GATE_CONTRACT_STALE_CEILING_MS) {
-          options.logger?.warning('gate-contract: using bounded stale cache after fetch failure', {
-            cacheAgeMs,
-            mainHeadSha: latest.mainHeadSha,
-          })
-          return evaluateMarker(latest.marker, readinessFor(latest, checkedAt, true))
-        }
-      }
+      lastFailureAt = checkedAt
+      return degraded(latest, checkedAt)
+    }
+  }
 
-      const staleCacheMetadata = latest === undefined
-        ? {}
-        : {
-            mainHeadSha: latest.mainHeadSha,
-            cacheAgeMs: checkedAt - latest.fetchedAt,
-          }
-      return {
-        proceed: false,
-        reason: 'unavailable',
-        readiness: {
-          ready: false,
-          stale: true,
-          mainHeadSha: latest?.mainHeadSha ?? null,
-          ...staleCacheMetadata,
-        },
+  /** The decision when the marker cannot be fetched: a bounded stale cache, else unavailable. */
+  function degraded(latest: GateContractCacheEntry | undefined, checkedAt: number): GateContractDecision {
+    if (latest !== undefined) {
+      const cacheAgeMs = checkedAt - latest.fetchedAt
+      if (cacheAgeMs <= GATE_CONTRACT_STALE_CEILING_MS) {
+        options.logger?.warning('gate-contract: using bounded stale cache after fetch failure', {
+          cacheAgeMs,
+          mainHeadSha: latest.mainHeadSha,
+        })
+        return evaluateMarker(latest.marker, readinessFor(latest, checkedAt, true))
       }
+    }
+
+    const staleCacheMetadata = latest === undefined
+      ? {}
+      : {
+          mainHeadSha: latest.mainHeadSha,
+          cacheAgeMs: checkedAt - latest.fetchedAt,
+        }
+    return {
+      proceed: false,
+      reason: 'unavailable',
+      readiness: {
+        ready: false,
+        stale: true,
+        mainHeadSha: latest?.mainHeadSha ?? null,
+        ...staleCacheMetadata,
+      },
     }
   }
 

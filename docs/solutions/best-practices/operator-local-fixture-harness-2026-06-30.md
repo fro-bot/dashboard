@@ -340,13 +340,15 @@ instead of becoming another footgun.
 {
   "scripts": {
     "build:web:fixture": "VITE_FIXTURE_MODE=true vite build web",
-    "dev:fixture": "pnpm build:web:fixture && NODE_ENV=development DASHBOARD_HOST=127.0.0.1 DASHBOARD_WEB_DIST=./web/dist-fixture DASHBOARD_FIXTURE_HARNESS_ENABLED=true DASHBOARD_DEV_AUTOLOGIN=true node --env-file-if-exists=.env src/server.ts"
+    "dev:fixture": "pnpm build:web:fixture && NODE_ENV=development DASHBOARD_HOST=127.0.0.1 DASHBOARD_WEB_DIST=./web/dist-fixture DASHBOARD_FIXTURE_HARNESS_ENABLED=true DASHBOARD_DEV_AUTOLOGIN=true DASHBOARD_OPERATOR_LOGIN=fixture-operator DASHBOARD_COOKIE_KEY=$(node -e \"process.stdout.write(require('node:crypto').randomBytes(32).toString('base64'))\") node --env-file-if-exists=.env src/server.ts"
   }
 }
 ```
 
 The fixture script serves `web/dist-fixture`, not `web/dist`, and uses the real
-server env names. Tests should pin both details.
+server env names. It sets a synthetic `DASHBOARD_OPERATOR_LOGIN` and generates a
+throwaway cookie key per start, so it runs without a `.env`. Tests should pin both
+details.
 
 ### Session-scoped idempotency
 

@@ -1,7 +1,7 @@
 import {Buffer} from 'node:buffer'
 import {describe, expect, it, vi} from 'vitest'
-import {buildWikiAppDeps, createWikiReadTokenSource, type WikiWriteWiring} from '../src/server.ts'
 import {readTokenSource} from '../src/wiki/data-client.ts'
+import {buildWikiAppDeps, createWikiReadTokenSource, type WikiWriteWiring} from '../src/wiki/wiring.ts'
 
 const ORIGIN = 'https://dashboard.fro.bot'
 
@@ -40,6 +40,31 @@ describe('createWikiReadTokenSource', () => {
 
     await expect(source.getToken()).rejects.toThrow('lookup failed')
     await expect(source.getToken()).resolves.toBe('read-token')
+  })
+
+  it.each([
+    ['undefined', undefined],
+    ['zero', 0],
+    ['a negative ID', -4],
+    ['a fraction', 1.5],
+    ['a string', '7100001'],
+    ['NaN', Number.NaN],
+    ['an unsafe integer', Number.MAX_SAFE_INTEGER + 2],
+  ])('refuses %s as an installation ID and never mints or caches it', async (label, id) => {
+    // The read mint caches per installation ID, so each case uses its own valid ID.
+    const validId = 7_200_000 + label.length
+    const resolveInstallationId = vi.fn().mockResolvedValueOnce(id).mockResolvedValue(validId)
+    const mint = vi.fn(async () => 'read-token')
+    const source = createWikiReadTokenSource({
+      resolveInstallationId,
+      mint,
+    })
+
+    await expect(source.getToken()).rejects.toThrow(/installation/iu)
+    expect(mint).not.toHaveBeenCalled()
+    await expect(source.getToken()).resolves.toBe('read-token')
+    expect(resolveInstallationId).toHaveBeenCalledTimes(2)
+    expect(mint).toHaveBeenCalledWith(validId, expect.anything())
   })
 
   it('is a read token source', () => {

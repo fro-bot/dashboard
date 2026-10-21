@@ -14,9 +14,8 @@ import {describe, expect, it} from 'vitest'
 const CLIENT_MODULE_PATH = 'src/github/fro-bot-app-client.ts'
 
 const ALLOWED_IMPORTERS: ReadonlySet<string> = new Set([
-  'src/server.ts',
+  'src/wiki/wiring.ts',
   'src/wiki/write-operation.ts',
-  'src/wiki/fixture-target.ts',
 ])
 
 /**
@@ -100,7 +99,14 @@ describe('write credential boundary', () => {
       expect(violations.every(violation => violation.startsWith('src/wiki/pages-read.ts:'))).toBe(true)
     })
 
-    it.each(['src/github/installations.ts', 'src/github/aggregator.ts', 'src/wiki/config.ts', 'src/wiki/pages.ts'])(
+    it.each([
+      'src/server.ts',
+      'src/wiki/fixture-target.ts',
+      'src/github/installations.ts',
+      'src/github/aggregator.ts',
+      'src/wiki/config.ts',
+      'src/wiki/pages.ts',
+    ])(
       'flags a violation in %s',
       path => {
         const violations = findBoundaryViolations([{path, source: "import '../github/fro-bot-app-client.ts'"}])
@@ -109,7 +115,7 @@ describe('write credential boundary', () => {
       },
     )
 
-    it.each(['src/server.ts', 'src/wiki/write-operation.ts', 'src/wiki/fixture-target.ts'])(
+    it.each(['src/wiki/wiring.ts', 'src/wiki/write-operation.ts'])(
       'allows %s to import the client',
       path => {
         const violations = findBoundaryViolations([

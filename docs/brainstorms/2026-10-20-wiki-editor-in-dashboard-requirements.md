@@ -7,7 +7,7 @@ topic: wiki-editor-in-dashboard
 
 ## Summary
 
-The dashboard gets a wiki page list and an in-place editor. Saving commits the page to `fro-bot/.github:data` as Fro Bot and starts the promotion. The page publishes when the operator merges the promotion PR. The write path runs inside the dashboard server, and the separate `wiki-writer` service is removed.
+The dashboard gets a wiki page list and an in-place editor. Saving commits the page to `fro-bot/.github:data` as Fro Bot and starts the promotion. The page publishes when the operator merges the promotion PR. The write path runs inside the dashboard server. There is no separate writer service.
 
 ---
 
@@ -15,7 +15,7 @@ The dashboard gets a wiki page list and an in-place editor. Saving commits the p
 
 The Fro Bot wiki is generated and published from `fro-bot/.github`. To fix a wrong page today, the operator has to file an issue and wait for a regeneration. The editable-wiki work in fro-bot/.github (requirements R1–R18 in `docs/brainstorms/2026-08-29-editable-wiki-path-requirements.md`) defines an editing path for the operator. Its dashboard half was never built.
 
-A first attempt put write authority in a separate `wiki-writer` service, protected by internal HMAC auth and replay protection, so that the dashboard stayed read-only. That service is complete, but it has no image, no deploy path, no caller, and no durable replay store (#504). The isolation existed only to keep write authority out of the dashboard. The operator is the only user and signs in to the dashboard, so the dashboard can hold write authority scoped to that operator. The extra service, secret, and incident surface are not worth what they cost.
+Write authority sits in the dashboard server, scoped to the single operator. The operator is the only user and signs in to the dashboard, so a separate writer service would add a service, a secret, an internal auth scheme, a replay store and an incident surface without isolating anything the operator does not already hold.
 
 ---
 
@@ -79,11 +79,7 @@ A first attempt put write authority in a separate `wiki-writer` service, protect
 **Authority and structure**
 
 - R16. The write path runs in the dashboard server. Each write uses a Fro Bot App token scoped to `fro-bot/.github` with contents write only.
-- R17. The separate `wiki-writer` service is removed, along with:
-  - its internal HMAC auth and replay store;
-  - its two boundary tests;
-  - its Dockerfile COPY lines;
-  - its workspace entry.
+- R17. No separate writer service exists. The repository has no writer workspace, no internal HMAC auth or replay store, no writer image or Dockerfile COPY lines, and no writer secret.
 
   `@fro.bot/wiki-write-core` moves into the root dependencies. In the same change, AGENTS.md invariant 1 and its accepted-cost text are rewritten to describe the dashboard's write authority, scoped to the single operator.
 
@@ -108,7 +104,7 @@ A first attempt put write authority in a separate `wiki-writer` service, protect
 
 - The operator corrects a wrong wiki page from the dashboard, merges the promotion PR, and the fix appears on the published wiki. No issue is filed and nothing waits for a regeneration.
 - A marked correction survives the next regeneration.
-- No `wiki-writer` service or secret exists to deploy. The infra changes are limited to:
+- There is no writer service or secret to deploy. The infra changes are limited to:
   - a second App key secret in the dashboard environment;
   - its read-only mount;
   - the environment variable that points at it;
@@ -145,7 +141,7 @@ A first attempt put write authority in a separate `wiki-writer` service, protect
 
 - Infra adds the Fro Bot App private key to the dashboard as a second key alongside the existing read key. The current deploy publishes a single key slot and accepts a fixed set of payload fields, so it needs a new secret, mount, environment variable, and payload field.
 - The Fro Bot App installation covers `fro-bot/.github` with contents write. `merge-data.yaml` already mints Fro Bot tokens with contents write and listens for the `promote-data` repository dispatch.
-- `@fro.bot/wiki-write-core` 0.1.1 (published, pinned) supplies the gates, the gate contract, and corrections handling.
+- `@fro.bot/wiki-write-core` (pinned in `package.json`) supplies the gates, the gate contract, and corrections handling.
 - The configured operator identity is available to the dashboard in gateway mode.
 
 ---
@@ -168,7 +164,6 @@ A first attempt put write authority in a separate `wiki-writer` service, protect
 
 - Upstream requirements: `fro-bot/.github` `docs/brainstorms/2026-08-29-editable-wiki-path-requirements.md` (R1–R18) and plan `docs/plans/2026-08-29-001-feat-editable-wiki-path-plan.md`.
 - Earlier dashboard plan: `docs/plans/2026-08-31-001-feat-operator-wiki-editor-plan.md`. It assumes the separate writer service and pnpm, so use it as background only.
-- Writer code to reuse: `wiki-writer/src/write-operation.ts` (gates, commit flow, outcome states, page-blob guard), `github-data-client.ts` (target allowlist), `gate-contract.ts` (contract check), and the `Fro-Operation-Id` trailer reconcile.
+- Write-path code: `src/wiki/write-operation.ts` (gates, commit flow, outcome states, page-blob guard, trailer reconcile), `src/wiki/data-client.ts` (target allowlist), and `src/wiki/gate-contract.ts` (contract check).
 - Promotion workflow: `fro-bot/.github` `.github/workflows/merge-data.yaml` (`repository_dispatch` type `promote-data`, privacy checks).
 - Infra key and deploy pattern: `marcusrbrown/infra` `apps/dashboard/AGENTS.md` (App key at `/run/secrets/github-app.pem`) and `remote-deploy.ts` (fixed payload fields).
-- Tracking issue: #504.

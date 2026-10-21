@@ -21,6 +21,7 @@ import {Octokit} from '@octokit/core'
 import {retry} from '@octokit/plugin-retry'
 import {throttling} from '@octokit/plugin-throttling'
 
+import {withinBound} from '../bounded.ts'
 import {logger, sanitizeErrorMessage} from '../logger.ts'
 
 const ThrottledOctokit = Octokit.plugin(throttling, retry)
@@ -50,13 +51,22 @@ export interface FroBotAppClientOptions {
   readonly request?: AppRequest | undefined
   /** Clock in ms since epoch. Tests only. */
   readonly now?: (() => number) | undefined
+  /** Per-request bound. Tests only. */
+  readonly timeoutMs?: number | undefined
 }
 
-/** A credential failure whose message is safe to log. */
+/**
+ * A credential failure whose message is safe to log. `status` is the HTTP status of
+ * the failed request when GitHub answered, so callers can tell a refused credential
+ * (401, 403, 404) from a transient failure. It is null otherwise.
+ */
 export class WriteCredentialError extends Error {
-  constructor(message: string) {
+  readonly status: number | null
+
+  constructor(message: string, status: number | null = null) {
     super(message)
     this.name = 'WriteCredentialError'
+    this.status = status
   }
 }
 
@@ -69,6 +79,14 @@ const TARGET_REPO = '.github'
 
 /** Refresh a cached token this long before it expires. */
 const TOKEN_REFRESH_BUFFER_MS = 60_000
+
+/** Bound on each App-JWT request, the installation lookup and the mint. */
+export const JWT_REQUEST_TIMEOUT_MS = 15_000
+
+/** The longest rate-limit wait the client will sit through before it fails. */
+export const MAX_RATE_LIMIT_WAIT_SECONDS = 10
+
+const MAX_RATE_LIMIT_RETRIES = 2
 
 /** How long a resolved installation ID is trusted. */
 const INSTALLATION_ID_TTL_MS = 10 * 60_000
@@ -98,6 +116,21 @@ function describeFailure(error: unknown): string {
   return error instanceof Error ? sanitizeErrorMessage(error.message) : 'Unknown error'
 }
 
+function statusOf(error: unknown): number | null {
+  const status = typeof error === 'object' && error !== null ? (error as {status?: unknown}).status : undefined
+  return typeof status === 'number' ? status : null
+}
+
+/** Retry a rate-limited request only for a short, finite wait. */
+export function shouldRetryRateLimit(retryAfterSeconds: number, retryCount: number): boolean {
+  return (
+    retryCount < MAX_RATE_LIMIT_RETRIES &&
+    Number.isFinite(retryAfterSeconds) &&
+    retryAfterSeconds >= 0 &&
+    retryAfterSeconds <= MAX_RATE_LIMIT_WAIT_SECONDS
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -109,7 +142,7 @@ function createJwtRequest(appId: string, privateKey: string): AppRequest {
     throttle: {
       onRateLimit: (retryAfter: number, opts: Record<string, unknown>, _octokit: unknown, retryCount: number) => {
         logger.warning('GitHub rate limit hit (write client)', {retryAfter, url: opts.url, retryCount})
-        return retryCount < 2
+        return shouldRetryRateLimit(retryAfter, retryCount)
       },
       onSecondaryRateLimit: (retryAfter: number, opts: Record<string, unknown>) => {
         logger.warning('GitHub secondary rate limit hit (write client)', {retryAfter, url: opts.url})
@@ -127,8 +160,13 @@ function createJwtRequest(appId: string, privateKey: string): AppRequest {
  * installation ID. Nothing is shared across instances or with the read side.
  */
 export function createFroBotAppClient(options: FroBotAppClientOptions): WriteTokenProvider {
-  const request = options.request ?? createJwtRequest(options.appId, options.privateKey)
+  const send = options.request ?? createJwtRequest(options.appId, options.privateKey)
   const now = options.now ?? Date.now
+  const timeoutMs = options.timeoutMs ?? JWT_REQUEST_TIMEOUT_MS
+
+  // The signal aborts the real request; the deadline also bounds an injected one.
+  const request: AppRequest = async (route, params) =>
+    withinBound(send(route, {...params, request: {signal: AbortSignal.timeout(timeoutMs)}}), timeoutMs, 'Request timed out')
 
   const tokenCache = new Map<number, {readonly token: string; readonly expiresAt: number}>()
   let resolvedInstallation: {readonly id: number; readonly resolvedAt: number} | null = null
@@ -141,25 +179,28 @@ export function createFroBotAppClient(options: FroBotAppClientOptions): WriteTok
     try {
       data = (await request('GET /repos/{owner}/{repo}/installation', {owner: TARGET_OWNER, repo: TARGET_REPO})).data
     } catch (error) {
-      throw new WriteCredentialError(`Failed to resolve the ${TARGET_OWNER}/${TARGET_REPO} installation: ${describeFailure(error)}`)
+      throw new WriteCredentialError(
+        `Failed to resolve the ${TARGET_OWNER}/${TARGET_REPO} installation: ${describeFailure(error)}`,
+        statusOf(error),
+      )
     }
     const id = parseInstallationId(data)
     resolvedInstallation = {id, resolvedAt: now()}
     return id
   }
 
-  async function mint(installationId: number, permissions: WritePermissions): Promise<{token: string; expiresAt: number}> {
+  async function mint(installationId: number): Promise<{token: string; expiresAt: number}> {
     let data: unknown
     try {
       data = (
         await request('POST /app/installations/{installation_id}/access_tokens', {
           installation_id: installationId,
-          permissions: {...permissions},
+          permissions: {...WRITE_PERMISSIONS},
           repository_names: [TARGET_REPO],
         })
       ).data
     } catch (error) {
-      throw new WriteCredentialError(`Failed to mint a write token: ${describeFailure(error)}`)
+      throw new WriteCredentialError(`Failed to mint a write token: ${describeFailure(error)}`, statusOf(error))
     }
     return parseMintedToken(data)
   }
@@ -171,7 +212,7 @@ export function createFroBotAppClient(options: FroBotAppClientOptions): WriteTok
       if (now() < cached.expiresAt - TOKEN_REFRESH_BUFFER_MS) return cached.token
       tokenCache.delete(installationId)
     }
-    const minted = await mint(installationId, WRITE_PERMISSIONS)
+    const minted = await mint(installationId)
     tokenCache.set(installationId, minted)
     return minted.token
   }

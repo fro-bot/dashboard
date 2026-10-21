@@ -32,6 +32,7 @@ import {
   serializeCorrections,
 } from '@fro.bot/wiki-write-core'
 import {createBlobCache, createWikiDataClient} from './data-client.ts'
+import {isRecord} from './guards.ts'
 import {createWikiPages} from './pages.ts'
 import {CORRECTIONS_PATH, parseWikiPagePath, resolvePagePath, WIKI_INDEX_PATH, WIKI_LOG_PATH} from './paths.ts'
 import {createDispatchPort, createPromotionStatusReader} from './promotion.ts'
@@ -183,8 +184,8 @@ export class FixtureRepo {
   }
 
   transport(): Required<GitHubDataTransport> {
-    const call = async (method: string, params: Params, run: () => unknown): Promise<{data: unknown}> => {
-      this.calls.push({method, params})
+    const call = async (method: string, params: Params, run: () => unknown, recorded = false): Promise<{data: unknown}> => {
+      if (!recorded) this.calls.push({method, params})
       this.hooks.onCall?.(method, params)
       return {data: run()}
     }
@@ -234,6 +235,8 @@ export class FixtureRepo {
           return {sha, committer: {date: this.commit(sha).committedAt}}
         }),
       updateRef: async params => {
+        // Recorded before the hook runs, so an attempt the hook refuses still counts.
+        this.calls.push({method: 'updateRef', params})
         this.updateAttempts += 1
         const attempt = this.updateAttempts
         this.hooks.beforeUpdateRef?.(attempt)
@@ -244,7 +247,7 @@ export class FixtureRepo {
           this.head = commit.sha
           this.hooks.afterUpdateRef?.(attempt)
           return {}
-        })
+        }, true)
       },
       listCommitsByPath: async params =>
         call('listCommitsByPath', params, () => {
@@ -489,7 +492,7 @@ function correctionRecord(id: string, nodeId: string, text: string, actor: strin
     span: {text},
     state: 'active',
     attribution: {actor, recorded_at: '2026-02-01T00:00:00Z'},
-  } as unknown as CorrectionRecord
+  }
 }
 
 function seedPageFiles(): Record<string, string> {
@@ -661,10 +664,6 @@ function wikiPagePaths(files: Record<string, string>): Record<string, string> {
 
 function rebuiltIndex(files: Record<string, string>, wikiFiles: Record<string, string>): string {
   return rebuildWikiIndex({existingIndex: files[WIKI_INDEX_PATH] ?? '# Wiki Index\n', wikiFiles})
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function pageIdOf(input: unknown): string | null {

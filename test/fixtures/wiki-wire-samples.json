@@ -37,6 +37,12 @@
         "canWrite": true,
         "canWriteReason": null
       }
+    },
+    "unavailable": {
+      "status": 503,
+      "body": {
+        "state": "unavailable"
+      }
     }
   },
   "page": {
@@ -73,10 +79,74 @@
         "canWriteReason": null
       }
     },
+    "contractMismatch": {
+      "status": 200,
+      "body": {
+        "id": "repos.acme--alpha",
+        "type": "repos",
+        "title": "acme/alpha",
+        "updated": "2026-02-01",
+        "body": "\n# acme/alpha\n\nAlpha builds widgets for factories. See [[beta-topic]] and [[acme--beta]].\n",
+        "pageBlobSha": "blob-bc079bf35740",
+        "nodeId": "R_alpha",
+        "canMark": true,
+        "corrections": [],
+        "correctionsBase": "f60969523b1009c0ad48f9131ac238b0582f47a2c90c6821b7670710018200d6",
+        "headSha": "commit-1",
+        "contract": {
+          "ok": false,
+          "kind": "mismatch",
+          "retry": false
+        },
+        "canWrite": true,
+        "canWriteReason": null
+      }
+    },
+    "contractUnreadable": {
+      "status": 200,
+      "body": {
+        "id": "repos.acme--alpha",
+        "type": "repos",
+        "title": "acme/alpha",
+        "updated": "2026-02-01",
+        "body": "\n# acme/alpha\n\nAlpha builds widgets for factories. See [[beta-topic]] and [[acme--beta]].\n",
+        "pageBlobSha": "blob-bc079bf35740",
+        "nodeId": "R_alpha",
+        "canMark": true,
+        "corrections": [],
+        "correctionsBase": "f60969523b1009c0ad48f9131ac238b0582f47a2c90c6821b7670710018200d6",
+        "headSha": "commit-1",
+        "contract": {
+          "ok": false,
+          "kind": "unreadable",
+          "retry": true
+        },
+        "canWrite": true,
+        "canWriteReason": null
+      }
+    },
     "notFound": {
       "status": 404,
       "body": {
         "state": "not-found"
+      }
+    },
+    "unavailable": {
+      "status": 503,
+      "body": {
+        "state": "unavailable"
+      }
+    },
+    "correctionsCorrupt": {
+      "status": 502,
+      "body": {
+        "state": "corrections-corrupt"
+      }
+    },
+    "pageInvalid": {
+      "status": 502,
+      "body": {
+        "state": "page-invalid"
       }
     }
   },
@@ -113,12 +183,35 @@
         ]
       }
     },
+    "rejectedWithTarget": {
+      "status": 422,
+      "body": {
+        "state": "rejected",
+        "reason": "gate",
+        "findings": [
+          {
+            "kind": "broken-markdown-link",
+            "path": "knowledge/wiki/repos/acme--alpha.md",
+            "message": "A link points to a page that does not exist.",
+            "target": "./secret-page-name.md"
+          }
+        ]
+      }
+    },
     "contractRejected": {
       "status": 424,
       "body": {
         "state": "contract-rejected",
         "kind": "mismatch",
         "retry": false
+      }
+    },
+    "contractUnreadable": {
+      "status": 424,
+      "body": {
+        "state": "contract-rejected",
+        "kind": "unreadable",
+        "retry": true
       }
     },
     "conflictPage": {
@@ -163,6 +256,14 @@
         "state": "failed",
         "operationId": "00000000-0000-4000-8000-000000000001",
         "retryable": true
+      }
+    },
+    "failedRefused": {
+      "status": 502,
+      "body": {
+        "state": "failed",
+        "operationId": "00000000-0000-4000-8000-000000000001",
+        "retryable": false
       }
     },
     "indeterminate": {
@@ -224,6 +325,18 @@
       "body": {
         "state": "unknown"
       }
+    },
+    "invalidRequest": {
+      "status": 400,
+      "body": {
+        "state": "invalid-request"
+      }
+    },
+    "forbidden": {
+      "status": 403,
+      "body": {
+        "state": "forbidden"
+      }
     }
   },
   "dispatch": {
@@ -284,6 +397,18 @@
       "status": 502,
       "body": {
         "state": "configuration-fault"
+      }
+    },
+    "badRequest": {
+      "status": 400,
+      "body": {
+        "state": "bad-request"
+      }
+    },
+    "forbidden": {
+      "status": 403,
+      "body": {
+        "state": "forbidden"
       }
     }
   }

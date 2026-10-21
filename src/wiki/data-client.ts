@@ -15,7 +15,9 @@
 
 import {Buffer} from 'node:buffer'
 import {Octokit} from '@octokit/core'
+import {withinBound} from '../bounded.ts'
 import {sanitizeErrorMessage} from '../logger.ts'
+import {statusOf} from './guards.ts'
 import {assertAllowedTarget, isSnapshotPath, isWritablePath, WIKI_OWNER, WIKI_REF, WIKI_REPO, WIKI_REPOSITORY} from './paths.ts'
 
 export const PROMOTE_DATA_EVENT = 'promote-data'
@@ -174,6 +176,21 @@ export class WikiDataUnavailableError extends Error {
   }
 }
 
+/**
+ * The request never reached GitHub: the token could not be obtained. `status` is the
+ * HTTP status of the failed mint or lookup when GitHub answered it, so a refused
+ * credential still reads as a refusal. Carries no token, key or cause.
+ */
+export class RequestNotSentError extends Error {
+  readonly status: number | null
+
+  constructor(message: string, status: number | null) {
+    super(message)
+    this.name = 'RequestNotSentError'
+    this.status = status
+  }
+}
+
 export interface RateLimitInfo {
   readonly retryAfterSeconds: number | null
 }
@@ -209,6 +226,15 @@ export function rateLimitOf(error: unknown): RateLimitInfo | null {
     if (seconds > 0) return {retryAfterSeconds: Math.min(seconds, MAX_RETRY_HINT_SECONDS)}
   }
   return {retryAfterSeconds: null}
+}
+
+/**
+ * A refusal (401, 403, 404) that is not a rate limit. Retrying cannot fix it: the
+ * credential or its target is wrong.
+ */
+export function isRefusal(error: unknown): boolean {
+  const status = statusOf(error)
+  return (status === 401 || status === 403 || status === 404) && rateLimitOf(error) === null
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +294,16 @@ function createRequester(getToken: () => Promise<string>, options: TransportOpti
   let current: {readonly token: string; readonly octokit: Octokit} | null = null
 
   return async (route: string, params: Record<string, unknown>): Promise<{data: unknown}> => {
-    const token = await getToken()
+    let token: string
+    try {
+      token = await withinBound(getToken(), timeoutMs, 'GitHub request timed out')
+    } catch (error) {
+      // No request was sent. Keep the status so a refused credential still reads as a refusal.
+      throw new RequestNotSentError(
+        error instanceof Error ? sanitizeErrorMessage(error.message) : 'Token unavailable',
+        statusOf(error),
+      )
+    }
     if (current === null || current.token !== token) {
       const octokit = new Octokit({auth: token, ...(options.fetch === undefined ? {} : {request: {fetch: options.fetch}})})
       current = {token, octokit}
@@ -615,11 +650,6 @@ export function createWikiDataClient(
 // ---------------------------------------------------------------------------
 // Parsing helpers
 // ---------------------------------------------------------------------------
-
-function statusOf(error: unknown): number | null {
-  const status = typeof error === 'object' && error !== null ? (error as {status?: unknown}).status : undefined
-  return typeof status === 'number' ? status : null
-}
 
 function parentShas(parents: unknown): string[] {
   if (!Array.isArray(parents)) return []

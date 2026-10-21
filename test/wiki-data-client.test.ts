@@ -8,6 +8,7 @@ import {
   createWriteTransport,
   rateLimitOf,
   readTokenSource,
+  RequestNotSentError,
   WikiDataUnavailableError,
   writeTokenSource,
 } from '../src/wiki/data-client.ts'
@@ -706,6 +707,16 @@ describe('wiki data client: write support', () => {
   })
 })
 
+/** The rejection of a promise that is expected to fail. */
+async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise
+  } catch (error) {
+    return error
+  }
+  throw new Error('expected the promise to reject')
+}
+
 describe('wiki data client: transports', () => {
   interface Seen {
     readonly url: string
@@ -752,6 +763,118 @@ describe('wiki data client: transports', () => {
     expect(seen.length).toBe(4)
     expect(seen.every(entry => entry.url.startsWith('https://api.github.com/repos/fro-bot/.github/'))).toBe(true)
     expect(seen.every(entry => entry.authorization?.includes('read-token-1'))).toBe(true)
+  })
+
+  describe('token acquisition shares the request bound', () => {
+    const NEVER = async (): Promise<string> => new Promise<string>(() => {})
+
+    it('rejects a read whose token source never resolves, within the timeout', async () => {
+      const {fetch, seen} = fakeFetch(repoHandler)
+      const transport = createReadTransport(readTokenSource(NEVER), {fetch, timeoutMs: 40})
+      const started = Date.now()
+
+      await expect(createWikiDataClient(transport).getSnapshot()).rejects.toThrow()
+
+      expect(Date.now() - started).toBeLessThan(2000)
+      expect(seen).toHaveLength(0)
+    })
+
+    it('rejects a save-path write and a status read whose token source never resolves', async () => {
+      const {fetch, seen} = fakeFetch(() => ({}))
+      const client = createWikiDataClient(createWriteTransport(writeTokenSource(NEVER), {fetch, timeoutMs: 40}))
+      const started = Date.now()
+
+      await expect(client.getHeadSha()).rejects.toThrow()
+      await expect(client.createCommit({treeSha: 't', parentSha: 'p', message: 'm'})).rejects.toThrow()
+      await expect(client.getLatestPromotionRun()).rejects.toThrow()
+      await expect(client.listPromotionPulls()).rejects.toThrow()
+
+      expect(Date.now() - started).toBeLessThan(3000)
+      expect(seen).toHaveLength(0)
+    })
+
+    it('surfaces a slow token source as a read failure the snapshot classifies as unavailable', async () => {
+      const {fetch} = fakeFetch(repoHandler)
+      const transport = createReadTransport(readTokenSource(NEVER), {fetch, timeoutMs: 40})
+
+      await expect(createWikiDataClient(transport).getSnapshot()).rejects.toBeInstanceOf(WikiDataUnavailableError)
+    })
+
+    it('marks a token timeout as never sent, and sends no request', async () => {
+      const {fetch, seen} = fakeFetch(() => ({}))
+      const client = createWikiDataClient(createWriteTransport(writeTokenSource(NEVER), {fetch, timeoutMs: 40}))
+
+      const error = await rejectionOf(client.updateRef('commit-2'))
+
+      expect(error).toBeInstanceOf(RequestNotSentError)
+      expect(seen).toHaveLength(0)
+    })
+
+    it.each([
+      ['a thrown error', async () => Promise.reject(new Error('Token mint returned an unexpected response')), null],
+      ['a refused mint', async () => Promise.reject(Object.assign(new Error('refused'), {status: 403})), 403],
+      ['a failed lookup', async () => Promise.reject(Object.assign(new Error('missing'), {status: 404})), 404],
+    ])('marks %s from the token source as never sent, keeping its status', async (_label, getToken, status) => {
+      const {fetch, seen} = fakeFetch(() => ({}))
+      const client = createWikiDataClient(createWriteTransport(writeTokenSource(getToken), {fetch}))
+
+      const error = await rejectionOf(client.updateRef('commit-2'))
+
+      expect(error).toBeInstanceOf(RequestNotSentError)
+      expect((error as RequestNotSentError).status).toBe(status)
+      expect(seen).toHaveLength(0)
+    })
+
+    it('does not mark a failure after the request was sent as never sent', async () => {
+      const hang = vi.fn(async (_input: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new Error('The operation was aborted due to timeout')))
+        }),
+      )
+      const client = createWikiDataClient(
+        createWriteTransport(writeTokenSource(async () => 'token'), {fetch: hang, timeoutMs: 40}),
+      )
+
+      const error = await rejectionOf(client.updateRef('commit-2'))
+
+      expect(hang).toHaveBeenCalled()
+      expect(error).toBeInstanceOf(Error)
+      expect(error).not.toBeInstanceOf(RequestNotSentError)
+    })
+
+    it('does not echo a token or key in the never-sent message', async () => {
+      const client = createWikiDataClient(
+        createWriteTransport(writeTokenSource(async () => Promise.reject(new Error('boom ghs_abcdefghijklmnopqrstuvwxyz0123456789'))), {}),
+      )
+
+      const error = await rejectionOf(client.updateRef('commit-2'))
+
+      expect((error as Error).message).not.toContain('ghs_')
+    })
+
+    it('still passes a token that resolves inside the bound', async () => {
+      const {fetch, seen} = fakeFetch(repoHandler)
+      const slow = async (): Promise<string> => new Promise(resolve => setTimeout(() => resolve('late-token'), 10))
+      const transport = createReadTransport(readTokenSource(slow), {fetch, timeoutMs: 1000})
+
+      await createWikiDataClient(transport).getSnapshot()
+
+      expect(seen.every(entry => entry.authorization?.includes('late-token'))).toBe(true)
+    })
+
+    it('does not leave a timer behind after a prompt token', async () => {
+      const {fetch} = fakeFetch(repoHandler)
+      const transport = createReadTransport(readTokenSource(async () => 't'), {fetch, timeoutMs: 60_000})
+      vi.useFakeTimers()
+      try {
+        const pending = createWikiDataClient(transport).getSnapshot()
+        await vi.advanceTimersByTimeAsync(0)
+        await pending
+        expect(vi.getTimerCount()).toBe(0)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
   })
 
   it('exposes no write or status methods on the read transport', () => {

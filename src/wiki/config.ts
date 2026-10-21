@@ -46,9 +46,20 @@ function readOperatorId(): number | null {
   return parsed
 }
 
+/** Returns the App ID, or null when unset. Throws when set but not a positive integer. */
+function readAppId(): string | null {
+  const raw = readOptionalSecret('DASHBOARD_FRO_BOT_APP_ID')
+  if (raw === null) return null
+  const value = raw.trim()
+  if (!POSITIVE_INTEGER.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new TypeError('DASHBOARD_FRO_BOT_APP_ID must be a positive integer (fail-closed)')
+  }
+  return value
+}
+
 export function readWikiWriteConfig(): WikiWriteConfig {
   const operatorId = readOperatorId()
-  const appId = readOptionalSecret('DASHBOARD_FRO_BOT_APP_ID')
+  const appId = readAppId()
   const privateKey = readOptionalMultilineSecret('DASHBOARD_FRO_BOT_APP_KEY')
 
   if (appId === null && privateKey === null) return {enabled: false, reason: 'app-credentials-absent'}

@@ -128,14 +128,14 @@ export const EMPTY_CORRECTIONS_DIGEST = correctionsDigest([])
 // Parsing
 // ---------------------------------------------------------------------------
 
-interface ParsedPage {
+interface ParsedPageDocument {
   readonly title: string | null
   readonly updated: string | null
   readonly nodeId: string | null
   readonly body: string
 }
 
-function parsePage(content: string): ParsedPage | null {
+function parsePage(content: string): ParsedPageDocument | null {
   try {
     const document = parseFrontmatterDocument(content)
     const {title, updated, node_id: nodeId} = document.values
@@ -161,7 +161,6 @@ function staleIds(path: string, content: string, entries: readonly CorrectionRec
 }
 
 function toPageCorrection(record: CorrectionRecord, stale: boolean): PageCorrection {
-  const reason = (record as {reason?: unknown}).reason
   return {
     id: record.id,
     status: getCorrectionLifecycle(record),
@@ -170,7 +169,7 @@ function toPageCorrection(record: CorrectionRecord, stale: boolean): PageCorrect
       record.attribution === undefined
         ? null
         : {actor: record.attribution.actor, recordedAt: record.attribution.recorded_at},
-    reason: typeof reason === 'string' ? reason : null,
+    reason: record.state === 'needs-reconfirmation' ? record.reason : null,
     supersededBy: record.state === 'superseded' ? record.superseded_by : null,
     stale,
     record,

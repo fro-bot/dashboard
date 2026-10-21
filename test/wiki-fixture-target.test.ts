@@ -7,6 +7,7 @@
  */
 
 import type {FixtureWikiTarget} from '../src/wiki/fixture-target.ts'
+import type {SaveResult} from '../src/wiki/write-operation.ts'
 
 import {Buffer} from 'node:buffer'
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
@@ -47,6 +48,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllEnvs()
+  vi.unstubAllGlobals()
   rmSync(shellRoot, {recursive: true, force: true})
 })
 
@@ -225,6 +227,18 @@ interface FaultRow {
   readonly overrides?: (model: PageBody) => Record<string, unknown>
 }
 
+// Exhaustive over the save outcomes: a new state fails type-check until it is listed here and given a row.
+const OUTCOME_COVERAGE = {
+  saved: ['saved'],
+  'saved-not-promoted': ['saved-not-promoted'],
+  rejected: ['rejected'],
+  conflict: ['conflict:page', 'conflict:page-removed', 'conflict:corrections'],
+  failed: ['failed'],
+  'contract-rejected': ['contract-rejected:mismatch', 'contract-rejected:unreadable'],
+  indeterminate: ['indeterminate'],
+  'rate-limited': ['rate-limited'],
+} as const satisfies Record<SaveResult['state'], readonly string[]>
+
 const FAULT_ROWS: readonly FaultRow[] = [
   {name: 'plain page saves', id: IDS.plain, status: 200, body: {state: 'saved'}},
   {name: 'page without node_id saves', id: IDS.noNodeId, status: 200, body: {state: 'saved'}},
@@ -271,23 +285,12 @@ describe('fault pages through the real routes', () => {
   })
 
   it('covers every outcome in the contract', () => {
-    const states = new Set(FAULT_ROWS.map(row => [row.body.state, row.body.kind].filter(part => part !== undefined).join(':')))
+    const rowKeys = new Set(FAULT_ROWS.map(row => [row.body.state, row.body.kind].filter(part => part !== undefined).join(':')))
 
-    for (const expected of [
-      'saved',
-      'saved-not-promoted',
-      'rejected',
-      'conflict:page',
-      'conflict:page-removed',
-      'conflict:corrections',
-      'failed',
-      'contract-rejected:mismatch',
-      'contract-rejected:unreadable',
-      'indeterminate',
-      'rate-limited',
-    ]) {
-      expect(states, expected).toContain(expected)
+    for (const [state, keys] of Object.entries(OUTCOME_COVERAGE)) {
+      for (const key of keys) expect(rowKeys, `${state}: ${key}`).toContain(key)
     }
+    expect(Object.keys(OUTCOME_COVERAGE).sort()).toEqual([...new Set(FAULT_ROWS.map(row => String(row.body.state)))].sort())
   })
 
   it('runs the real gates: a saved page also gets its log entry and index', async () => {
@@ -333,11 +336,13 @@ describe('page with a rejecting gate finding', () => {
     expect(second.status).toBe(200)
   })
 
-  it('does not block other pages: the gates are page-scoped for rendering', async () => {
+  it('does not block other pages: a rejection on one page leaves another page saving', async () => {
     const world = await makeWorld()
 
-    const {res} = await openAndSave(world, IDS.plain, 1)
+    const rejected = await openAndSave(world, IDS.rejected, 1)
+    const {res} = await openAndSave(world, IDS.plain, 2)
 
+    expect(rejected.res.status).toBe(422)
     expect(res.status).toBe(200)
   })
 })
@@ -649,7 +654,7 @@ describe('promotion status', () => {
     expect(world.target.repo.calls.length - before).toBeLessThanOrEqual(3)
   })
 
-  it('shows the blocked branch on the list read and the page read, then clears on a later success', async () => {
+  it('reports the blocked branch through the status route after a list read and after a page read, then clears on a later success', async () => {
     const world = await makeWorld()
     const {json} = await openAndSave(world, IDS.blocked, 1)
     const since = json.committedAt as string
@@ -700,10 +705,11 @@ describe('promotion status', () => {
     expect(byId.get(5001)).toMatchObject({status: 'in_progress', conclusion: null})
   })
 
-  it('names the real step in the failed run so the reason comes from the real mapping', async () => {
+  it('fails the blocked page run at the privacy step, which the status reader maps to private-page', async () => {
     const world = await makeWorld()
-    await openAndSave(world, IDS.blocked, 1)
+    const {json} = await openAndSave(world, IDS.blocked, 1)
     advancePastRun(world)
+    expect(await promotionStatus(world, json.committedAt as string)).toMatchObject({state: 'blocked', reason: 'private-page'})
 
     const jobs = await world.target.repo.transport().listRunJobs({run_id: 5000})
     const steps = ((jobs.data as {jobs: {steps: {name: string; conclusion: string}[]}[]}).jobs[0]?.steps ?? []).filter(
@@ -840,7 +846,6 @@ describe('fixture harness wiring', () => {
     )
 
     expect(network).not.toHaveBeenCalled()
-    vi.unstubAllGlobals()
   })
 })
 

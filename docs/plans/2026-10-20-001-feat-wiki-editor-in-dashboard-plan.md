@@ -131,7 +131,7 @@ Facts observed on the live `fro-bot/.github` repository through the GitHub API w
 - Pipeline commits on `data` are authored as `fro-bot[bot]` with the `109017866+fro-bot[bot]@users.noreply.github.com` address and are GitHub-verified. The writer's identity constant uses a different address.
 - A ruleset named "data branch: Fro Bot App only" is active on `data` with update, non-fast-forward, and creation rules. Its bypass list is not visible to the token used.
 - `merge-data.yaml` runs the privacy checks as steps inside the workflow run, so a failed check fails the run. It uses `cancel-in-progress` for `repository_dispatch` runs, and a weekly schedule backs up the dispatch.
-- Blocked promotion is a recurring state. Scheduled runs 35545734311 (2026-09-20) and 34790889509 (2026-09-13) both stopped at the step "🔒 Block private wiki pages".
+- Blocked promotion is a recurring state. Recent scheduled `merge-data.yaml` runs stopped at the step "🔒 Block private wiki pages".
 
 ### Institutional Learnings
 
@@ -275,7 +275,7 @@ The verdict is `extend`. The write operation, the Git Data client, and the gates
 
 - KTD3. **Promotion is a repository dispatch on every save.** The server sends `promote-data` with no payload after every successful commit. Saves made while a promotion PR is open land in that PR. Merging stays manual. The weekly workflow schedule is a backstop, so a failed dispatch is not data loss.
 
-- KTD4. **Promotion status is branch-level and read from the workflow run.** The privacy checks run as steps inside the `merge-data` run, so a blocked promotion is a failed run, not a PR check. Status is a function of the open PR and the newest run of the workflow, of any event type. Scheduled runs can fail the same way, as runs 35545734311 and 34790889509 did.
+- KTD4. **Promotion status is branch-level and read from the workflow run.** The privacy checks run as steps inside the `merge-data` run, so a blocked promotion is a failed run, not a PR check. Status is a function of the open PR and the newest run of the workflow, of any event type. Scheduled runs can fail the same way.
   - A run in progress, queued, or cancelled is pending. A failed run is blocked, with a coarse reason from the failed step's name and a link to the run. A successful run is settled, with the PR link when one is open. A cancelled run is pending because `cancel-in-progress` cancels a run when a newer dispatch arrives.
   - After a save, status ignores any run created before that save's commit time, so an older failure cannot answer for a newer save. No run yet means pending.
   - Blocked is scoped to the `data` branch, not to one save. The editor shows it on the page list and when a page opens, not only after a save. The operator reads the reason, edits, and saves again.
@@ -492,7 +492,7 @@ After the infra handoff and PR 4, the operator saves one real correction, sees t
 
 This check settles KTD2's permission type.
 
-- **Result.** A Fro Bot installation token minted for `fro-bot/.github` with `permissions: {contents: 'write'}` came back with exactly `{contents: write, metadata: read}`. With that token, these reads all returned 200: run 35545734311, its jobs, the `merge-data.yaml` runs list, open `data`→`main` PRs, and the `data` ref. Run 35545734311's only non-success step is "🔒 Block private wiki pages". Run 34790889509 failed at the same step.
+- **Result.** A Fro Bot installation token minted for `fro-bot/.github` with `permissions: {contents: 'write'}` came back with exactly `{contents: write, metadata: read}`. With that token, these reads all returned 200: a failed `merge-data.yaml` run, its jobs, the `merge-data.yaml` runs list, open `data`→`main` PRs, and the `data` ref. That run's only non-success step is "🔒 Block private wiki pages", and a second failed run stopped at the same step.
 - **Decision.** KTD2's permission type is `contents: write` only. The promotion-status reads need no further scope, and the infra handoff adds no App permission.
 - **Installation scope.** The Fro Bot App installation grants far more than this, including `administration`, `secrets` and `workflows` write. The narrow scope comes only from the mint-time `permissions` subset, so U1's permission type is the boundary that keeps it narrow.
 - The real promotion-status path can return "Promotion blocked" (KTD4).
@@ -757,7 +757,7 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 - Edge case: the newest run was cancelled by a newer dispatch. Status is pending, not blocked.
 - Edge case: two saves in a row produce two dispatches. The first run is cancelled and the second succeeds. Status is settled with the PR link.
 - Edge case: a failed run followed by a later successful run clears blocked.
-- Edge case: a scheduled run that failed at the private-page step, as runs 35545734311 and 34790889509 did, reads as blocked with no save involved.
+- Edge case: a scheduled run that failed at the private-page step reads as blocked with no save involved.
 - Edge case: a run created before `since` is ignored, and status is pending until a newer run appears.
 - Edge case: two reads inside the polling interval make one set of GitHub requests.
 - Error path: the dispatch call fails or times out. The port reports failure. Retry dispatch after a failure succeeds without a commit, and it respects the rate limit. Covers AE6.
@@ -1112,7 +1112,7 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 - Rejected shows each finding. A finding with a `target` selects its first occurrence in the text. Other findings are page-level.
 - Conflict names its kind, page or corrections, and shows the current version and the draft as plain text, with the draft kept. For the corrections kind it also shows the corrections change, the base entries against the current ones. Overwrite re-bases the draft onto the current page blob and the current corrections base together, then requires a confirm. For a removed page, Save is disabled and the draft stays. U13 completes that variant.
 - Failed and gate-contract unreadable offer Save again. Rate-limited shows its own message with the retry hint.
-- Save status unknown never retries. The pending operation stays in the draft. A "Check save status" action runs the operation lookup in place. The same lookup runs on the next open. A found commit clears the draft and shows the saved state. A missing commit restores the draft with Save again and a fresh operation ID. An undecidable lookup shows the conflict view with the newer version labeled "possibly your save".
+- Save status unknown never retries. The pending operation stays in the draft. A "Check save status" action runs the operation lookup in place. The same lookup runs on the next open. A found commit clears the draft and shows saved-not-promoted with the retry-dispatch action, because the dispatch outcome of a save that landed late is unknown. Retrying the dispatch is safe, so the save is still promoted. A missing commit restores the draft with Save again and a fresh operation ID. An undecidable lookup shows the conflict view with the newer version labeled "possibly your save".
 - After a saved outcome, the editor shows promotion status. It reads once after the save, passing the commit time as `since`, then repeats at an interval of at least 15 seconds while the state is pending, and stops when the state settles or the tab is hidden (KTD5). It links the open PR when there is one, shows a blocked promotion with its reason and run link, and offers retry dispatch for saved-not-promoted.
 - The pending copy says the promotion also runs on the weekly schedule and that saving again is not needed.
 - Responses for an operation that is no longer current are ignored, so a late response cannot revive a settled state.
@@ -1417,10 +1417,9 @@ flowchart TB
 
 - **Origin document:** [docs/brainstorms/2026-10-20-wiki-editor-in-dashboard-requirements.md](docs/brainstorms/2026-10-20-wiki-editor-in-dashboard-requirements.md). It is tracked in this repository.
 - Upstream requirements: `docs/brainstorms/2026-08-29-editable-wiki-path-requirements.md` (R1 to R18) and `docs/plans/2026-08-29-001-feat-editable-wiki-path-plan.md` in `fro-bot/.github`.
-- Promotion workflow: `.github/workflows/merge-data.yaml` in `fro-bot/.github`. Runs 35545734311 and 34790889509 are the evidence for blocked promotion.
+- Promotion workflow: `.github/workflows/merge-data.yaml` in `fro-bot/.github`. Failed scheduled runs stopped at the private-page step are the evidence for blocked promotion.
 - Shared core: the `@fro.bot/wiki-write-core` package, as installed in `node_modules`.
 - Related code: `wiki-writer/src/write-operation.ts`, `wiki-writer/src/github-data-client.ts`, `wiki-writer/src/gate-contract.ts`, `src/server.ts`, `src/github/app-client.ts`, `src/github/installations.ts`, `src/routes/auth.ts`, `web/src/App.tsx`, `web/src/sw.ts`.
 - Earlier dashboard plan, superseded by this plan: `docs/plans/2026-08-31-001-feat-operator-wiki-editor-plan.md`.
 - Infra deploy pattern: `apps/dashboard/src/remote-deploy.ts` in `marcusrbrown/infra`, read through the GitHub API while planning. The infra `apps/dashboard/AGENTS.md` was not read.
-- Tracking issue: #504.
 - Runbook for gateway access: `docs/runbooks/gateway-access.md`.

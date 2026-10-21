@@ -5,6 +5,7 @@ import {GATE_CONTRACT_VERSION} from '@fro.bot/wiki-write-core'
 import {describe, expect, it, vi} from 'vitest'
 import {isErr, isOk} from '../src/result.ts'
 import {WikiDataUnavailableError} from '../src/wiki/data-client.ts'
+import {createGateContractChecker} from '../src/wiki/gate-contract.ts'
 import {correctionsDigest, createWikiPages, EMPTY_CORRECTIONS_DIGEST} from '../src/wiki/pages.ts'
 
 // ---------------------------------------------------------------------------
@@ -247,6 +248,24 @@ describe('wiki page read model', () => {
     })
   })
 
+  it.each(['retired', 'active'])('treats a reason on a %s entry as a corrupt file, so no stray reason is shown', async state => {
+    const files = {
+      ...BASE_FILES,
+      'knowledge/corrections.yaml': correctionsYaml(
+        entry(
+          'c1',
+          'R_infra',
+          'Bun workspace monorepo',
+          `    attribution:\n      actor: marcusrbrown\n      recorded_at: "2030-01-01T00:00:00Z"\n    state: ${state}\n    reason: leftover text\n`,
+        ),
+      ),
+    }
+
+    const result = await makePages(files).pages.readPage('repos.marcusrbrown--infra', WRITABLE)
+
+    expect(result).toMatchObject({success: false, error: {kind: 'corrections-corrupt'}})
+  })
+
   it('treats a missing corrections file as an empty set with the empty digest', async () => {
     const model = await readOk(BASE_FILES, 'repos.marcusrbrown--infra')
 
@@ -476,5 +495,30 @@ describe('correctionsDigest', () => {
     const backward = await readOk({...BASE_FILES, 'knowledge/corrections.yaml': correctionsYaml(e2, e1)}, 'repos.marcusrbrown--infra')
 
     expect(forward.correctionsBase).toBe(backward.correctionsBase)
+  })
+})
+
+describe('page reads during a gate-contract outage with no cached marker', () => {
+  it('answers unreadable with retry on every read and fetches the marker once inside the failure window', async () => {
+    const fetch = vi.fn().mockRejectedValue(new Error('network unavailable'))
+    let now = 0
+    const checker = createGateContractChecker({fetch, now: () => now})
+    const pages = createWikiPages({
+      client: {getSnapshot: vi.fn(async () => snapshotOf(BASE_FILES))},
+      checkContract: async () => checker.check(),
+    })
+
+    const reads = await Promise.all([
+      pages.readPage('repos.marcusrbrown--infra', WRITABLE),
+      pages.readPage('repos.marcusrbrown--infra', WRITABLE),
+    ])
+    now += 5000
+    const later = await pages.readPage('repos.marcusrbrown--infra', WRITABLE)
+
+    for (const result of [...reads, later]) {
+      if (!isOk(result)) throw new Error('expected ok')
+      expect(result.data.contract).toEqual({ok: false, kind: 'unreadable', retry: true})
+    }
+    expect(fetch).toHaveBeenCalledTimes(1)
   })
 })

@@ -17,8 +17,8 @@ view of Fro Bot's cross-repo footprint.
    credentials may never mint write-scoped tokens.
 
    The dashboard holds GitHub write authority scoped to the single operator
-   (`DASHBOARD_OPERATOR_ID`): a write runs only for a gateway session whose
-   `operatorId` equals it. That authority comes through a separate Fro Bot App
+   (`DASHBOARD_OPERATOR_ID`): outside the dev fixture harness, a write runs only for a
+   gateway session whose `operatorId` equals it. That authority comes through a separate Fro Bot App
    credential (`DASHBOARD_FRO_BOT_APP_ID` / `DASHBOARD_FRO_BOT_APP_KEY(_FILE)`) — the
    same App `release.yaml` authenticates as via `APPLICATION_ID`, distinct from the
    read-only Agent App behind `DASHBOARD_GITHUB_APP_*`. Its client
@@ -27,8 +27,8 @@ view of Fro Bot's cross-repo footprint.
    type admits no other scope. Commits go to the `data` branch and are limited to wiki
    pages, `knowledge/log.md`, `knowledge/index.md` and `knowledge/corrections.yaml`,
    after the shared `@fro.bot/wiki-write-core` gates pass; the only other write is one
-   `promote-data` repository dispatch. Only `src/server.ts`, `src/wiki/write-operation.ts`
-   and `src/wiki/fixture-target.ts` may import the write client
+   `promote-data` repository dispatch. Only `src/wiki/wiring.ts` and `src/wiki/write-operation.ts`
+   may import the write client
    (`test/wiki-credential-boundary.test.ts`), and `web/src/wiki/no-key-material.test.ts`
    keeps key material, Octokit and the write path out of the client bundle. Any
    additional write target, scope or credential requires explicit owner approval and a

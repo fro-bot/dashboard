@@ -5,7 +5,9 @@
  * Dockerfile properties enforce that:
  * - the prod-deps stage installs with `--production`, so no dev dependency or
  *   build tool reaches the image;
- * - no stage copies the whole build context, so nothing enters an image unnamed.
+ * - no stage copies the whole build context, so nothing enters an image unnamed;
+ * - the runtime stage takes `node_modules` from prod-deps and from nowhere else,
+ *   and copies no other stage whole.
  *
  * Stages are found by their `FROM ... AS <name>` lines, never by line number. The
  * runtime stage is the last stage.
@@ -19,6 +21,9 @@ import {describe, expect, it} from 'vitest'
 const repoRoot = resolve(import.meta.dirname, '..')
 
 const PROD_DEPS_STAGE = 'prod-deps'
+const NODE_MODULES_SOURCE = '/app/node_modules'
+// Sources that bring a whole earlier stage, or its dependency tree, into the runtime image.
+const WHOLE_STAGE_SOURCES: ReadonlySet<string> = new Set(['/app', '/app/', '/app/*', '/app/.', NODE_MODULES_SOURCE, `${NODE_MODULES_SOURCE}/`, `${NODE_MODULES_SOURCE}/*`])
 
 interface Instruction {
   readonly keyword: string
@@ -66,6 +71,8 @@ function parseStages(dockerfile: string): Stage[] {
 interface CopySource {
   readonly path: string
   readonly fromStage: boolean
+  /** The `--from=` stage name, when the copy has one. */
+  readonly stage: string | undefined
 }
 
 /** COPY/ADD source paths, without flags or the destination. */
@@ -74,8 +81,9 @@ function copySources(instruction: Instruction): CopySource[] {
   const tokens = instruction.args.split(/\s+/).filter(token => token !== '')
   const flags = tokens.filter(token => token.startsWith('--'))
   const operands = tokens.filter(token => !token.startsWith('--'))
-  const fromStage = flags.some(flag => flag.startsWith('--from='))
-  return operands.slice(0, -1).map(path => ({path, fromStage}))
+  const from = flags.find(flag => flag.startsWith('--from='))
+  const stage = from?.slice('--from='.length)
+  return operands.slice(0, -1).map(path => ({path, fromStage: from !== undefined, stage}))
 }
 
 function findBoundaryViolations(dockerfile: string): string[] {
@@ -100,6 +108,20 @@ function findBoundaryViolations(dockerfile: string): string[] {
         if (!fromStage && ['.', './', '*'].includes(path)) {
           violations.push(`${label(stage)} stage copies the whole build context: ${path}`)
         }
+      }
+    }
+  }
+
+  const runtime = stages.at(-1)
+  if (runtime !== undefined) {
+    const sources = runtime.instructions.flatMap(copySources)
+    const fromProdDeps = sources.some(
+      source => source.stage === PROD_DEPS_STAGE && source.path.replace(/\/$/, '') === NODE_MODULES_SOURCE,
+    )
+    if (!fromProdDeps) violations.push(`runtime stage does not copy node_modules from ${PROD_DEPS_STAGE}`)
+    for (const {path, stage} of sources) {
+      if (stage !== undefined && stage !== PROD_DEPS_STAGE && WHOLE_STAGE_SOURCES.has(path)) {
+        violations.push(`runtime stage copies ${path} from the ${stage} stage`)
       }
     }
   }
@@ -183,9 +205,34 @@ describe('Dockerfile boundary checker (error paths)', () => {
     expect(findBoundaryViolations(mutated)).toEqual([expect.stringContaining('prod-deps stage copies the whole build context')])
   })
 
-  it('allows copying a whole earlier stage', () => {
-    const mutated = `${validDockerfile}COPY --from=builder /app/ ./\n`
+  it.each(['/app/', '/app', '/app/node_modules', '/app/node_modules/', '/app/*'])(
+    'rejects a runtime copy of %s from the builder stage',
+    source => {
+      const mutated = `${validDockerfile}COPY --from=builder ${source} ./\n`
+      expect(findBoundaryViolations(mutated)).toEqual([`runtime stage copies ${source} from the builder stage`])
+    },
+  )
+
+  it('allows the runtime to copy the built client from the builder stage', () => {
+    expect(findBoundaryViolations(validDockerfile)).toEqual([])
+  })
+
+  it('allows copying a whole earlier stage in a build stage', () => {
+    const mutated = validDockerfile.replace('FROM node:24 AS prod-deps', 'COPY --from=builder /app/ ./\nFROM node:24 AS prod-deps')
     expect(findBoundaryViolations(mutated)).toEqual([])
+  })
+
+  it('rejects a runtime that takes node_modules from the builder instead of prod-deps', () => {
+    const mutated = validDockerfile.replace('COPY --from=prod-deps /app/node_modules/', 'COPY --from=builder /app/node_modules/')
+    expect(findBoundaryViolations(mutated)).toEqual([
+      'runtime stage does not copy node_modules from prod-deps',
+      'runtime stage copies /app/node_modules/ from the builder stage',
+    ])
+  })
+
+  it('rejects a runtime with no node_modules copy at all', () => {
+    const mutated = validDockerfile.replace('COPY --from=prod-deps /app/node_modules/ ./node_modules/\n', '')
+    expect(findBoundaryViolations(mutated)).toEqual(['runtime stage does not copy node_modules from prod-deps'])
   })
 
   it('ignores commented-out whole-context copies', () => {
@@ -194,7 +241,10 @@ describe('Dockerfile boundary checker (error paths)', () => {
   })
 
   it('reports a Dockerfile with no prod-deps stage', () => {
-    expect(findBoundaryViolations('FROM node:24\n')).toEqual([`no ${PROD_DEPS_STAGE} stage found`])
+    expect(findBoundaryViolations('FROM node:24\n')).toEqual([
+      `no ${PROD_DEPS_STAGE} stage found`,
+      `runtime stage does not copy node_modules from ${PROD_DEPS_STAGE}`,
+    ])
   })
 
   it('reports a prod-deps stage with no install', () => {

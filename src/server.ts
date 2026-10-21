@@ -16,7 +16,6 @@ import type {ServerType} from '@hono/node-server'
 import type {GitHubOAuthClient} from './auth/oauth.ts'
 import type {OperatorClient, SessionDto} from './gateway/operator-client.ts'
 import type {AggregatorSnapshot} from './github/aggregator.ts'
-import type {WriteTokenProvider} from './github/fro-bot-app-client.ts'
 import type {MetadataReader} from './github/metadata.ts'
 import type {ListenerStore} from './listener/store.ts'
 import {Buffer} from 'node:buffer'
@@ -44,7 +43,6 @@ import {FIXTURE_OPERATOR_PREFIX} from './gateway/operator-fixture-routes.ts'
 import {createOperatorServerFetch} from './gateway/operator-server-fetch.ts'
 import {createAggregator} from './github/aggregator.ts'
 import {createDashboardAppClient} from './github/app-client.ts'
-import {createFroBotAppClient} from './github/fro-bot-app-client.ts'
 import {buildInstallationsClient, enumerateRepos, mintReadOnlyToken} from './github/installations.ts'
 import {makeNotFoundError, readRepoMetadata} from './github/metadata.ts'
 import {readListenerDbPath, readListenerIngestKey} from './listener/config.ts'
@@ -58,22 +56,10 @@ import {buildWikiRouter, type WikiAppDeps} from './routes/wiki.ts'
 import {readOptionalMultilineSecret, readOptionalSecret} from './secrets.ts'
 import {loadCookieKey, SessionManager} from './session.ts'
 import {createPublicStatic} from './static-files.ts'
-import {readWikiWriteConfig, type WikiWriteConfig, type WikiWriteOffReason} from './wiki/config.ts'
-import {
-  createBlobCache,
-  createReadTransport,
-  createWikiDataClient,
-  createWriteTransport,
-  readTokenSource,
-  writeTokenSource,
-  type ReadTokenSource,
-} from './wiki/data-client.ts'
-import {createGateContractChecker} from './wiki/gate-contract.ts'
-import {createWikiPages} from './wiki/pages.ts'
+import {readWikiWriteConfig} from './wiki/config.ts'
 import {parsePageId} from './wiki/paths.ts'
-import {createDispatchPort, createPromotionStatusReader} from './wiki/promotion.ts'
 import {consumeReturnCookie, parseReturnTarget, returnTargetForPath, setReturnCookie} from './wiki/return-target.ts'
-import {createWikiWriteOperation} from './wiki/write-operation.ts'
+import {buildWikiAppDeps, buildWikiReadTokens, buildWikiWriteWiring} from './wiki/wiring.ts'
 
 /** Hono context variables set by auth middleware */
 interface Variables {
@@ -1141,126 +1127,6 @@ export function readServerBindConfig(env: NodeJS.ProcessEnv = process.env): Serv
   }
 
   return {host, port}
-}
-
-/** Wiki write capability after wiring: either a token provider, or off with a reason. */
-export type WikiWriteWiring =
-  | {readonly enabled: true; readonly config: Extract<WikiWriteConfig, {enabled: true}>; readonly tokens: WriteTokenProvider}
-  | {readonly enabled: false; readonly reason: WikiWriteOffReason}
-
-/**
- * Build the write-token client only when the configuration enables writes.
- * A half-configured credential pair leaves writes off and logs a warning.
- */
-export function buildWikiWriteWiring(config: WikiWriteConfig): WikiWriteWiring {
-  if (!config.enabled) {
-    if (config.reason === 'app-credentials-incomplete') {
-      logger.warning(
-        'Only one of DASHBOARD_FRO_BOT_APP_ID and DASHBOARD_FRO_BOT_APP_KEY is set — wiki write capability disabled',
-      )
-    }
-    return {enabled: false, reason: config.reason}
-  }
-  return {
-    enabled: true,
-    config,
-    tokens: createFroBotAppClient({appId: config.appId, privateKey: config.privateKey}),
-  }
-}
-
-const WIKI_INSTALLATION_TTL_MS = 10 * 60_000
-
-/**
- * Read-token source for the wiki repository, from the existing read mint. The
- * installation ID is resolved with the App JWT and trusted for a bounded time;
- * tokens come from `mintReadOnlyToken`, which caches them.
- */
-export function createWikiReadTokenSource(deps: {
-  readonly resolveInstallationId: () => Promise<number>
-  readonly mint: (installationId: number, permissions: Record<string, 'read'>) => Promise<string>
-  readonly now?: () => number
-}): ReadTokenSource {
-  const now = deps.now ?? Date.now
-  let resolved: {readonly id: number; readonly at: number} | null = null
-
-  return readTokenSource(async () => {
-    if (resolved === null || now() - resolved.at >= WIKI_INSTALLATION_TTL_MS) {
-      resolved = {id: await deps.resolveInstallationId(), at: now()}
-    }
-    return mintReadOnlyToken(resolved.id, deps.mint)
-  })
-}
-
-function buildWikiReadTokens(credentials: {appId: string; privateKey: string}): ReadTokenSource {
-  const appClient = createDashboardAppClient(credentials)
-  return createWikiReadTokenSource({
-    mint: appClient.mintInstallationToken,
-    resolveInstallationId: async () => {
-      const response = await appClient.octokit.request('GET /repos/{owner}/{repo}/installation', {
-        owner: 'fro-bot',
-        repo: '.github',
-      })
-      return (response.data as unknown as {id: number}).id
-    },
-  })
-}
-
-/**
- * Compose the wiki capability. List and page reads use the read token source.
- * The save path, the dispatch port, and promotion status use the write token
- * source built from the Fro Bot App client. With no read credentials the pages
- * are unavailable; with write capability off there is no write side at all.
- */
-export function buildWikiAppDeps(input: {
-  readonly readTokens: ReadTokenSource | null
-  readonly write: WikiWriteWiring
-  readonly fetch?: typeof fetch | undefined
-}): WikiAppDeps {
-  const transportOptions = input.fetch === undefined ? {} : {fetch: input.fetch}
-  const blobCache = createBlobCache()
-  const contractChecker = createGateContractChecker({
-    fetch: async (url, init) => fetch(url, init),
-    logger,
-  })
-  const checkContract = async () => contractChecker.check()
-
-  const pages =
-    input.readTokens === null
-      ? null
-      : createWikiPages({
-          client: createWikiDataClient(createReadTransport(input.readTokens, transportOptions), {blobCache}),
-          checkContract,
-        })
-
-  if (!input.write.enabled) {
-    return {
-      pages,
-      write: null,
-      policy: {capability: {enabled: false, reason: input.write.reason}, fixtureOperatorLogin: null},
-    }
-  }
-
-  const {tokens, config} = input.write
-  const client = createWikiDataClient(
-    createWriteTransport(
-      writeTokenSource(async () => tokens.getWriteToken()),
-      transportOptions,
-    ),
-    {blobCache},
-  )
-  const dispatch = createDispatchPort({client})
-  return {
-    pages,
-    write: {
-      operation: createWikiWriteOperation({client, checkContract, dispatch}),
-      dispatch,
-      status: createPromotionStatusReader({client}),
-    },
-    policy: {
-      capability: {enabled: true, operatorId: config.operatorId, dashboardOrigin: config.dashboardOrigin},
-      fixtureOperatorLogin: null,
-    },
-  }
 }
 
 /**
