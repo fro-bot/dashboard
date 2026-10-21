@@ -5,7 +5,7 @@
 FROM oven/bun:1.4.3@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598 AS bun
 
 # ── Builder stage ─────────────────────────────────────────────────────────────
-FROM node:24-trixie-slim@sha256:1375326a10579cc1fd089d5da149ad29ae76dc3ccee6c0b0746d3de09dc5d0a1 AS builder
+FROM node:24-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS builder
 
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 
@@ -28,7 +28,7 @@ ENV VITE_DASHBOARD_VERSION=$DASHBOARD_VERSION
 RUN bun run build:web
 
 # ── Production dependency stage ───────────────────────────────────────────────
-FROM node:24-trixie-slim@sha256:1375326a10579cc1fd089d5da149ad29ae76dc3ccee6c0b0746d3de09dc5d0a1 AS prod-deps
+FROM node:24-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS prod-deps
 
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 
@@ -45,7 +45,7 @@ COPY wiki-writer/package.json ./wiki-writer/package.json
 RUN bun install --filter './' --production --frozen-lockfile --ignore-scripts
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-FROM node:24-trixie-slim@sha256:1375326a10579cc1fd089d5da149ad29ae76dc3ccee6c0b0746d3de09dc5d0a1
+FROM node:24-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea
 
 WORKDIR /app
 
