@@ -854,3 +854,88 @@ describe('flag-ON: nonsensical identity rejection', () => {
     expect(res.status).toBe(200)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Wiki deep link: gateway /auth/login carries a validated `next`
+// ---------------------------------------------------------------------------
+
+async function login(query: string) {
+  const {client} = makeFakeOperatorClient(async () => ok(VALID_SESSION))
+  const app = await buildGatewayApp(client)
+  return app.request(`/auth/login${query}`)
+}
+
+describe('gateway /auth/login — wiki return target', () => {
+  const GATEWAY_START = '/operator/auth/github/start?return_to=/operator'
+
+  it('sets the return cookie from a valid next and still redirects to the fixed gateway start', async () => {
+    const res = await login(`?next=${encodeURIComponent('/wiki/repos.acme--alpha')}`)
+
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toBe(GATEWAY_START)
+    const cookie = res.headers.get('set-cookie') ?? ''
+    expect(cookie).toContain(`wiki_return=${encodeURIComponent('/wiki/repos.acme--alpha')}`)
+    expect(cookie).toMatch(/HttpOnly/iu)
+    expect(cookie).toMatch(/SameSite=Lax/iu)
+  })
+
+  it.each([
+    ['an absolute URL', 'https://evil.example/wiki/repos.a'],
+    ['a protocol-relative URL', '//evil.example/wiki/repos.a'],
+    ['the root', '/'],
+    ['an operator path', '/operator'],
+    ['a nested wiki path', '/wiki/repos.a/b'],
+    ['a malformed ID', '/wiki/repos..'],
+    ['an encoded slash', '/wiki/repos.a%2Fb'],
+    ['a query string', '/wiki/repos.a?x=1'],
+    ['an empty value', ''],
+  ])('drops a next that is %s and proceeds with no cookie', async (_label, next) => {
+    const res = await login(`?next=${encodeURIComponent(next)}`)
+
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toBe(GATEWAY_START)
+    expect(res.headers.get('set-cookie')).toBeNull()
+  })
+
+  it('sets no cookie when there is no next, or when next is repeated', async () => {
+    const none = await login('')
+    const repeated = await login('?next=/wiki/repos.a&next=https://evil.example')
+
+    expect(none.headers.get('set-cookie')).toBeNull()
+    expect(repeated.headers.get('location')).toBe(GATEWAY_START)
+  })
+
+  it('never reflects next into the redirect target', async () => {
+    const res = await login(`?next=${encodeURIComponent('/wiki/repos.acme--alpha')}&return_to=https://evil.example`)
+
+    expect(res.headers.get('location')).toBe(GATEWAY_START)
+  })
+
+  it('sets the return cookie when a present but invalid gateway session redirects a page request', async () => {
+    const {client} = makeFakeOperatorClient(async () => err({kind: 'unauthorized'} as unknown as GatewayClientError))
+    const app = await buildGatewayApp(client)
+
+    const res = await app.request('/wiki/repos.acme--alpha', {headers: {cookie: '__Host-session=expired'}})
+
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toBe(GATEWAY_START)
+    expect(res.headers.get('set-cookie') ?? '').toContain('wiki_return=')
+  })
+
+  it('does not log the page ID of an unauthenticated wiki request', async () => {
+    const lines: string[] = []
+    for (const method of ['log', 'info', 'warn', 'error'] as const) {
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+        lines.push(args.map(String).join(' '))
+      })
+    }
+    const {client} = makeFakeOperatorClient(async () => err({kind: 'unauthorized'} as unknown as GatewayClientError))
+    const app = await buildGatewayApp(client)
+
+    await app.request('/wiki/repos.acme--alpha', {headers: {cookie: '__Host-session=expired'}})
+
+    expect(lines.length).toBeGreaterThan(0)
+    expect(lines.join('\n')).not.toContain('acme')
+    vi.restoreAllMocks()
+  })
+})

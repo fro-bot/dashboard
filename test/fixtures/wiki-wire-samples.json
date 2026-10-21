@@ -1,0 +1,290 @@
+{
+  "list": {
+    "ok": {
+      "status": 200,
+      "body": {
+        "headSha": "commit-1",
+        "pages": [
+          {
+            "id": "repos.acme--alpha",
+            "title": "acme/alpha",
+            "type": "repos",
+            "updated": "2026-02-01",
+            "canMark": true
+          },
+          {
+            "id": "repos.acme--beta",
+            "title": "acme/beta",
+            "type": "repos",
+            "updated": "2026-02-01",
+            "canMark": true
+          },
+          {
+            "id": "topics.beta-topic",
+            "title": "Beta topic",
+            "type": "topics",
+            "updated": "2026-02-01",
+            "canMark": false
+          },
+          {
+            "id": "entities.gamma",
+            "title": "Gamma",
+            "type": "entities",
+            "updated": "2026-02-01",
+            "canMark": false
+          }
+        ],
+        "canWrite": true,
+        "canWriteReason": null
+      }
+    }
+  },
+  "page": {
+    "ok": {
+      "status": 200,
+      "body": {
+        "id": "repos.acme--alpha",
+        "type": "repos",
+        "title": "acme/alpha",
+        "updated": "2026-02-01",
+        "body": "\n# acme/alpha\n\nAlpha builds widgets for factories. See [[beta-topic]] and [[acme--beta]].\n",
+        "pageBlobSha": "blob-bc079bf35740",
+        "nodeId": "R_alpha",
+        "canMark": true,
+        "corrections": [
+          {
+            "id": "c1",
+            "status": "active",
+            "span": {
+              "text": "Alpha builds widgets"
+            },
+            "attribution": null,
+            "reason": null,
+            "supersededBy": null,
+            "stale": false
+          }
+        ],
+        "correctionsBase": "84af704b511188e099d585af405ec64aa728d795249bc5cccdffcec5602b731f",
+        "headSha": "commit-1",
+        "contract": {
+          "ok": true
+        },
+        "canWrite": true,
+        "canWriteReason": null
+      }
+    },
+    "notFound": {
+      "status": 404,
+      "body": {
+        "state": "not-found"
+      }
+    }
+  },
+  "save": {
+    "saved": {
+      "status": 200,
+      "body": {
+        "state": "saved",
+        "operationId": "00000000-0000-4000-8000-000000000001",
+        "commitSha": "commit-2",
+        "committedAt": "2030-01-01T00:00:01.000Z"
+      }
+    },
+    "notPromoted": {
+      "status": 202,
+      "body": {
+        "state": "saved-not-promoted",
+        "operationId": "00000000-0000-4000-8000-000000000001",
+        "commitSha": "commit-2",
+        "committedAt": "2030-01-01T00:00:01.000Z"
+      }
+    },
+    "rejected": {
+      "status": 422,
+      "body": {
+        "state": "rejected",
+        "reason": "gate",
+        "findings": [
+          {
+            "kind": "unsafe-html",
+            "path": "knowledge/wiki/repos/acme--alpha.md",
+            "message": "The page contains HTML that is not allowed."
+          }
+        ]
+      }
+    },
+    "contractRejected": {
+      "status": 424,
+      "body": {
+        "state": "contract-rejected",
+        "kind": "mismatch",
+        "retry": false
+      }
+    },
+    "conflictPage": {
+      "status": 409,
+      "body": {
+        "state": "conflict",
+        "kind": "page",
+        "currentBlobSha": "blob-bc079bf35740"
+      }
+    },
+    "conflictPageRemoved": {
+      "status": 409,
+      "body": {
+        "state": "conflict",
+        "kind": "page-removed"
+      }
+    },
+    "conflictCorrections": {
+      "status": 409,
+      "body": {
+        "state": "conflict",
+        "kind": "corrections",
+        "currentCorrections": [
+          {
+            "id": "c1",
+            "status": "active",
+            "span": {
+              "text": "Alpha builds widgets"
+            },
+            "attribution": null,
+            "reason": null,
+            "supersededBy": null,
+            "stale": false
+          }
+        ],
+        "correctionsBase": "84af704b511188e099d585af405ec64aa728d795249bc5cccdffcec5602b731f"
+      }
+    },
+    "failed": {
+      "status": 502,
+      "body": {
+        "state": "failed",
+        "operationId": "00000000-0000-4000-8000-000000000001",
+        "retryable": true
+      }
+    },
+    "indeterminate": {
+      "status": 504,
+      "body": {
+        "state": "indeterminate",
+        "operationId": "00000000-0000-4000-8000-000000000001"
+      }
+    },
+    "limited": {
+      "status": 429,
+      "body": {
+        "state": "rate-limited",
+        "retryAfterSeconds": 17
+      }
+    },
+    "forbidden": {
+      "status": 403,
+      "body": {
+        "state": "forbidden"
+      }
+    },
+    "unsupported": {
+      "status": 415,
+      "body": {
+        "state": "unsupported-media-type"
+      }
+    },
+    "tooLarge": {
+      "status": 413,
+      "body": {
+        "state": "payload-too-large"
+      }
+    },
+    "badRequest": {
+      "status": 400,
+      "body": {
+        "state": "bad-request"
+      }
+    }
+  },
+  "lookup": {
+    "found": {
+      "status": 200,
+      "body": {
+        "state": "found",
+        "commitSha": "commit-2",
+        "committedAt": "2030-01-01T00:00:01.000Z"
+      }
+    },
+    "missing": {
+      "status": 200,
+      "body": {
+        "state": "missing"
+      }
+    },
+    "unknown": {
+      "status": 200,
+      "body": {
+        "state": "unknown"
+      }
+    }
+  },
+  "dispatch": {
+    "dispatched": {
+      "status": 200,
+      "body": {
+        "state": "dispatched"
+      }
+    },
+    "failed": {
+      "status": 502,
+      "body": {
+        "state": "dispatch-failed"
+      }
+    },
+    "limited": {
+      "status": 429,
+      "body": {
+        "state": "rate-limited",
+        "retryAfterSeconds": 33
+      }
+    }
+  },
+  "status": {
+    "pending": {
+      "status": 200,
+      "body": {
+        "state": "pending",
+        "pr": null
+      }
+    },
+    "settled": {
+      "status": 200,
+      "body": {
+        "state": "settled",
+        "pr": {
+          "number": 7,
+          "url": "https://github.com/fro-bot/.github/pull/7"
+        }
+      }
+    },
+    "blocked": {
+      "status": 200,
+      "body": {
+        "state": "blocked",
+        "reason": "private-page",
+        "runUrl": "https://github.com/fro-bot/.github/actions/runs/3",
+        "pr": null
+      }
+    },
+    "unavailable": {
+      "status": 503,
+      "body": {
+        "state": "unavailable"
+      }
+    },
+    "configurationFault": {
+      "status": 502,
+      "body": {
+        "state": "configuration-fault"
+      }
+    }
+  }
+}

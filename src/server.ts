@@ -28,7 +28,7 @@ import {getConnInfo} from '@hono/node-server/conninfo'
 import {serveStatic} from '@hono/node-server/serve-static'
 import {Octokit} from '@octokit/core'
 import {graphql} from '@octokit/graphql'
-import {Hono, type Context} from 'hono'
+import {Hono, type Context, type MiddlewareHandler} from 'hono'
 import {getCookie, setCookie} from 'hono/cookie'
 import {secureHeaders} from 'hono/secure-headers'
 import {fetchGitHubUserLogin, makeGitHubOAuthClient} from './auth/oauth.ts'
@@ -54,10 +54,26 @@ import {isOk} from './result.ts'
 import {buildApiRouter} from './routes/api.ts'
 import {buildAuthRouter} from './routes/auth.ts'
 import {buildListenerRouter} from './routes/listener.ts'
+import {buildWikiRouter, type WikiAppDeps} from './routes/wiki.ts'
 import {readOptionalMultilineSecret, readOptionalSecret} from './secrets.ts'
 import {loadCookieKey, SessionManager} from './session.ts'
 import {createPublicStatic} from './static-files.ts'
 import {readWikiWriteConfig, type WikiWriteConfig, type WikiWriteOffReason} from './wiki/config.ts'
+import {
+  createBlobCache,
+  createReadTransport,
+  createWikiDataClient,
+  createWriteTransport,
+  readTokenSource,
+  writeTokenSource,
+  type ReadTokenSource,
+} from './wiki/data-client.ts'
+import {createGateContractChecker} from './wiki/gate-contract.ts'
+import {createWikiPages} from './wiki/pages.ts'
+import {parsePageId} from './wiki/paths.ts'
+import {createDispatchPort, createPromotionStatusReader} from './wiki/promotion.ts'
+import {consumeReturnCookie, parseReturnTarget, returnTargetForPath, setReturnCookie} from './wiki/return-target.ts'
+import {createWikiWriteOperation} from './wiki/write-operation.ts'
 
 /** Hono context variables set by auth middleware */
 interface Variables {
@@ -122,30 +138,56 @@ function sweepRateLimitMap(now: number): void {
   }
 }
 
+/** Per-operator ceiling for wiki writes, lower than the per-IP ceiling. */
+export const WIKI_WRITE_RATE_LIMIT_MAX = 10
+
+export interface RateLimitDecision {
+  readonly allowed: boolean
+  /** Seconds until the window ends. Zero when allowed. */
+  readonly retryAfterSeconds: number
+}
+
 /**
- * Check rate limit for the given IP.
- * Accepts an optional `now` for testability (defaults to Date.now()).
- * Returns true if the request is allowed, false if rate-limited.
+ * Fixed-window check for `key` against `max` requests per window. Client IPs and
+ * `operator:<id>` writer keys share the map but never collide. Accepts an
+ * optional `now` for testability.
  */
-export function checkRateLimit(ip: string, now: number = Date.now()): boolean {
+export function consumeRateLimit(key: string, max: number, now: number = Date.now()): RateLimitDecision {
   rateLimitCallCount++
   if (rateLimitCallCount >= EVICT_INTERVAL) {
     rateLimitCallCount = 0
     sweepRateLimitMap(now)
   }
 
-  const entry = rateLimitMap.get(ip)
+  const entry = rateLimitMap.get(key)
 
   if (entry === undefined || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
-    rateLimitMap.set(ip, {count: 1, windowStart: now})
-    return true
+    rateLimitMap.set(key, {count: 1, windowStart: now})
+    return {allowed: true, retryAfterSeconds: 0}
   }
 
   entry.count++
-  if (entry.count > RATE_LIMIT_MAX) {
-    return false
+  if (entry.count > max) {
+    const remainingMs = entry.windowStart + RATE_LIMIT_WINDOW_MS - now
+    return {allowed: false, retryAfterSeconds: Math.max(1, Math.ceil(remainingMs / 1000))}
   }
-  return true
+  return {allowed: true, retryAfterSeconds: 0}
+}
+
+/**
+ * Check rate limit for the given IP.
+ * Accepts an optional `now` for testability (defaults to Date.now()).
+ * Returns true if the request is allowed, false if rate-limited.
+ */
+export function checkRateLimit(ip: string, now: number = Date.now()): boolean {
+  return consumeRateLimit(ip, RATE_LIMIT_MAX, now).allowed
+}
+
+/** A path safe to log: wiki paths carry page IDs, so they collapse to their template. */
+function loggablePath(path: string): string {
+  if (path.startsWith('/api/wiki/')) return '/api/wiki/*'
+  if (path.startsWith('/wiki/')) return '/wiki/:id'
+  return path
 }
 
 /**
@@ -285,6 +327,11 @@ export interface DashboardAppConfig {
    * the read/ack routes still work if listenerStore is provided.
    */
   listenerIngestKey?: string | null | undefined
+  /**
+   * Wiki read and write capability. When undefined, wiki reads answer 503 and
+   * every wiki write is refused. Production wires this in `createDashboardServer`.
+   */
+  wiki?: WikiAppDeps | undefined
 }
 
 /**
@@ -465,7 +512,17 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     }
   }
 
+  // The wiki return cookie is Secure except under loopback development.
+  const returnCookieSecure = !(devAutoLogin || fixtureHarnessActive)
+
   const app = new Hono<{Variables: Variables}>()
+
+  // Redirect to login, remembering a /wiki/<id> target so login can return to it.
+  const redirectToLogin = (c: Context, location: string, path: string): Response => {
+    const target = c.req.method === 'GET' ? returnTargetForPath(path) : null
+    if (target !== null) setReturnCookie(c, target, returnCookieSecure)
+    return c.redirect(location, 302)
+  }
 
   // ── Global error handler (redaction chokepoint) ─────────────────────────────
   // Hono's default onError does `console.error(err)` — a RAW, unredacted Error
@@ -517,6 +574,14 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     }),
   )
 
+  // ── Wiki responses are never cached ─────────────────────────────────────────
+  // Registered ahead of the rate limiter and auth middleware so redirects, 429s,
+  // and refusals on /api/wiki carry it too.
+  app.use('/api/wiki/*', async (c, next) => {
+    await next()
+    c.res.headers.set('cache-control', 'no-store')
+  })
+
   // ── Rate limiting middleware (defense-in-depth; real limiting belongs at Caddy) ──
   // Keyed on the direct connection remote address, not X-Forwarded-For (client-spoofable).
   app.use('*', async (c: Context, next) => {
@@ -534,7 +599,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
       }
 
       if (!checkRateLimit(ip)) {
-        logger.warning('Rate limit exceeded', {ip, path})
+        logger.warning('Rate limit exceeded', {ip, path: loggablePath(path)})
         return c.text('Too Many Requests', 429)
       }
     }
@@ -598,13 +663,13 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
       // Require an inbound cookie to forward as the end-user principal.
       const inboundCookie = c.req.header('cookie')
       if (inboundCookie === undefined || inboundCookie.trim() === '') {
-        return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
+        return redirectToLogin(c, GATEWAY_LOGIN_REDIRECT, path)
       }
 
       // Fail closed if the configured gateway origin is invalid or unparseable.
       if (resolvedGatewayOrigin === null) {
-        logger.warning('gateway-auth: configured gateway origin is invalid or missing', {path})
-        return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
+        logger.warning('gateway-auth: configured gateway origin is invalid or missing', {path: loggablePath(path)})
+        return redirectToLogin(c, GATEWAY_LOGIN_REDIRECT, path)
       }
 
       // Build the OperatorClient: use injected client (tests) or build per-request (production).
@@ -636,24 +701,24 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
       // Log only the path — never the cookie value or error detail (may contain identity info).
       const result = await client.getCurrentSession()
       if (!isOk(result)) {
-        logger.warning('gateway-auth: session validation failed', {path})
-        return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
+        logger.warning('gateway-auth: session validation failed', {path: loggablePath(path)})
+        return redirectToLogin(c, GATEWAY_LOGIN_REDIRECT, path)
       }
 
       // Expired-session defense — even on a 2xx, a non-future expiresAt → deny.
       if (result.data.expiresAt <= Date.now()) {
-        logger.warning('gateway-auth: session expired', {path})
-        return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
+        logger.warning('gateway-auth: session expired', {path: loggablePath(path)})
+        return redirectToLogin(c, GATEWAY_LOGIN_REDIRECT, path)
       }
 
       // Nonsensical identity defense — non-positive operatorId or blank login → deny.
       if (result.data.operatorId <= 0) {
-        logger.warning('gateway-auth: session has non-positive operatorId', {path})
-        return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
+        logger.warning('gateway-auth: session has non-positive operatorId', {path: loggablePath(path)})
+        return redirectToLogin(c, GATEWAY_LOGIN_REDIRECT, path)
       }
       if (result.data.login.trim() === '') {
-        logger.warning('gateway-auth: session has empty login', {path})
-        return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
+        logger.warning('gateway-auth: session has empty login', {path: loggablePath(path)})
+        return redirectToLogin(c, GATEWAY_LOGIN_REDIRECT, path)
       }
 
       // Valid gateway session: attach to context.
@@ -695,7 +760,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
           return next()
         }
 
-        return c.redirect('/auth/login', 302)
+        return redirectToLogin(c, '/auth/login', path)
       }
 
       c.set('sessionLogin', validSession.login)
@@ -708,7 +773,13 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     // or any Arctic path — the dashboard session-minting flow must not be reachable
     // (a dashboard `session` cookie cannot satisfy the gateway; see issue #70).
     const gatewayAuthRouter = new Hono()
-    gatewayAuthRouter.get('/login', c => c.redirect(GATEWAY_LOGIN_REDIRECT, 302))
+    gatewayAuthRouter.get('/login', c => {
+      // A single, validated `next` is remembered; the redirect target never depends on it.
+      const requested = c.req.queries('next')
+      const target = requested?.length === 1 ? parseReturnTarget(requested[0]) : null
+      if (target !== null) setReturnCookie(c, target, returnCookieSecure)
+      return c.redirect(GATEWAY_LOGIN_REDIRECT, 302)
+    })
     app.route('/auth', gatewayAuthRouter)
   } else if (operatorLogin === undefined) {
     // Fail-closed: no operator login → deny all auth routes; no session can be minted.
@@ -729,6 +800,25 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // ── API routes ───────────────────────────────────────────────────────────────
   app.route('/api', buildApiRouter(getSnapshot))
 
+  // ── Wiki editor routes ──────────────────────────────────────────────────────
+  // Behind the session middleware above. Writes run their own authorization chain.
+  const wikiDeps: WikiAppDeps = opts?.wiki ?? {
+    pages: null,
+    write: null,
+    policy: {capability: {enabled: false, reason: 'app-credentials-absent'}, fixtureOperatorLogin: null},
+  }
+  const fixtureOperatorLogin =
+    wikiDeps.policy.fixtureOperatorLogin ??
+    (fixtureHarnessActive && devAutoLogin && operatorLogin !== undefined ? operatorLogin : null)
+  app.route(
+    '/api/wiki',
+    buildWikiRouter({
+      ...wikiDeps,
+      policy: {...wikiDeps.policy, fixtureOperatorLogin},
+      rateLimit: key => consumeRateLimit(key, WIKI_WRITE_RATE_LIMIT_MAX),
+    }),
+  )
+
   // ── Operator listener channel ───────────────────────────────────────────────
   // Only mounted when a store is injected. /ingest is public-before-session
   // (isPublicPath above) and HMAC-gated inside the route; /messages*/ack-all
@@ -740,9 +830,11 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     )
   }
 
-  // Serve the React SPA at /. index.html requires a session; shell assets are public.
+  // Serve the React SPA at / and at /wiki/<id>. index.html requires a session; shell assets are public.
   // When pushNotificationsEnabled, inject a <meta name="push-enabled" content="true">
   // tag so the SPA can render the push consent surface without a separate flag fetch.
+  // Both routes share one handler, so the injection and the length are computed the same way.
+  let serveIndex: MiddlewareHandler
   if (pushNotificationsEnabled) {
     // Serve the SPA shell inline (not via serveStatic) so the injected body's
     // length is computed correctly. Post-processing a streamed serveStatic
@@ -750,17 +842,26 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     // and drops the <div id="root"> mount target. Reading + injecting + c.html()
     // recomputes the length. Fall through to serveStatic if the file is missing.
     const indexHtmlPath = join(webDistRoot, 'index.html')
-    app.get('/', async c => {
+    serveIndex = async c => {
       if (!existsSync(indexHtmlPath)) return c.notFound()
       const html = readFileSync(indexHtmlPath, 'utf8')
       const injected = html.includes('<meta name="push-enabled"')
         ? html
         : html.replace('</head>', '<meta name="push-enabled" content="true"></head>')
       return c.html(injected)
-    })
+    }
   } else {
-    app.get('/', serveStatic({root: webDistRoot, path: 'index.html'}))
+    serveIndex = serveStatic({root: webDistRoot, path: 'index.html'})
   }
+  app.get('/', serveIndex)
+
+  // One-segment /wiki/<id> paths only. The ID is checked against the raw path, so an
+  // encoded slash, a dot segment, or a trailing slash is not served the shell.
+  app.get('/wiki/:id', async (c, next) => {
+    const id = new URL(c.req.url).pathname.slice('/wiki/'.length)
+    if (parsePageId(id) === null) return c.notFound()
+    return serveIndex(c, next)
+  })
 
   // ── /operator and /operator/ → / redirect (unconditional, flag-independent) ──
   // / is the canonical operator launch route. Old /operator and /operator/ links
@@ -768,8 +869,9 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   // the flag has no effect. /operator/ is handled separately because Hono's
   // app.route('/operator', router) does not strip the trailing slash — router.get('/')
   // inside the sub-router never fires for /operator/.
-  app.get('/operator', c => c.redirect('/', 302))
-  app.get('/operator/', c => c.redirect('/', 302))
+  // A wiki deep-link target remembered across login is consumed here, once.
+  app.get('/operator', c => c.redirect(consumeReturnCookie(c) ?? '/', 302))
+  app.get('/operator/', c => c.redirect(consumeReturnCookie(c) ?? '/', 302))
 
   // /static files are un-hashed and not precached, so without this a browser can heuristically reuse a
   // stale module next to a fresh bundle after a deploy. Registered before every /static mount below.
@@ -1052,6 +1154,101 @@ export function buildWikiWriteWiring(config: WikiWriteConfig): WikiWriteWiring {
   }
 }
 
+const WIKI_INSTALLATION_TTL_MS = 10 * 60_000
+
+/**
+ * Read-token source for the wiki repository, from the existing read mint. The
+ * installation ID is resolved with the App JWT and trusted for a bounded time;
+ * tokens come from `mintReadOnlyToken`, which caches them.
+ */
+export function createWikiReadTokenSource(deps: {
+  readonly resolveInstallationId: () => Promise<number>
+  readonly mint: (installationId: number, permissions: Record<string, 'read'>) => Promise<string>
+  readonly now?: () => number
+}): ReadTokenSource {
+  const now = deps.now ?? Date.now
+  let resolved: {readonly id: number; readonly at: number} | null = null
+
+  return readTokenSource(async () => {
+    if (resolved === null || now() - resolved.at >= WIKI_INSTALLATION_TTL_MS) {
+      resolved = {id: await deps.resolveInstallationId(), at: now()}
+    }
+    return mintReadOnlyToken(resolved.id, deps.mint)
+  })
+}
+
+function buildWikiReadTokens(credentials: {appId: string; privateKey: string}): ReadTokenSource {
+  const appClient = createDashboardAppClient(credentials)
+  return createWikiReadTokenSource({
+    mint: appClient.mintInstallationToken,
+    resolveInstallationId: async () => {
+      const response = await appClient.octokit.request('GET /repos/{owner}/{repo}/installation', {
+        owner: 'fro-bot',
+        repo: '.github',
+      })
+      return (response.data as unknown as {id: number}).id
+    },
+  })
+}
+
+/**
+ * Compose the wiki capability. List and page reads use the read token source.
+ * The save path, the dispatch port, and promotion status use the write token
+ * source built from the Fro Bot App client. With no read credentials the pages
+ * are unavailable; with write capability off there is no write side at all.
+ */
+export function buildWikiAppDeps(input: {
+  readonly readTokens: ReadTokenSource | null
+  readonly write: WikiWriteWiring
+  readonly fetch?: typeof fetch | undefined
+}): WikiAppDeps {
+  const transportOptions = input.fetch === undefined ? {} : {fetch: input.fetch}
+  const blobCache = createBlobCache()
+  const contractChecker = createGateContractChecker({
+    fetch: async (url, init) => fetch(url, init),
+    logger,
+  })
+  const checkContract = async () => contractChecker.check()
+
+  const pages =
+    input.readTokens === null
+      ? null
+      : createWikiPages({
+          client: createWikiDataClient(createReadTransport(input.readTokens, transportOptions), {blobCache}),
+          checkContract,
+        })
+
+  if (!input.write.enabled) {
+    return {
+      pages,
+      write: null,
+      policy: {capability: {enabled: false, reason: input.write.reason}, fixtureOperatorLogin: null},
+    }
+  }
+
+  const {tokens, config} = input.write
+  const client = createWikiDataClient(
+    createWriteTransport(
+      writeTokenSource(async () => tokens.getWriteToken()),
+      transportOptions,
+    ),
+    {blobCache},
+  )
+  const dispatch = createDispatchPort({client})
+  return {
+    pages,
+    write: {
+      operation: createWikiWriteOperation({client, checkContract, dispatch}),
+      dispatch,
+      status: createPromotionStatusReader({client}),
+    },
+    policy: {
+      capability: {enabled: true, operatorId: config.operatorId, dashboardOrigin: config.dashboardOrigin},
+      fixtureOperatorLogin: null,
+    },
+  }
+}
+
 /**
  * Binds the app to `DASHBOARD_HOST:DASHBOARD_PORT` (default `0.0.0.0:3000`) via
  * @hono/node-server. Loads the cookie key asynchronously before starting.
@@ -1107,7 +1304,12 @@ async function createDashboardServer(): Promise<ServerType> {
   const wikiWrite = buildWikiWriteWiring(readWikiWriteConfig())
   logger.info('Wiki write capability', wikiWrite.enabled ? {enabled: true} : {enabled: false, reason: wikiWrite.reason})
 
-  const app = await buildDashboardApp({cookieKey, getSnapshot, listenerStore, listenerIngestKey})
+  const wiki = buildWikiAppDeps({
+    readTokens: appId !== null && privateKey !== null ? buildWikiReadTokens({appId, privateKey}) : null,
+    write: wikiWrite,
+  })
+
+  const app = await buildDashboardApp({cookieKey, getSnapshot, listenerStore, listenerIngestKey, wiki})
 
   const {host, port} = readServerBindConfig()
 

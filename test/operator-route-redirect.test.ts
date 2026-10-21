@@ -270,3 +270,80 @@ describe('auth path — unauthenticated / enters login flow', () => {
     expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Wiki deep link: the return cookie survives login and is consumed once
+// ---------------------------------------------------------------------------
+
+describe('/operator redirect — wiki return cookie', () => {
+  const TARGET = '/wiki/repos.acme--alpha'
+  const RETURN = `wiki_return=${encodeURIComponent(TARGET)}`
+
+  it('lands an unauthenticated /wiki/<id> visit back on the page after the gateway returns to /operator', async () => {
+    const app = await buildGatewayApp(makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION)))
+
+    const first = await app.request(TARGET)
+    expect(first.status).toBe(302)
+    expect(first.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
+    const setCookie = first.headers.get('set-cookie') ?? ''
+    expect(setCookie).toContain(RETURN)
+
+    const back = await app.request('/operator', {headers: {cookie: `__Host-session=x; ${RETURN}`}})
+    expect(back.status).toBe(302)
+    expect(back.headers.get('location')).toBe(TARGET)
+    expect(back.headers.get('set-cookie') ?? '').toMatch(/wiki_return=;.*Max-Age=0/iu)
+
+    const again = await app.request('/operator', {headers: {cookie: '__Host-session=x'}})
+    expect(again.status).toBe(302)
+    expect(again.headers.get('location')).toBe('/')
+    expect(again.headers.get('set-cookie')).toBeNull()
+  })
+
+  it('also redirects /operator/ to the target and clears the cookie', async () => {
+    const app = await buildGatewayApp(makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION)))
+
+    const res = await app.request('/operator/', {headers: {cookie: `__Host-session=x; ${RETURN}`}})
+
+    expect(res.headers.get('location')).toBe(TARGET)
+    expect(res.headers.get('set-cookie') ?? '').toMatch(/Max-Age=0/iu)
+  })
+
+  it.each([
+    ['an absolute URL', 'https://evil.example/wiki/repos.a'],
+    ['a nested path', '/wiki/repos.a/b'],
+    ['the root', '/'],
+    ['a malformed page ID', '/wiki/repos..'],
+  ])('ignores and clears a cookie holding %s', async (_label, value) => {
+    const app = await buildGatewayApp(makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION)))
+
+    const res = await app.request('/operator', {headers: {cookie: `__Host-session=x; wiki_return=${encodeURIComponent(value)}`}})
+
+    expect(res.headers.get('location')).toBe('/')
+    expect(res.headers.get('set-cookie') ?? '').toMatch(/Max-Age=0/iu)
+  })
+
+  it('consumes the cookie in Arctic mode as well', async () => {
+    const app = await buildArcticApp(false)
+
+    const res = await app.request('/operator', {headers: {cookie: `session=${makeSessionCookie()}; ${RETURN}`}})
+
+    expect(res.headers.get('location')).toBe(TARGET)
+  })
+
+  it('redirects to / with no cookie header when there is nothing to consume', async () => {
+    const app = await buildArcticApp(false)
+
+    const res = await app.request('/operator', {headers: {cookie: `session=${makeSessionCookie()}`}})
+
+    expect(res.headers.get('location')).toBe('/')
+    expect(res.headers.get('set-cookie')).toBeNull()
+  })
+
+  it('does not honor the cookie on an unauthenticated /operator request', async () => {
+    const app = await buildArcticApp(false)
+
+    const res = await app.request('/operator', {headers: {cookie: RETURN}})
+
+    expect(res.headers.get('location')).toBe('/auth/login')
+  })
+})

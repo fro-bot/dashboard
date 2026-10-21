@@ -774,7 +774,7 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 
 ### U5. Authorization chain and wiki routes
 
-- [ ] Landed
+- [x] Landed
 
 **Goal:** Expose the wiki read and write routes behind operator-identity, origin, content-type, and rate-limit checks. Serve the deep-link shell and carry the page target across login.
 

@@ -505,3 +505,53 @@ describe('sw.ts push and notificationclick handlers (behavioral)', () => {
     expect(appWindow.postMessage).not.toHaveBeenCalled()
   })
 })
+
+// The wiki API carries drafts and save outcomes. It must reach the server on every request, so the worker
+// may route /api/wiki/* only through NetworkOnly and may not cache it or answer it from the precache.
+describe('sw.ts routing of /api/wiki/* (behavioral)', () => {
+  const WIKI_PATHS = [
+    '/api/wiki/pages',
+    '/api/wiki/pages/repos.acme--alpha',
+    '/api/wiki/pages/repos.acme--alpha/save',
+    '/api/wiki/operations/00000000-0000-4000-8000-000000000001',
+    '/api/wiki/promotion/status',
+    '/api/wiki/promotion/dispatch',
+  ]
+
+  beforeEach(() => {
+    vi.resetModules()
+    vi.stubGlobal('addEventListener', vi.fn())
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.clearAllMocks()
+  })
+
+  it('routes every /api/wiki/* URL to a NetworkOnly strategy and to nothing else', async () => {
+    const routing = await import('workbox-routing')
+    const strategies = await import('workbox-strategies')
+    await import('./sw.ts')
+
+    type Matcher = (options: {url: URL; request: {mode: string; destination: string}}) => boolean
+    const registered = (vi.mocked(routing.registerRoute).mock.calls as unknown as [unknown, unknown][]).filter(
+      (call): call is [Matcher, unknown] => typeof call[0] === 'function',
+    )
+    expect(registered.length).toBeGreaterThan(0)
+
+    for (const path of WIKI_PATHS) {
+      const url = new URL(path, 'https://dashboard.fro.bot')
+      const request = {mode: 'cors', destination: ''}
+      const handlers = registered.filter(([matcher]) => matcher({url, request})).map(([, handler]) => handler)
+      expect(handlers.length, path).toBeGreaterThan(0)
+      for (const handler of handlers) expect(vi.mocked(strategies.NetworkOnly).mock.results.map(r => r.value)).toContain(handler)
+    }
+  })
+
+  it('does not precache or runtime-cache any wiki path', () => {
+    const source = readFileSync(resolve(import.meta.dirname, 'sw.ts'), 'utf8')
+
+    expect(source).not.toMatch(/StaleWhileRevalidate|CacheFirst|NetworkFirst/u)
+    expect(readSW()).not.toMatch(/api\/wiki/u)
+  })
+})
