@@ -3,13 +3,17 @@ import {
   assertAllowedTarget,
   CORRECTIONS_PATH,
   isAllowedWikiPath,
+  isWritablePath,
   pageIdFor,
   parsePageId,
   parseWikiPagePath,
   resolvePagePath,
+  WIKI_INDEX_PATH,
+  WIKI_LOG_PATH,
   WIKI_PAGE_TYPES,
   WIKI_REF,
   WIKI_REPOSITORY,
+  writableSetFor,
 } from '../src/wiki/paths.ts'
 
 const TREE = new Set([
@@ -146,5 +150,38 @@ describe('resolvePagePath', () => {
       expect(resolved === null || isAllowedWikiPath(resolved)).toBe(true)
     }
     expect(resolvePagePath('repos.x/../../../secrets', hostile)).toBeNull()
+  })
+})
+
+describe('write allowlist', () => {
+  const PAGE = 'knowledge/wiki/repos/marcusrbrown--infra.md'
+
+  it('lets a commit write exactly the page, the log, the index, and the corrections file', () => {
+    expect([...writableSetFor(PAGE)].sort()).toEqual([PAGE, WIKI_LOG_PATH, WIKI_INDEX_PATH, CORRECTIONS_PATH].sort())
+    expect(WIKI_LOG_PATH).toBe('knowledge/log.md')
+    expect(WIKI_INDEX_PATH).toBe('knowledge/index.md')
+  })
+
+  it.each([
+    'knowledge/schema.md',
+    'knowledge/wiki/README.md',
+    'knowledge/wiki/repos/other.md',
+    'metadata/repos.yaml',
+    '.github/workflows/merge-data.yaml',
+    'docs/plan.md',
+    '',
+  ])('does not include %j', path => {
+    expect(writableSetFor(PAGE).has(path)).toBe(false)
+  })
+
+  it('accepts only page paths, the log, the index, and the corrections file as writable', () => {
+    for (const path of [PAGE, WIKI_LOG_PATH, WIKI_INDEX_PATH, CORRECTIONS_PATH]) expect(isWritablePath(path)).toBe(true)
+    for (const path of ['knowledge/schema.md', 'metadata/repos.yaml', 'knowledge/wiki/README.md', 'knowledge/wiki/repos/a/b.md']) {
+      expect(isWritablePath(path)).toBe(false)
+    }
+  })
+
+  it('refuses a page path outside the allowlist', () => {
+    expect(() => writableSetFor('knowledge/schema.md')).toThrow('path')
   })
 })

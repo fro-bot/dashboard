@@ -348,7 +348,6 @@ The verdict is `extend`. The write operation, the Git Data client, and the gates
 ### Deferred to Implementation
 
 - The exact environment variable names for the Fro Bot key slot. The plan proposes `DASHBOARD_FRO_BOT_APP_ID` and `DASHBOARD_FRO_BOT_APP_KEY` with `_FILE` precedence. U1 fixes the names, and the runbook hands them to infra.
-- Commit identity. Pipeline commits are authored as the `fro-bot[bot]` address, and the writer constant uses another address. U3 matches the pipeline's identity and checks whether omitting author and committer yields GitHub-verified commits.
 - Whether the Fro Bot App is on the bypass list of the "data branch: Fro Bot App only" ruleset. The closing real save proves it, and U3 maps a ruleset refusal to a failure.
 - The real HTTP status GitHub returns for a non-forced ref update on a moved head and for a ruleset refusal. KTD9 does not depend on the status, but the first real save confirms the mapping.
 - The cold-read measurement result and whether anything beyond the blob cache is warranted (U2).
@@ -642,7 +641,7 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 
 ### U3. Write operation
 
-- [ ] Landed
+- [x] Landed
 
 **Goal:** One save runs the guards and gates, commits as Fro Bot, calls an injected dispatch port, and reports a distinct outcome. It stays correct while pipeline commits move the head.
 
@@ -666,7 +665,7 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 - Gates apply the staged transitions and new marks to the corrections read at save time, then run the shared build, survival, lint, and rendering checks. Retired and superseded corrections skip the survival check.
 - The server mints correction IDs and builds attribution from the verified session login and the server clock. A mark on a page without `node_id` is rejected.
 - A gate error that carries findings becomes a rejection with those findings. Findings carry `target` only when that text occurs in the submission.
-- The commit message keeps the manual-edit subject and adds two trailers: the operation ID and the operator login from the session. Author and committer follow the identity decision in Deferred to Implementation.
+- The commit message keeps the manual-edit subject and adds two trailers: the operation ID and the operator login from the session. The commit sends no author or committer. GitHub then attributes it to the Fro Bot App and signs it, as it does for the pipeline's verified `data` commits; GitHub's bot signature verification requires no custom author or committer.
 - The commit carries the page, the appended `knowledge/log.md`, the rebuilt `knowledge/index.md`, and the corrections file when the save writes it (KTD22). Blobs are created only for files whose content changed.
 - Ref-update failures follow KTD9: re-read the head to classify, retry a moved head within the bound, fail on an unchanged head, and run reconcile on a timeout or server error.
 - Reconcile lists commits touching the page path and the corrections path since the operation started, matches the operation trailer, and reports success on a match. No match or a listing failure reports an indeterminate result. A lookup entry point serves the reopen case: given an operation ID, a page ID, and a start time, it runs the same path-scoped match.

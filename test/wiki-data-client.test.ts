@@ -6,6 +6,7 @@ import {
   createReadTransport,
   createWikiDataClient,
   createWriteTransport,
+  rateLimitOf,
   readTokenSource,
   WikiDataUnavailableError,
   writeTokenSource,
@@ -472,7 +473,13 @@ describe('wiki data client: writes and history', () => {
       per_page: 100,
     })
     expect(commits).toEqual([
-      {sha: 'c2', message: 'edit\n\nFro-Operation-Id: op-1', parents: ['c1'], treeSha: 't2'},
+      {
+        sha: 'c2',
+        message: 'edit\n\nFro-Operation-Id: op-1',
+        parents: ['c1'],
+        treeSha: 't2',
+        committedAt: '2030-01-02T00:00:00Z',
+      },
       {sha: 'c1', message: 'older', parents: []},
     ])
   })
@@ -596,6 +603,106 @@ describe('wiki data client: writes and history', () => {
     ['jobs', async (c: ReturnType<typeof createWikiDataClient>) => c.listRunJobs(1), {listRunJobs: vi.fn().mockResolvedValue({data: {}})}],
   ])('rejects a malformed %s response', async (_label, call, transport) => {
     await expect(call(createWikiDataClient(transport))).rejects.toThrow()
+  })
+})
+
+describe('wiki data client: write support', () => {
+  it('reads the head SHA with one request', async () => {
+    const transport = readTransport([], {}, {head: 'head-9'})
+
+    await expect(createWikiDataClient(transport).getHeadSha()).resolves.toBe('head-9')
+    expect(transport.getRef).toHaveBeenCalledTimes(1)
+    expect(transport.getTree).not.toHaveBeenCalled()
+  })
+
+  it('returns the commit SHA and the time GitHub reports for a created commit', async () => {
+    const transport = {
+      createCommit: vi.fn().mockResolvedValue({data: {sha: 'c1', committer: {date: '2030-01-02T03:04:05Z'}}}),
+    }
+
+    await expect(
+      createWikiDataClient(transport).createCommit({treeSha: 't', parentSha: 'p', message: 'm'}),
+    ).resolves.toEqual({sha: 'c1', committedAt: '2030-01-02T03:04:05Z'})
+  })
+
+  it('sends the given author and committer, and sends none when none are given', async () => {
+    const transport = {createCommit: vi.fn().mockResolvedValue({data: {sha: 'c1'}})}
+    const client = createWikiDataClient(transport)
+    const identity = {name: 'fro-bot[bot]', email: '109017866+fro-bot[bot]@users.noreply.github.com'}
+
+    await client.createCommit({treeSha: 't', parentSha: 'p', message: 'm', author: identity, committer: identity})
+    await client.createCommit({treeSha: 't', parentSha: 'p', message: 'm'})
+
+    expect(transport.createCommit.mock.calls[0]?.[0]).toMatchObject({author: identity, committer: identity})
+    expect(transport.createCommit.mock.calls[1]?.[0]).not.toHaveProperty('author')
+    expect(transport.createCommit.mock.calls[1]?.[0]).not.toHaveProperty('committer')
+  })
+
+  it('refuses to create a tree entry outside the write allowlist, or one that deletes', async () => {
+    const transport = {createTree: vi.fn().mockResolvedValue({data: {sha: 't2'}})}
+    const client = createWikiDataClient(transport)
+
+    await expect(client.createTree('t1', [{path: '.github/workflows/merge-data.yaml', sha: 'b'}])).rejects.toThrow('path')
+    await expect(client.createTree('t1', [{path: 'knowledge/wiki/topics/a.md', sha: null}])).rejects.toThrow('delete')
+    expect(transport.createTree).not.toHaveBeenCalled()
+    await expect(client.createTree('t1', [{path: 'knowledge/log.md', sha: 'b'}])).resolves.toBe('t2')
+  })
+
+  it('carries the commit time on listed commits', async () => {
+    const transport = {
+      listCommitsByPath: vi.fn().mockResolvedValue({
+        data: [{sha: 'c1', commit: {message: 'm', committer: {date: '2030-01-01T00:00:00Z'}}, parents: []}],
+      }),
+    }
+
+    const [commit] = await createWikiDataClient(transport).listCommitsByPath('knowledge/corrections.yaml')
+
+    expect(commit?.committedAt).toBe('2030-01-01T00:00:00Z')
+  })
+
+  it('reports a rate-limited snapshot read with its retry hint', async () => {
+    const limited = Object.assign(new Error('API rate limit exceeded'), {status: 403, response: {headers: {'retry-after': '12'}}})
+    const transport = {...readTransport([], {}), getRef: vi.fn().mockRejectedValue(limited)}
+
+    const failure = await createWikiDataClient(transport)
+      .getSnapshot()
+      .then(
+        () => null,
+        (error: unknown) => error,
+      )
+
+    expect(failure).toBeInstanceOf(WikiDataUnavailableError)
+    expect((failure as WikiDataUnavailableError).rateLimit).toEqual({retryAfterSeconds: 12})
+  })
+
+  describe('rateLimitOf', () => {
+    const error = (status: number | undefined, message: string, headers?: Record<string, string>) =>
+      Object.assign(new Error(message), {status, ...(headers === undefined ? {} : {response: {headers}})})
+
+    it.each([
+      ['a 429', error(429, 'Too Many Requests', {'retry-after': '5'}), {retryAfterSeconds: 5}],
+      ['a 403 with no remaining quota', error(403, 'Forbidden', {'x-ratelimit-remaining': '0'}), {retryAfterSeconds: null}],
+      ['a 403 that names a rate limit', error(403, 'You have exceeded a secondary rate limit'), {retryAfterSeconds: null}],
+      ['a 429 with no headers', error(429, 'Too Many Requests'), {retryAfterSeconds: null}],
+    ])('recognises %s', (_label, input, expected) => {
+      expect(rateLimitOf(input)).toEqual(expected)
+    })
+
+    it.each([
+      ['an ordinary 403', error(403, 'Resource not accessible by integration')],
+      ['a 404', error(404, 'Not Found')],
+      ['a 500', error(500, 'Server Error')],
+      ['a plain Error', new Error('nope')],
+      ['a non-error', 'x'],
+      ['null', null],
+    ])('ignores %s', (_label, input) => {
+      expect(rateLimitOf(input)).toBeNull()
+    })
+
+    it('ignores a nonsense retry-after value', () => {
+      expect(rateLimitOf(error(429, 'x', {'retry-after': 'soon'}))).toEqual({retryAfterSeconds: null})
+      expect(rateLimitOf(error(429, 'x', {'retry-after': '-4'}))).toEqual({retryAfterSeconds: null})
+    })
   })
 })
 

@@ -6,7 +6,7 @@
  * corrections file is an error result, never an empty list.
  */
 
-import type {CorrectionLifecycle, CorrectionRecord, CorrectionsFile} from '@fro.bot/wiki-write-core'
+import type {CorrectionLifecycle, CorrectionRecord} from '@fro.bot/wiki-write-core'
 import type {Result} from '../result.ts'
 import type {GitHubSnapshot, WikiDataClient} from './data-client.ts'
 import type {GateContractDecision, GateContractVerdict} from './gate-contract.ts'
@@ -15,14 +15,14 @@ import type {WikiPageType} from './paths.ts'
 import {createHash} from 'node:crypto'
 import {
   getCorrectionLifecycle,
-  parseCorrections,
   parseFrontmatterDocument,
   verifyCorrectionSurvival,
 } from '@fro.bot/wiki-write-core'
 import {err, ok} from '../result.ts'
 import {WikiDataUnavailableError} from './data-client.ts'
 import {classifyGateContract} from './gate-contract.ts'
-import {CORRECTIONS_PATH, pageIdFor, parsePageId, parseWikiPagePath, resolvePagePath, WIKI_PAGE_TYPES} from './paths.ts'
+import {readCorrectionsFile} from './gates.ts'
+import {pageIdFor, parsePageId, parseWikiPagePath, resolvePagePath, WIKI_PAGE_TYPES} from './paths.ts'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -150,18 +150,6 @@ function parsePage(content: string): ParsedPage | null {
   }
 }
 
-/** A missing file is the empty set. An empty or unparseable one is corrupt. */
-function parseCorrectionsFile(files: Record<string, string>): CorrectionsFile | null {
-  const raw = files[CORRECTIONS_PATH]
-  if (raw === undefined) return {version: 1, corrections: []}
-  if (raw.trim() === '') return null
-  try {
-    return parseCorrections(raw)
-  } catch {
-    return null
-  }
-}
-
 function staleIds(path: string, content: string, entries: readonly CorrectionRecord[]): ReadonlySet<string> {
   if (entries.length === 0) return new Set()
   try {
@@ -187,6 +175,16 @@ function toPageCorrection(record: CorrectionRecord, stale: boolean): PageCorrect
     stale,
     record,
   }
+}
+
+/** The read-model entries for a page's corrections records, with the stale flag set. */
+export function toPageCorrections(
+  path: string,
+  content: string,
+  records: readonly CorrectionRecord[],
+): PageCorrection[] {
+  const stale = staleIds(path, content, records)
+  return records.map(record => toPageCorrection(record, stale.has(record.id)))
 }
 
 function unavailable(error: unknown): WikiPagesError {
@@ -257,12 +255,11 @@ export function createWikiPages(deps: WikiPagesDeps): WikiPages {
     const parsed = parsePage(content)
     if (parsed === null) return err({kind: 'page-invalid'})
 
-    const file = parseCorrectionsFile(snapshot.files)
+    const file = readCorrectionsFile(snapshot.files)
     if (file === null) return err({kind: 'corrections-corrupt'})
 
     const records =
       parsed.nodeId === null ? [] : file.corrections.filter(record => record.page_node_id === parsed.nodeId)
-    const stale = staleIds(path, content, records)
 
     return ok({
       id,
@@ -273,7 +270,7 @@ export function createWikiPages(deps: WikiPagesDeps): WikiPages {
       pageBlobSha,
       nodeId: parsed.nodeId,
       canMark: parsed.nodeId !== null,
-      corrections: records.map(record => toPageCorrection(record, stale.has(record.id))),
+      corrections: toPageCorrections(path, content, records),
       correctionsBase: correctionsDigest(records),
       headSha: snapshot.headSha,
       contract,

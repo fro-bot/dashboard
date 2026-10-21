@@ -13,6 +13,8 @@ export const WIKI_REPOSITORY = `${WIKI_OWNER}/${WIKI_REPO}`
 export const WIKI_REF = 'data'
 
 export const CORRECTIONS_PATH = 'knowledge/corrections.yaml'
+export const WIKI_INDEX_PATH = 'knowledge/index.md'
+export const WIKI_LOG_PATH = 'knowledge/log.md'
 
 /**
  * Paths whose blobs a snapshot reads. An entry ending in `/` is a directory
@@ -48,6 +50,17 @@ export function isAllowedWikiPath(path: string): boolean {
 
 export function isSnapshotPath(path: string): boolean {
   return SNAPSHOT_PATH_PREFIXES.some(entry => (entry.endsWith('/') ? path.startsWith(entry) : path === entry))
+}
+
+/** Any path a commit may write: a page, the log, the index, or the corrections file. */
+export function isWritablePath(path: string): boolean {
+  return path === WIKI_LOG_PATH || path === WIKI_INDEX_PATH || isAllowedWikiPath(path)
+}
+
+/** The exact set of paths one save to `pagePath` may write. */
+export function writableSetFor(pagePath: string): ReadonlySet<string> {
+  if (parseWikiPagePath(pagePath) === null) throw new Error('path is not allowed')
+  return new Set([pagePath, WIKI_LOG_PATH, WIKI_INDEX_PATH, CORRECTIONS_PATH])
 }
 
 export function assertAllowedTarget(repository: string, ref: string, path: string): void {

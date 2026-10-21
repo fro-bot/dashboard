@@ -16,7 +16,7 @@
 import {Buffer} from 'node:buffer'
 import {Octokit} from '@octokit/core'
 import {sanitizeErrorMessage} from '../logger.ts'
-import {assertAllowedTarget, isSnapshotPath, WIKI_OWNER, WIKI_REF, WIKI_REPO, WIKI_REPOSITORY} from './paths.ts'
+import {assertAllowedTarget, isSnapshotPath, isWritablePath, WIKI_OWNER, WIKI_REF, WIKI_REPO, WIKI_REPOSITORY} from './paths.ts'
 
 export const PROMOTE_DATA_EVENT = 'promote-data'
 export const PROMOTION_WORKFLOW = 'merge-data.yaml'
@@ -25,7 +25,6 @@ const BLOB_READ_CONCURRENCY = 8
 const DEFAULT_BLOB_CACHE_BYTES = 64 * 1024 * 1024
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 const COMMIT_LIST_PAGE_SIZE = 100
-const FALLBACK_AUTHOR = {name: 'Fro Bot', email: '41898282+github-actions[bot]@users.noreply.github.com'}
 
 // ---------------------------------------------------------------------------
 // Token sources
@@ -93,10 +92,12 @@ export interface GitHubCommit {
   readonly message: string
   readonly parents: readonly string[]
   readonly treeSha?: string
+  readonly committedAt?: string
 }
 
 export interface TreeEntry {
   readonly path: string
+  /** Blob SHA. A tree entry never deletes. */
   readonly sha: string | null
 }
 
@@ -106,6 +107,11 @@ export interface CreateCommitInput {
   readonly message: string
   readonly author?: {readonly name: string; readonly email: string}
   readonly committer?: {readonly name: string; readonly email: string}
+}
+
+export interface CreatedCommit {
+  readonly sha: string
+  readonly committedAt: string | null
 }
 
 export interface PromotionPull {
@@ -131,10 +137,11 @@ export interface RunJob {
 
 export interface WikiDataClient {
   readonly getSnapshot: () => Promise<GitHubSnapshot>
+  readonly getHeadSha: () => Promise<string>
   readonly getCommit: (commitSha: string) => Promise<GitHubCommit>
   readonly createBlob: (content: string) => Promise<string>
   readonly createTree: (baseTreeSha: string, entries: readonly TreeEntry[]) => Promise<string>
-  readonly createCommit: (input: CreateCommitInput) => Promise<string>
+  readonly createCommit: (input: CreateCommitInput) => Promise<CreatedCommit>
   readonly updateRef: (commitSha: string) => Promise<void>
   readonly listCommitsByPath: (path: string, options?: {readonly since?: string}) => Promise<GitHubCommit[]>
   readonly createPromotionDispatch: () => Promise<void>
@@ -151,13 +158,57 @@ export interface WikiDataClientOptions {
 export class WikiDataUnavailableError extends Error {
   readonly reason: 'read-failed' | 'tree-truncated'
   readonly status: number | null
+  readonly rateLimit: RateLimitInfo | null
 
-  constructor(reason: 'read-failed' | 'tree-truncated', status: number | null, detail?: string) {
+  constructor(
+    reason: 'read-failed' | 'tree-truncated',
+    status: number | null,
+    detail?: string,
+    rateLimit: RateLimitInfo | null = null,
+  ) {
     super(detail === undefined ? `Wiki data unavailable: ${reason}` : `Wiki data unavailable: ${reason}: ${detail}`)
     this.name = 'WikiDataUnavailableError'
     this.reason = reason
     this.status = status
+    this.rateLimit = rateLimit
   }
+}
+
+export interface RateLimitInfo {
+  readonly retryAfterSeconds: number | null
+}
+
+const MAX_RETRY_HINT_SECONDS = 3600
+
+function headerOf(error: unknown, name: string): string | undefined {
+  const response = typeof error === 'object' && error !== null ? (error as {response?: unknown}).response : undefined
+  const headers = typeof response === 'object' && response !== null ? (response as {headers?: unknown}).headers : undefined
+  if (typeof headers !== 'object' || headers === null) return undefined
+  const value = (headers as Record<string, unknown>)[name]
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : undefined
+}
+
+/**
+ * Recognises a GitHub rate-limit response (429, or 403 with no quota left or a
+ * rate-limit message) and returns a retry hint in seconds when GitHub gave one.
+ */
+export function rateLimitOf(error: unknown): RateLimitInfo | null {
+  const status = statusOf(error)
+  const message = error instanceof Error ? error.message : ''
+  const exhausted = headerOf(error, 'x-ratelimit-remaining') === '0'
+  const named = /rate limit/iu.test(message)
+  if (status !== 429 && !(status === 403 && (exhausted || named))) return null
+
+  const retryAfter = Number(headerOf(error, 'retry-after'))
+  if (Number.isFinite(retryAfter) && retryAfter > 0) {
+    return {retryAfterSeconds: Math.min(Math.ceil(retryAfter), MAX_RETRY_HINT_SECONDS)}
+  }
+  const reset = Number(headerOf(error, 'x-ratelimit-reset'))
+  if (Number.isFinite(reset) && reset > 0) {
+    const seconds = Math.ceil(reset - Date.now() / 1000)
+    if (seconds > 0) return {retryAfterSeconds: Math.min(seconds, MAX_RETRY_HINT_SECONDS)}
+  }
+  return {retryAfterSeconds: null}
 }
 
 // ---------------------------------------------------------------------------
@@ -364,8 +415,18 @@ export function createWikiDataClient(
         'read-failed',
         statusOf(error),
         error instanceof Error ? sanitizeErrorMessage(error.message) : undefined,
+        rateLimitOf(error),
       )
     }
+  }
+
+  async function getHeadSha(): Promise<string> {
+    const ref = await call<{object?: {sha?: unknown}}>('getRef', {
+      owner: WIKI_OWNER,
+      repo: WIKI_REPO,
+      ref: `heads/${WIKI_REF}`,
+    })
+    return requireString(ref.object?.sha, 'GitHub ref did not return a head SHA')
   }
 
   async function getCommit(commitSha: string): Promise<GitHubCommit> {
@@ -393,6 +454,10 @@ export function createWikiDataClient(
   }
 
   async function createTree(baseTreeSha: string, entries: readonly TreeEntry[]): Promise<string> {
+    for (const entry of entries) {
+      if (!isWritablePath(entry.path)) throw new Error('tree entry path is not allowed')
+      if (entry.sha === null) throw new Error('tree entries cannot delete files')
+    }
     const response = await call<{sha?: unknown}>('createTree', {
       owner: WIKI_OWNER,
       repo: WIKI_REPO,
@@ -402,17 +467,21 @@ export function createWikiDataClient(
     return requireString(response.sha, 'GitHub tree creation did not return a SHA')
   }
 
-  async function createCommit(input: CreateCommitInput): Promise<string> {
-    const response = await call<{sha?: unknown}>('createCommit', {
+  async function createCommit(input: CreateCommitInput): Promise<CreatedCommit> {
+    const response = await call<{sha?: unknown; committer?: {date?: unknown}}>('createCommit', {
       owner: WIKI_OWNER,
       repo: WIKI_REPO,
       message: input.message,
       tree: input.treeSha,
       parents: [input.parentSha],
-      author: input.author ?? FALLBACK_AUTHOR,
-      committer: input.committer ?? FALLBACK_AUTHOR,
+      ...(input.author === undefined ? {} : {author: input.author}),
+      ...(input.committer === undefined ? {} : {committer: input.committer}),
     })
-    return requireString(response.sha, 'GitHub commit creation did not return a SHA')
+    const date = response.committer?.date
+    return {
+      sha: requireString(response.sha, 'GitHub commit creation did not return a SHA'),
+      committedAt: typeof date === 'string' && date !== '' ? date : null,
+    }
   }
 
   async function updateRef(commitSha: string): Promise<void> {
@@ -441,11 +510,16 @@ export function createWikiDataClient(
       const detail = typeof entry.commit === 'object' && entry.commit !== null ? (entry.commit as Record<string, unknown>) : {}
       const treeSha =
         typeof detail.tree === 'object' && detail.tree !== null ? (detail.tree as {sha?: unknown}).sha : undefined
+      const committedAt =
+        typeof detail.committer === 'object' && detail.committer !== null
+          ? (detail.committer as {date?: unknown}).date
+          : undefined
       return {
         sha: requireString(entry.sha, 'GitHub commit list entry did not return a SHA'),
         message: typeof detail.message === 'string' ? detail.message : '',
         parents: parentShas(entry.parents),
         ...(typeof treeSha === 'string' ? {treeSha} : {}),
+        ...(typeof committedAt === 'string' ? {committedAt} : {}),
       }
     })
   }
@@ -524,6 +598,7 @@ export function createWikiDataClient(
 
   return {
     getSnapshot,
+    getHeadSha,
     getCommit,
     createBlob,
     createTree,
