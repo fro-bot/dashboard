@@ -133,7 +133,12 @@ export function buildWikiAppDeps(input: {
   const {tokens, config} = input.write
   const client = createWikiDataClient(
     createWriteTransport(
-      writeTokenSource(async () => tokens.getWriteToken()),
+      writeTokenSource(
+        async () => tokens.getWriteToken(),
+        token => {
+          tokens.invalidate(token)
+        },
+      ),
       transportOptions,
     ),
     {blobCache},

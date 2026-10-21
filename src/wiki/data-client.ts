@@ -42,14 +42,19 @@ export interface ReadTokenSource {
 export interface WriteTokenSource {
   readonly kind: 'write-token-source'
   readonly getToken: () => Promise<string>
+  /** Drops a token GitHub rejected, so the next `getToken` mints a new one. Optional. */
+  readonly invalidate?: ((token: string) => void) | undefined
 }
 
 export function readTokenSource(getToken: () => Promise<string>): ReadTokenSource {
   return {kind: 'read-token-source', getToken}
 }
 
-export function writeTokenSource(getToken: () => Promise<string>): WriteTokenSource {
-  return {kind: 'write-token-source', getToken}
+export function writeTokenSource(
+  getToken: () => Promise<string>,
+  invalidate?: (token: string) => void,
+): WriteTokenSource {
+  return {kind: 'write-token-source', getToken, invalidate}
 }
 
 // ---------------------------------------------------------------------------
@@ -289,27 +294,55 @@ export function createBlobCache(options: {readonly maxBytes?: number} = {}): Blo
 // Real transports
 // ---------------------------------------------------------------------------
 
-function createRequester(getToken: () => Promise<string>, options: TransportOptions) {
+function createRequester(
+  getToken: () => Promise<string>,
+  options: TransportOptions,
+  invalidate?: (token: string) => void,
+) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
   let current: {readonly token: string; readonly octokit: Octokit} | null = null
 
   return async (route: string, params: Record<string, unknown>): Promise<{data: unknown}> => {
-    let token: string
+    // One deadline covers token acquisition, the request, and the one retry after a 401.
+    const deadline = Date.now() + timeoutMs
+    const remaining = (): number => Math.max(deadline - Date.now(), 0)
+    let usedToken: string | null = null
+
+    const attempt = async (): Promise<{data: unknown}> => {
+      let token: string
+      try {
+        token = await withinBound(getToken(), remaining(), 'GitHub request timed out')
+      } catch (error) {
+        // No request was sent. Keep the status so a refused credential still reads as a refusal.
+        throw new RequestNotSentError(
+          error instanceof Error ? sanitizeErrorMessage(error.message) : 'Token unavailable',
+          statusOf(error),
+        )
+      }
+      usedToken = token
+      if (current === null || current.token !== token) {
+        const octokit = new Octokit({auth: token, ...(options.fetch === undefined ? {} : {request: {fetch: options.fetch}})})
+        current = {token, octokit}
+      }
+      const response = await current.octokit.request(route, {...params, request: {signal: AbortSignal.timeout(remaining())}})
+      return {data: response.data as unknown}
+    }
+
     try {
-      token = await withinBound(getToken(), timeoutMs, 'GitHub request timed out')
+      return await attempt()
     } catch (error) {
-      // No request was sent. Keep the status so a refused credential still reads as a refusal.
-      throw new RequestNotSentError(
-        error instanceof Error ? sanitizeErrorMessage(error.message) : 'Token unavailable',
-        statusOf(error),
-      )
+      // A 401 means GitHub processed nothing, so one retry with a fresh token is safe.
+      if (
+        invalidate === undefined ||
+        usedToken === null ||
+        error instanceof RequestNotSentError ||
+        statusOf(error) !== 401
+      ) {
+        throw error
+      }
+      invalidate(usedToken)
+      return attempt()
     }
-    if (current === null || current.token !== token) {
-      const octokit = new Octokit({auth: token, ...(options.fetch === undefined ? {} : {request: {fetch: options.fetch}})})
-      current = {token, octokit}
-    }
-    const response = await current.octokit.request(route, {...params, request: {signal: AbortSignal.timeout(timeoutMs)}})
-    return {data: response.data as unknown}
   }
 }
 
@@ -332,7 +365,7 @@ export function createWriteTransport(
   source: WriteTokenSource,
   options: TransportOptions = {},
 ): Required<GitHubDataTransport> {
-  const request = createRequester(source.getToken, options)
+  const request = createRequester(source.getToken, options, source.invalidate)
   return {
     ...readCalls(request),
     createBlob: async params => request('POST /repos/{owner}/{repo}/git/blobs', params),

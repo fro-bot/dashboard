@@ -43,7 +43,7 @@ view of Fro Bot's cross-repo footprint.
    App's installation is broad, so the mint-time `permissions` subset is the only thing
    that keeps a minted token narrow. A `contents: write` token covers the whole
    `fro-bot/.github` repository; the `data` branch and the path allowlist
-   (`src/wiki/paths.ts`) are enforced in application code, not by the token.
+   (`src/wiki/paths.ts`) are enforced in application code, not by the token. The wiki read routes serve only content that is already public on `fro-bot/.github`, a public repository whose `data` branch anyone can read, so they need a dashboard session but no operator identity match.
 2. **Redaction preservation.** `src/github/metadata.ts` reads
    `metadata/repos.yaml` from the `fro-bot/.github` `data` branch and exports
    `redactedNodeIds` (node_ids of `[REDACTED]`/`private:true` entries). The

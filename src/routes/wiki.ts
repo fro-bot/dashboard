@@ -293,6 +293,14 @@ export function buildWikiRouter(deps: WikiRouterDeps): Hono<{Variables: WikiVari
     c.set('wikiRoute', '/api/wiki/operations/:operationId')
     if (deps.write === null) return forbidden(c)
 
+    // A lookup reads GitHub history, so it spends the operator's write budget. A session with
+    // no identity match is left to the per-IP limit that already covers every /api route.
+    const session = sessionOf(c)
+    if (session !== null && accessOf(deps, session).canWrite) {
+      const limit = deps.rateLimit(operatorRateLimitKey(session))
+      if (!limit.allowed) return rateLimited(c, limit.retryAfterSeconds)
+    }
+
     const operationId = c.req.param('operationId')
     const pageId = c.req.query('pageId')
     const startedAt = c.req.query('startedAt')

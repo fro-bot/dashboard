@@ -39,6 +39,11 @@ export const WRITE_PERMISSIONS = {contents: 'write'} as const satisfies WritePer
 export interface WriteTokenProvider {
   /** Returns a cached or freshly minted token. NEVER log this value. */
   readonly getWriteToken: () => Promise<string>
+  /**
+   * Drops the cached token when it is `token`, so the next call mints a new one. A newer
+   * cached token is kept. Used when GitHub rejects a token the cache still holds.
+   */
+  readonly invalidate: (token: string) => void
 }
 
 /** App-JWT request function, the seam for tests. */
@@ -156,8 +161,9 @@ function createJwtRequest(appId: string, privateKey: string): AppRequest {
 /**
  * Create a write-token provider authenticated as the Fro Bot App.
  *
- * Each instance owns its token cache (keyed by installation) and its resolved
- * installation ID. Nothing is shared across instances or with the read side.
+ * Each instance owns its token cache (keyed by installation), its resolved
+ * installation ID and one in-flight lookup-and-mint that concurrent callers share.
+ * Nothing is shared across instances or with the read side.
  */
 export function createFroBotAppClient(options: FroBotAppClientOptions): WriteTokenProvider {
   const send = options.request ?? createJwtRequest(options.appId, options.privateKey)
@@ -205,7 +211,7 @@ export function createFroBotAppClient(options: FroBotAppClientOptions): WriteTok
     return parseMintedToken(data)
   }
 
-  async function getWriteToken(): Promise<string> {
+  async function obtainWriteToken(): Promise<string> {
     const installationId = await resolveInstallationId()
     const cached = tokenCache.get(installationId)
     if (cached !== undefined) {
@@ -217,5 +223,21 @@ export function createFroBotAppClient(options: FroBotAppClientOptions): WriteTok
     return minted.token
   }
 
-  return {getWriteToken}
+  // One flight at a time: simultaneous cold callers share one lookup and one mint. The
+  // flight is cleared when it settles, so a rejection is never remembered.
+  let flight: Promise<string> | undefined
+  async function getWriteToken(): Promise<string> {
+    flight ??= obtainWriteToken().finally(() => {
+      flight = undefined
+    })
+    return flight
+  }
+
+  function invalidate(token: string): void {
+    for (const [installationId, cached] of tokenCache) {
+      if (cached.token === token) tokenCache.delete(installationId)
+    }
+  }
+
+  return {getWriteToken, invalidate}
 }

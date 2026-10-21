@@ -929,6 +929,88 @@ describe('GET /api/wiki/operations/:operationId', () => {
     expect(world.repo.calls).toHaveLength(0)
   })
 
+  describe('per-operator rate limit', () => {
+    const query = () => `pageId=${ALPHA_ID}&startedAt=1`
+
+    it('answers 429 with a Retry-After header on the 11th lookup in a minute', async () => {
+      const world = makeWorld()
+      const app = await gatewayApp(world.deps)
+
+      for (let index = 0; index < WIKI_WRITE_RATE_LIMIT_MAX; index += 1) {
+        expect((await lookup(app, query())).status).toBe(200)
+      }
+      const limited = await lookup(app, query())
+
+      expect(limited.status).toBe(429)
+      const body = (await limited.json()) as {state: string; retryAfterSeconds: number}
+      expect(body.state).toBe('rate-limited')
+      expect(body.retryAfterSeconds).toBeGreaterThan(0)
+      expect(limited.headers.get('retry-after')).toBe(String(body.retryAfterSeconds))
+      expect(limited.headers.get('cache-control')).toBe('no-store')
+    })
+
+    it('does not read GitHub for a limited lookup', async () => {
+      const world = makeWorld()
+      const app = await gatewayApp(world.deps)
+      for (let index = 0; index < WIKI_WRITE_RATE_LIMIT_MAX; index += 1) await lookup(app, query())
+      const before = world.repo.calls.length
+
+      await lookup(app, query())
+
+      expect(world.repo.calls.length).toBe(before)
+    })
+
+    it('shares the operator key with saves, so lookups cannot starve another operator', async () => {
+      const world = makeWorld()
+      const app = await gatewayApp(world.deps)
+      const other = await gatewayApp(world.deps, () => ({...SESSION, operatorId: 99999}))
+      for (let index = 0; index < WIKI_WRITE_RATE_LIMIT_MAX; index += 1) await lookup(app, query())
+
+      expect((await save(app, saveBody(world))).status).toBe(429)
+      expect(world.repo.count('createCommit')).toBe(0)
+      expect((await lookup(other, query())).status).toBe(200)
+    })
+
+    it('does not apply the operator limit to a session with no identity match', async () => {
+      const world = makeWorld()
+      const other = await gatewayApp(world.deps, () => ({...SESSION, operatorId: 99999}))
+
+      for (let index = 0; index < WIKI_WRITE_RATE_LIMIT_MAX + 5; index += 1) {
+        expect((await lookup(other, query())).status).toBe(200)
+      }
+    })
+
+    it('keeps the access rule: write capability configured, no identity match needed', async () => {
+      const off = makeWorld({capabilityOff: true})
+      const unmatched = makeWorld()
+
+      expect((await lookup(await gatewayApp(off.deps), query())).status).toBe(403)
+      expect((await lookup(await gatewayApp(unmatched.deps, () => ({...SESSION, operatorId: 99999})), query())).status).toBe(200)
+    })
+
+    it('counts a malformed lookup against the operator key', async () => {
+      const world = makeWorld()
+      const app = await gatewayApp(world.deps)
+
+      for (let index = 0; index < WIKI_WRITE_RATE_LIMIT_MAX; index += 1) {
+        expect((await lookup(app, 'pageId=..&startedAt=1')).status).toBe(400)
+      }
+
+      expect((await lookup(app, query())).status).toBe(429)
+    })
+
+    it('leaves the per-IP ceiling to the existing middleware for an unmatched session', async () => {
+      const world = makeWorld()
+      const other = await gatewayApp(world.deps, () => ({...SESSION, operatorId: 99999}))
+
+      for (let index = 0; index < 60; index += 1) await lookup(other, query())
+      const over = await lookup(other, query())
+
+      expect(over.status).toBe(429)
+      expect(await over.text()).toBe('Too Many Requests')
+    })
+  })
+
   it('accepts the largest start time the Date range holds', async () => {
     const world = makeWorld()
 

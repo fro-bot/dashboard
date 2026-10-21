@@ -81,8 +81,8 @@ automation is separately credentialed and outside this web/runtime boundary.
 The cost this accepts: a compromised dashboard login yields valid in-scope wiki edits, and a
 compromised server exposes the Fro Bot App private key. That App's installation is broad, so the
 mint-time `permissions` subset is what keeps a minted token narrow, and the `data` branch and path
-allowlist are enforced in application code, not by the token. Existing application POST endpoints
-are not GitHub write authority. See [docs/runbooks/wiki-editor.md](docs/runbooks/wiki-editor.md).
+allowlist are enforced in application code, not by the token. The wiki read routes serve only content that is already public on `fro-bot/.github`, a public repository whose `data` branch anyone can read, so they need a dashboard session but no operator identity match.
+Existing application POST endpoints are not GitHub write authority. See [docs/runbooks/wiki-editor.md](docs/runbooks/wiki-editor.md).
 
 Redaction is enforced from `metadata/repos.yaml` on the `fro-bot/.github` `data` branch:
 denylisted repos are excluded before any per-repo query, and the app fails closed if that read

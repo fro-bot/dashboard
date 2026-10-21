@@ -94,10 +94,10 @@ function recordingFetch() {
 }
 
 describe('buildWikiAppDeps', () => {
-  const enabled = (getWriteToken: () => Promise<string>): WikiWriteWiring => ({
+  const enabled = (getWriteToken: () => Promise<string>, invalidate: (token: string) => void = () => {}): WikiWriteWiring => ({
     enabled: true,
     config: {enabled: true, appId: '1', privateKey: 'k', operatorId: 4242, dashboardOrigin: ORIGIN},
-    tokens: {getWriteToken},
+    tokens: {getWriteToken, invalidate},
   })
 
   it('reads pages with the read token only and sends the dispatch with the write token only', async () => {
@@ -118,6 +118,42 @@ describe('buildWikiAppDeps', () => {
     expect(read).toHaveBeenCalledTimes(readCalls)
     expect(net.seen).toEqual([{method: 'POST', path: '/repos/fro-bot/.github/dispatches', authorization: expect.stringContaining('write-token') as string}])
     expect(getWriteToken).toHaveBeenCalledTimes(1)
+  })
+
+  it('evicts the write token and retries once when GitHub answers 401, through the token provider', async () => {
+    const getWriteToken = vi.fn().mockResolvedValueOnce('stale-write-token').mockResolvedValue('fresh-write-token')
+    const invalidate = vi.fn()
+    const seen: string[] = []
+    const net = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const authorization = new Headers(init?.headers).get('authorization') ?? ''
+      seen.push(authorization)
+      return authorization.includes('stale') ? new Response('{}', {status: 401}) : new Response(null, {status: 204})
+    })
+    const deps = buildWikiAppDeps({
+      readTokens: readTokenSource(async () => 'read-token'),
+      write: enabled(getWriteToken, invalidate),
+      fetch: net,
+    })
+
+    await expect(deps.write?.dispatch.dispatch()).resolves.toEqual({ok: true})
+
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith('stale-write-token')
+    expect(seen).toEqual(['token stale-write-token', 'token fresh-write-token'])
+  })
+
+  it('reports a persistent 401 on the dispatch as a failure after one retry', async () => {
+    const invalidate = vi.fn()
+    const net = vi.fn(async () => new Response('{}', {status: 401}))
+    const deps = buildWikiAppDeps({
+      readTokens: readTokenSource(async () => 'read-token'),
+      write: enabled(async () => 'write-token', invalidate),
+      fetch: net,
+    })
+
+    await expect(deps.write?.dispatch.dispatch()).resolves.toMatchObject({ok: false})
+
+    expect(net).toHaveBeenCalledTimes(2)
+    expect(invalidate).toHaveBeenCalledTimes(1)
   })
 
   it('carries the configured operator ID and origin into the policy, with no fixture identity', () => {

@@ -310,6 +310,119 @@ function clientFailing(route: string, error: unknown) {
   })
 }
 
+function slowHarness() {
+  const gate: {release: (() => void) | undefined} = {release: undefined}
+  const calls: string[] = []
+  const request = vi.fn(async (route: string) => {
+    calls.push(route)
+    await new Promise<void>(resolve => {
+      const previous = gate.release
+      gate.release = () => {
+        previous?.()
+        resolve()
+      }
+    })
+    if (route === INSTALLATION_ROUTE) return {data: {id: 9}}
+    return {data: {token: `shared-${calls.length}`, expires_at: new Date(START + 3_600_000).toISOString()}}
+  })
+  const client = createFroBotAppClient({appId: '12345', privateKey: FAKE_PEM, request, now: () => START})
+  return {client, gate, calls, request}
+}
+
+describe('write token eviction', () => {
+  it('drops the cached token on invalidate, so the next call mints a new one without a new lookup', async () => {
+    const {client, count, state} = makeHarness()
+    const stale = await client.getWriteToken()
+
+    client.invalidate(stale)
+    const fresh = await client.getWriteToken()
+
+    expect(stale).toBe('minted-token-1')
+    expect(fresh).toBe('minted-token-2')
+    expect(count(TOKEN_ROUTE)).toBe(2)
+    expect(count(INSTALLATION_ROUTE)).toBe(1)
+    expect(state.minted).toBe(2)
+  })
+
+  it('keeps a newer token when invalidate names an older one', async () => {
+    const {client, count} = makeHarness()
+    const first = await client.getWriteToken()
+    client.invalidate(first)
+    const second = await client.getWriteToken()
+
+    client.invalidate(first)
+
+    await expect(client.getWriteToken()).resolves.toBe(second)
+    expect(count(TOKEN_ROUTE)).toBe(2)
+  })
+
+  it('ignores invalidate when nothing is cached', async () => {
+    const {client, count} = makeHarness()
+
+    client.invalidate('never-minted')
+
+    await expect(client.getWriteToken()).resolves.toBe('minted-token-1')
+    expect(count(TOKEN_ROUTE)).toBe(1)
+  })
+})
+
+describe('concurrent cold write token calls', () => {
+  it('makes one lookup and one mint for five simultaneous cold calls', async () => {
+    const {client, gate, calls} = slowHarness()
+
+    const pending = Array.from({length: 5}, async () => client.getWriteToken())
+    for (let step = 0; step < 2; step += 1) {
+      await vi.waitFor(() => {
+        expect(gate.release).toBeDefined()
+      })
+      const release = gate.release
+      gate.release = undefined
+      release?.()
+    }
+    const tokens = await Promise.all(pending)
+
+    expect(calls).toEqual([INSTALLATION_ROUTE, TOKEN_ROUTE])
+    expect(new Set(tokens).size).toBe(1)
+  })
+
+  it('serves a call made after the flight from the cache', async () => {
+    const {client, count} = makeHarness()
+
+    await Promise.all(Array.from({length: 5}, async () => client.getWriteToken()))
+    await client.getWriteToken()
+
+    expect(count(INSTALLATION_ROUTE)).toBe(1)
+    expect(count(TOKEN_ROUTE)).toBe(1)
+  })
+
+  it('does not cache a rejected flight: every waiter fails, and the next call retries', async () => {
+    let fail = true
+    const request = vi.fn(async (route: string) => {
+      if (route === INSTALLATION_ROUTE) return {data: {id: 9}}
+      if (fail) throw new Error('transient')
+      return {data: {token: 'recovered', expires_at: new Date(START + 3_600_000).toISOString()}}
+    })
+    const client = createFroBotAppClient({appId: '12345', privateKey: FAKE_PEM, request, now: () => START})
+
+    const settled = await Promise.allSettled(Array.from({length: 4}, async () => client.getWriteToken()))
+    fail = false
+
+    expect(settled.every(result => result.status === 'rejected')).toBe(true)
+    expect(request.mock.calls.filter(([route]) => route === TOKEN_ROUTE)).toHaveLength(1)
+    await expect(client.getWriteToken()).resolves.toBe('recovered')
+  })
+
+  it('keeps each instance on its own flight', async () => {
+    const one = makeHarness()
+    const two = makeHarness()
+
+    await Promise.all([one.client.getWriteToken(), two.client.getWriteToken()])
+
+    expect(one.count(TOKEN_ROUTE)).toBe(1)
+    expect(two.count(TOKEN_ROUTE)).toBe(1)
+  })
+})
+
 describe('write token failures keep the HTTP status', () => {
   const statusError = (status: number) => Object.assign(new Error(`HTTP ${status} ghs_abcdefghijklmnopqrstuvwxyz0123456789`), {status})
 

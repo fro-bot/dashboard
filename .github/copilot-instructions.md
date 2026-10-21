@@ -33,7 +33,7 @@ load-bearing rules for code suggestions.
    edits, and server compromise exposes the Fro Bot App private key, whose App installation
    is broad, so the mint-time `permissions` subset is the only thing that keeps a minted
    token narrow. The `data` branch and the path allowlist (`src/wiki/paths.ts`) are enforced
-   in application code, not by the token.
+   in application code, not by the token. The wiki read routes serve only content that is already public on `fro-bot/.github`, a public repository whose `data` branch anyone can read, so they need a dashboard session but no operator identity match.
 2. **Redaction preservation.** `src/github/metadata.ts` reads `metadata/repos.yaml` from
    the `fro-bot/.github` `data` branch and exports `redactedNodeIds` (the node_ids of
    `[REDACTED]`/`private: true` entries). The aggregator must exclude denylisted repos

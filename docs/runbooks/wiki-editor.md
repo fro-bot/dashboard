@@ -7,6 +7,8 @@ is merged by hand.
 This runbook is the handoff for infra, the `fro-bot/.github` Edit-link task, and anyone debugging a
 save. The security model is invariant 1 in `AGENTS.md`.
 
+The wiki read routes serve only content that is already public on `fro-bot/.github`, a public repository whose `data` branch anyone can read, so they need a dashboard session but no operator identity match.
+
 ---
 
 ## Credentials and configuration
@@ -48,7 +50,7 @@ changes.
 
 Each write mints an installation token on demand with `permissions: {contents: 'write'}` and
 `repositoryNames: ['.github']`. GitHub returns `{contents: write, metadata: read}`. The token is
-cached per process and refreshed shortly before expiry.
+cached per process and refreshed shortly before expiry. Simultaneous requests share one lookup and one mint. When GitHub answers a write-path request with 401, the cached token is dropped, a new one is minted and that request is retried once. A second 401 is reported as a refusal.
 
 Checked against the real App: that token can read the `data` ref, the open `data` → `main` PRs,
 the `merge-data.yaml` runs, and a run's jobs and steps. Promotion status therefore needs no scope
@@ -148,8 +150,8 @@ Measured against the real repository. The cold read dominates the first page ope
 
 ### Rate limits
 
-Writes are limited per operator, below the per-IP limit. A trip answers the rate-limited outcome with
-a retry hint. GitHub rate limits surface the same way.
+Writes and save-status lookups share one per-operator limit, below the per-IP limit. A trip answers
+the rate-limited outcome with a retry hint. GitHub rate limits surface the same way.
 
 ### Weekly backstop
 

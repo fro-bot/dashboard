@@ -6,6 +6,7 @@ import {
   createReadTransport,
   createWikiDataClient,
   createWriteTransport,
+  isRefusal,
   rateLimitOf,
   readTokenSource,
   RequestNotSentError,
@@ -717,6 +718,26 @@ async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
   throw new Error('expected the promise to reject')
 }
 
+function unauthorizedThenOk(statuses: number[]) {
+  const seen: {authorization: string | null}[] = []
+  const impl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+    const authorization = new Headers(init?.headers).get('authorization')
+    seen.push({authorization})
+    const status = statuses[seen.length - 1] ?? 200
+    return new Response(JSON.stringify(status === 200 ? {object: {sha: 'head-1'}} : {message: 'Bad credentials'}), {
+      status,
+      headers: {'content-type': 'application/json'},
+    })
+  })
+  return {impl: impl as unknown as typeof fetch, seen}
+}
+
+function source(tokens: string[], invalidate?: (token: string) => void) {
+  let index = 0
+  const getToken = vi.fn(async () => tokens[Math.min(index++, tokens.length - 1)] ?? 'none')
+  return {getToken, source: writeTokenSource(getToken, invalidate)}
+}
+
 describe('wiki data client: transports', () => {
   interface Seen {
     readonly url: string
@@ -798,6 +819,134 @@ describe('wiki data client: transports', () => {
       const transport = createReadTransport(readTokenSource(NEVER), {fetch, timeoutMs: 40})
 
       await expect(createWikiDataClient(transport).getSnapshot()).rejects.toBeInstanceOf(WikiDataUnavailableError)
+    })
+
+    describe('a 401 on a write-path request', () => {
+      it('evicts the token, mints again, and retries the request once with the new token', async () => {
+        const net = unauthorizedThenOk([401, 200])
+        const invalidate = vi.fn()
+        const tokens = source(['stale-token', 'fresh-token'], invalidate)
+        const client = createWikiDataClient(createWriteTransport(tokens.source, {fetch: net.impl}))
+
+        await expect(client.getHeadSha()).resolves.toBe('head-1')
+
+        expect(invalidate).toHaveBeenCalledExactlyOnceWith('stale-token')
+        expect(tokens.getToken).toHaveBeenCalledTimes(2)
+        expect(net.seen.map(entry => entry.authorization)).toEqual(['token stale-token', 'token fresh-token'])
+      })
+
+      it('surfaces a second 401 as the refusal, after exactly one retry', async () => {
+        const net = unauthorizedThenOk([401, 401, 200])
+        const invalidate = vi.fn()
+        const tokens = source(['stale-token', 'fresh-token'], invalidate)
+        const client = createWikiDataClient(createWriteTransport(tokens.source, {fetch: net.impl}))
+
+        const error = await rejectionOf(client.getHeadSha())
+
+        expect((error as {status?: number}).status).toBe(401)
+        expect(isRefusal(error)).toBe(true)
+        expect(net.seen).toHaveLength(2)
+        expect(invalidate).toHaveBeenCalledTimes(1)
+        expect(tokens.getToken).toHaveBeenCalledTimes(2)
+      })
+
+      it.each([403, 404, 422, 500])('does not evict or retry on a %d', async status => {
+        const net = unauthorizedThenOk([status])
+        const invalidate = vi.fn()
+        const tokens = source(['token-1', 'token-2'], invalidate)
+        const client = createWikiDataClient(createWriteTransport(tokens.source, {fetch: net.impl}))
+
+        const error = await rejectionOf(client.getHeadSha())
+
+        expect((error as {status?: number}).status).toBe(status)
+        expect(net.seen).toHaveLength(1)
+        expect(invalidate).not.toHaveBeenCalled()
+        expect(tokens.getToken).toHaveBeenCalledTimes(1)
+      })
+
+      it('does not retry when the source cannot refresh', async () => {
+        const net = unauthorizedThenOk([401])
+        const tokens = source(['token-1', 'token-2'])
+        const client = createWikiDataClient(createWriteTransport(tokens.source, {fetch: net.impl}))
+
+        const error = await rejectionOf(client.getHeadSha())
+
+        expect((error as {status?: number}).status).toBe(401)
+        expect(net.seen).toHaveLength(1)
+        expect(tokens.getToken).toHaveBeenCalledTimes(1)
+      })
+
+      it('never retries a read transport, which has no refresh', async () => {
+        const net = unauthorizedThenOk([401])
+        const getToken = vi.fn(async () => 'read-token')
+        const client = createWikiDataClient(createReadTransport(readTokenSource(getToken), {fetch: net.impl}))
+
+        const error = await rejectionOf(client.getHeadSha())
+
+        expect((error as {status?: number}).status).toBe(401)
+        expect(net.seen).toHaveLength(1)
+        expect(getToken).toHaveBeenCalledTimes(1)
+      })
+
+      it('retries a write request too, since a 401 means nothing was processed', async () => {
+        const net = unauthorizedThenOk([401, 200])
+        const tokens = source(['stale-token', 'fresh-token'], vi.fn())
+        const client = createWikiDataClient(createWriteTransport(tokens.source, {fetch: net.impl}))
+
+        await client.createPromotionDispatch()
+
+        expect(net.seen.map(entry => entry.authorization)).toEqual(['token stale-token', 'token fresh-token'])
+      })
+
+      it('reports a failed re-mint as never sent, inside the same bound', async () => {
+        const net = unauthorizedThenOk([401, 200])
+        let calls = 0
+        const getToken = vi.fn(async () => {
+          calls += 1
+          return calls === 1 ? 'stale-token' : new Promise<string>(() => {})
+        })
+        const client = createWikiDataClient(
+          createWriteTransport(writeTokenSource(getToken, vi.fn()), {fetch: net.impl, timeoutMs: 60}),
+        )
+        const started = Date.now()
+
+        const error = await rejectionOf(client.getHeadSha())
+
+        expect(error).toBeInstanceOf(RequestNotSentError)
+        expect(Date.now() - started).toBeLessThan(2000)
+        expect(net.seen).toHaveLength(1)
+      })
+
+      it('shares one deadline across the first request and the retry', async () => {
+        let calls = 0
+        const impl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+          calls += 1
+          const first = calls === 1
+          return new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(
+              () => {
+                resolve(new Response('{}', {status: first ? 401 : 200, headers: {'content-type': 'application/json'}}))
+              },
+              first ? 120 : 10_000,
+            )
+            init?.signal?.addEventListener('abort', () => {
+              clearTimeout(timer)
+              reject(new Error('The operation was aborted due to timeout'))
+            })
+          })
+        })
+        const tokens = source(['stale-token', 'fresh-token'], vi.fn())
+        const client = createWikiDataClient(
+          createWriteTransport(tokens.source, {fetch: impl as unknown as typeof fetch, timeoutMs: 200}),
+        )
+        const started = Date.now()
+
+        await rejectionOf(client.getHeadSha())
+
+        // 120 ms for the first request leaves under 100 ms for the retry, not a fresh 200 ms.
+        expect(Date.now() - started).toBeLessThan(290)
+        expect(impl).toHaveBeenCalledTimes(2)
+      })
     })
 
     it('marks a token timeout as never sent, and sends no request', async () => {
