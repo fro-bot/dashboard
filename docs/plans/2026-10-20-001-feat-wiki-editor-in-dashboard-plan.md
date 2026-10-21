@@ -719,7 +719,7 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 
 ### U4. Dispatch port and promotion status
 
-- [ ] Landed
+- [x] Landed
 
 **Goal:** Implement the dispatch port that U3 calls, and report branch-level promotion status from GitHub: the open PR, a pending run, or a blocked run.
 
