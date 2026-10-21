@@ -850,7 +850,7 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 
 ### U6. Fixture write target
 
-- [ ] Landed
+- [x] Landed
 
 **Goal:** In fixture mode, the real wiki routes run against an in-memory repository that can produce every outcome, so the shipped client can reach each one.
 

@@ -309,6 +309,12 @@ export interface DashboardAppConfig {
    */
   fixtureBindHost?: string | undefined
   /**
+   * The bind port, used with the bind host to derive the loopback origin that
+   * fixture-mode wiki writes must come from. If undefined, reads DASHBOARD_PORT
+   * (default 3000). Only used while the fixture harness is active.
+   */
+  fixtureBindPort?: number | undefined
+  /**
    * Root directory for SPA static assets (index.html, /assets/*, /icon-*,
    * /manifest.webmanifest, /sw.js, /registerSW.js).
    * If undefined, reads from DASHBOARD_WEB_DIST env, defaulting to './web/dist'.
@@ -451,6 +457,8 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
       : opts.fixtureHarnessEnabled
 
   let fixtureHarnessActive = false
+  // Where the fixture server binds, for the origin its wiki writes must come from. Set only while the harness is active.
+  let fixtureBind: {readonly host: string; readonly port: number} | null = null
 
   if (fixtureHarnessRequested) {
     // Guard A: NODE_ENV must be explicitly 'development' or 'test' (fail closed).
@@ -478,6 +486,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     }
 
     fixtureHarnessActive = true
+    fixtureBind = {host: configuredHost as string, port: opts?.fixtureBindPort ?? readServerBindConfig().port}
     logger.warning('FIXTURE HARNESS ENABLED — synthetic operator routes mounted; never use in production')
   }
 
@@ -802,21 +811,26 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
 
   // ── Wiki editor routes ──────────────────────────────────────────────────────
   // Behind the session middleware above. Writes run their own authorization chain.
-  const wikiDeps: WikiAppDeps = opts?.wiki ?? {
-    pages: null,
-    write: null,
-    policy: {capability: {enabled: false, reason: 'app-credentials-absent'}, fixtureOperatorLogin: null},
+  // While the fixture harness is active the in-memory fixture target replaces any injected wiring.
+  // It is imported here and nowhere else, only after the harness guards have passed.
+  let wikiDeps: WikiAppDeps
+  if (fixtureHarnessActive && fixtureBind !== null) {
+    const {buildFixtureWikiDeps, fixtureOriginFor} = await import('./wiki/fixture-target.ts')
+    wikiDeps = buildFixtureWikiDeps({
+      dashboardOrigin: fixtureOriginFor(fixtureBind.host, fixtureBind.port),
+      operatorLogin: devAutoLogin && operatorLogin !== undefined ? operatorLogin : null,
+    }).deps
+    logger.warning('FIXTURE WIKI TARGET ENABLED — wiki routes run against an in-memory repository; never use in production')
+  } else {
+    wikiDeps = opts?.wiki ?? {
+      pages: null,
+      write: null,
+      policy: {capability: {enabled: false, reason: 'app-credentials-absent'}, fixtureOperatorLogin: null},
+    }
   }
-  const fixtureOperatorLogin =
-    wikiDeps.policy.fixtureOperatorLogin ??
-    (fixtureHarnessActive && devAutoLogin && operatorLogin !== undefined ? operatorLogin : null)
   app.route(
     '/api/wiki',
-    buildWikiRouter({
-      ...wikiDeps,
-      policy: {...wikiDeps.policy, fixtureOperatorLogin},
-      rateLimit: key => consumeRateLimit(key, WIKI_WRITE_RATE_LIMIT_MAX),
-    }),
+    buildWikiRouter({...wikiDeps, rateLimit: key => consumeRateLimit(key, WIKI_WRITE_RATE_LIMIT_MAX)}),
   )
 
   // ── Operator listener channel ───────────────────────────────────────────────

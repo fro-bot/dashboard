@@ -413,28 +413,45 @@ describe('save: authorization chain', () => {
     expect(res.status).toBe(200)
   })
 
-  it('derives the fixture identity from autologin only while the fixture harness is active', async () => {
+  it('never lets autologin alone confer write access: injected wiring keeps its own fixture identity', async () => {
     const world = makeWorld()
     const deps: WikiAppDeps = {...world.deps, policy: {...world.deps.policy, capability: {enabled: true, operatorId: null, dashboardOrigin: ORIGIN}}}
-    const build = async (fixture: boolean) =>
+    const app = await buildDashboardApp({
+      operatorLogin: LOGIN,
+      cookieKey: TEST_KEY,
+      devAutoLogin: true,
+      fixtureHarnessEnabled: false,
+      wiki: deps,
+      webDistRoot: SHELL_ROOT,
+    })
+
+    const res = await app.request(`/api/wiki/pages/${ALPHA_ID}/save`, {
+      method: 'POST',
+      headers: {origin: ORIGIN, 'content-type': 'application/json'},
+      body: JSON.stringify(saveBody(world)),
+    })
+
+    expect(res.status).toBe(403)
+    expectNothingWritten(world)
+  })
+
+  it('derives the fixture identity from autologin only while the fixture harness is active', async () => {
+    const build = async (devAutoLogin: boolean) =>
       buildDashboardApp({
         operatorLogin: LOGIN,
         cookieKey: TEST_KEY,
-        devAutoLogin: true,
-        fixtureHarnessEnabled: fixture,
+        devAutoLogin,
+        fixtureHarnessEnabled: true,
         fixtureBindHost: '127.0.0.1',
-        wiki: deps,
+        fixtureBindPort: 3000,
         webDistRoot: SHELL_ROOT,
       })
-    const write = async (app: Awaited<ReturnType<typeof build>>, n: number) =>
-      app.request(`/api/wiki/pages/${ALPHA_ID}/save`, {
-        method: 'POST',
-        headers: {origin: ORIGIN, 'content-type': 'application/json'},
-        body: JSON.stringify(saveBody(world, {operationId: opId(n)})),
-      })
+    const sm = new SessionManager(TEST_KEY)
+    const read = async (app: Awaited<ReturnType<typeof build>>) =>
+      (await app.request('/api/wiki/pages', {headers: {cookie: `session=${sm.sign(LOGIN)}`}})).json()
 
-    expect((await write(await build(true), 1)).status).toBe(200)
-    expect((await write(await build(false), 2)).status).toBe(403)
+    expect(await read(await build(true))).toMatchObject({canWrite: true, canWriteReason: null})
+    expect(await read(await build(false))).toMatchObject({canWrite: false, canWriteReason: 'session-not-supported'})
   })
 
   it('answers every refused chain step before the body check with the same 403 body', async () => {
