@@ -524,7 +524,7 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 
 ### U1. Write credential seam and operator configuration
 
-- [ ] Landed
+- [x] Landed
 
 **Goal:** A separate Fro Bot App client mints contents-write installation tokens scoped to `fro-bot/.github`. Configuration reads the key slot and the operator ID. A missing key leaves every write path off.
 

@@ -16,6 +16,7 @@ import type {ServerType} from '@hono/node-server'
 import type {GitHubOAuthClient} from './auth/oauth.ts'
 import type {OperatorClient, SessionDto} from './gateway/operator-client.ts'
 import type {AggregatorSnapshot} from './github/aggregator.ts'
+import type {WriteTokenProvider} from './github/fro-bot-app-client.ts'
 import type {MetadataReader} from './github/metadata.ts'
 import type {ListenerStore} from './listener/store.ts'
 import {Buffer} from 'node:buffer'
@@ -43,6 +44,7 @@ import {FIXTURE_OPERATOR_PREFIX} from './gateway/operator-fixture-routes.ts'
 import {createOperatorServerFetch} from './gateway/operator-server-fetch.ts'
 import {createAggregator} from './github/aggregator.ts'
 import {createDashboardAppClient} from './github/app-client.ts'
+import {createFroBotAppClient} from './github/fro-bot-app-client.ts'
 import {buildInstallationsClient, enumerateRepos, mintReadOnlyToken} from './github/installations.ts'
 import {makeNotFoundError, readRepoMetadata} from './github/metadata.ts'
 import {readListenerDbPath, readListenerIngestKey} from './listener/config.ts'
@@ -55,6 +57,7 @@ import {buildListenerRouter} from './routes/listener.ts'
 import {readOptionalMultilineSecret, readOptionalSecret} from './secrets.ts'
 import {loadCookieKey, SessionManager} from './session.ts'
 import {createPublicStatic} from './static-files.ts'
+import {readWikiWriteConfig, type WikiWriteConfig, type WikiWriteOffReason} from './wiki/config.ts'
 
 /** Hono context variables set by auth middleware */
 interface Variables {
@@ -1024,6 +1027,31 @@ export function readServerBindConfig(env: NodeJS.ProcessEnv = process.env): Serv
   return {host, port}
 }
 
+/** Wiki write capability after wiring: either a token provider, or off with a reason. */
+export type WikiWriteWiring =
+  | {readonly enabled: true; readonly config: Extract<WikiWriteConfig, {enabled: true}>; readonly tokens: WriteTokenProvider}
+  | {readonly enabled: false; readonly reason: WikiWriteOffReason}
+
+/**
+ * Build the write-token client only when the configuration enables writes.
+ * A half-configured credential pair leaves writes off and logs a warning.
+ */
+export function buildWikiWriteWiring(config: WikiWriteConfig): WikiWriteWiring {
+  if (!config.enabled) {
+    if (config.reason === 'app-credentials-incomplete') {
+      logger.warning(
+        'Only one of DASHBOARD_FRO_BOT_APP_ID and DASHBOARD_FRO_BOT_APP_KEY is set — wiki write capability disabled',
+      )
+    }
+    return {enabled: false, reason: config.reason}
+  }
+  return {
+    enabled: true,
+    config,
+    tokens: createFroBotAppClient({appId: config.appId, privateKey: config.privateKey}),
+  }
+}
+
 /**
  * Binds the app to `DASHBOARD_HOST:DASHBOARD_PORT` (default `0.0.0.0:3000`) via
  * @hono/node-server. Loads the cookie key asynchronously before starting.
@@ -1073,6 +1101,11 @@ async function createDashboardServer(): Promise<ServerType> {
       error: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)),
     })
   }
+
+  // Invalid wiki configuration throws here, before the server listens. With no
+  // Fro Bot key the wiring stays off and nothing else changes.
+  const wikiWrite = buildWikiWriteWiring(readWikiWriteConfig())
+  logger.info('Wiki write capability', wikiWrite.enabled ? {enabled: true} : {enabled: false, reason: wikiWrite.reason})
 
   const app = await buildDashboardApp({cookieKey, getSnapshot, listenerStore, listenerIngestKey})
 
