@@ -901,7 +901,7 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 
 ### U7. Writer removal, boundary replacement, and documentation
 
-- [ ] Landed
+- [x] Landed
 
 **Goal:** Remove the `wiki-writer` service and everything that guarded it. Replace the boundary checks with a client-side check. Rewrite the invariants and docs to describe the dashboard's write authority.
 

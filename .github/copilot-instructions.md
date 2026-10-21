@@ -1,39 +1,39 @@
 # Copilot instructions
 
 Fro Bot monitoring dashboard with a read-only-by-default GitHub data path and one
-isolated wiki-write capability: a single Hono + JSX SSR Node 24 process, no
+scoped wiki-write capability: a single Hono + JSX SSR Node 24 process, no
 build step, native TypeScript. It is an authenticated single-operator view of Fro Bot's
 cross-repo footprint. `AGENTS.md` is the canonical context; this file mirrors the
 load-bearing rules for code suggestions.
 
 ## Security invariants — never generate code that violates these
 
-1. **Read-only by default, with one isolated wiki-write capability.**
+1. **Read-only by default, with one scoped wiki-write capability.**
    `DASHBOARD_GITHUB_APP_*` remains strictly read-only: every GitHub App installation
    token is minted with an explicit read-only `permissions` subset at mint time
    (`pull_requests`/`checks`/`issues`/`contents`/`metadata: read`, with
    `security_events`/`vulnerability_alerts: read` optional and graceful), and those
-   credentials may never mint write-scoped tokens. The dashboard web/runtime has no
-   GitHub write authority today — the `wiki-writer` service is implemented in
-   `wiki-writer/` but is not deployed, not integrated, and holds no runtime authority
-   (nothing in `src/` reaches it, and neither its source nor its writer-only
-   dependencies enter the dashboard runtime image; it is a Bun workspace member covered
-   by the root gates, and its security-boundary test enforces the import boundary). When it ships it will be the only such authority: separately deployed,
-   authenticated as the
-   Fro Bot App (the same App `release.yaml` uses via `APPLICATION_ID`, distinct from the
-   read-only Agent App behind `DASHBOARD_GITHUB_APP_*`), able to target only the
-   `fro-bot/.github` repository's `data` branch, under an explicit wiki/corrections path
-   allowlist, executing gates from the shared `@fro.bot/wiki-write-core` package. The dashboard web process must never receive the
-   Fro Bot App private key or an installation token derived from it. Any additional
-   write target or credential requires explicit owner approval and a new threat model.
-   This invariant does not govern separately credentialed repository CI/release automation,
-   which is not available to the dashboard web process. Do not generate code that expands
-   this boundary. Dashboard authentication compromise
-   can now produce valid in-scope wiki edits, dashboard RCE can exercise the private
-   writer API within scope, writer compromise exposes Fro Bot write authority, and the
-   deployment owns another secret, service, health boundary, and incident surface.
-   The separation prevents credential exfiltration and arbitrary GitHub operations, but
-   cannot prevent a compromised authenticated dashboard from submitting in-scope edits.
+   credentials may never mint write-scoped tokens. The dashboard holds GitHub write
+   authority scoped to the single operator (`DASHBOARD_OPERATOR_ID`): a write runs only for
+   a gateway session whose `operatorId` equals it. That authority comes through a separate
+   Fro Bot App credential (`DASHBOARD_FRO_BOT_APP_ID` / `DASHBOARD_FRO_BOT_APP_KEY(_FILE)`;
+   the same App `release.yaml` uses via `APPLICATION_ID`, distinct from the read-only Agent
+   App). Its client (`src/github/fro-bot-app-client.ts`) mints installation tokens on demand
+   with `contents: write` for `fro-bot/.github` only, and its permission type admits no
+   other scope. Commits go to the `data` branch and are limited to wiki pages,
+   `knowledge/log.md`, `knowledge/index.md` and `knowledge/corrections.yaml`, after the
+   shared `@fro.bot/wiki-write-core` gates pass; the only other write is one `promote-data`
+   repository dispatch. Only `src/server.ts`, `src/wiki/write-operation.ts` and
+   `src/wiki/fixture-target.ts` may import the write client, and nothing under `web/src` may
+   touch key material, Octokit or the write path. Any additional write target, scope or
+   credential requires explicit owner approval and a new threat model. This invariant does
+   not govern separately credentialed repository CI/release automation, which is not
+   available to the dashboard web process. Do not generate code that expands this boundary.
+   The cost it accepts: dashboard authentication compromise yields valid in-scope wiki
+   edits, and server compromise exposes the Fro Bot App private key, whose App installation
+   is broad, so the mint-time `permissions` subset is the only thing that keeps a minted
+   token narrow. The `data` branch and the path allowlist (`src/wiki/paths.ts`) are enforced
+   in application code, not by the token.
 2. **Redaction preservation.** `src/github/metadata.ts` reads `metadata/repos.yaml` from
    the `fro-bot/.github` `data` branch and exports `redactedNodeIds` (the node_ids of
    `[REDACTED]`/`private: true` entries). The aggregator must exclude denylisted repos

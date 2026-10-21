@@ -2,11 +2,8 @@
   "name": "@fro-bot/dashboard",
   "version": "0.0.0",
   "private": true,
-  "description": "Fro Bot monitoring dashboard with an isolated wiki-write capability",
+  "description": "Fro Bot monitoring dashboard with a read-only-by-default GitHub data path and a scoped wiki-write capability",
   "type": "module",
-  "workspaces": [
-    "wiki-writer"
-  ],
   "scripts": {
     "bootstrap": "bun install",
     "dev": "node --env-file-if-exists=.env --watch src/server.ts",
@@ -30,7 +27,7 @@
   },
   "dependencies": {
     "@bfra.me/es": "0.1.0",
-    "@fro.bot/wiki-write-core": "0.1.1",
+    "@fro.bot/wiki-write-core": "0.1.2",
     "@hono/node-server": "^2.0.0",
     "@octokit/auth-app": "8.3.1",
     "@octokit/core": "7.0.8",

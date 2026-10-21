@@ -1,12 +1,11 @@
 /**
- * Guards the wiki-writer boundary in the Dockerfile.
+ * Guards the production image boundary in the Dockerfile.
  *
- * The runtime image holds only the root package's production dependencies and none
- * of the wiki-writer workspace. Two Dockerfile properties enforce that:
- * - the prod-deps stage installs with `--filter './'` and `--production`;
- * - no stage copies wiki-writer source, and the runtime stage copies nothing from
- *   `wiki-writer/` at all. The only allowed wiki-writer path is its manifest, which
- *   the build stages need so the lockfile matches the workspace.
+ * The runtime image holds only the root package's production dependencies. Two
+ * Dockerfile properties enforce that:
+ * - the prod-deps stage installs with `--production`, so no dev dependency or
+ *   build tool reaches the image;
+ * - no stage copies the whole build context, so nothing enters an image unnamed.
  *
  * Stages are found by their `FROM ... AS <name>` lines, never by line number. The
  * runtime stage is the last stage.
@@ -19,7 +18,6 @@ import {describe, expect, it} from 'vitest'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 
-const ALLOWED_WRITER_PATH = 'wiki-writer/package.json'
 const PROD_DEPS_STAGE = 'prod-deps'
 
 interface Instruction {
@@ -80,14 +78,6 @@ function copySources(instruction: Instruction): CopySource[] {
   return operands.slice(0, -1).map(path => ({path, fromStage}))
 }
 
-function normalizePath(path: string): string {
-  return path.replace(/^(?:\.\/)+/, '')
-}
-
-function mentionsWriter(path: string): boolean {
-  return normalizePath(path).startsWith('wiki-writer')
-}
-
 function findBoundaryViolations(dockerfile: string): string[] {
   const violations: string[] = []
   const stages = parseStages(dockerfile)
@@ -100,7 +90,6 @@ function findBoundaryViolations(dockerfile: string): string[] {
     const installs = prodDeps.instructions.filter(i => i.keyword === 'RUN' && /\bbun\s+install\b/.test(i.args))
     if (installs.length === 0) violations.push(`${PROD_DEPS_STAGE} stage has no bun install`)
     for (const {args} of installs) {
-      if (!/--filter[\s=]['"]?\.\/['"]?(?:\s|$)/.test(args)) violations.push(`${PROD_DEPS_STAGE} bun install lacks --filter './': ${args}`)
       if (!/(?:^|\s)--production(?:\s|$)/.test(args)) violations.push(`${PROD_DEPS_STAGE} bun install lacks --production: ${args}`)
     }
   }
@@ -108,10 +97,6 @@ function findBoundaryViolations(dockerfile: string): string[] {
   for (const stage of stages) {
     for (const instruction of stage.instructions) {
       for (const {path, fromStage} of copySources(instruction)) {
-        if (mentionsWriter(path) && normalizePath(path) !== ALLOWED_WRITER_PATH) {
-          violations.push(`${label(stage)} stage copies wiki-writer source: ${path}`)
-        }
-        // A whole-context copy pulls wiki-writer in without naming it.
         if (!fromStage && ['.', './', '*'].includes(path)) {
           violations.push(`${label(stage)} stage copies the whole build context: ${path}`)
         }
@@ -119,16 +104,7 @@ function findBoundaryViolations(dockerfile: string): string[] {
     }
   }
 
-  const runtime = stages.at(-1)
-  if (runtime === undefined) {
-    violations.push('no stages found')
-  } else {
-    for (const instruction of runtime.instructions) {
-      for (const {path} of copySources(instruction)) {
-        if (mentionsWriter(path)) violations.push(`runtime stage copies from wiki-writer/: ${path}`)
-      }
-    }
-  }
+  if (stages.length === 0) violations.push('no stages found')
 
   return violations
 }
@@ -136,13 +112,11 @@ function findBoundaryViolations(dockerfile: string): string[] {
 const validDockerfile = [
   'FROM node:24 AS builder',
   'COPY package.json bun.lock bunfig.toml ./',
-  'COPY wiki-writer/package.json ./wiki-writer/package.json',
   'RUN bun install --frozen-lockfile',
   '',
   'FROM node:24 AS prod-deps',
   'COPY package.json bun.lock bunfig.toml ./',
-  'COPY wiki-writer/package.json ./wiki-writer/package.json',
-  "RUN bun install --filter './' --production --frozen-lockfile --ignore-scripts",
+  'RUN bun install --production --frozen-lockfile --ignore-scripts',
   '',
   'FROM node:24',
   'COPY --from=prod-deps /app/node_modules/ ./node_modules/',
@@ -151,7 +125,7 @@ const validDockerfile = [
   '',
 ].join('\n')
 
-describe('Dockerfile wiki-writer boundary', () => {
+describe('Dockerfile production image boundary', () => {
   it('reports no violations for the real Dockerfile', () => {
     const dockerfile = readFileSync(resolve(repoRoot, 'Dockerfile'), 'utf8')
     expect(findBoundaryViolations(dockerfile)).toEqual([])
@@ -171,40 +145,24 @@ describe('Dockerfile boundary checker (error paths)', () => {
     expect(findBoundaryViolations(validDockerfile)).toEqual([])
   })
 
-  it('rejects a prod-deps install without --filter', () => {
-    const mutated = validDockerfile.replace("--filter './' ", '')
-    expect(findBoundaryViolations(mutated)).toEqual([expect.stringContaining("lacks --filter './'")])
-  })
-
   it('rejects a prod-deps install without --production', () => {
     const mutated = validDockerfile.replace('--production ', '')
     expect(findBoundaryViolations(mutated)).toEqual([expect.stringContaining('lacks --production')])
   })
 
+  it('does not take a --production-like flag for --production', () => {
+    const mutated = validDockerfile.replace('--production ', '--production-mode ')
+    expect(findBoundaryViolations(mutated)).toEqual([expect.stringContaining('lacks --production')])
+  })
+
   it('reads a prod-deps install split across continuation lines', () => {
-    const mutated = validDockerfile.replace("--filter './' --production", "\\\n  --filter './' \\\n  --production")
+    const mutated = validDockerfile.replace('--production --frozen-lockfile', '\\\n  --production \\\n  --frozen-lockfile')
     expect(findBoundaryViolations(mutated)).toEqual([])
   })
 
-  it('rejects wiki-writer source copied into a build stage', () => {
-    const mutated = validDockerfile.replace(
-      'FROM node:24 AS prod-deps',
-      'COPY wiki-writer/src ./wiki-writer/src\nFROM node:24 AS prod-deps',
-    )
-    expect(findBoundaryViolations(mutated)).toEqual([expect.stringContaining('builder stage copies wiki-writer source')])
-  })
-
-  it('rejects wiki-writer source copied into the runtime stage', () => {
-    const mutated = `${validDockerfile}COPY ./wiki-writer/src ./wiki-writer/src\n`
-    expect(findBoundaryViolations(mutated)).toEqual([
-      expect.stringContaining('runtime stage copies wiki-writer source'),
-      expect.stringContaining('runtime stage copies from wiki-writer/'),
-    ])
-  })
-
-  it('rejects even the wiki-writer manifest in the runtime stage', () => {
-    const mutated = `${validDockerfile}COPY wiki-writer/package.json ./\n`
-    expect(findBoundaryViolations(mutated)).toEqual([expect.stringContaining('runtime stage copies from wiki-writer/')])
+  it('rejects a continued prod-deps install that drops --production', () => {
+    const mutated = validDockerfile.replace('--production --frozen-lockfile', '\\\n  --frozen-lockfile')
+    expect(findBoundaryViolations(mutated)).toEqual([expect.stringContaining('lacks --production')])
   })
 
   it('rejects a whole-context copy in a build stage', () => {
@@ -212,12 +170,35 @@ describe('Dockerfile boundary checker (error paths)', () => {
     expect(findBoundaryViolations(mutated)).toEqual([expect.stringContaining('builder stage copies the whole build context')])
   })
 
-  it('ignores commented-out wiki-writer copies', () => {
-    const mutated = `${validDockerfile}# COPY wiki-writer/src ./wiki-writer/src\n`
+  it('rejects a whole-context copy in the runtime stage', () => {
+    const mutated = `${validDockerfile}COPY ./ ./\n`
+    expect(findBoundaryViolations(mutated)).toEqual([expect.stringContaining('runtime stage copies the whole build context')])
+  })
+
+  it('rejects a wildcard copy in the prod-deps stage', () => {
+    const mutated = validDockerfile.replace(
+      'RUN bun install --production',
+      'COPY * ./\nRUN bun install --production',
+    )
+    expect(findBoundaryViolations(mutated)).toEqual([expect.stringContaining('prod-deps stage copies the whole build context')])
+  })
+
+  it('allows copying a whole earlier stage', () => {
+    const mutated = `${validDockerfile}COPY --from=builder /app/ ./\n`
+    expect(findBoundaryViolations(mutated)).toEqual([])
+  })
+
+  it('ignores commented-out whole-context copies', () => {
+    const mutated = `${validDockerfile}# COPY . .\n`
     expect(findBoundaryViolations(mutated)).toEqual([])
   })
 
   it('reports a Dockerfile with no prod-deps stage', () => {
     expect(findBoundaryViolations('FROM node:24\n')).toEqual([`no ${PROD_DEPS_STAGE} stage found`])
+  })
+
+  it('reports a prod-deps stage with no install', () => {
+    const mutated = validDockerfile.replace(/RUN bun install --production[^\n]*\n/u, '')
+    expect(findBoundaryViolations(mutated)).toEqual([`${PROD_DEPS_STAGE} stage has no bun install`])
   })
 })

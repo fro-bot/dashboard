@@ -1,7 +1,7 @@
 ---
 title: 'feat: Add operator wiki editor and private writer'
 type: feat
-status: active
+status: superseded
 date: 2026-08-31
 origin: 'fro-bot/.github → docs/plans/2026-08-29-001-feat-editable-wiki-path-plan.md Units 7a/7b'
 ---

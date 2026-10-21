@@ -11,10 +11,8 @@ COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 
 WORKDIR /app
 
-# Copy manifests first for layer caching. The wiki-writer manifest is copied so the
-# workspace resolves against the lockfile; none of its source enters any stage.
+# Copy manifests first for layer caching.
 COPY package.json bun.lock bunfig.toml ./
-COPY wiki-writer/package.json ./wiki-writer/package.json
 
 # Install ALL deps (including devDependencies) for the build step
 RUN bun install --frozen-lockfile
@@ -34,15 +32,12 @@ COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 
 WORKDIR /app
 
-# Copy manifests for prod-only install. The wiki-writer manifest is needed so the
-# frozen lockfile matches the workspace; no wiki-writer source is copied.
+# Copy manifests for prod-only install.
 COPY package.json bun.lock bunfig.toml ./
-COPY wiki-writer/package.json ./wiki-writer/package.json
 
 # Install the root package's production deps only (frozen lockfile) — NO dev deps,
-# NO build tools, NO lifecycle scripts. --filter './' keeps the wiki-writer workspace's
-# dependencies out of the runtime image.
-RUN bun install --filter './' --production --frozen-lockfile --ignore-scripts
+# NO build tools, NO lifecycle scripts.
+RUN bun install --production --frozen-lockfile --ignore-scripts
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM node:24-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea

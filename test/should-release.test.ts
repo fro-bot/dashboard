@@ -488,7 +488,7 @@ describe('should-release — overrides change triggers release', () => {
 describe('should-release — workspaces change triggers release', () => {
   it('releases when only workspaces changes (array form)', () => {
     const base = writePkg(tmpDir, 'base.json', {...BASE_PKG, workspaces: ['web']})
-    const head = writePkg(tmpDir, 'head.json', {...BASE_PKG, workspaces: ['web', 'wiki-writer']})
+    const head = writePkg(tmpDir, 'head.json', {...BASE_PKG, workspaces: ['web', 'tools']})
     const {exitCode, stdout} = runGuard('package.json', base, head)
     expect(exitCode).toBe(0)
     expect(stdout).toMatch(/^release:/)

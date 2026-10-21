@@ -6,7 +6,7 @@
       "name": "@fro-bot/dashboard",
       "dependencies": {
         "@bfra.me/es": "0.1.0",
-        "@fro.bot/wiki-write-core": "0.1.1",
+        "@fro.bot/wiki-write-core": "0.1.2",
         "@hono/node-server": "^2.0.0",
         "@octokit/auth-app": "8.3.1",
         "@octokit/core": "7.0.8",
@@ -47,15 +47,6 @@
         "workbox-routing": "7.4.1",
         "workbox-strategies": "7.4.1",
         "workbox-window": "7.4.1",
-      },
-    },
-    "wiki-writer": {
-      "name": "@fro-bot/wiki-writer",
-      "version": "0.0.0",
-      "dependencies": {
-        "@fro.bot/wiki-write-core": "0.1.2",
-        "@octokit/auth-app": "8.3.1",
-        "@octokit/core": "7.0.8",
       },
     },
   },
@@ -333,8 +324,6 @@
     "@eslint/plugin-kit": ["@eslint/plugin-kit@0.7.3", "", { "dependencies": { "@eslint/core": "^1.2.1", "levn": "^0.4.1" } }, "sha512-IkO+/KEUvwbVpiURZg+P7zF74z5Jxe0UgJxVni+RtoHQ6IZieXaO02kmadomap/q+l6bc/jdPGGqTjhuZnuz1Q=="],
 
     "@exodus/bytes": ["@exodus/bytes@1.16.0", "", { "peerDependencies": { "@noble/hashes": "^1.8.0 || ^2.0.0" }, "optionalPeers": ["@noble/hashes"] }, "sha512-IcpW84uEn3N7ETtNZMlxKhfl6Pec8rUNGOTBtWbK1FKhJxIFAptZyVrvVRVBimAJxJCgc3PxepxkdWWG4DVzfA=="],
-
-    "@fro-bot/wiki-writer": ["@fro-bot/wiki-writer@workspace:wiki-writer"],
 
     "@fro.bot/wiki-write-core": ["@fro.bot/wiki-write-core@0.1.2", "", { "dependencies": { "@octokit/rest": "^22.0.1", "yaml": "^2.8.3" } }, "sha512-raE8GW09Add7x2bEl4e0hsFIg+7art6alOVWy+Ny0Ss8YFcY0DgxLjWTpmcnO9GF8byUcz/rW20k1jGUoPlmTg=="],
 

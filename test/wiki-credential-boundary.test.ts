@@ -19,6 +19,12 @@ const ALLOWED_IMPORTERS: ReadonlySet<string> = new Set([
   'src/wiki/fixture-target.ts',
 ])
 
+/**
+ * The client-side scan names the forbidden symbols as test data to prove it catches
+ * them. It holds no import of them, and it is exempt by exact path only.
+ */
+const SCAN_FIXTURE_PATHS: ReadonlySet<string> = new Set(['web/src/wiki/no-key-material.test.ts'])
+
 const FORBIDDEN_REFERENCES = [
   {label: 'fro-bot-app-client import', pattern: /fro-bot-app-client/u},
   {label: 'WriteTokenProvider', pattern: /\bWriteTokenProvider\b/u},
@@ -32,7 +38,7 @@ interface SourceFile {
 function findBoundaryViolations(files: readonly SourceFile[]): string[] {
   const violations: string[] = []
   for (const file of files) {
-    if (file.path === CLIENT_MODULE_PATH || ALLOWED_IMPORTERS.has(file.path)) continue
+    if (file.path === CLIENT_MODULE_PATH || ALLOWED_IMPORTERS.has(file.path) || SCAN_FIXTURE_PATHS.has(file.path)) continue
     for (const reference of FORBIDDEN_REFERENCES) {
       if (reference.pattern.test(file.source)) {
         violations.push(`${file.path}: ${reference.label}`)
@@ -59,7 +65,7 @@ async function listSourceFiles(directory: string): Promise<string[]> {
 }
 
 async function readProductionSources(): Promise<SourceFile[]> {
-  const roots = ['src', 'web/src', 'wiki-writer/src', 'scripts'].map(root => join(repositoryRoot, root))
+  const roots = ['src', 'web/src', 'scripts'].map(root => join(repositoryRoot, root))
   const paths = (await Promise.all(roots.map(async root => listSourceFiles(root).catch(() => [])))).flat().sort()
   return Promise.all(
     paths.map(async path => ({
@@ -113,6 +119,14 @@ describe('write credential boundary', () => {
         expect(violations).toEqual([])
       },
     )
+
+    it('exempts the client-side scan by exact path only', () => {
+      const source = "import {x} from '../github/fro-bot-app-client.ts'"
+
+      expect(findBoundaryViolations([{path: 'web/src/wiki/no-key-material.test.ts', source}])).toEqual([])
+      expect(findBoundaryViolations([{path: 'web/src/wiki/other.test.ts', source}])).toHaveLength(1)
+      expect(findBoundaryViolations([{path: 'web/src/wiki/no-key-material.test.tsx', source}])).toHaveLength(1)
+    })
 
     it('does not allow a look-alike path', () => {
       const violations = findBoundaryViolations([

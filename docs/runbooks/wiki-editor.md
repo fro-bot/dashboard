@@ -1,0 +1,270 @@
+# Wiki Editor
+
+The dashboard edits the `fro-bot/.github` wiki in place. A save commits to the `data` branch as the
+Fro Bot App, then sends one `promote-data` repository dispatch. The promotion PR (`data` → `main`)
+is merged by hand.
+
+This runbook is the handoff for infra, the `fro-bot/.github` Edit-link task, and anyone debugging a
+save. The security model is invariant 1 in `AGENTS.md`.
+
+---
+
+## Credentials and configuration
+
+| Variable                                                  | Meaning                                                                               |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `DASHBOARD_FRO_BOT_APP_ID`                                | Fro Bot App ID. Single line. `_FILE` form supported.                                  |
+| `DASHBOARD_FRO_BOT_APP_KEY` / `DASHBOARD_FRO_BOT_APP_KEY_FILE` | Fro Bot App private key (PEM, multiline). Production uses the `_FILE` form.      |
+| `DASHBOARD_OPERATOR_ID`                                   | The operator's numeric GitHub ID. A positive integer. A set but invalid value stops startup. |
+| `DASHBOARD_GATEWAY_OPERATOR_ORIGIN`                       | Existing setting. The origin a write request must come from. See below.               |
+
+These are separate from `DASHBOARD_GITHUB_APP_*`, which stays read-only. The two Apps never share
+a credential, a token cache, or a module.
+
+**Write capability is off** unless the App ID, the key and the operator ID are all present. Reads
+keep working. The page list and page read report `canWrite: false` with a reason code:
+
+| Reason code                  | Cause                                         |
+| ---------------------------- | --------------------------------------------- |
+| `app-credentials-absent`     | Neither the App ID nor the key is set.        |
+| `app-credentials-incomplete` | Exactly one of the two is set. Startup logs a warning. |
+| `operator-id-unset`          | Credentials set, `DASHBOARD_OPERATOR_ID` unset. |
+| `not-operator`               | The session's `operatorId` differs from the configured one. |
+| `session-not-supported`      | A plain Arctic OAuth session. Only gateway sessions write. |
+
+Write routes answer `403 {"state":"forbidden"}` for every refused chain step, so the response does
+not say which check failed.
+
+### Origin
+
+A write request must carry an `Origin` header equal to the configured origin, exactly. A missing,
+`null`, different-port or different-scheme value is refused. The `Host` header is never used.
+
+The origin is `DASHBOARD_GATEWAY_OPERATOR_ORIGIN`. Production leaves it unset, so it defaults to
+`https://dashboard.fro.bot`, which is the public dashboard origin. Set it only if the public origin
+changes.
+
+### Token scope
+
+Each write mints an installation token on demand with `permissions: {contents: 'write'}` and
+`repositoryNames: ['.github']`. GitHub returns `{contents: write, metadata: read}`. The token is
+cached per process and refreshed shortly before expiry.
+
+Checked against the real App: that token can read the `data` ref, the open `data` → `main` PRs,
+the `merge-data.yaml` runs, and a run's jobs and steps. Promotion status therefore needs no scope
+beyond `contents: write`, and the infra handoff adds no App permission.
+
+The App installation itself is broad (it includes `administration`, `secrets` and `workflows`
+write). Only the mint-time `permissions` subset keeps a token narrow. The `data` branch and the
+path allowlist are enforced in application code (`src/wiki/paths.ts`).
+
+---
+
+## Infra handoff
+
+The change lands in `marcusrbrown/infra`. `apps/dashboard/src/remote-deploy.ts` uses payload v2
+with exactly five named fields. An unknown field is rejected and a missing field fails. Publishing
+a second key needs all of these:
+
+- A new case branch for the new field in the payload reader.
+- A seen flag for it, with duplicate detection.
+- A required-field check that includes it.
+- A size constant for it, counted in the total payload limit.
+- A second publish step to a new active path, with its own allowlisted failure detail.
+- The TypeScript payload type change.
+- The compose read-only mount for the new path.
+
+The field loop in the same file is hard-coded to five and must become six.
+
+Then set three environment variables on the dashboard service:
+
+- `DASHBOARD_FRO_BOT_APP_KEY_FILE`: the mounted key path.
+- `DASHBOARD_FRO_BOT_APP_ID`: the Fro Bot App ID.
+- `DASHBOARD_OPERATOR_ID`: the operator's numeric GitHub ID.
+
+The Fro Bot App installation on `fro-bot/.github` must grant contents write. It already does,
+because `merge-data.yaml` mints Fro Bot tokens with contents write.
+
+Caddy's catch-all proxies to the dashboard without rewriting the path, so `/wiki/<id>` reaches the
+server as sent.
+
+---
+
+## The `/wiki/<id>` contract
+
+The `fro-bot/.github` Edit-link task links pages to the dashboard:
+
+```text
+https://dashboard.fro.bot/wiki/<id>
+```
+
+A page ID is `<directory>.<name>`:
+
+| Page path                                  | ID                          |
+| ------------------------------------------ | --------------------------- |
+| `knowledge/wiki/repos/<name>.md`           | `repos.<name>`              |
+| `knowledge/wiki/topics/<name>.md`          | `topics.<name>`             |
+| `knowledge/wiki/entities/<name>.md`        | `entities.<name>`           |
+| `knowledge/wiki/comparisons/<name>.md`     | `comparisons.<name>`        |
+
+Example: `knowledge/wiki/repos/marcusrbrown--infra.md` is `repos.marcusrbrown--infra`.
+
+- The directory is one of the four above. The name is the file name without `.md`.
+- The name starts and ends with a letter or digit and holds only letters, digits, `.`, `_` and `-`.
+  It never contains `..`. An ID is at most 200 characters.
+- Pages only. Nested paths, `README.md`, `index.md`, `log.md` and `corrections.yaml` have no ID.
+- The link takes exactly one path segment. A trailing slash, a nested path or an encoded slash is a 404.
+- An unauthenticated visit signs in first, then returns to the page. The return target is kept in a
+  short-lived cookie that holds only a valid `/wiki/<id>` path.
+
+The server resolves an ID to a path by finding it in the current tree, never from client input.
+
+---
+
+## What a save does
+
+One commit on `data` carries the page, the appended `knowledge/log.md` entry, the rebuilt
+`knowledge/index.md`, and `knowledge/corrections.yaml` when the save marks, retires, flags or
+reconfirms a correction. The commit message has two trailers: `Fro-Operation-Id` and `Fro-Operator`.
+The commit sets no author or committer, so GitHub attributes it to the App.
+
+Conflicts are per page: the page's blob SHA must match what the editor loaded. A moved head is
+retried in the request a few times. Every save then dispatches `promote-data`. If the dispatch
+fails, the save reports "saved, not promoted" and the editor offers a retry that sends only the
+dispatch.
+
+### Cold and warm reads
+
+A snapshot lists the whole `data` tree in one request and reads only the blobs the gates need:
+everything under `knowledge/` and `metadata/repos.yaml`. A content-addressed blob cache spares
+refetching unchanged blobs.
+
+| Read | Requests | Wall time |
+| ---- | -------- | --------- |
+| Cold | 56       | about 3.5 s |
+| Warm, head unchanged | 3 | about 0.7 s |
+
+Measured against the real repository. The cold read dominates the first page open after a deploy.
+
+### Rate limits
+
+Writes are limited per operator, below the per-IP limit. A trip answers the rate-limited outcome with
+a retry hint. GitHub rate limits surface the same way.
+
+### Weekly backstop
+
+`merge-data.yaml` also runs on a weekly schedule. A save whose dispatch failed is therefore
+promoted by the next scheduled run: a failed dispatch is not data loss.
+
+---
+
+## Promotion status
+
+Status is read from the open `data` → `main` PR and the newest `merge-data.yaml` run, of any event
+type. The privacy checks run as steps inside that run, so a blocked promotion is a failed run, not
+a PR check. One status read costs at most three GitHub requests, and the server caches a result
+for a few seconds.
+
+| Newest run                          | State                   |
+| ----------------------------------- | ----------------------- |
+| queued or in progress               | pending                 |
+| `cancelled`, `action_required`, `stale` | pending             |
+| `success`, `neutral`, `skipped`     | settled                 |
+| `failure`, `timed_out`, `startup_failure` | blocked           |
+| no run yet                          | pending                 |
+
+A cancelled run is pending because a newer dispatch cancels the run in progress. Runs created
+before the save's commit time are ignored, so an older failure cannot answer for a newer save.
+Blocked belongs to the `data` branch, not to one save: a later successful run clears it.
+
+### Reading "Promotion blocked"
+
+The reason comes from the failed step's name, ignoring a leading symbol. Unknown names read as
+`unknown`. The response carries the reason code and a link to the run, never log text.
+
+| Failed step                                       | Reason               |
+| ------------------------------------------------- | -------------------- |
+| `🔒 Block private wiki pages`                     | `private-page`       |
+| `🔒 Block private repo names in promotion diff`   | `private-repo-name`  |
+| `🔒 Fetch data ref for promotion diff`            | `promotion-diff`     |
+| `⤵ Fetch data branch for privacy check`           | `privacy-check`      |
+| `🔁 Merge main into data`                         | `merge`              |
+| `🔀 Open data merge PR`                           | `open-pr`            |
+| anything else                                     | `unknown`            |
+
+Example: runs 35545734311 and 34790889509 both failed at `🔒 Block private wiki pages`.
+
+To clear a block, read the run, fix the page the step names, and save again.
+
+"Promotion status unavailable" means a transient read error: network, timeout, 5xx or a GitHub
+rate limit. A 401, 403 or 404 on the status reads is a configuration fault. It is logged at error
+level and returned as `configuration-fault`.
+
+---
+
+## Gate contract
+
+Before opening a page and on every save, the dashboard compares the gate-contract version of its
+`@fro.bot/wiki-write-core` dependency with the marker published on `fro-bot/.github` `main`
+(`packages/wiki-write-core/dist/gate-contract.json`). The marker is cached
+(`GATE_CONTRACT_CACHE_TTL_MS`). If a refresh fails, a cached marker is used up to
+`GATE_CONTRACT_STALE_CEILING_MS`.
+
+| Outcome        | Meaning                                              | Retry | Fix |
+| -------------- | ---------------------------------------------------- | ----- | --- |
+| `ok`           | Versions match.                                      |       |     |
+| `mismatch`     | The dashboard's gates differ from the control plane's. Saves answer HTTP 424 and make no GitHub write call. The editor keeps the draft. | No | Update the `@fro.bot/wiki-write-core` dependency to the version the control plane publishes, then deploy. |
+| `unreadable`   | The marker could not be fetched or parsed, and no usable cached marker exists. HTTP 424. | Yes | Check that `raw.githubusercontent.com` is reachable and the marker file exists on `main`, then retry. |
+
+A mismatch cannot be fixed by retrying. An unreadable marker clears itself when the fetch works again.
+
+---
+
+## Local development: `dev:fixture`
+
+`bun run dev:fixture` serves the fixture build against an in-memory repository. It needs no GitHub
+credential and makes no network request. The script sets what the write path needs:
+
+- `NODE_ENV=development` and `DASHBOARD_HOST=127.0.0.1`: the fixture harness refuses anything else.
+- `DASHBOARD_FIXTURE_HARNESS_ENABLED=true` and `DASHBOARD_DEV_AUTOLOGIN=true`.
+- `DASHBOARD_OPERATOR_LOGIN=fixture-operator`: autologin mints no session without it.
+- `DASHBOARD_COOKIE_KEY`: a throwaway key generated on each start.
+
+The expected origin in fixture mode is the loopback origin the server binds to:
+`http://127.0.0.1:<DASHBOARD_PORT>` (port 3000 by default). Open the app at that exact origin.
+`http://localhost:<port>` fails the `Origin` check.
+
+Only the Git Data transport is fake. The routes, gates, write operation and promotion reader are
+the production code.
+
+Each fault fires on the first save of its page, lets the following saves through, and arms again
+after the next save that goes through. Restarting resets everything.
+
+| Page ID                                | First save                                                        |
+| -------------------------------------- | ----------------------------------------------------------------- |
+| `repos.fixture--plain`                 | Saves. Has a `node_id` and one active correction. Status reads pending, then settled. |
+| `comparisons.fixture-a-vs-b`           | Saves.                                                            |
+| `topics.fixture-no-node-id`            | Saves. No `node_id`, so no marks.                                 |
+| `topics.fixture-conflict`              | Page conflict: another writer changed the page.                   |
+| `repos.fixture--corrections-conflict`  | Corrections conflict, for a save that carries a mark or transition. |
+| `topics.fixture-timeout-landed`        | Timeout; the commit landed. Lookup finds it.                      |
+| `topics.fixture-timeout-lost`          | Timeout; the commit did not land. Lookup reports missing.         |
+| `topics.fixture-dispatch-failure`      | Saved, not promoted. The retry dispatch succeeds with no second commit. |
+| `topics.fixture-blocked`               | Saves; the promotion then reads blocked, reason `private-page`.   |
+| `topics.fixture-contract-mismatch`     | Contract mismatch on every save.                                  |
+| `topics.fixture-contract-unreadable`   | Contract unreadable once.                                         |
+| `topics.fixture-rate-limit`            | GitHub rate limit with a retry hint.                              |
+| `topics.fixture-failed`                | Retryable write failure; nothing is committed.                    |
+| `topics.fixture-rejected`              | Rejected by a real gate: the page holds an inline frame. Remove the line and save. |
+| `entities.fixture-vanishes`            | The page is removed first: page-removed conflict. It returns on the next list read. |
+
+The fixture cannot prove GitHub's own status codes or response shapes. The first real save does.
+
+---
+
+## Closing check
+
+After the infra change is live, save one real correction. Confirm the commit lands on `data` with
+both trailers and the App's attribution, the promotion run starts, and the promotion PR shows the
+change. Merge the PR by hand. This is the only check that proves the real credential, the ruleset
+bypass, the dispatch and the privacy-check read together.
