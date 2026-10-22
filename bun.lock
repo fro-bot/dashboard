@@ -6,7 +6,7 @@
       "name": "@fro-bot/dashboard",
       "dependencies": {
         "@bfra.me/es": "0.1.0",
-        "@fro.bot/wiki-write-core": "0.1.2",
+        "@fro.bot/wiki-write-core": "0.1.3",
         "@hono/node-server": "^2.0.0",
         "@octokit/auth-app": "8.3.1",
         "@octokit/core": "7.0.8",
@@ -325,7 +325,7 @@
 
     "@exodus/bytes": ["@exodus/bytes@1.16.0", "", { "peerDependencies": { "@noble/hashes": "^1.8.0 || ^2.0.0" }, "optionalPeers": ["@noble/hashes"] }, "sha512-IcpW84uEn3N7ETtNZMlxKhfl6Pec8rUNGOTBtWbK1FKhJxIFAptZyVrvVRVBimAJxJCgc3PxepxkdWWG4DVzfA=="],
 
-    "@fro.bot/wiki-write-core": ["@fro.bot/wiki-write-core@0.1.2", "", { "dependencies": { "@octokit/rest": "^22.0.1", "yaml": "^2.8.3" } }, "sha512-raE8GW09Add7x2bEl4e0hsFIg+7art6alOVWy+Ny0Ss8YFcY0DgxLjWTpmcnO9GF8byUcz/rW20k1jGUoPlmTg=="],
+    "@fro.bot/wiki-write-core": ["@fro.bot/wiki-write-core@0.1.3", "", { "dependencies": { "@octokit/rest": "^22.0.1", "yaml": "^2.8.3" } }, "sha512-FbwGEYK/aIJM8PQImHYJf4+61jUwcFPUR6ixuNY3XTQPVS3wiBxhc4d3ljBq7jisnEIO93DHRRsK9Muqbm5eaw=="],
 
     "@hono/node-server": ["@hono/node-server@2.1.5", "", { "peerDependencies": { "hono": "^4 || ^5.0.0-0" } }, "sha512-MgP/I06GdvsilDspMk/qmRzpk8LOUStP6jFAbSRi40W09DhoyUn+Mj7eyKICPqeYKybOjVFLVIAQzvu1bfIa7Q=="],
 
