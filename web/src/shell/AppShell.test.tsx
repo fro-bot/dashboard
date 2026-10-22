@@ -1,4 +1,4 @@
-import {fireEvent, render, screen} from '@testing-library/react'
+import {fireEvent, render, screen, within} from '@testing-library/react'
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {getLogoutAbortSignal} from '../push/logout-abort.ts'
 import * as logoutPurgeModule from '../pwa/logout-purge.ts'
@@ -480,6 +480,42 @@ describe('AppShell', () => {
       fireEvent.click(screen.getByTestId('logout-button'))
 
       expect(signalBefore.aborted).toBe(true)
+    })
+  })
+  describe('navigation', () => {
+    it('renders Runs, Inbox and Wiki entries inside the primary navigation', () => {
+      render(<AppShell>content</AppShell>)
+      const nav = screen.getByRole('navigation', {name: 'Primary navigation'})
+      for (const name of ['Runs', 'Inbox', 'Wiki']) {
+        expect(within(nav).getByRole('button', {name})).toBeInTheDocument()
+      }
+    })
+
+    it('Wiki calls onNavigate with the wiki view', () => {
+      const onNavigate = vi.fn()
+      render(<AppShell onNavigate={onNavigate}>content</AppShell>)
+      fireEvent.click(screen.getByRole('button', {name: 'Wiki'}))
+      expect(onNavigate).toHaveBeenCalledTimes(1)
+      expect(onNavigate).toHaveBeenCalledWith('wiki')
+    })
+
+    it('Runs and Inbox still call onNavigate with their own view', () => {
+      const onNavigate = vi.fn()
+      render(<AppShell onNavigate={onNavigate}>content</AppShell>)
+      fireEvent.click(screen.getByRole('button', {name: 'Runs'}))
+      fireEvent.click(screen.getByRole('button', {name: 'Inbox'}))
+      expect(onNavigate.mock.calls).toEqual([['operator'], ['listener']])
+    })
+
+    it('marks only the current view with aria-current', () => {
+      const {rerender} = render(<AppShell currentView="wiki">content</AppShell>)
+      expect(screen.getByRole('button', {name: 'Wiki'})).toHaveAttribute('aria-current', 'page')
+      expect(screen.getByRole('button', {name: 'Runs'})).not.toHaveAttribute('aria-current')
+      expect(screen.getByRole('button', {name: 'Inbox'})).not.toHaveAttribute('aria-current')
+
+      rerender(<AppShell currentView="operator">content</AppShell>)
+      expect(screen.getByRole('button', {name: 'Runs'})).toHaveAttribute('aria-current', 'page')
+      expect(screen.getByRole('button', {name: 'Wiki'})).not.toHaveAttribute('aria-current')
     })
   })
 })

@@ -299,6 +299,46 @@ describe('/operator redirect — wiki return cookie', () => {
     expect(again.headers.get('set-cookie')).toBeNull()
   })
 
+  it('lands an unauthenticated /wiki visit back on the list after the gateway returns to /operator', async () => {
+    const app = await buildGatewayApp(makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION)))
+    const listReturn = `wiki_return=${encodeURIComponent('/wiki')}`
+
+    const first = await app.request('/wiki')
+    expect(first.status).toBe(302)
+    expect(first.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
+    expect(first.headers.get('set-cookie') ?? '').toContain(listReturn)
+
+    const back = await app.request('/operator', {headers: {cookie: `__Host-session=x; ${listReturn}`}})
+    expect(back.status).toBe(302)
+    expect(back.headers.get('location')).toBe('/wiki')
+    expect(back.headers.get('set-cookie') ?? '').toMatch(/wiki_return=;.*Max-Age=0/iu)
+
+    const again = await app.request('/operator', {headers: {cookie: '__Host-session=x'}})
+    expect(again.headers.get('location')).toBe('/')
+    expect(again.headers.get('set-cookie')).toBeNull()
+  })
+
+  it('also redirects /operator/ to the list and clears the cookie', async () => {
+    const app = await buildGatewayApp(makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION)))
+
+    const res = await app.request('/operator/', {
+      headers: {cookie: `__Host-session=x; wiki_return=${encodeURIComponent('/wiki')}`},
+    })
+
+    expect(res.headers.get('location')).toBe('/wiki')
+    expect(res.headers.get('set-cookie') ?? '').toMatch(/Max-Age=0/iu)
+  })
+
+  it('consumes a list cookie in Arctic mode as well', async () => {
+    const app = await buildArcticApp(false)
+
+    const res = await app.request('/operator', {
+      headers: {cookie: `session=${makeSessionCookie()}; wiki_return=${encodeURIComponent('/wiki')}`},
+    })
+
+    expect(res.headers.get('location')).toBe('/wiki')
+  })
+
   it('also redirects /operator/ to the target and clears the cookie', async () => {
     const app = await buildGatewayApp(makeFakeOperatorClient(async () => ok(VALID_GATEWAY_SESSION)))
 
@@ -311,6 +351,8 @@ describe('/operator redirect — wiki return cookie', () => {
   it.each([
     ['an absolute URL', 'https://evil.example/wiki/repos.a'],
     ['a nested path', '/wiki/repos.a/b'],
+    ['the wiki index with a slash', '/wiki/'],
+    ['the list with a query string', '/wiki?x=1'],
     ['the root', '/'],
     ['a malformed page ID', '/wiki/repos..'],
   ])('ignores and clears a cookie holding %s', async (_label, value) => {

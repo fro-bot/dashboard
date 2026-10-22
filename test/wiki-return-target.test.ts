@@ -15,6 +15,7 @@ describe('parseReturnTarget', () => {
     '/wiki/topics.docker-containers',
     '/wiki/entities.node.js',
     '/wiki/comparisons.a-vs-b',
+    '/wiki',
   ])('accepts %s', target => {
     expect(parseReturnTarget(target)).toBe(target)
   })
@@ -25,7 +26,15 @@ describe('parseReturnTarget', () => {
     ['the root', '/'],
     ['the operator path', '/operator'],
     ['the wiki index', '/wiki/'],
-    ['the bare wiki path', '/wiki'],
+    ['the wiki path with a query string', '/wiki?x=1'],
+    ['the wiki path with a fragment', '/wiki#top'],
+    ['the wiki path with an encoded character', '/wik%69'],
+    ['the wiki path in another case', '/Wiki'],
+    ['the wiki path with a trailing dot', '/wiki.'],
+    ['a longer first segment', '/wikis'],
+    ['the wiki path with a backslash', '/wiki\\'],
+    ['the wiki path with a newline', '/wiki\n'],
+    ['the wiki path with whitespace', '/wiki '],
     ['a nested path', '/wiki/repos.a/b'],
     ['a trailing slash', '/wiki/repos.a/'],
     ['a query string', '/wiki/repos.a?x=1'],
@@ -59,7 +68,11 @@ describe('returnTargetForPath', () => {
     expect(returnTargetForPath('/wiki/repos.acme--alpha')).toBe('/wiki/repos.acme--alpha')
   })
 
-  it.each(['/', '/wiki', '/wiki/', '/wiki/a/b', '/api/wiki/pages', '/operator'])('returns null for %s', path => {
+  it('returns the path for the bare wiki list path', () => {
+    expect(returnTargetForPath('/wiki')).toBe('/wiki')
+  })
+
+  it.each(['/', '/wiki/', '/wiki/a/b', '/api/wiki/pages', '/operator'])('returns null for %s', path => {
     expect(returnTargetForPath(path)).toBeNull()
   })
 })
@@ -108,6 +121,22 @@ describe('return cookie', () => {
     expect(cleared).toMatch(/Max-Age=0/iu)
   })
 
+  it('round-trips the bare wiki list target through the cookie', async () => {
+    const app = new Hono()
+    app.get('/set', c => {
+      setReturnCookie(c, '/wiki', true)
+      return c.text('ok')
+    })
+    app.get('/consume', c => c.json({target: consumeReturnCookie(c)}))
+
+    const set = await app.request('/set')
+    expect(set.headers.get('set-cookie') ?? '').toContain(`${RETURN_COOKIE}=${encodeURIComponent('/wiki')}`)
+
+    const res = await app.request('/consume', {headers: {cookie: `${RETURN_COOKIE}=${encodeURIComponent('/wiki')}`}})
+    expect(await res.json()).toEqual({target: '/wiki'})
+    expect(res.headers.get('set-cookie') ?? '').toMatch(/Max-Age=0/iu)
+  })
+
   it('returns null and sends no cookie header when there is no cookie', async () => {
     const res = await appFor(true).request('/consume')
 
@@ -119,6 +148,7 @@ describe('return cookie', () => {
     ['an absolute URL', 'https://evil.example/'],
     ['the root', '/'],
     ['a nested path', '/wiki/repos.a/b'],
+    ['the wiki index with a slash', '/wiki/'],
     ['garbage', '%E0%A4%A'],
   ])('clears a tampered cookie holding %s and returns null', async (_label, value) => {
     const res = await appFor(true).request('/consume', {headers: {cookie: `${RETURN_COOKIE}=${encodeURIComponent(value)}`}})

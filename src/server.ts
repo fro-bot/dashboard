@@ -830,7 +830,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     )
   }
 
-  // Serve the React SPA at / and at /wiki/<id>. index.html requires a session; shell assets are public.
+  // Serve the React SPA at /, at /wiki and at /wiki/<id>. index.html requires a session; shell assets are public.
   // When pushNotificationsEnabled, inject a <meta name="push-enabled" content="true">
   // tag so the SPA can render the push consent surface without a separate flag fetch.
   // Both routes share one handler, so the injection and the length are computed the same way.
@@ -854,6 +854,9 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
     serveIndex = serveStatic({root: webDistRoot, path: 'index.html'})
   }
   app.get('/', serveIndex)
+
+  // The wiki list. The same handler as /wiki/<id>, behind the same session check.
+  app.get('/wiki', serveIndex)
 
   // One-segment /wiki/<id> paths only. The ID is checked against the raw path, so an
   // encoded slash, a dot segment, or a trailing slash is not served the shell.

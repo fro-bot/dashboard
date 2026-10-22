@@ -1169,13 +1169,58 @@ describe('GET /wiki/:id shell', () => {
     ['an encoded slash', '/wiki/repos.a%2Fb'],
     ['a trailing slash', `/wiki/${ALPHA_ID}/`],
     ['the bare index', '/wiki/'],
-    ['the bare wiki path', '/wiki'],
+    ['the wiki path with a double slash', '/wiki//'],
   ])('does not serve the shell for %s', async (_label, path) => {
     const world = makeWorld()
 
     const res = await get(await gatewayApp(world.deps), path)
 
     expect(res.status).toBe(404)
+  })
+
+  it('serves the SPA shell for the bare /wiki list path behind the session, the same shell as /', async () => {
+    const world = makeWorld()
+    const app = await gatewayApp(world.deps)
+
+    const res = await get(app, '/wiki')
+
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('text/html')
+    const text = await res.text()
+    expect(text).toContain('<div id="root"></div>')
+    expect(text).toBe(await (await get(app, '/')).text())
+  })
+
+  it('serves /wiki through the same index handler as /wiki/<id>: push meta tag and matching length', async () => {
+    const world = makeWorld()
+    const app = await gatewayApp(world.deps, () => SESSION, {pushNotificationsEnabled: true})
+
+    const res = await get(app, '/wiki')
+    const text = await res.text()
+
+    expect(text).toContain('<meta name="push-enabled" content="true">')
+    const declared = res.headers.get('content-length')
+    if (declared !== null) expect(Number(declared)).toBe(Buffer.byteLength(text, 'utf8'))
+  })
+
+  it('does not serve the shell for POST /wiki', async () => {
+    const world = makeWorld()
+
+    const res = await (await gatewayApp(world.deps)).request('/wiki', {method: 'POST', headers: {cookie: 'x'}})
+
+    expect(res.status).not.toBe(200)
+  })
+
+  it('redirects an unauthenticated request for /wiki to login and sets the list return cookie', async () => {
+    const world = makeWorld()
+    const res = await (await gatewayApp(world.deps)).request('/wiki')
+
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toBe('/operator/auth/github/start?return_to=/operator')
+    const cookie = res.headers.get('set-cookie') ?? ''
+    expect(cookie).toContain(`wiki_return=${encodeURIComponent('/wiki')}`)
+    expect(cookie).toMatch(/HttpOnly/iu)
+    expect(cookie).toMatch(/SameSite=Lax/iu)
   })
 
   it('redirects an unauthenticated request to login and sets the return cookie', async () => {
@@ -1196,7 +1241,7 @@ describe('GET /wiki/:id shell', () => {
     const world = makeWorld()
     const app = await gatewayApp(world.deps)
 
-    for (const path of ['/', '/wiki/repos.a/b', '/wiki/repos..', '/api/wiki/pages']) {
+    for (const path of ['/', '/wiki/', '/wiki/repos.a/b', '/wiki/repos..', '/api/wiki/pages']) {
       const res = await app.request(path)
       expect(res.status).toBe(302)
       expect(res.headers.get('set-cookie')).toBeNull()
@@ -1246,6 +1291,7 @@ describe('public paths', () => {
   })
 
   it.each([
+    '/wiki',
     `/wiki/${ALPHA_ID}`,
     '/wiki/repos.x',
     '/api/wiki/pages',
@@ -1264,14 +1310,14 @@ describe('public paths', () => {
     const world = makeWorld()
     const app = await buildDashboardApp({operatorLogin: LOGIN, cookieKey: TEST_KEY, wiki: world.deps, webDistRoot: SHELL_ROOT})
 
-    for (const path of [`/wiki/${ALPHA_ID}`, '/api/wiki/pages']) expect((await app.request(path)).status).toBe(302)
+    for (const path of ['/wiki', `/wiki/${ALPHA_ID}`, '/api/wiki/pages']) expect((await app.request(path)).status).toBe(302)
   })
 
   it('denies the wiki paths with 401 when no operator login is configured', async () => {
     const world = makeWorld()
     const app = await buildDashboardApp({wiki: world.deps, webDistRoot: SHELL_ROOT})
 
-    for (const path of [`/wiki/${ALPHA_ID}`, '/api/wiki/pages']) expect((await app.request(path)).status).toBe(401)
+    for (const path of ['/wiki', `/wiki/${ALPHA_ID}`, '/api/wiki/pages']) expect((await app.request(path)).status).toBe(401)
   })
 })
 

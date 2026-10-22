@@ -879,9 +879,26 @@ describe('gateway /auth/login — wiki return target', () => {
     expect(cookie).toMatch(/SameSite=Lax/iu)
   })
 
+  it('sets the return cookie from next=/wiki, the list, and still redirects to the fixed gateway start', async () => {
+    const res = await login(`?next=${encodeURIComponent('/wiki')}`)
+
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toBe(GATEWAY_START)
+    expect(res.headers.get('set-cookie') ?? '').toContain(`wiki_return=${encodeURIComponent('/wiki')}`)
+  })
+
+  it('accepts the unencoded form ?next=/wiki as well', async () => {
+    const res = await login('?next=/wiki')
+
+    expect(res.headers.get('location')).toBe(GATEWAY_START)
+    expect(res.headers.get('set-cookie') ?? '').toContain(`wiki_return=${encodeURIComponent('/wiki')}`)
+  })
+
   it.each([
     ['an absolute URL', 'https://evil.example/wiki/repos.a'],
     ['a protocol-relative URL', '//evil.example/wiki/repos.a'],
+    ['the wiki list with a query string', '/wiki?x=1'],
+    ['the wiki index with a slash', '/wiki/'],
     ['the root', '/'],
     ['an operator path', '/operator'],
     ['a nested wiki path', '/wiki/repos.a/b'],
@@ -920,6 +937,17 @@ describe('gateway /auth/login — wiki return target', () => {
     expect(res.status).toBe(302)
     expect(res.headers.get('location')).toBe(GATEWAY_START)
     expect(res.headers.get('set-cookie') ?? '').toContain('wiki_return=')
+  })
+
+  it('sets the return cookie when a present but invalid gateway session redirects a request for the list', async () => {
+    const {client} = makeFakeOperatorClient(async () => err({kind: 'unauthorized'} as unknown as GatewayClientError))
+    const app = await buildGatewayApp(client)
+
+    const res = await app.request('/wiki', {headers: {cookie: '__Host-session=expired'}})
+
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toBe(GATEWAY_START)
+    expect(res.headers.get('set-cookie') ?? '').toContain(`wiki_return=${encodeURIComponent('/wiki')}`)
   })
 
   it('does not log the page ID of an unauthenticated wiki request', async () => {

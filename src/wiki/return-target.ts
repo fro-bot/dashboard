@@ -2,9 +2,10 @@
  * Deep-link return target.
  *
  * After a login redirect the browser should land back on the wiki page it asked
- * for. The target travels in a short-lived HttpOnly cookie. It is a `/wiki/<id>`
- * path with a shape-valid page ID and nothing else, and it is re-validated on
- * use. There is no `return` parameter and no other accepted form.
+ * for. The target travels in a short-lived HttpOnly cookie. It is either the bare
+ * `/wiki` list path or a `/wiki/<id>` path with a shape-valid page ID, and nothing
+ * else, and it is re-validated on use. There is no `return` parameter and no other
+ * accepted form.
  */
 
 import type {Context} from 'hono'
@@ -15,15 +16,17 @@ import {parsePageId} from './paths.ts'
 export const RETURN_COOKIE = 'wiki_return'
 export const RETURN_COOKIE_MAX_AGE_SECONDS = 10 * 60
 
+const WIKI_LIST = '/wiki'
 const WIKI_PREFIX = '/wiki/'
 
-/** The target when `value` is exactly `/wiki/<id>` with a shape-valid ID; otherwise null. */
+/** The target when `value` is exactly `/wiki` or `/wiki/<id>` with a shape-valid ID; otherwise null. */
 export function parseReturnTarget(value: unknown): string | null {
+  if (value === WIKI_LIST) return value
   if (typeof value !== 'string' || !value.startsWith(WIKI_PREFIX)) return null
   return parsePageId(value.slice(WIKI_PREFIX.length)) === null ? null : value
 }
 
-/** The request path as a return target, or null when it is not a wiki page path. */
+/** The request path as a return target, or null when it is neither the wiki list nor a wiki page path. */
 export function returnTargetForPath(pathname: string): string | null {
   return parseReturnTarget(pathname)
 }

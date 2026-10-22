@@ -1023,7 +1023,7 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 
 ### U9. Page list, view routing, and deep link
 
-- [ ] Landed
+- [x] Landed
 
 **Goal:** A Wiki view lists editable pages, shows branch-level promotion status, and opens a page by its deep-link route. The route survives login. Orphaned drafts open read-only.
 

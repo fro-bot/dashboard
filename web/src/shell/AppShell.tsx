@@ -45,6 +45,9 @@ function redirectToLogin(): void {
   window.location.href = AUTH_LOGIN_PATH
 }
 
+/** The views the shell can show. App holds the current one in state; there is no router. */
+export type AppView = 'operator' | 'listener' | 'wiki'
+
 type Theme = 'dark' | 'light'
 
 function getInitialTheme(): Theme {
@@ -75,9 +78,9 @@ interface AppShellProps {
   /** Fixture-mode session id, appended as a query param by the push client. */
   pushFixtureSessionId?: string
   /** Current active view */
-  currentView?: 'operator' | 'listener'
+  currentView?: AppView
   /** Navigation handler */
-  onNavigate?: (view: 'operator' | 'listener') => void
+  onNavigate?: (view: AppView) => void
   /** Global unread count for listener messages */
   listenerUnreadCount?: number
 }
@@ -259,6 +262,7 @@ export function AppShell({
             <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
               <button
                 type="button"
+                aria-current={currentView === 'operator' ? 'page' : undefined}
                 onClick={() => onNavigate?.('operator')}
                 style={{
                   minHeight: '32px',
@@ -277,6 +281,7 @@ export function AppShell({
               </button>
               <button
                 type="button"
+                aria-current={currentView === 'listener' ? 'page' : undefined}
                 onClick={() => onNavigate?.('listener')}
                 style={{
                   minHeight: '32px',
@@ -313,6 +318,25 @@ export function AppShell({
                     {listenerUnreadCount > 99 ? '99+' : listenerUnreadCount}
                   </span>
                 )}
+              </button>
+              <button
+                type="button"
+                aria-current={currentView === 'wiki' ? 'page' : undefined}
+                onClick={() => onNavigate?.('wiki')}
+                style={{
+                  minHeight: '32px',
+                  padding: 'var(--space-1) var(--space-3)',
+                  background: currentView === 'wiki' ? 'var(--color-surface-raised)' : 'transparent',
+                  color: currentView === 'wiki' ? 'var(--color-text)' : 'var(--color-text-muted)',
+                  border: 'none',
+                  borderRadius: 'var(--radius-md)',
+                  cursor: 'pointer',
+                  fontSize: 'var(--text-body-sm)',
+                  fontWeight: 600,
+                  transition: 'all var(--duration-fast) var(--ease-standard)',
+                }}
+              >
+                Wiki
               </button>
             </div>
 

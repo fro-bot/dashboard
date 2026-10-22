@@ -116,8 +116,9 @@ Example: `knowledge/wiki/repos/marcusrbrown--infra.md` is `repos.marcusrbrown--i
   It never contains `..`. An ID is at most 200 characters.
 - Pages only. Nested paths, `README.md`, `index.md`, `log.md` and `corrections.yaml` have no ID.
 - The link takes exactly one path segment. A trailing slash, a nested path or an encoded slash is a 404.
-- An unauthenticated visit signs in first, then returns to the page. The return target is kept in a
-  short-lived cookie that holds only a valid `/wiki/<id>` path.
+- `/wiki` serves the page list. It is the only other wiki path the server serves a shell for.
+- An unauthenticated visit signs in first, then returns to the page or the list. The return target is
+  kept in a short-lived cookie that holds only `/wiki` or a valid `/wiki/<id>` path.
 
 The server resolves an ID to a path by finding it in the current tree, never from client input.
 

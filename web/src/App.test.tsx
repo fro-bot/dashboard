@@ -571,3 +571,356 @@ describe('App — OPEN_RUN service-worker message', () => {
     expect(src).not.toMatch(/hashchange/)
   })
 })
+
+// ── Wiki view ──────────────────────────────────────────────────────────────
+// There is no router: App holds the view in state and web/src/wiki/location.ts owns the URL.
+// The operator view stays mounted (hidden) while the wiki view shows, exactly as it does for the inbox.
+
+describe('App — wiki view', () => {
+  const operatorWrapper = () => screen.getByTestId('operator-shell').parentElement as HTMLElement
+
+  async function renderApp() {
+    const view = render(<App />)
+    await act(async () => {})
+    return view
+  }
+
+  async function traverse(delta: -1 | 1) {
+    const popped = new Promise<void>(resolve => {
+      window.addEventListener('popstate', () => resolve(), {once: true})
+    })
+    await act(async () => {
+      window.history.go(delta)
+      await popped
+    })
+  }
+
+  beforeEach(async () => {
+    stubMatchMedia()
+    window.localStorage.clear()
+    document.documentElement.removeAttribute('data-theme')
+    window.history.pushState(null, '', '/')
+    const fixtureLoader = await import('./operator/fixture-runtime-loader.ts')
+    vi.spyOn(fixtureLoader, 'fetchFixtureSession').mockResolvedValue(null)
+    const runtimeModule = await import('./operator/runtime.ts')
+    vi.spyOn(runtimeModule, 'createOperatorRuntime').mockImplementation(() => ({isMounted: true, cleanup: vi.fn()}))
+    const listenerApi = await import('./api/listener.ts')
+    vi.spyOn(listenerApi, 'fetchListenerMessages').mockResolvedValue({ok: true, data: {messages: [], unreadCount: 0}})
+    const wikiApi = await import('./api/wiki.ts')
+    vi.spyOn(wikiApi, 'listWikiPages').mockReturnValue(new Promise(() => {}))
+    vi.spyOn(wikiApi, 'getWikiPage').mockReturnValue(new Promise(() => {}))
+    vi.spyOn(wikiApi, 'promotionStatus').mockReturnValue(new Promise(() => {}))
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    window.history.pushState(null, '', '/')
+  })
+
+  it('opens at the operator view when the path is not a wiki page', async () => {
+    await renderApp()
+    expect(operatorWrapper().style.display).toBe('block')
+    expect(screen.queryByTestId('wiki-list')).toBeNull()
+    expect(screen.queryByTestId('wiki-page')).toBeNull()
+  })
+
+  it('the Wiki nav opens the list and hides the operator view without unmounting it', async () => {
+    await renderApp()
+    const operatorNode = screen.getByTestId('operator-shell')
+
+    fireEvent.click(screen.getByRole('button', {name: 'Wiki'}))
+
+    expect(screen.getByTestId('wiki-list')).toBeInTheDocument()
+    expect(screen.getByTestId('operator-shell')).toBe(operatorNode)
+    expect(operatorWrapper().style.display).toBe('none')
+    expect(screen.getByRole('button', {name: 'Wiki'})).toHaveAttribute('aria-current', 'page')
+    expect(window.location.pathname).toBe('/wiki')
+  })
+
+  it('loading at /wiki opens the list directly, with the operator view hidden', async () => {
+    window.history.replaceState(null, '', '/wiki')
+
+    await renderApp()
+
+    expect(screen.getByTestId('wiki-list')).toBeInTheDocument()
+    expect(screen.queryByTestId('wiki-page')).toBeNull()
+    expect(operatorWrapper().style.display).toBe('none')
+    expect(screen.getByRole('button', {name: 'Wiki'})).toHaveAttribute('aria-current', 'page')
+  })
+
+  it('does not stack history entries when the app loads on /wiki', async () => {
+    window.history.replaceState(null, '', '/wiki')
+    const length = window.history.length
+
+    await renderApp()
+
+    expect(window.history.length).toBe(length)
+  })
+
+  it('Back from the list returns to the Runs view, and Forward returns to the list', async () => {
+    await renderApp()
+    fireEvent.click(screen.getByRole('button', {name: 'Wiki'}))
+
+    await traverse(-1)
+    expect(window.location.pathname).toBe('/')
+    expect(operatorWrapper().style.display).toBe('block')
+    expect(screen.queryByTestId('wiki-list')).toBeNull()
+
+    await traverse(1)
+    expect(window.location.pathname).toBe('/wiki')
+    expect(screen.getByTestId('wiki-list')).toBeInTheDocument()
+  })
+
+  it('Runs after Wiki shows the same operator node again and drops the list', async () => {
+    await renderApp()
+    const operatorNode = screen.getByTestId('operator-shell')
+    fireEvent.click(screen.getByRole('button', {name: 'Wiki'}))
+
+    fireEvent.click(screen.getByRole('button', {name: 'Runs'}))
+
+    expect(screen.getByTestId('operator-shell')).toBe(operatorNode)
+    expect(operatorWrapper().style.display).toBe('block')
+    expect(screen.queryByTestId('wiki-list')).toBeNull()
+  })
+
+  it('creates the operator runtime once, however the views change', async () => {
+    const runtimeModule = await import('./operator/runtime.ts')
+    await renderApp()
+    fireEvent.click(screen.getByRole('button', {name: 'Wiki'}))
+    fireEvent.click(screen.getByRole('button', {name: 'Inbox'}))
+    fireEvent.click(screen.getByRole('button', {name: 'Runs'}))
+    await act(async () => {})
+    expect(vi.mocked(runtimeModule.createOperatorRuntime)).toHaveBeenCalledTimes(1)
+  })
+
+  it('loading at /wiki/<id> opens that page directly, with the operator view hidden', async () => {
+    window.history.replaceState(null, '', '/wiki/repos.acme--alpha')
+
+    await renderApp()
+
+    expect(screen.getByTestId('wiki-page')).toHaveAttribute('data-page-id', 'repos.acme--alpha')
+    expect(operatorWrapper().style.display).toBe('none')
+    expect(screen.getByRole('button', {name: 'Wiki'})).toHaveAttribute('aria-current', 'page')
+  })
+
+  it('Back from a deep-linked page returns to the list, and Forward returns to the page', async () => {
+    window.history.replaceState(null, '', '/wiki/repos.acme--alpha')
+    await renderApp()
+
+    await traverse(-1)
+    expect(screen.getByTestId('wiki-list')).toBeInTheDocument()
+    expect(screen.queryByTestId('wiki-page')).toBeNull()
+    expect(window.location.pathname).toBe('/wiki')
+
+    await traverse(1)
+    expect(screen.getByTestId('wiki-page')).toHaveAttribute('data-page-id', 'repos.acme--alpha')
+  })
+
+  it('does not stack history entries when the app mounts twice on the same deep link', async () => {
+    window.history.replaceState(null, '', '/wiki/repos.acme--alpha')
+    const first = await renderApp()
+    const length = window.history.length
+    first.unmount()
+
+    await renderApp()
+
+    expect(window.history.length).toBe(length)
+  })
+
+  it('a path that fails the page-ID check opens the operator view', async () => {
+    window.history.replaceState(null, '', '/wiki/not-a-page')
+    await renderApp()
+    expect(screen.queryByTestId('wiki-page')).toBeNull()
+    expect(operatorWrapper().style.display).toBe('block')
+  })
+
+  it('leaving a page for Runs takes /wiki/<id> off the URL', async () => {
+    window.history.replaceState(null, '', '/wiki/repos.acme--alpha')
+    await renderApp()
+
+    fireEvent.click(screen.getByRole('button', {name: 'Runs'}))
+
+    expect(window.location.pathname).toBe('/')
+    expect(operatorWrapper().style.display).toBe('block')
+    expect(screen.queryByTestId('wiki-page')).toBeNull()
+  })
+
+  it('the Wiki nav from a page returns to the list', async () => {
+    window.history.replaceState(null, '', '/wiki/repos.acme--alpha')
+    await renderApp()
+
+    fireEvent.click(screen.getByRole('button', {name: 'Wiki'}))
+
+    expect(screen.getByTestId('wiki-list')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/wiki')
+  })
+
+  it('leaves the operator #runId hash alone through every view change', async () => {
+    window.history.replaceState(null, '', '/#run-keep-me')
+    await renderApp()
+
+    fireEvent.click(screen.getByRole('button', {name: 'Wiki'}))
+    fireEvent.click(screen.getByRole('button', {name: 'Inbox'}))
+    fireEvent.click(screen.getByRole('button', {name: 'Runs'}))
+
+    expect(window.location.hash).toBe('#run-keep-me')
+    expect(window.location.pathname).toBe('/')
+  })
+
+  it('a popstate that lands on the same wiki list does not pull the user off it', async () => {
+    await renderApp()
+    fireEvent.click(screen.getByRole('button', {name: 'Wiki'}))
+
+    act(() => {
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+
+    expect(screen.getByTestId('wiki-list')).toBeInTheDocument()
+  })
+
+  it('a popstate on the operator view (the run hash writes one) leaves every non-wiki view where it is', async () => {
+    await renderApp()
+    fireEvent.click(screen.getByRole('button', {name: 'Inbox'}))
+    await act(async () => {})
+
+    act(() => {
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+
+    expect(operatorWrapper().style.display).toBe('none')
+    expect(screen.getByRole('button', {name: 'Inbox'})).toHaveAttribute('aria-current', 'page')
+  })
+
+  describe('list to page and back', () => {
+    const SUMMARY = {id: 'repos.acme--alpha', title: 'acme/alpha', type: 'repos', updated: '2026-02-01', canMark: true} as const
+    const PAGE = {
+      ...SUMMARY,
+      body: 'Alpha builds widgets.\n',
+      pageBlobSha: 'blob-1',
+      nodeId: null,
+      corrections: [],
+      correctionsBase: 'digest-1',
+      headSha: 'commit-1',
+      contract: {ok: true},
+      canWrite: true,
+      canWriteReason: null,
+    } as const
+
+    beforeEach(async () => {
+      const wikiApi = await import('./api/wiki.ts')
+      vi.mocked(wikiApi.listWikiPages).mockResolvedValue({
+        ok: true,
+        value: {headSha: 'commit-1', pages: [SUMMARY], canWrite: true, canWriteReason: null},
+      })
+      vi.mocked(wikiApi.promotionStatus).mockResolvedValue({ok: true, value: {state: 'settled', pr: null}})
+      vi.mocked(wikiApi.getWikiPage).mockResolvedValue({ok: true, value: PAGE as never})
+    })
+
+    it('a page row opens the page at its deep link, and Back returns to the list', async () => {
+      await renderApp()
+      fireEvent.click(screen.getByRole('button', {name: 'Wiki'}))
+      await act(async () => {})
+
+      fireEvent.click(screen.getByRole('link', {name: 'acme/alpha'}))
+      await act(async () => {})
+
+      expect(window.location.pathname).toBe('/wiki/repos.acme--alpha')
+      expect(screen.getByTestId('wiki-page')).toHaveAttribute('data-state', 'ready')
+      expect(screen.getByTestId('wiki-page-body')).toHaveTextContent('Alpha builds widgets.')
+      expect(screen.queryByTestId('wiki-list')).toBeNull()
+
+      await traverse(-1)
+      await act(async () => {})
+
+      expect(screen.getByTestId('wiki-list')).toBeInTheDocument()
+      expect(screen.queryByTestId('wiki-page')).toBeNull()
+      expect(window.location.pathname).toBe('/wiki')
+    })
+
+    it('the in-page back link returns to the list', async () => {
+      window.history.replaceState(null, '', '/wiki/repos.acme--alpha')
+      await renderApp()
+
+      fireEvent.click(screen.getByRole('link', {name: 'Back to the wiki list'}))
+      await act(async () => {})
+
+      expect(screen.getByTestId('wiki-list')).toBeInTheDocument()
+      expect(window.location.pathname).toBe('/wiki')
+    })
+
+    it('an unknown ID in the URL shows not-found with a path back to the list', async () => {
+      const wikiApi = await import('./api/wiki.ts')
+      vi.mocked(wikiApi.getWikiPage).mockResolvedValue({ok: false, error: {kind: 'not-found'}})
+      window.history.replaceState(null, '', '/wiki/repos.nope')
+      await renderApp()
+
+      expect(screen.getByTestId('wiki-page-not-found')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('link', {name: 'Back to the wiki list'}))
+      await act(async () => {})
+      expect(screen.getByTestId('wiki-list')).toBeInTheDocument()
+    })
+  })
+
+  describe('OPEN_RUN from the wiki view', () => {
+    type Listener = (event: unknown) => void
+    const controller = {postMessage: vi.fn()}
+    let listeners: Set<Listener>
+    let originalDescriptor: PropertyDescriptor | undefined
+
+    beforeEach(async () => {
+      listeners = new Set()
+      originalDescriptor = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker')
+      Object.defineProperty(navigator, 'serviceWorker', {
+        configurable: true,
+        value: {
+          controller,
+          ready: new Promise(() => {}),
+          addEventListener: (type: string, listener: Listener) => {
+            if (type === 'message') listeners.add(listener)
+          },
+          removeEventListener: (type: string, listener: Listener) => {
+            if (type === 'message') listeners.delete(listener)
+          },
+        },
+      })
+      const runtimeModule = await import('./operator/runtime.ts')
+      vi.spyOn(runtimeModule, 'requestRunJump').mockImplementation(() => {})
+    })
+
+    afterEach(() => {
+      if (originalDescriptor === undefined) Reflect.deleteProperty(navigator, 'serviceWorker')
+      else Object.defineProperty(navigator, 'serviceWorker', originalDescriptor)
+    })
+
+    function deliver(data: unknown) {
+      act(() => {
+        for (const listener of [...listeners]) listener({data, source: controller})
+      })
+    }
+
+    it('switches back to Runs from the list and requests the jump', async () => {
+      const runtimeModule = await import('./operator/runtime.ts')
+      await renderApp()
+      fireEvent.click(screen.getByRole('button', {name: 'Wiki'}))
+      expect(operatorWrapper().style.display).toBe('none')
+
+      deliver({type: 'OPEN_RUN', runId: 'run-from-wiki'})
+
+      expect(operatorWrapper().style.display).toBe('block')
+      expect(screen.queryByTestId('wiki-list')).toBeNull()
+      expect(runtimeModule.requestRunJump).toHaveBeenCalledWith('run-from-wiki')
+    })
+
+    it('switches back to Runs from a wiki page and takes the page off the URL', async () => {
+      window.history.replaceState(null, '', '/wiki/repos.acme--alpha')
+      await renderApp()
+      expect(operatorWrapper().style.display).toBe('none')
+
+      deliver({type: 'OPEN_RUN', runId: 'run-from-page'})
+
+      expect(operatorWrapper().style.display).toBe('block')
+      expect(screen.queryByTestId('wiki-page')).toBeNull()
+      expect(window.location.pathname).toBe('/')
+    })
+  })
+})
