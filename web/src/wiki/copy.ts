@@ -205,7 +205,7 @@ export const CORRECTIONS_COPY = {
 /** Marking a span of the draft as a correction (U12). */
 export const MARK_COPY = {
   button: 'Mark as correction',
-  hint: 'Select text in the page text, then choose Mark as correction.',
+  hint: 'Select text, then choose Mark as correction.',
   marked: 'Marked as a correction.',
   removed: 'Mark removed.',
   kept: 'Mark kept.',
@@ -307,7 +307,7 @@ export const UNMARKED_COPY = {
   confirmNoNodeId:
     'This page cannot be marked. Your changes will be saved, but edits to this page do not survive the next regeneration. Unmarked changes will be lost at the next regeneration.',
   unavailable:
-    'The editor could not check which changes are marked: this change is too large to check. Saving asks you to confirm as if the changes were not marked.',
+    'The editor could not check which changes are marked, because this change is too large.',
   confirm: 'Confirm save',
   cancel: 'Back to editing',
 } as const

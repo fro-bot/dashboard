@@ -2389,12 +2389,168 @@
 .wiki-correction-list { display: grid; gap: var(--space-3); }
 .wiki-correction { padding: var(--space-4); border: 1px solid var(--color-border-muted); border-radius: var(--radius-md); background: var(--color-surface); }
 .wiki-correction-status { margin: 0 0 var(--space-2); color: var(--color-accent); font-size: var(--text-label); font-weight: 650; letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.wiki-correction[data-status="retired"] {
+  border-color: var(--color-border-muted);
+  background: color-mix(in srgb, var(--color-bg) 18%, var(--color-surface));
+}
+.wiki-correction[data-status="retired"] .wiki-correction-status { color: var(--color-text-muted); font-weight: 500; }
+.wiki-correction[data-status="retired"] .wiki-correction-span,
+.wiki-correction[data-status="retired"] .wiki-correction-reason,
+.wiki-correction[data-status="retired"] .wiki-correction-attribution,
+.wiki-correction[data-status="retired"] .wiki-correction-superseded-by { color: var(--color-text-muted); }
+.wiki-correction[data-status="needs-reconfirmation"] {
+  border-color: color-mix(in srgb, var(--color-warning) 60%, var(--color-border-muted));
+  background: color-mix(in srgb, var(--color-warning) 4%, var(--color-surface));
+}
+.wiki-correction[data-status="needs-reconfirmation"] .wiki-correction-status {
+  color: color-mix(in srgb, var(--color-warning) 70%, var(--color-text));
+}
 .wiki-correction-span,
 .wiki-correction-reason,
 .wiki-correction-attribution,
 .wiki-correction-superseded-by { margin: var(--space-1) 0; line-height: 1.55; overflow-wrap: anywhere; }
 .wiki-label { color: var(--color-text-muted); font-size: var(--text-body-sm); }
 .wiki-correction-stale { color: var(--color-warning); }
+
+/* Marking a span stays attached to the editor, with the selection requirement visible beside it. */
+.wiki-mark-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin-top: var(--space-2);
+}
+.wiki-mark-controls:not(:has(.wiki-mark-hint)) { display: none; }
+.wiki-editor .wiki-mark-controls .wiki-mark {
+  border-color: var(--color-border-accent);
+  color: var(--color-accent);
+  font-weight: 600;
+}
+.wiki-editor .wiki-mark-controls .wiki-mark:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-accent) 8%, var(--color-surface));
+}
+.wiki-mark-hint { color: var(--color-text-muted); font-size: var(--text-body-sm); line-height: 1.45; }
+.wiki-mark-status { max-width: 70ch; border-color: var(--color-border-accent); }
+.wiki-unmarked-notice-no-node-id {
+  border-color: color-mix(in srgb, var(--color-warning) 65%, var(--color-border-muted));
+  background: color-mix(in srgb, var(--color-warning) 5%, var(--color-surface));
+}
+
+/* The marks gate is part of Save's immediate context, not a second outcome panel. */
+.wiki-editor[data-mode="editing"] .wiki-corrections:has(.wiki-marks-blocking) {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+}
+.wiki-editor[data-mode="editing"] .wiki-corrections:has(.wiki-marks-blocking) > h3 { margin-bottom: var(--space-2); }
+.wiki-marks {
+  margin: var(--space-3) 0 var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border-muted);
+}
+.wiki-marks h4 { margin: 0 0 var(--space-1); font-size: var(--text-body); font-weight: 650; }
+.wiki-marks-note { margin: 0 0 var(--space-2); color: var(--color-text-muted); font-size: var(--text-body-sm); line-height: 1.5; }
+.wiki-marks-blocking {
+  margin: var(--space-2) 0;
+  padding: var(--space-2) var(--space-3);
+  border-color: color-mix(in srgb, var(--color-warning) 60%, var(--color-border-muted));
+  background: color-mix(in srgb, var(--color-warning) 6%, var(--color-surface));
+  color: var(--color-warning);
+}
+.wiki-mark-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.wiki-mark-item {
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}
+.wiki-mark-item[data-mark-state="review"] {
+  border-color: color-mix(in srgb, var(--color-warning) 60%, var(--color-border-muted));
+  background: color-mix(in srgb, var(--color-warning) 5%, var(--color-surface));
+}
+.wiki-mark-item[data-mark-state="detached"] {
+  border-color: color-mix(in srgb, var(--color-info) 55%, var(--color-border-muted));
+  background: color-mix(in srgb, var(--color-info) 5%, var(--color-surface));
+}
+.wiki-mark-text { margin: 0; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
+.wiki-mark-text q { quotes: "“" "”" "‘" "’"; }
+.wiki-mark-state { margin: var(--space-1) 0 0; color: var(--color-warning); font-size: var(--text-body-sm); font-weight: 600; }
+.wiki-mark-item[data-mark-state="detached"] .wiki-mark-state { color: var(--color-info); }
+.wiki-mark-actions,
+.wiki-correction-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+.wiki-editor .wiki-mark-actions button,
+.wiki-editor .wiki-correction-actions button,
+.wiki-editor .wiki-finding-retire {
+  min-height: 44px;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-body-sm);
+}
+.wiki-editor .wiki-mark-jump { border-color: var(--color-border-accent); color: var(--color-accent); }
+.wiki-editor .wiki-mark-keep { border-color: var(--color-border-accent); color: var(--color-accent); }
+.wiki-editor .wiki-mark-remove { color: var(--color-text-muted); }
+
+/* Staged correction transitions remain visibly pending until the page is saved. */
+.wiki-correction[data-stale="true"] {
+  border-color: color-mix(in srgb, var(--color-warning) 60%, var(--color-border-muted));
+}
+.wiki-correction-stale-detail {
+  color: var(--color-text-muted);
+  font-size: var(--text-body-sm);
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.wiki-correction[data-staged="retire"],
+.wiki-correction[data-staged="flag"] {
+  border-color: color-mix(in srgb, var(--color-warning) 65%, var(--color-border-muted));
+  background: color-mix(in srgb, var(--color-warning) 4%, var(--color-surface));
+}
+.wiki-correction[data-staged="reconfirm"] {
+  border-color: color-mix(in srgb, var(--color-success) 55%, var(--color-border-muted));
+  background: color-mix(in srgb, var(--color-success) 4%, var(--color-surface));
+}
+.wiki-correction-staged,
+.wiki-finding-retire-staged {
+  width: fit-content;
+  max-width: 100%;
+  margin: var(--space-2) 0;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-size: var(--text-body-sm);
+  font-weight: 600;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.wiki-correction[data-staged="retire"] .wiki-correction-staged,
+.wiki-correction[data-staged="flag"] .wiki-correction-staged,
+.wiki-finding-retire-staged {
+  border-color: color-mix(in srgb, var(--color-warning) 60%, var(--color-border-muted));
+  color: var(--color-warning);
+}
+.wiki-finding-eroded { border-top-color: color-mix(in srgb, var(--color-warning) 65%, var(--color-border-muted)); }
+.wiki-staged-dropped {
+  margin: var(--space-3) 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 60%, var(--color-border-muted));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-warning) 5%, var(--color-surface));
+  color: var(--color-warning);
+  font-size: var(--text-body-sm);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.wiki-editor .wiki-correction-action { color: var(--color-text-muted); }
+.wiki-editor .wiki-correction-undo { border-color: var(--color-border-accent); color: var(--color-accent); }
+.wiki-editor .wiki-finding-retire { border-color: var(--color-border-accent); color: var(--color-accent); }
+.wiki-unmarked-unavailable { border-color: var(--color-border-accent); }
 
 .wiki-orphaned-draft-text { margin-block: var(--space-3); }
 .wiki-orphaned-draft-id { font-family: var(--font-mono); overflow-wrap: anywhere; }
