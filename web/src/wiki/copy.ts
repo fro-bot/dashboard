@@ -285,8 +285,8 @@ export const EDITOR_COPY = {
   merged: 'Your draft now holds the merged text and starts from the current version. Review it, then save.',
   mergedMarksNeedReview: (count: number) =>
     count === 1
-      ? 'One marked correction could not be carried over with confidence. Keep it or remove it before you save.'
-      : `${String(count)} marked corrections could not be carried over with confidence. Keep or remove each before you save.`,
+      ? 'One marked correction could not be carried over with confidence. Resolve it in the corrections list before you save.'
+      : `${String(count)} marked corrections could not be carried over with confidence. Resolve each in the corrections list before you save.`,
   findingShow: 'Show in text',
   findingRetire: 'Retire this correction',
   findingRetireStaged: 'A retire is staged for this correction. Save to apply it.',
