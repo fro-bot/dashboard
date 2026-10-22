@@ -144,11 +144,16 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value !== ''
 }
 
+/** A whole number of ms that a Date can hold. A pending time becomes a Date for the lookup fallback. */
+function isDateMs(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && Math.abs(value) <= 8.64e15
+}
+
 function parsePending(value: unknown): PendingOperation | null | undefined {
   if (value === null) return null
   if (!isRecord(value)) return undefined
   const {operationId, sentAt, bodyChanged, state} = value
-  if (!isNonEmptyString(operationId) || typeof sentAt !== 'number' || !Number.isFinite(sentAt)) return undefined
+  if (!isNonEmptyString(operationId) || !isDateMs(sentAt)) return undefined
   if (typeof bodyChanged !== 'boolean' || (state !== 'sending' && state !== 'unknown')) return undefined
   return {operationId, sentAt, bodyChanged, state}
 }

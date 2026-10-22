@@ -240,6 +240,13 @@ describe('describeLookup — resolving an unknown save', () => {
     expect(display.saveDisabled).toBe(false)
   })
 
+  it('missing: warns that a save made just now may not be listed yet, so check the page before overwriting', () => {
+    const display = describeLookup({ok: true, value: {state: 'missing'}})
+    expect(display.detail).toMatch(/just made/iu)
+    expect(display.detail).toMatch(/conflict/iu)
+    expect(display.detail).toMatch(/check the page before/iu)
+  })
+
   it('unknown: shows the conflict view with the newer version labeled "possibly your save"', () => {
     const display = describeLookup({ok: true, value: {state: 'unknown'}})
     expect(display.kind).toBe('lookup-unknown')

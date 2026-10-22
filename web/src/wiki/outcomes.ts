@@ -144,7 +144,8 @@ export const OUTCOME_COPY = {
   lookupFoundDetail:
     'Your earlier save landed. Whether it was sent for publication is unknown. Sending the publication request again is safe and makes no new commit.',
   lookupMissingHeadline: 'That save did not land',
-  lookupMissingDetail: 'Nothing was saved. Your draft is restored. Save again.',
+  lookupMissingDetail:
+    'Nothing was saved. Your draft is restored. Save again. If a save was just made, it may not be listed yet: saving again may show a conflict with it, so check the page before overwriting.',
   lookupUnknownHeadline: 'Still not sure',
   lookupUnknownDetail:
     'The history could not settle whether your save landed. The page now has a newer version, which may be your save. Compare it with your draft, then overwrite or check again.',

@@ -155,6 +155,12 @@ refetching unchanged blobs.
 
 Measured against the real repository. The cold read dominates the first page open after a deploy.
 
+### A save that is not found yet
+
+A save-status check reads GitHub's path history, which can lag behind a commit that just landed. If a
+save that was just made is not found yet, saving again may show a conflict with that save, so check
+the page before overwriting.
+
 ### Rate limits
 
 Writes and save-status lookups share one per-operator limit, below the per-IP limit. A trip answers

@@ -183,6 +183,33 @@ describe('unreadable records', () => {
     expect(idb.records()).toHaveLength(1)
   })
 
+  // `sentAt` becomes a Date for the lookup fallback, so it must be a time a Date can hold.
+  it.each([
+    ['past the latest Date', 8.64e15 + 1],
+    ['before the earliest Date', -8.64e15 - 1],
+    ['not a whole number', 1.5],
+    ['not a safe integer', 2 ** 60],
+  ])('reports a pending operation whose sentAt is %s as unreadable', async (_label, sentAt) => {
+    const {idb, store} = setup()
+    idb.plant({
+      ...input({pending: {operationId: OPERATION_ID, sentAt, bodyChanged: true, state: 'unknown'}}),
+      schemaVersion: 1,
+      updatedAt: NOW,
+    })
+
+    expect(await store.getDraft('repos.acme--alpha')).toEqual({
+      ok: false,
+      error: {kind: 'unreadable', pageId: 'repos.acme--alpha'},
+    })
+  })
+
+  it.each([8.64e15, -8.64e15, 0, NOW])('reads a pending operation whose sentAt is %s', async sentAt => {
+    const {store} = setup()
+    await store.putDraft(input({pending: {operationId: OPERATION_ID, sentAt, bodyChanged: true, state: 'unknown'}}))
+
+    expect((await mustLoad(store)).pending?.sentAt).toBe(sentAt)
+  })
+
   it('reports a record from a newer schema version as unreadable, not as a draft', async () => {
     const {idb, store} = setup()
     idb.plant({...input(), schemaVersion: 2, updatedAt: NOW, extra: 'future'})

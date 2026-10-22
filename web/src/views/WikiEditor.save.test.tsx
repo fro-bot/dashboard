@@ -1415,3 +1415,46 @@ describe('save — overwrite from the possibly-saved view', () => {
     expect(guardedWikiPageId()).toBeNull()
   })
 })
+
+describe('check save status — a send time a Date cannot hold', () => {
+  it('shows the saved panel for a found save with no commit time, and does not reject', async () => {
+    // Only a store that cannot hold the record keeps the in-memory time, and a clock far out of range gives one.
+    store = createDraftStore({indexedDB: undefined, now: () => 1e16})
+    saveSpy.mockResolvedValue(saveFailure({kind: 'status-unknown', cause: 'timeout'}))
+    lookupSpy.mockResolvedValue(lookupOk({state: 'found', commitSha: 'c1', committedAt: null}))
+    await renderPage()
+    await editAndSave()
+
+    fireEvent.click(button('Check save status'))
+    await flush()
+
+    expect(lookupSpy).toHaveBeenCalledWith({operationId: 'op-1', pageId: PAGE_ID, startedAt: 1e16})
+    const panel = screen.getByTestId('wiki-saved')
+    expect(panel).toHaveAttribute('data-saved', 'saved-not-promoted')
+    expect(within(panel).getByRole('button', {name: 'Retry dispatch'})).toBeEnabled()
+
+    // With no commit time there is no bound, so the status read is made without one.
+    statusSpy.mockClear()
+    fireEvent.click(within(panel).getByRole('button', {name: 'Retry dispatch'}))
+    await flush()
+    await macrotask()
+    expect(statusSpy).toHaveBeenCalled()
+    expect(statusSpy.mock.calls[0]).toEqual([undefined])
+  })
+
+  it('still bounds the status read by the send time when that time is a real date', async () => {
+    saveSpy.mockResolvedValue(saveFailure({kind: 'status-unknown', cause: 'timeout'}))
+    lookupSpy.mockResolvedValue(lookupOk({state: 'found', commitSha: 'c1', committedAt: null}))
+    await renderPage()
+    await editAndSave()
+
+    fireEvent.click(button('Check save status'))
+    await flush()
+    statusSpy.mockClear()
+    fireEvent.click(button('Retry dispatch'))
+    await flush()
+    await macrotask()
+
+    expect(statusSpy.mock.calls[0]).toEqual([new Date(NOW).toISOString()])
+  })
+})

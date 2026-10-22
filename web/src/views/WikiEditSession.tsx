@@ -196,6 +196,12 @@ function useLatestState<T>(initial: T) {
 
 const shortVersion = (sha: string) => sha.slice(0, 7)
 
+/** A time a Date cannot hold has no ISO form, and `toISOString` would throw on it. */
+function isoOrUndefined(ms: number): string | undefined {
+  const date = new Date(ms)
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString()
+}
+
 /**
  * What a confirmation is recorded against: the base the draft started from (blob, text and
  * corrections base) and the draft text. Any change to either makes it a different snapshot.
@@ -239,8 +245,8 @@ type Note = 'kept' | 'kept-failed' | 'discard-kept-stored' | 'rebased' | null
 type UnreadableNotice = 'none' | 'present' | 'replaced' | 'resolved'
 
 interface SavedBase {
-  /** Passed to the status read: runs created before the commit are ignored. */
-  readonly since: string
+  /** Passed to the status read: runs created before the commit are ignored. Undefined means no bound. */
+  readonly since: string | undefined
 }
 
 /** The save was sent for publication. Promotion status is read while it is pending. */
@@ -808,7 +814,7 @@ export function WikiEditSession(props: WikiEditSessionProps) {
         setMode('viewing')
         setSaved({
           kind: 'saved-not-promoted',
-          since: committedAt ?? new Date(op.sentAt).toISOString(),
+          since: committedAt ?? isoOrUndefined(op.sentAt),
           dispatch: {kind: 'idle'},
           foundLate: true,
         })
