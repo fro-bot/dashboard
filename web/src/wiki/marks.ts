@@ -31,6 +31,10 @@ const MAX_CANDIDATES = 5000
 export interface Mark {
   /** Local to the draft. Never sent. The server mints the correction ID. */
   readonly id: string
+  /**
+   * UTF-16 offsets into the draft. An unplaced mark carries sentinel offsets (see `unplaceMark`),
+   * so read them only after `isPlaced` holds.
+   */
   readonly start: number
   readonly end: number
   readonly text: string

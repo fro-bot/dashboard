@@ -115,7 +115,7 @@ Example: `knowledge/wiki/repos/marcusrbrown--infra.md` is `repos.marcusrbrown--i
 - The name starts and ends with a letter or digit and holds only letters, digits, `.`, `_` and `-`.
   It never contains `..`. An ID is at most 200 characters.
 - Pages only. Nested paths, `README.md`, `index.md`, `log.md` and `corrections.yaml` have no ID.
-- The link takes exactly one path stretch. A trailing slash, a nested path or an encoded slash is a 404.
+- The link takes exactly one path segment. A trailing slash, a nested path or an encoded slash is a 404.
 - `/wiki` serves the page list. It is the only other wiki path the server serves a shell for.
 - An unauthenticated visit signs in first, then returns to the page or the list. The return target is
   kept in a short-lived cookie that holds only `/wiki` or a valid `/wiki/<id>` path.
@@ -162,6 +162,8 @@ survive regeneration.
   An edit leaves it where it is if its text stands at its own offsets now, as when an undo brings the
   text back, and otherwise it is *unplaced*. A mark whose text has left the draft is *missing* too.
   Save waits until each *missing* mark is removed and each *needs review* mark is kept or removed.
+  When the same words also stand elsewhere with a closer match to the mark's surrounding text, a
+  flagged mark can show as *missing* even at its own place. Remove it and mark the text again.
 - On Save, a changed draft is compared with the page it started from, line by line and then word by
   word. A draft whose changes all fall inside marked spans saves without a question. A change
   outside every mark asks for confirmation. So does a deletion unless one mark surrounds the gap,
