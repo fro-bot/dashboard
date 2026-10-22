@@ -1,25 +1,24 @@
 /**
- * Wiki page view. Read-only in this unit; the editor itself arrives later.
+ * Wiki page: the shell around one page's edit session.
  *
- * Shows one page by ID: the body as plain text (raw Markdown in a `<pre>`, never rendered
- * and never injected as markup) and its corrections. A page the server does not know is
- * either an orphaned draft (a local draft exists for the ID: shown read-only with Copy and
- * Discard) or a not-found state. Neither is ever a blank page.
+ * Opens a page by ID. The page, the branch promotion status and (once the page is known) the
+ * local draft are each read once; none holds up another. A page that loads is handed to
+ * `WikiEditSession`, which shows the body as plain text (raw Markdown in a `<pre>`, never
+ * rendered and never injected as markup), its corrections, and the edit and save lifecycle.
+ * A page the server does not know is either an orphaned draft (a local draft exists for the
+ * ID: shown read-only with Copy and Discard) or a not-found state. Neither is ever a blank page.
  *
  * Markup only: real headings, lists, buttons and links, `role` live regions, and stable
  * class names and `data-*` hooks for the later visual pass. `data-state` on the root names
  * the current state.
  */
 
-import {type MouseEvent, useEffect, useState} from 'react'
-import {getWikiPage, type WikiCorrection, type WikiPage} from '../api/wiki.ts'
+import {type MouseEvent, useEffect, useRef, useState} from 'react'
+import {getWikiPage, promotionStatus, type WikiPage} from '../api/wiki.ts'
 import {
-  canWriteReasonCopy,
-  CORRECTION_STATUS_LABEL,
   isRetryable,
   ORPHAN_COPY,
   PAGE_COPY,
-  PAGE_TYPE_LABEL,
   readFailureCopy,
   type ReadFailureCopyKey,
 } from '../wiki/copy.ts'
@@ -27,6 +26,7 @@ import type {DraftRecord, DraftStore} from '../wiki/drafts.ts'
 import {isPlainClick, WIKI_LIST_URL} from '../wiki/location.ts'
 import {clearWikiSignInGuard, navigateToWikiSignIn, wikiSignInUrl} from '../wiki/session-recovery.ts'
 import {sharedDraftStore} from '../wiki/shared-store.ts'
+import {type OpenPromotion, WikiEditSession} from './WikiEditSession.tsx'
 
 export interface WikiEditorProps {
   readonly pageId: string
@@ -38,7 +38,13 @@ export interface WikiEditorProps {
 
 type PageState =
   | {readonly kind: 'loading'}
-  | {readonly kind: 'ready'; readonly page: WikiPage}
+  /** `draft`: the local draft for this page, if any. `draftUnreadable`: one exists but fails validation. */
+  | {
+    readonly kind: 'ready'
+    readonly page: WikiPage
+    readonly draft: DraftRecord | null
+    readonly draftUnreadable: boolean
+  }
   /** `draftUnreadable`: a draft record exists for this ID but fails validation. It is left in place. */
   | {readonly kind: 'not-found'; readonly draftUnreadable: boolean}
   | {readonly kind: 'orphaned-draft'; readonly draft: DraftRecord}
@@ -47,12 +53,26 @@ type PageState =
 export function WikiEditor({pageId, onBackToList, draftStore}: WikiEditorProps) {
   const [state, setState] = useState<PageState>({kind: 'loading'})
   const [attempt, setAttempt] = useState(0)
+  const [promotion, setPromotion] = useState<OpenPromotion>({kind: 'loading'})
+  const [refresh, setRefresh] = useState({refreshing: false, failed: false})
+  /** Bumped when the page being shown changes, so a late answer for an earlier one is dropped. */
+  const epochRef = useRef(0)
 
   useEffect(() => {
     let cancelled = false
     const store = draftStore ?? sharedDraftStore()
+    epochRef.current += 1
 
     setState({kind: 'loading'})
+    setPromotion({kind: 'loading'})
+    setRefresh({refreshing: false, failed: false})
+
+    // The branch promotion status is read once, beside the page. A failed read is a note.
+    void (async () => {
+      const result = await promotionStatus()
+      if (cancelled) return
+      setPromotion(result.ok ? {kind: 'ready', status: result.value} : {kind: 'unavailable'})
+    })()
 
     void (async () => {
       const result = await getWikiPage(pageId)
@@ -60,7 +80,14 @@ export function WikiEditor({pageId, onBackToList, draftStore}: WikiEditorProps) 
 
       if (result.ok) {
         clearWikiSignInGuard()
-        setState({kind: 'ready', page: result.value})
+        const draft = await store.getDraft(pageId)
+        if (cancelled) return
+        setState({
+          kind: 'ready',
+          page: result.value,
+          draft: draft.ok ? draft.value : null,
+          draftUnreadable: !draft.ok && draft.error.kind === 'unreadable',
+        })
         return
       }
       if (result.error.kind !== 'not-found') {
@@ -82,6 +109,23 @@ export function WikiEditor({pageId, onBackToList, draftStore}: WikiEditorProps) 
       cancelled = true
     }
   }, [pageId, attempt, draftStore])
+
+  // After a save the page changed on the server. Read it again, quietly, so a later edit starts
+  // from the new version.
+  const refreshPage = () => {
+    const epoch = epochRef.current
+    setRefresh({refreshing: true, failed: false})
+    void (async () => {
+      const result = await getWikiPage(pageId)
+      if (epochRef.current !== epoch) return
+      if (result.ok) {
+        setState(current => (current.kind === 'ready' ? {...current, page: result.value} : current))
+        setRefresh({refreshing: false, failed: false})
+      } else {
+        setRefresh({refreshing: false, failed: true})
+      }
+    })()
+  }
 
   const sessionLost = state.kind === 'failed' && state.failure === 'session-lost'
 
@@ -114,7 +158,22 @@ export function WikiEditor({pageId, onBackToList, draftStore}: WikiEditorProps) 
         </p>
       ) : null}
 
-      {state.kind === 'ready' ? <PageBody page={state.page} /> : null}
+      {state.kind === 'ready' ? (
+        <WikiEditSession
+          key={`${pageId}:${attempt}`}
+          page={state.page}
+          draft={state.draft}
+          draftUnreadable={state.draftUnreadable}
+          store={draftStore ?? sharedDraftStore()}
+          openPromotion={promotion}
+          refreshing={refresh.refreshing}
+          refreshFailed={refresh.failed}
+          onRefresh={refreshPage}
+          onReload={() => {
+            setAttempt(n => n + 1)
+          }}
+        />
+      ) : null}
 
       {state.kind === 'not-found' ? <NotFound draftUnreadable={state.draftUnreadable} /> : null}
 
@@ -132,96 +191,6 @@ export function WikiEditor({pageId, onBackToList, draftStore}: WikiEditorProps) 
           }}
         />
       ) : null}
-    </section>
-  )
-}
-
-function PageBody({page}: {readonly page: WikiPage}) {
-  return (
-    <article className="wiki-page-content">
-      <h2 className="wiki-page-title">{page.title}</h2>
-      <p className="wiki-page-meta" data-testid="wiki-page-meta">
-        <span className="wiki-page-type">{PAGE_TYPE_LABEL[page.type]}</span>{' '}
-        {page.updated === null ? null : (
-          <span className="wiki-page-updated">
-            <time dateTime={page.updated}>{page.updated}</time>
-          </span>
-        )}
-      </p>
-
-      {page.canWrite ? null : (
-        <p className="wiki-note wiki-write-notice" data-testid="wiki-write-notice" role="status">
-          {canWriteReasonCopy(page.canWriteReason)}
-        </p>
-      )}
-
-      <section className="wiki-page-text" aria-labelledby="wiki-page-text-heading">
-        <h3 id="wiki-page-text-heading">{PAGE_COPY.bodyHeading}</h3>
-        <p className="wiki-page-text-note">{PAGE_COPY.bodyNote}</p>
-        <pre className="wiki-page-body" data-testid="wiki-page-body">
-          {page.body}
-        </pre>
-      </section>
-
-      <Corrections corrections={page.corrections} />
-    </article>
-  )
-}
-
-function Corrections({corrections}: {readonly corrections: readonly WikiCorrection[]}) {
-  return (
-    <section
-      className="wiki-corrections"
-      data-testid="wiki-corrections"
-      aria-labelledby="wiki-corrections-heading"
-    >
-      <h3 id="wiki-corrections-heading">{PAGE_COPY.correctionsHeading}</h3>
-      {corrections.length === 0 ? (
-        <p className="wiki-corrections-empty">{PAGE_COPY.noCorrections}</p>
-      ) : (
-        <ul className="wiki-correction-list">
-          {corrections.map(correction => (
-            <li
-              key={correction.id}
-              className="wiki-correction"
-              data-correction-id={correction.id}
-              data-status={correction.status}
-            >
-              <p className="wiki-correction-status">
-                <span className="wiki-correction-status-label">{CORRECTION_STATUS_LABEL[correction.status]}</span>
-                {correction.stale ? (
-                  <>
-                    {' '}
-                    <span className="wiki-correction-stale">{PAGE_COPY.stale}</span>
-                  </>
-                ) : null}
-              </p>
-              <p className="wiki-correction-span">
-                <span className="wiki-label">{PAGE_COPY.spanLabel}: </span>
-                <q>{correction.span.text}</q>
-              </p>
-              {correction.reason === null ? null : (
-                <p className="wiki-correction-reason">
-                  <span className="wiki-label">{PAGE_COPY.reasonLabel}: </span>
-                  {correction.reason}
-                </p>
-              )}
-              {correction.attribution === null ? null : (
-                <p className="wiki-correction-attribution">
-                  <span className="wiki-label">{PAGE_COPY.recordedLabel}: </span>
-                  {correction.attribution.actor}, <time dateTime={correction.attribution.recordedAt}>{correction.attribution.recordedAt}</time>
-                </p>
-              )}
-              {correction.supersededBy === null ? null : (
-                <p className="wiki-correction-superseded-by">
-                  <span className="wiki-label">{PAGE_COPY.supersededByLabel}: </span>
-                  {correction.supersededBy}
-                </p>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
     </section>
   )
 }

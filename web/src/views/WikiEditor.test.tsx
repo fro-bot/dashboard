@@ -65,6 +65,7 @@ beforeEach(() => {
   idb = createMemoryIdb()
   store = createDraftStore({indexedDB: idb.factory, now: () => 1_900_000_000_000})
   getSpy = vi.spyOn(wikiApi, 'getWikiPage').mockResolvedValue(ok(pageOf()))
+  vi.spyOn(wikiApi, 'promotionStatus').mockResolvedValue(ok({state: 'settled', pr: null}))
   sessionStorage.clear()
 })
 
@@ -415,11 +416,11 @@ describe('WikiEditor — orphaned draft', () => {
     expect(screen.queryByTestId('wiki-orphaned-draft')).toBeNull()
   })
 
-  it('asks for the draft only when the page is not found', async () => {
+  it('reads the draft once when the page is found, so an editor can restore it', async () => {
     getSpy.mockResolvedValue(ok(pageOf()))
     const readSpy = vi.spyOn(store, 'getDraft')
     await renderPage()
-    expect(readSpy).not.toHaveBeenCalled()
+    expect(readSpy).toHaveBeenCalledTimes(1)
   })
 })
 

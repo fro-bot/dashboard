@@ -848,6 +848,121 @@ describe('App — wiki view', () => {
       expect(window.location.pathname).toBe('/wiki')
     })
 
+    describe('with unsaved edits', () => {
+      let confirmSpy: MockInstance<typeof window.confirm>
+
+      async function editing() {
+        window.history.replaceState(null, '', '/wiki/repos.acme--alpha')
+        await renderApp()
+        fireEvent.click(screen.getByRole('button', {name: 'Edit'}))
+        await act(async () => {})
+        fireEvent.change(screen.getByRole('textbox', {name: 'Page text (raw Markdown)'}), {target: {value: 'changed'}})
+      }
+
+      beforeEach(() => {
+        confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      })
+
+      it('a view switch asks first, and a refusal keeps the editor and the URL', async () => {
+        await editing()
+
+        fireEvent.click(screen.getByRole('button', {name: 'Runs'}))
+
+        expect(confirmSpy).toHaveBeenCalledTimes(1)
+        expect(screen.getByRole('textbox', {name: 'Page text (raw Markdown)'})).toHaveValue('changed')
+        expect(window.location.pathname).toBe('/wiki/repos.acme--alpha')
+        expect(operatorWrapper().style.display).toBe('none')
+      })
+
+      it('a view switch goes ahead when confirmed', async () => {
+        await editing()
+        confirmSpy.mockReturnValue(true)
+
+        fireEvent.click(screen.getByRole('button', {name: 'Runs'}))
+
+        expect(operatorWrapper().style.display).toBe('block')
+        expect(screen.queryByTestId('wiki-page')).toBeNull()
+        expect(window.location.pathname).toBe('/')
+      })
+
+      it('the list link asks first, and a refusal keeps the editor', async () => {
+        await editing()
+
+        fireEvent.click(screen.getByRole('link', {name: 'Back to the wiki list'}))
+
+        expect(confirmSpy).toHaveBeenCalledTimes(1)
+        expect(screen.getByRole('textbox', {name: 'Page text (raw Markdown)'})).toBeInTheDocument()
+        expect(window.location.pathname).toBe('/wiki/repos.acme--alpha')
+      })
+
+      it('the Wiki nav from the page asks first', async () => {
+        await editing()
+        fireEvent.click(screen.getByRole('button', {name: 'Wiki'}))
+        expect(confirmSpy).toHaveBeenCalledTimes(1)
+        expect(screen.queryByTestId('wiki-list')).toBeNull()
+      })
+
+      it('the browser Back button asks first, and a refusal puts the page URL back', async () => {
+        await editing()
+
+        await traverse(-1)
+
+        expect(confirmSpy).toHaveBeenCalledTimes(1)
+        expect(screen.getByRole('textbox', {name: 'Page text (raw Markdown)'})).toHaveValue('changed')
+        expect(window.location.pathname).toBe('/wiki/repos.acme--alpha')
+        expect(screen.queryByTestId('wiki-list')).toBeNull()
+      })
+
+      it('the browser Back button goes ahead when confirmed', async () => {
+        await editing()
+        confirmSpy.mockReturnValue(true)
+
+        await traverse(-1)
+        await act(async () => {})
+
+        expect(screen.getByTestId('wiki-list')).toBeInTheDocument()
+        expect(window.location.pathname).toBe('/wiki')
+      })
+
+      it('a popstate that stays on the page (a hash change) does not ask', async () => {
+        await editing()
+
+        act(() => {
+          window.dispatchEvent(new PopStateEvent('popstate'))
+        })
+
+        expect(confirmSpy).not.toHaveBeenCalled()
+        expect(screen.getByRole('textbox', {name: 'Page text (raw Markdown)'})).toBeInTheDocument()
+      })
+
+      it('asks nothing when there is nothing to lose', async () => {
+        window.history.replaceState(null, '', '/wiki/repos.acme--alpha')
+        await renderApp()
+        fireEvent.click(screen.getByRole('button', {name: 'Edit'}))
+        await act(async () => {})
+
+        fireEvent.click(screen.getByRole('link', {name: 'Back to the wiki list'}))
+
+        expect(confirmSpy).not.toHaveBeenCalled()
+        expect(screen.getByTestId('wiki-list')).toBeInTheDocument()
+      })
+
+      it('opening a page asks first when a guard is held for another page', async () => {
+        const guard = await import('./wiki/navigation-guard.ts')
+        await renderApp()
+        fireEvent.click(screen.getByRole('button', {name: 'Wiki'}))
+        await act(async () => {})
+        const release = guard.registerNavigationGuard({pageId: 'topics.elsewhere', message: 'Leave?'})
+
+        fireEvent.click(screen.getByRole('link', {name: 'acme/alpha'}))
+
+        expect(confirmSpy).toHaveBeenCalledWith('Leave?')
+        expect(screen.getByTestId('wiki-list')).toBeInTheDocument()
+        expect(window.location.pathname).toBe('/wiki')
+        release()
+      })
+    })
+
     it('an unknown ID in the URL shows not-found with a path back to the list', async () => {
       const wikiApi = await import('./api/wiki.ts')
       vi.mocked(wikiApi.getWikiPage).mockResolvedValue({ok: false, error: {kind: 'not-found'}})
@@ -909,6 +1024,22 @@ describe('App — wiki view', () => {
       expect(operatorWrapper().style.display).toBe('block')
       expect(screen.queryByTestId('wiki-list')).toBeNull()
       expect(runtimeModule.requestRunJump).toHaveBeenCalledWith('run-from-wiki')
+    })
+
+    it('a refused leave keeps the wiki view and does not request the jump', async () => {
+      const guard = await import('./wiki/navigation-guard.ts')
+      const runtimeModule = await import('./operator/runtime.ts')
+      vi.spyOn(window, 'confirm').mockReturnValue(false)
+      await renderApp()
+      fireEvent.click(screen.getByRole('button', {name: 'Wiki'}))
+      const release = guard.registerNavigationGuard({pageId: 'repos.acme--alpha', message: 'Leave?'})
+
+      deliver({type: 'OPEN_RUN', runId: 'run-held'})
+
+      expect(operatorWrapper().style.display).toBe('none')
+      expect(screen.getByTestId('wiki-list')).toBeInTheDocument()
+      expect(runtimeModule.requestRunJump).not.toHaveBeenCalled()
+      release()
     })
 
     it('switches back to Runs from a wiki page and takes the page off the URL', async () => {

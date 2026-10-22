@@ -7,6 +7,7 @@ import {Operator} from './views/Operator.tsx'
 import {ListenerChannel} from './views/Listener.tsx'
 import {WikiEditor} from './views/WikiEditor.tsx'
 import {WikiList} from './views/WikiList.tsx'
+import {confirmLeaveWiki, restoreGuardedPage} from './wiki/navigation-guard.ts'
 import {
   currentWikiRoute,
   leaveWikiUrl,
@@ -83,24 +84,34 @@ export default function App() {
 
   // Show a view. Only the wiki owns a URL: /wiki for the list, /wiki/<id> for a page. Leaving it pushes
   // back the URL the operator view had, hash included, and the Wiki entry always lands on the list.
-  const showView = useCallback((view: AppView) => {
+  // A wiki page with unsaved edits holds a navigation guard: the operator is asked first, and a refusal
+  // changes nothing (returns false). The list link, the nav, and the OPEN_RUN handler all come through here.
+  const showView = useCallback((view: AppView): boolean => {
+    if (!confirmLeaveWiki(null)) return false
     if (view === 'wiki') showWikiList()
     else leaveWikiUrl()
     setWikiPageId(null)
     setCurrentView(view)
+    return true
   }, [])
 
   const openWikiPage = useCallback((pageId: string) => {
+    if (!confirmLeaveWiki({kind: 'page', id: pageId})) return
     if (!pushWikiPage(pageId)) return
     setWikiPageId(pageId)
   }, [])
 
   // Back and Forward. A /wiki/<id> entry opens that page and /wiki opens the list. Any other entry
   // leaves the wiki for the operator view, and leaves every non-wiki view where it is (a hash change
-  // also fires popstate).
+  // also fires popstate). The URL has already moved by the time this runs, so a move the guard refuses
+  // is undone by putting the guarded page's URL back.
   useEffect(() => {
     seedWikiHistory()
     return onWikiPopState(route => {
+      if (!confirmLeaveWiki(route)) {
+        restoreGuardedPage()
+        return
+      }
       if (route.kind === 'other') {
         setWikiPageId(null)
         setCurrentView(view => (view === 'wiki' ? 'operator' : view))
@@ -131,7 +142,12 @@ export default function App() {
       if (controller === null || controller === undefined || event.source !== controller) return
       const message = parseOpenRunMessage(event.data)
       if (message === null) return
-      flushSync(() => showView('operator'))
+      let left = false
+      flushSync(() => {
+        left = showView('operator')
+      })
+      // A refused leave (unsaved wiki edits) keeps the wiki view, so there is no run view to jump in.
+      if (!left) return
       requestRunJump(message.runId)
     }
 

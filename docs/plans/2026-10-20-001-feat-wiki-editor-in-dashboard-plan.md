@@ -1084,7 +1084,7 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 
 ### U10. Editor, save lifecycle, and all eight outcomes
 
-- [ ] Landed
+- [x] Landed
 
 **Goal:** Edit raw Markdown in place, save it, and report each outcome separately. Resolve an unknown save in place or on reopen.
 
@@ -1161,7 +1161,7 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 
 ### U11. Unmarked-change notice and confirmation
 
-- [ ] Landed
+- [x] Landed
 
 **Goal:** The editor says that only marked corrections survive regeneration, and Save of a changed draft needs confirmation. Until marking exists, every change is unmarked.
 

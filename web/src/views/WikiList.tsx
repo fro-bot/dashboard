@@ -24,7 +24,6 @@ import {
   type WikiPageType,
 } from '../api/wiki.ts'
 import {
-  blockReasonCopy,
   canWriteReasonCopy,
   isRetryable,
   LIST_COPY,
@@ -37,6 +36,7 @@ import type {DraftRecord, DraftStore} from '../wiki/drafts.ts'
 import {isPlainClick, wikiPagePath} from '../wiki/location.ts'
 import {clearWikiSignInGuard, navigateToWikiSignIn, wikiSignInUrl} from '../wiki/session-recovery.ts'
 import {sharedDraftStore} from '../wiki/shared-store.ts'
+import {PromotionBanner} from './PromotionBanner.tsx'
 
 export interface WikiListProps {
   /** Open a page by ID. Called for an unmodified click on a page row or an orphaned draft. */
@@ -217,39 +217,6 @@ function ListFailure({failure, onRetry}: {readonly failure: ReadFailureCopyKey; 
           {LIST_COPY.retry}
         </button>
       ) : null}
-    </div>
-  )
-}
-
-function PromotionBanner({status}: {readonly status: PromotionStatus}) {
-  if (status.state === 'settled') return null
-
-  if (status.state === 'pending') {
-    return (
-      <div className="wiki-promotion wiki-promotion-pending" data-testid="wiki-promotion-pending" role="status">
-        <h3>{PROMOTION_COPY.pendingHeadline}</h3>
-        <p>{PROMOTION_COPY.pendingDetail}</p>
-        {status.pr === null ? null : (
-          <a href={status.pr.url} target="_blank" rel="noopener noreferrer">
-            {PROMOTION_COPY.pullRequestLink}
-          </a>
-        )}
-      </div>
-    )
-  }
-
-  return (
-    <div className="wiki-promotion wiki-promotion-blocked" data-testid="wiki-promotion-blocked" role="alert">
-      <h3>{PROMOTION_COPY.blockedHeadline}</h3>
-      <p>{blockReasonCopy(status.reason)}</p>
-      <a href={status.runUrl} target="_blank" rel="noopener noreferrer">
-        {PROMOTION_COPY.blockedRunLink}
-      </a>
-      {status.pr === null ? null : (
-        <a href={status.pr.url} target="_blank" rel="noopener noreferrer">
-          {PROMOTION_COPY.pullRequestLink}
-        </a>
-      )}
     </div>
   )
 }

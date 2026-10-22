@@ -179,6 +179,85 @@ export const PAGE_COPY = {
   notFoundDetail: 'No page has this ID. It may have been renamed or removed.',
 } as const
 
+export const EDITOR_COPY = {
+  edit: 'Edit',
+  resume: 'Resume draft',
+  save: 'Save',
+  saveAgain: 'Save again',
+  cancel: 'Cancel',
+  textLabel: 'Page text (raw Markdown)',
+  frontmatterNote: 'Frontmatter is managed by the system. It is not shown here and cannot be edited.',
+  savingAnnouncement: 'Saving…',
+  checkingAnnouncement: 'Checking the save status…',
+  draftBaseLabel: 'Started from page version',
+  draftStaleLead: 'The page has changed since this draft started. It is now at version',
+  draftStaleTail: 'Saving will compare the two and ask you to resolve any conflict.',
+  draftNotStoredLocally:
+    'Draft not saved locally. Your edits are still here, but they will be lost if you leave this page.',
+  draftUnreadable: 'A draft for this page could not be read from this device. It has been left in place.',
+  draftKept: 'Your draft is kept on this device.',
+  cancelHeading: 'Keep or discard your draft?',
+  cancelDetail: 'You have changes that are not saved to the wiki.',
+  cancelPendingDetail: 'Discarding also forgets the save that is still unconfirmed.',
+  keepDraft: 'Keep draft',
+  discardDraft: 'Discard draft',
+  keepEditing: 'Keep editing',
+  discardFailed: 'The draft could not be discarded. It is still on this device.',
+  checkStatus: 'Check save status',
+  retryDispatch: 'Retry dispatch',
+  retryingDispatch: 'Sending…',
+  signIn: 'Sign in',
+  copyDraft: 'Copy draft',
+  copied: 'Draft copied.',
+  copyFailed: 'The draft could not be copied. Select the text and copy it by hand.',
+  contractUnreadableNotice: 'The wiki checks could not be read, so saving may fail. Try again.',
+  retry: 'Try again',
+  refreshing: 'Updating the page after your save…',
+  refreshFailed: 'The page could not be reloaded after your save. Try again before editing.',
+  conflictCurrentHeading: 'Current version',
+  conflictDraftHeading: 'Your draft',
+  conflictLoading: 'Loading the current version…',
+  conflictLoadFailed: 'The current version could not be loaded.',
+  conflictRemoved: 'The page is no longer in the wiki.',
+  conflictCorrectionsBaseHeading: 'Corrections when your draft started',
+  conflictCorrectionsCurrentHeading: 'Corrections now',
+  noCorrections: 'No corrections.',
+  overwrite: 'Overwrite with my draft',
+  overwriteConfirmHeading: 'Overwrite the current version?',
+  overwriteConfirmDetail:
+    'Your draft will replace the current version when you save next. Changes made since your draft started are lost from the page.',
+  overwriteConfirm: 'Yes, overwrite',
+  overwriteCancel: 'Keep comparing',
+  rebased: 'Your draft now starts from the current version. Review it, then save.',
+  findingShow: 'Show in text',
+  findingPageLevel: 'About the page as a whole',
+  findingsHeading: 'Findings',
+  savedRetrySent: 'The publication request was sent.',
+  promotionPrLink: 'View the pull request',
+  promotionRunLink: 'View the blocked run',
+  guardStored: 'You have unsaved changes. Your draft is kept on this device. Leave this page?',
+  guardNotStored: 'You have unsaved changes that are not stored on this device. Leave this page and lose them?',
+  guardUnknown: 'Your last save is unconfirmed. Leave this page anyway?',
+} as const
+
+/**
+ * Only marked corrections survive the next regeneration of a page (KTD16). Marking is not
+ * available yet, so every change is unmarked. A page without a `node_id` cannot be marked at all.
+ */
+export const UNMARKED_COPY = {
+  noticeMarkedOnly:
+    'Only marked corrections survive the next regeneration of this page. Marking is not available yet, so changes made here will be lost then.',
+  noticeNoNodeId:
+    'Edits to this page do not survive regeneration. This page cannot be marked, so changes made here will be lost the next time it is regenerated.',
+  confirmHeading: 'Save unmarked changes?',
+  confirmMarkedOnly:
+    'Your changes are not marked as corrections. Unmarked changes will be lost at the next regeneration of this page.',
+  confirmNoNodeId:
+    'This page cannot be marked. Your changes will be saved, but edits to this page do not survive the next regeneration. Unmarked changes will be lost at the next regeneration.',
+  confirm: 'Confirm save',
+  cancel: 'Back to editing',
+} as const
+
 export const ORPHAN_COPY = {
   heading: 'Draft without a page',
   detail: 'This page is no longer in the wiki. Your draft is still on this device and is shown read-only.',
