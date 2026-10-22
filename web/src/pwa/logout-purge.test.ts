@@ -5,9 +5,11 @@
  * to assert both purge paths are called with the correct arguments.
  */
 
-import {beforeEach, describe, expect, it, vi} from 'vitest'
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {purgeOperatorCache} from './logout-purge.ts'
 import {OPERATOR_RUNTIME_CACHE} from './cache-names.ts'
+import {createDraftStore} from '../wiki/drafts.ts'
+import {createMemoryIdb} from '../wiki/test-support/memory-idb.ts'
 
 describe('purgeOperatorCache', () => {
   const mockCachesDelete = vi.fn().mockResolvedValue(true)
@@ -79,5 +81,49 @@ describe('purgeOperatorCache', () => {
       value: {controller: null},
     })
     expect(() => purgeOperatorCache()).not.toThrow()
+  })
+})
+
+describe('purgeOperatorCache and drafts', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('leaves every draft intact: drafts survive sign-out', async () => {
+    Object.defineProperty(globalThis, 'caches', {
+      writable: true,
+      configurable: true,
+      value: {delete: vi.fn().mockResolvedValue(true)},
+    })
+    Object.defineProperty(navigator, 'serviceWorker', {
+      writable: true,
+      configurable: true,
+      value: {controller: {postMessage: vi.fn()}},
+    })
+
+    const idb = createMemoryIdb()
+    // Global too, so a purge that reached for `indexedDB` would hit the fake and throw.
+    vi.stubGlobal('indexedDB', idb.factory)
+    const store = createDraftStore({indexedDB: idb.factory})
+    const draft = {
+      pageId: 'repos.acme--alpha',
+      baseBlobSha: 'blob-1',
+      baseText: 'base',
+      correctionsBase: {entries: [], digest: 'a'.repeat(64)},
+      draftText: 'unsaved work',
+      pending: null,
+    }
+    await store.putDraft(draft)
+    await store.putDraft({...draft, pageId: 'topics.other'})
+    const operationsBefore = idb.operations.length
+
+    purgeOperatorCache()
+    await Promise.resolve()
+
+    // Logout never opens or deletes the draft database.
+    expect(idb.operations).toHaveLength(operationsBefore)
+    const listed = await store.listDrafts()
+    expect(listed.ok && listed.value.drafts.map(d => d.draftText)).toEqual(['unsaved work', 'unsaved work'])
+    expect(listed.ok && listed.value.unreadable).toEqual([])
   })
 })

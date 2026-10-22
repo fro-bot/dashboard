@@ -961,7 +961,7 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 
 ### U8. Client API module and draft store
 
-- [ ] Landed
+- [x] Landed
 
 **Goal:** A typed, fail-closed client for the wiki routes, and a raw IndexedDB draft store that records the pending operation before each send.
 
