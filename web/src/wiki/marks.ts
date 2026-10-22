@@ -221,8 +221,61 @@ function changeBetween(oldText: string, newText: string): Change {
   return {start: head, oldEnd: oldText.length - tail, newEnd: newText.length - tail}
 }
 
+/**
+ * Where the browser says an input event happened: `caret`, the textarea's caret after the event, and
+ * `inserted`, the length of the text it inserted when the browser reports one (typing and
+ * composition do; a paste does not). The caret is the end of what was inserted, or the point of a
+ * deletion.
+ */
+export interface EditHint {
+  readonly caret: number
+  readonly inserted?: number | undefined
+}
+
+/**
+ * Place the change where the browser says it happened. The minimal region can lie a few characters
+ * away from the real edit when the typed or deleted text repeats the text around it: typing "r" over
+ * "right suff" in "left right suffix." leaves "left rix.", and the diff reads that as "ght suffi"
+ * deleted after "left ri", or as a deletion after "left r" with the typed "r" absorbed into the old
+ * one. The real edit ends at the caret, and replaced `inserted` characters with the removed text. The
+ * region is moved there when that gives the same new text, and otherwise stays where the diff put it.
+ */
+function alignToHint(oldText: string, newText: string, change: Change, hint: EditHint | undefined): Change {
+  if (hint === undefined || !Number.isSafeInteger(hint.caret) || hint.caret < 0 || hint.caret > newText.length) return change
+  const {caret} = hint
+  const splits = (text: string, at: number) =>
+    at > 0 && at < text.length && isHighSurrogate(text.charCodeAt(at - 1)) && isLowSurrogate(text.charCodeAt(at))
+
+  const candidate = (inserted: number, removed: number): Change | null => {
+    const start = caret - inserted
+    const oldEnd = start + removed
+    if (inserted < 0 || removed < 0 || start < 0 || oldEnd > oldText.length) return null
+    if (newText.slice(0, start) !== oldText.slice(0, start) || newText.slice(caret) !== oldText.slice(oldEnd)) return null
+    if (splits(newText, start) || splits(newText, caret) || splits(oldText, start) || splits(oldText, oldEnd)) return null
+    return {start, oldEnd, newEnd: caret}
+  }
+
+  if (hint.inserted !== undefined) {
+    const exact = candidate(hint.inserted, hint.inserted - (newText.length - oldText.length))
+    if (exact !== null) return exact
+  }
+  return candidate(change.newEnd - change.start, change.oldEnd - change.start) ?? change
+}
+
 function anchored(text: string, mark: Mark, range: Range): Mark {
   return {...mark, ...range, text: text.slice(range.start, range.end), ...contextAround(text, range.start, range.end)}
+}
+
+/**
+ * Whether an insertion is, as far as the text can tell, at `floor`. The same text results from
+ * inserting at any offset the inserted run can slide to: typing "c" before "cat" gives "ccat",
+ * which is also "c" inserted after the first "c". The diff places the insertion as far right as it
+ * can, so it can only look inside a mark when the insertion could equally sit at the mark's start.
+ */
+function insertionCouldStartAt(newText: string, start: number, length: number, floor: number): boolean {
+  let at = start
+  while (at > floor && newText.charCodeAt(at - 1) === newText.charCodeAt(at - 1 + length)) at -= 1
+  return at <= floor
 }
 
 function rebaseOne(mark: Mark, oldText: string, newText: string, change: Change): Mark {
@@ -243,8 +296,13 @@ function rebaseOne(mark: Mark, oldText: string, newText: string, change: Change)
     // The change is before the mark, or ends exactly where it begins.
     return anchored(newText, mark, {start: a + delta, end: b + delta})
   }
+  const insertion = change.start === change.oldEnd
+  if (insertion && insertionCouldStartAt(newText, change.start, change.newEnd - change.start, a)) {
+    // An insertion that could be at the start of the mark is at its start: the mark shifts.
+    return anchored(newText, mark, {start: a + delta, end: b + delta})
+  }
   if (change.start >= a && change.oldEnd <= b) {
-    // The change lies entirely inside the mark: the mark follows what is there now.
+    // The change lies inside the mark: the mark follows what is there now.
     // A change that deletes the whole mark leaves nothing of it. It keeps its text and is flagged.
     return b + delta <= a ? {...mark, needsReview: true} : anchored(newText, mark, {start: a, end: b + delta})
   }
@@ -262,17 +320,30 @@ function rebaseOne(mark: Mark, oldText: string, newText: string, change: Change)
 /**
  * Carry the marks through an edit from `oldText` to `newText`. The edit is taken as one region, the
  * text between the common head and the common tail, which is exact for typing, pasting and deleting.
- * A mark outside the region moves with the text. A mark grows only when the region lies entirely
- * inside it. When the region crosses an edge of a mark, the mark is clipped to the part of its
- * original span that survives outside the region and is flagged for review, so unmarked text is
- * never taken into a mark. A mark whose whole span lies in the region keeps its old text and is
- * flagged for review. It is detached where that text no longer stands. Where the same text stands
- * elsewhere, the mark is found there but stays flagged, so Save waits until the operator keeps or
- * removes it.
+ * The editor calls this for every input event, so a keystroke is one edit. `hint` says where the
+ * browser saw the edit; it places the edit when the diff alone cannot tell where it was.
+ *
+ * - A mark outside the region moves with the text.
+ * - An insertion at the start or the end of a mark does not grow it. The mark keeps its text and
+ *   moves as an edit before or after it would move it. An insertion that could equally sit at the
+ *   start of the mark, such as a repeated character, counts as at the start.
+ * - A mark grows or shrinks only when the region lies inside it: an insertion strictly inside the
+ *   mark, or a replacement or deletion within its span, including a replacement of exactly its text.
+ * - When the region crosses an edge of a mark, the mark is clipped to the part of its original span
+ *   that survives outside the region and is flagged for review, so unmarked text is never taken into
+ *   a mark.
+ * - A mark whose whole span lies in the region keeps its text and is flagged for review. It is
+ *   detached where that text no longer stands. Where the same text stands elsewhere, the mark is
+ *   found there but stays flagged, so Save waits until the operator keeps or removes it.
  */
-export function rebaseMarks(marks: readonly Mark[], oldText: string, newText: string): readonly Mark[] {
+export function rebaseMarks(
+  marks: readonly Mark[],
+  oldText: string,
+  newText: string,
+  hint?: EditHint,
+): readonly Mark[] {
   if (oldText === newText || marks.length === 0) return marks
-  const change = changeBetween(oldText, newText)
+  const change = alignToHint(oldText, newText, changeBetween(oldText, newText), hint)
   return marks.map(mark => rebaseOne(mark, oldText, newText, change))
 }
 
@@ -285,8 +356,9 @@ export function rebaseAndLimit(
   marks: readonly Mark[],
   oldText: string,
   newText: string,
+  hint?: EditHint,
 ): {readonly marks: readonly Mark[]; readonly dropped: number} {
-  const rebased = rebaseMarks(marks, oldText, newText)
+  const rebased = rebaseMarks(marks, oldText, newText, hint)
   const kept = rebased.filter(mark => mark.text.length <= MAX_MARK_TEXT_LENGTH)
   return kept.length === rebased.length ? {marks: rebased, dropped: 0} : {marks: kept, dropped: rebased.length - kept.length}
 }

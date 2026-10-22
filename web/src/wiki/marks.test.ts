@@ -15,6 +15,7 @@ import {
   snapToCodePoints,
   type Mark,
 } from './marks.ts'
+import {checkUnmarkedChanges} from './unmarked.ts'
 
 function created(text: string, start: number, end: number, existing: readonly Mark[] = []): Mark {
   const result = createMark(text, {start, end}, existing)
@@ -605,5 +606,261 @@ describe('rebaseAndLimit', () => {
   it('returns the marks untouched for an unchanged text', () => {
     const marks = [markOn(page, hundred)]
     expect(rebaseAndLimit(marks, page, page)).toEqual({marks, dropped: 0})
+  })
+})
+
+// ---------------------------------------------------------------------------
+// One keystroke at a time
+// ---------------------------------------------------------------------------
+
+/**
+ * The editor rebases the marks on every input event, and a textarea fires one per keystroke. These
+ * tests do the same: the first keystroke replaces `replacing` characters at `at`, and each later one
+ * inserts a character at the caret.
+ */
+function keystrokes(
+  text: string,
+  marks: readonly Mark[],
+  at: number,
+  typed: string,
+  replacing = 0,
+): {readonly text: string; readonly marks: readonly Mark[]; readonly steps: readonly (readonly Mark[])[]} {
+  let current = text
+  let rebased = marks
+  let caret = at
+  const steps: (readonly Mark[])[] = []
+  for (const [index, char] of [...typed].entries()) {
+    const next = current.slice(0, caret) + char + current.slice(caret + (index === 0 ? replacing : 0))
+    // The browser reports the caret after the input, at the end of what was typed.
+    rebased = rebaseAndLimit(rebased, current, next, {caret: caret + char.length, inserted: char.length}).marks
+    steps.push(rebased)
+    current = next
+    caret += char.length
+  }
+  return {text: current, marks: rebased, steps}
+}
+
+describe('typing one character at a time', () => {
+  const page = 'The cat sat on the mat.'
+
+  it('does not grow a mark when text is typed after it, and the check reports the typed text unmarked', () => {
+    const mark = markOn(page, 'cat')
+    const typed = keystrokes(page, [mark], mark.end, ' sat')
+
+    expect(typed.text).toBe('The cat sat sat on the mat.')
+    for (const step of typed.steps) expect(step[0]).toMatchObject({text: 'cat', start: 4, end: 7, needsReview: false})
+    expect(
+      checkUnmarkedChanges({baseText: page, draftText: typed.text, marks: saveMarksOf(typed.text, typed.marks)}),
+    ).toBe('unmarked')
+  })
+
+  it('does not grow a mark when text is typed after it at the end of the page', () => {
+    const end = 'The cat'
+    const mark = markOn(end, 'cat')
+    const typed = keystrokes(end, [mark], mark.end, ' sat')
+    expect(typed.marks[0]).toMatchObject({text: 'cat', start: 4, end: 7})
+    expect(
+      checkUnmarkedChanges({baseText: end, draftText: typed.text, marks: saveMarksOf(typed.text, typed.marks)}),
+    ).toBe('unmarked')
+  })
+
+  it('does not grow a mark when text is typed at its start; the mark shifts along', () => {
+    const mark = markOn(page, 'cat')
+    const typed = keystrokes(page, [mark], mark.start, 'big ')
+
+    expect(typed.text).toBe('The big cat sat on the mat.')
+    expect(typed.marks[0]).toMatchObject({text: 'cat', start: 8, end: 11, needsReview: false})
+    for (const step of typed.steps) expect(step[0]?.text).toBe('cat')
+  })
+
+  it('does not grow a mark when the typed character repeats the first character of the mark', () => {
+    const mark = markOn(page, 'cat')
+    const typed = keystrokes(page, [mark], mark.start, 'ccc')
+
+    expect(typed.text).toBe('The ccccat sat on the mat.')
+    expect(typed.marks[0]).toMatchObject({text: 'cat', start: 7, end: 10, needsReview: false})
+    for (const step of typed.steps) expect(step[0]?.text).toBe('cat')
+  })
+
+  it('does not grow a mark when a character that repeats its text is typed inside it, since it could equally be at an edge', () => {
+    const run = 'x aaa y'
+    const mark = markOn(run, 'aaa')
+    const typed = keystrokes(run, [mark], mark.start + 2, 'a')
+    expect(typed.text).toBe('x aaaa y')
+    expect(typed.marks[0]).toMatchObject({text: 'aaa', needsReview: false})
+  })
+
+  it('does not grow a mark when the typed character repeats the last character of the mark', () => {
+    const mark = markOn(page, 'cat')
+    const typed = keystrokes(page, [mark], mark.end, 'ttt')
+    expect(typed.marks[0]).toMatchObject({text: 'cat', start: 4, end: 7, needsReview: false})
+  })
+
+  it('clips a mark when text is selected from inside it to past its end, and typing over it adds nothing to it', () => {
+    const mark = markOn(page, 'cat sat')
+    // Select "sat on" (from inside the mark to past its end) and type over it.
+    const at = page.indexOf('sat')
+    const typed = keystrokes(page, [mark], at, 'replacement', 'sat on'.length)
+
+    expect(typed.text).toBe('The cat replacement the mat.')
+    expect(typed.steps[0]?.[0]).toMatchObject({text: 'cat ', needsReview: true})
+    for (const step of typed.steps) expect(step[0]).toMatchObject({text: 'cat ', start: 4, end: 8, needsReview: true})
+    expect(typed.marks[0]?.text).not.toContain('replacement')
+  })
+
+  it('clips the same way when the text after the selection starts like what is typed', () => {
+    const left = 'left over item'
+    const mark = markOn(left, 'left over')
+    const typed = keystrokes(left, [mark], left.indexOf('over'), 'replacement', 'over i'.length)
+    for (const step of typed.steps) expect(step[0]?.text.length).toBeLessThanOrEqual('left '.length)
+    expect(typed.marks[0]).toMatchObject({text: 'left ', needsReview: true})
+  })
+
+  it('still grows a mark when text is typed strictly inside it', () => {
+    const mark = markOn(page, 'cat sat')
+    const typed = keystrokes(page, [mark], page.indexOf('sat'), 'very ')
+
+    expect(typed.text).toBe('The cat very sat on the mat.')
+    expect(typed.marks[0]).toMatchObject({text: 'cat very sat', start: 4, end: 16, needsReview: false})
+    expect(typed.steps.map(step => step[0]?.text)).toEqual([
+      'cat vsat',
+      'cat vesat',
+      'cat versat',
+      'cat verysat',
+      'cat very sat',
+    ])
+  })
+
+  it('keeps the mark on its text when a character is typed into the middle of a word it holds', () => {
+    const widgets = 'Alpha builds widgets.'
+    const mark = markOn(widgets, 'widgets')
+    const typed = keystrokes(widgets, [mark], widgets.indexOf('dg'), 'XYZ')
+    expect(typed.marks[0]).toMatchObject({text: 'wiXYZdgets'})
+  })
+
+  describe('selecting exactly the marked text and retyping it', () => {
+    it('replaces the marked text with the first keystroke, and what follows is not part of the mark', () => {
+      const mark = markOn(page, 'cat')
+      const typed = keystrokes(page, [mark], mark.start, 'cat', mark.end - mark.start)
+
+      expect(typed.text).toBe(page)
+      // The first keystroke, "c", leaves "c" marked. "a" and "t" are typed at its end.
+      expect(typed.steps[0]?.[0]).toMatchObject({text: 'c', start: 4, end: 5, needsReview: false})
+      expect(typed.marks[0]).toMatchObject({text: 'c', start: 4, end: 5, needsReview: false})
+    })
+
+    it('leaves only the first typed character marked when the replacement is different text', () => {
+      const mark = markOn(page, 'cat')
+      const typed = keystrokes(page, [mark], mark.start, 'dog', mark.end - mark.start)
+
+      expect(typed.text).toBe('The dog sat on the mat.')
+      expect(typed.marks[0]).toMatchObject({text: 'd', needsReview: false})
+      // The rest of the typed text is outside the mark, so the check reports it.
+      expect(
+        checkUnmarkedChanges({baseText: page, draftText: typed.text, marks: saveMarksOf(typed.text, typed.marks)}),
+      ).toBe('unmarked')
+    })
+  })
+})
+
+describe('typing over a selection that crosses the edge of a mark', () => {
+  const lead = 'p'.repeat(212 - '\n\n\nAn extra sentence.\n\n\n'.length) + '\n\n\nAn extra sentence.\n\n\n'
+  const page = `${lead}left right suffix.`
+
+  it('replays the browser case: "right suff" selected inside "left right", then "replacement" typed', () => {
+    expect(page.indexOf('left right')).toBe(212)
+    const mark = created(page, 212, 222)
+    expect(page.slice(217, 227)).toBe('right suff')
+
+    const typed = keystrokes(page, [mark], 217, 'replacement', 10)
+
+    expect(typed.text.slice(212)).toBe('left replacementix.')
+    // The first typed character, "r", is also the first selected character. The browser says one
+    // character was inserted at the caret, so the edit replaced the whole selection and only
+    // "left " survives.
+    for (const step of typed.steps) expect(step[0]).toMatchObject({text: 'left ', start: 212, end: 217, needsReview: true})
+    expect(typed.marks[0]?.text).not.toContain('replacement')
+    expect(typed.marks[0]?.text).not.toContain('r')
+    expect(typed.marks[0]?.text).not.toContain('i')
+  })
+
+  // The typed text begins with the character the selection begins with, or ends with the one after it.
+  const original = 'left right'
+  const text = 'xx left right suffix.'
+  const cases: readonly {
+    readonly label: string
+    readonly select: readonly [number, number]
+    readonly typed: string
+    /** What must survive of the mark's original text, as a prefix (right clip) or a suffix (left clip). */
+    readonly survives: 'prefix' | 'suffix'
+  }[] = [
+    {label: 'same first character at a selection that starts inside the mark', select: [5, 15], typed: 'right again', survives: 'prefix'},
+    {label: 'same first character, a longer run of the same letter', select: [5, 15], typed: 'rrrrright', survives: 'prefix'},
+    {label: 'typed text that begins like the text after the selection', select: [5, 15], typed: 'iii', survives: 'prefix'},
+    {label: 'typed text that ends like the text after the selection', select: [5, 15], typed: 'stuffi', survives: 'prefix'},
+    {label: 'a selection that starts before the mark, same first character', select: [0, 8], typed: 'xx lines', survives: 'suffix'},
+    {label: 'a selection that starts before the mark, ending like the mark', select: [0, 8], typed: 'xx left', survives: 'suffix'},
+    {label: 'a selection that starts before the mark, ending like the text it keeps', select: [0, 8], typed: 'xx rt', survives: 'suffix'},
+  ]
+
+  it.each(cases)('keeps only surviving original text: $label', ({select, typed, survives}) => {
+    const mark = markOn(text, original)
+    const result = keystrokes(text, [mark], select[0], typed, select[1] - select[0])
+    expect(result.text.startsWith(text.slice(0, select[0]) + typed)).toBe(true)
+
+    for (const step of result.steps) {
+      const kept = step[0]
+      expect(kept?.needsReview).toBe(true)
+      // Exactly the part of the original that lies outside the selection.
+      const outside = survives === 'prefix' ? select[0] - mark.start : mark.end - select[1]
+      expect(kept?.text.length).toBe(outside)
+      expect(survives === 'prefix' ? original.startsWith(kept?.text ?? '?') : original.endsWith(kept?.text ?? '?')).toBe(true)
+    }
+    // And it does not change once it is clipped: later keystrokes leave its text alone.
+    expect(new Set(result.steps.map(step => step[0]?.text)).size).toBe(1)
+  })
+
+  // Pages where a typed character repeats the text beside it, so the diff alone puts the edit in
+  // the wrong place. Each fails if the browser's caret and inserted length are ignored.
+  const ambiguous: readonly {
+    readonly page: string
+    readonly marked: string
+    readonly at: number
+    readonly select: readonly [number, number]
+    readonly typed: string
+    readonly survives: 'prefix' | 'suffix'
+  }[] = [
+    {page: 'aibbabaiii ab', marked: 'ibba', at: 1, select: [3, 6], typed: 'b ai ', survives: 'prefix'},
+    {page: 'iaibaiabiii  ', marked: 'iaibaiabi', at: 0, select: [1, 10], typed: 'aab i', survives: 'prefix'},
+    {page: 'ib bbaia ia', marked: 'baia', at: 4, select: [5, 9], typed: 'abaiiab', survives: 'prefix'},
+    {page: 'ii ibaaba abb', marked: 'ibaab', at: 3, select: [5, 10], typed: 'ai bb', survives: 'prefix'},
+    {page: 'i a aaaa  ', marked: 'a ', at: 2, select: [0, 3], typed: 'ab a aa', survives: 'suffix'},
+    {page: 'ba aaaaaaiaibba', marked: 'aaa', at: 5, select: [2, 7], typed: 'abaabbb', survives: 'suffix'},
+    {page: 'bb aii abi ', marked: 'abi', at: 7, select: [6, 9], typed: 'bibb', survives: 'suffix'},
+    {page: 'aaa ibib i ', marked: 'bib ', at: 5, select: [2, 6], typed: 'bai ', survives: 'suffix'},
+  ]
+
+  it.each(ambiguous)('keeps only surviving original text when the diff is ambiguous: $page', row => {
+    expect(row.page.slice(row.at, row.at + row.marked.length)).toBe(row.marked)
+    const mark = created(row.page, row.at, row.at + row.marked.length)
+    const result = keystrokes(row.page, [mark], row.select[0], row.typed, row.select[1] - row.select[0])
+
+    const outside = row.survives === 'prefix' ? row.select[0] - mark.start : mark.end - row.select[1]
+    for (const step of result.steps) {
+      expect(step[0]?.needsReview).toBe(true)
+      expect(step[0]?.text.length).toBe(outside)
+      expect(row.survives === 'prefix' ? row.marked.startsWith(step[0]?.text ?? '?') : row.marked.endsWith(step[0]?.text ?? '?')).toBe(true)
+    }
+    expect(new Set(result.steps.map(step => step[0]?.text)).size).toBe(1)
+  })
+
+  it('falls back to the diff when the hint does not describe the edit', () => {
+    const text = 'The cat sat on the mat.'
+    const mark = markOn(text, 'cat')
+    const next = `Intro. ${text}`
+    // A caret that does not match the text, as after an undo or a drop, is ignored.
+    expect(rebaseMarks([mark], text, next, {caret: 3, inserted: 1})).toEqual(rebaseMarks([mark], text, next))
+    expect(rebaseMarks([mark], text, next, {caret: 9999, inserted: 1})).toEqual(rebaseMarks([mark], text, next))
+    expect(rebaseMarks([mark], text, next, {caret: 7})).toEqual(rebaseMarks([mark], text, next))
   })
 })

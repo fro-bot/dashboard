@@ -145,12 +145,17 @@ survive regeneration.
 
 - A mark is a UTF-16 start and end plus the exact text with a short prefix and suffix. The text is what
   the server stores. The offsets are hints that the editor keeps current as the draft changes.
-- A mark grows only when an edit lies entirely inside it. An edit that crosses the edge of a mark
-  clips the mark to what survives of its original span outside the edit and flags it *needs review*.
-  An edit that covers the whole mark, such as deleting exactly its text, keeps the mark's text and
-  flags it too. The mark is missing where that text no longer stands. Where the same text stands
-  elsewhere the mark is found there, but it stays flagged until the operator keeps or removes it. A mark that grows past 4,096 characters is removed with
-  a notice, because the server would refuse it.
+- The editor rebases the marks on every input event, using the caret and the inserted length the
+  browser reports to place the edit when the text alone is ambiguous: typing a character over a
+  selection that begins with the same character, for example. A paste reports no inserted length, so
+  it is placed by the text alone. Text typed at the start or the end of a mark does
+  not grow it; the typed text is unmarked. A mark grows or shrinks only for an edit inside its span,
+  including typing strictly inside it or replacing exactly its text. An edit that crosses the edge of
+  a mark clips the mark to what survives of its original span outside the edit and flags it *needs
+  review*. An edit that covers the whole mark, such as deleting exactly its text, keeps the mark's
+  text and flags it too. The mark is missing where that text no longer stands. Where the same text
+  stands elsewhere the mark is found there, but it stays flagged until the operator keeps or removes
+  it.
 - A mark whose text has left the draft is *missing*. A mark flagged for review (set by a merge) is
   *needs review*. Save waits until each is removed, or for a flagged mark, kept.
 - On Save, a changed draft is compared with the page it started from, line by line and then word by

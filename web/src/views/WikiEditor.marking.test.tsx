@@ -515,6 +515,129 @@ describe('a paste that crosses the edge of a mark', () => {
   })
 })
 
+describe('typing next to a mark, one input event at a time', () => {
+  const PAGE_TEXT = 'The cat sat on the mat.\n'
+
+  /** Type `typed` at `at`, one change event per character, as a textarea does. */
+  function typeEach(at: number, typed: string, replacing = 0) {
+    let caret = at
+    for (const [index, char] of [...typed].entries()) {
+      const value = textbox().value
+      type(value.slice(0, caret) + char + value.slice(caret + (index === 0 ? replacing : 0)))
+      caret += char.length
+    }
+  }
+
+  async function markCat() {
+    getSpy.mockResolvedValue(ok(pageOf({body: PAGE_TEXT, corrections: []})))
+    await renderPage()
+    await edit()
+    selectText('cat')
+    fireEvent.click(markButton())
+  }
+
+  it('does not grow the mark when " sat" is typed after it, and Save asks for the confirmation', async () => {
+    await markCat()
+    typeEach(textbox().value.indexOf('cat') + 3, ' sat')
+
+    expect(textbox().value).toBe('The cat sat sat on the mat.\n')
+    expect(screen.getByTestId('wiki-mark-item')).toHaveTextContent('cat')
+    expect(screen.getByTestId('wiki-mark-item').querySelector('q')?.textContent).toBe('cat')
+    expect(screen.getByTestId('wiki-mark-item')).toHaveAttribute('data-mark-state', 'ok')
+
+    fireEvent.click(button('Save'))
+    expect(confirmation()).toBeInTheDocument()
+    expect(saveSpy).not.toHaveBeenCalled()
+
+    fireEvent.click(button('Confirm save'))
+    await flush()
+    expect(sentSave().marks).toEqual([{text: 'cat', start: 4, end: 7}])
+  })
+
+  it('does not grow the mark when text is typed at its start', async () => {
+    await markCat()
+    typeEach(textbox().value.indexOf('cat'), 'ccc')
+
+    expect(screen.getByTestId('wiki-mark-item').querySelector('q')?.textContent).toBe('cat')
+    fireEvent.click(button('Save'))
+    expect(confirmation()).toBeInTheDocument()
+  })
+
+  it('clips the mark when text is selected from inside it to past its end, and typing over it adds nothing', async () => {
+    getSpy.mockResolvedValue(ok(pageOf({body: PAGE_TEXT, corrections: []})))
+    await renderPage()
+    await edit()
+    selectText('cat sat')
+    fireEvent.click(markButton())
+    typeEach(textbox().value.indexOf('sat'), 'replacement', 'sat on'.length)
+
+    expect(textbox().value).toBe('The cat replacement the mat.\n')
+    expect(screen.getByTestId('wiki-mark-item').querySelector('q')?.textContent).toBe('cat ')
+    expect(screen.getByTestId('wiki-mark-item')).toHaveAttribute('data-mark-state', 'review')
+    expect(button('Save')).toBeDisabled()
+  })
+})
+
+describe('typing over a selection that crosses the edge of a mark, as a browser reports it', () => {
+  const LEAD = `${'p'.repeat(212 - '\n\n\nAn extra sentence.\n\n\n'.length)}\n\n\nAn extra sentence.\n\n\n`
+  const PAGE_TEXT = `${LEAD}left right suffix.`
+
+  /**
+   * Type one character as a browser does: the value changes, the caret sits after the character, and
+   * the input event says what was inserted. `replacing` characters are replaced by the first one.
+   */
+  function typeAsBrowser(typed: string, replacing: number) {
+    const area = textbox()
+    const setValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set as (value: string) => void
+    let caret = area.selectionStart
+    for (const [index, char] of [...typed].entries()) {
+      const value = area.value
+      setValue.call(area, value.slice(0, caret) + char + value.slice(caret + (index === 0 ? replacing : 0)))
+      caret += char.length
+      area.setSelectionRange(caret, caret)
+      fireEvent(area, new InputEvent('input', {bubbles: true, data: char, inputType: 'insertText'}))
+    }
+  }
+
+  async function markLeftRight() {
+    getSpy.mockResolvedValue(ok(pageOf({body: PAGE_TEXT, corrections: []})))
+    await renderPage()
+    await edit()
+    select(212, 222)
+    fireEvent.click(markButton())
+    expect(screen.getByTestId('wiki-mark-item').querySelector('q')?.textContent).toBe('left right')
+  }
+
+  it('replays the browser case: the mark ends as the surviving "left ", flagged, with none of the typed text', async () => {
+    await markLeftRight()
+    textbox().setSelectionRange(217, 227)
+    typeAsBrowser('replacement', 10)
+
+    expect(textbox().value.slice(212)).toBe('left replacementix.')
+    expect(screen.getByTestId('wiki-mark-item').querySelector('q')?.textContent).toBe('left ')
+    expect(screen.getByTestId('wiki-mark-item')).toHaveAttribute('data-mark-state', 'review')
+    expect(button('Save')).toBeDisabled()
+  })
+
+  it('keeps the same result when the typed text begins with the character after the selection', async () => {
+    await markLeftRight()
+    textbox().setSelectionRange(217, 227)
+    typeAsBrowser('ixed', 10)
+
+    expect(screen.getByTestId('wiki-mark-item').querySelector('q')?.textContent).toBe('left ')
+    expect(screen.getByTestId('wiki-mark-item')).toHaveAttribute('data-mark-state', 'review')
+  })
+
+  it('still grows a mark when text is typed strictly inside it, with the same events', async () => {
+    await markLeftRight()
+    textbox().setSelectionRange(214, 214)
+    typeAsBrowser('XY', 0)
+
+    expect(screen.getByTestId('wiki-mark-item').querySelector('q')?.textContent).toBe('leXYft right')
+    expect(screen.getByTestId('wiki-mark-item')).toHaveAttribute('data-mark-state', 'ok')
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Marks and staged actions persist
 // ---------------------------------------------------------------------------

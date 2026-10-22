@@ -51,6 +51,7 @@ import {
   locateMark,
   markState,
   rebaseAndLimit,
+  type EditHint,
   removeMark,
   saveMarksOf,
   type Mark,
@@ -241,6 +242,18 @@ function useLatestState<T>(initial: T) {
 }
 
 const shortVersion = (sha: string) => sha.slice(0, 7)
+
+/**
+ * What the browser says about an input event: where the caret is after it, and how much text it
+ * inserted. Typing, composition and line breaks say; a paste, a drop and an undo do not.
+ */
+function editHintOf(native: Event, caret: number): EditHint {
+  const {data, inputType} = native as Partial<InputEvent>
+  if (typeof data === 'string') return {caret, inserted: data.length}
+  if (typeof inputType === 'string' && inputType.startsWith('delete')) return {caret, inserted: 0}
+  if (inputType === 'insertLineBreak') return {caret, inserted: 1}
+  return {caret}
+}
 
 /** A time a Date cannot hold has no ISO form, and `toISOString` would throw on it. */
 function isoOrUndefined(ms: number): string | undefined {
@@ -510,10 +523,10 @@ export function WikiEditSession(props: WikiEditSessionProps) {
     }, DRAFT_DEBOUNCE_MS)
   }
 
-  const onTextChange = (value: string) => {
+  const onTextChange = (value: string, hint?: EditHint) => {
     // The marks follow the text through the edit. A mark that grew past the length limit is dropped,
     // so it never reaches the draft store or a save.
-    const rebased = docRef.current === null ? null : rebaseAndLimit(docRef.current.marks, docRef.current.text, value)
+    const rebased = docRef.current === null ? null : rebaseAndLimit(docRef.current.marks, docRef.current.text, value, hint)
     setDoc(current => (current === null || rebased === null ? current : {...current, text: value, marks: rebased.marks}))
     setNote(null)
     setMarkStatus(rebased !== null && rebased.dropped > 0 ? MARK_COPY.grewTooLong : null)
@@ -1359,7 +1372,7 @@ export function WikiEditSession(props: WikiEditSessionProps) {
             readOnly={busy || hasUnknown}
             spellCheck={false}
             onChange={event => {
-              onTextChange(event.target.value)
+              onTextChange(event.target.value, editHintOf(event.nativeEvent, event.target.selectionStart))
             }}
           />
 
