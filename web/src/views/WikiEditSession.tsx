@@ -818,7 +818,7 @@ export function WikiEditSession(props: WikiEditSessionProps) {
         </p>
       ) : null}
 
-      <p className="wiki-save-status" data-testid="wiki-save-status" role="status">
+      <p className="wiki-save-status sr-only" data-testid="wiki-save-status" role="status">
         {announcement}
       </p>
 
