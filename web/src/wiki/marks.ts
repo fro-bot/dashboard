@@ -320,6 +320,9 @@ function rebaseOne(mark: Mark, oldText: string, newText: string, change: Change)
   if (!isPlaced(mark)) return mark
   const wasAttached = oldText.startsWith(mark.text, mark.start) && mark.end === mark.start + mark.text.length
   if (!wasAttached) {
+    // A flagged mark is never found again by searching for its text: it stays where it is if its text
+    // stands there now, as when an undo brings the text back, and otherwise it has no place.
+    if (mark.needsReview) return standsAtOwnOffsets(newText, mark) ? mark : unplaceMark(mark)
     // Detached before this edit: the edit may have brought its text back.
     const found = locateMark(newText, mark)
     return found === null ? mark : anchored(newText, mark, found)
@@ -373,7 +376,8 @@ function rebaseOne(mark: Mark, oldText: string, newText: string, change: Change)
  *   a mark.
  * - A mark whose whole span lies in the region keeps its text and is flagged for review. It is
  *   detached where that text no longer stands. Where the same text stands elsewhere, the mark is not
- *   at its own offsets there, so it is detached too and can only be removed.
+ *   at its own offsets there, so it is detached too and can only be removed. A later edit does not
+ *   find it there: a flagged mark whose text does not stand at its own offsets is left unplaced.
  */
 export function rebaseMarks(
   marks: readonly Mark[],

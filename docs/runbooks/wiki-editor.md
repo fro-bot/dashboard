@@ -153,14 +153,15 @@ survive regeneration.
   including typing strictly inside it or replacing exactly its text. An edit that crosses the edge of
   a mark clips the mark to what survives of its original span outside the edit and flags it *needs
   review*. An edit that covers the whole mark, such as deleting exactly its text, keeps the mark's
-  text and flags it too. The mark is missing where that text no longer stands. Where the same text
-  stands elsewhere, the mark is not at its own offsets there, so it is missing too and can only be
-  removed.
-- A mark whose text has left the draft is *missing*. A flagged mark is *needs review* when its text
-  stands at the offsets the mark records, and *missing* when it does not. Save waits until each
-  is removed, or for a *needs review* mark, kept. **Keep** is offered only on a *needs review* mark and
-  clears the flag without moving the mark, so a kept mark is the span the operator marked and never
-  another occurrence of the same words.
+  text and flags it too.
+- **The Keep rule**, for an edit and for a merge alike. A flagged mark is *needs review* only when its
+  text stands at the offsets the mark records. **Keep** is offered only then, and it clears the flag
+  without moving the mark, so a kept mark is the span the operator marked and never another
+  occurrence of the same words. Any other flagged mark is *missing*, even where its words stand
+  elsewhere: it cannot be kept, and no later edit or merge searches for its text and places it there.
+  An edit leaves it where it is if its text stands at its own offsets now, as when an undo brings the
+  text back, and otherwise it is *unplaced*. A mark whose text has left the draft is *missing* too.
+  Save waits until each *missing* mark is removed and each *needs review* mark is kept or removed.
 - On Save, a changed draft is compared with the page it started from, line by line and then word by
   word. A draft whose changes all fall inside marked spans saves without a question. A change
   outside every mark asks for confirmation. So does a deletion unless one mark surrounds the gap,
@@ -230,9 +231,8 @@ range of the merged text came from mine, base or theirs. Offsets are UTF-16 code
   as theirs, one whose text does not verify at the new position, one that was not in the draft's text
   to begin with, and a flagged one that was not at its own offsets in the draft. An unplaced mark is
   stored with its end at the largest safe integer, which no text has, so the draft schema is
-  unchanged. It is *missing* even where its words stand elsewhere, it cannot be kept, no edit places
-  it, and it is never sent. The panel offers only **Remove**, and the operator marks the text again.
-  Save waits until it is removed.
+  unchanged. It follows the Keep rule above and is never sent. The panel offers only **Remove**, and
+  the operator marks the text again.
 - A mark that was already flagged and is carried stays flagged, and can be kept.
 
 #### Pages too large to compare
