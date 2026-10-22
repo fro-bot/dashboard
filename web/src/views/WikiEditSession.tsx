@@ -57,6 +57,7 @@ import {
   type Mark,
   type MarkRefusal,
 } from '../wiki/marks.ts'
+import type {MergeOutput} from '../wiki/merge.ts'
 import {confirmLeaveWiki, registerNavigationGuard} from '../wiki/navigation-guard.ts'
 import {
   describeDispatchFailure,
@@ -69,6 +70,7 @@ import {
   type OutcomeAction,
   type OutcomeDisplay,
 } from '../wiki/outcomes.ts'
+import {remapMarks} from '../wiki/remap-marks.ts'
 import {wikiSignInUrl} from '../wiki/session-recovery.ts'
 import {
   reconcileStaged,
@@ -83,6 +85,7 @@ import {checkUnmarkedChanges} from '../wiki/unmarked.ts'
 import {usePromotionPolling} from '../wiki/use-promotion-polling.ts'
 import {PromotionBanner} from './PromotionBanner.tsx'
 import {WikiCorrections} from './WikiCorrections.tsx'
+import {WikiMerge} from './WikiMerge.tsx'
 
 /** The gate's finding for a marked correction that is no longer in the page. Its target is the correction ID. */
 const ERODED_FINDING = 'correction-eroded'
@@ -314,7 +317,7 @@ function sameSnapshot(a: Snapshot | null, b: Snapshot | null): boolean {
 
 type Mode = 'viewing' | 'editing' | 'conflict'
 type Phase = 'idle' | 'saving' | 'checking'
-type Note = 'kept' | 'kept-failed' | 'discard-kept-stored' | 'rebased' | null
+type Note = 'kept' | 'kept-failed' | 'discard-kept-stored' | 'rebased' | 'merged' | null
 
 function droppedNoticeFor(count: number): string | null {
   if (count === 0) return null
@@ -416,6 +419,8 @@ export function WikiEditSession(props: WikiEditSessionProps) {
   const [discardingUnreadable, setDiscardingUnreadable] = useState(false)
   const [unreadableStatus, setUnreadableStatus] = useState<string | null>(null)
   const [note, setNote] = useState<Note>(null)
+  /** How many marks the last merge flagged for review, for the note that follows it. */
+  const [mergeFlagged, setMergeFlagged] = useState(0)
   const [saved, setSaved] = useState<SavedState | null>(null)
   const [conflict, setConflict] = useState<ConflictState | null>(null)
   const [cancelOpen, setCancelOpen] = useState(false)
@@ -916,6 +921,37 @@ export function WikiEditSession(props: WikiEditSessionProps) {
     setMode('editing')
   }
 
+  /**
+   * Use the merged text as the draft. The page base becomes the current blob and text, the corrections
+   * base is read from the current page, and the marks are carried through the merge. The base changed,
+   * so a recorded unmarked-change confirmation no longer applies.
+   */
+  const applyMerge = async (output: MergeOutput) => {
+    const current = docRef.current
+    if (conflict === null || conflict.current.kind !== 'ready' || current === null) return
+    const latest = conflict.current.page
+    const correctionsBase: CorrectionsBase = {entries: latest.corrections, digest: latest.correctionsBase}
+
+    const marks = remapMarks(current.marks, current.text, output)
+    const merged: Doc = {
+      ...current,
+      text: output.text,
+      marks,
+      base: {blobSha: latest.pageBlobSha, text: latest.body, correctionsBase},
+      unknownOp: null,
+    }
+    setDoc(refreshCorrections(correctionsBase.entries, merged) ?? merged)
+    setConfirmOpen(null)
+    setConfirmed(null)
+    setMergeFlagged(marks.filter((mark, index) => mark.needsReview && current.marks[index]?.needsReview === false).length)
+    await persistNow({dropPending: true})
+    if (!mountedRef.current) return
+    setConflict(null)
+    setOutcome(null)
+    setNote('merged')
+    setMode('editing')
+  }
+
   // -------------------------------------------------------------------------
   // Save
   // -------------------------------------------------------------------------
@@ -1365,6 +1401,16 @@ export function WikiEditSession(props: WikiEditSessionProps) {
               {EDITOR_COPY.rebased}
             </p>
           ) : null}
+          {note === 'merged' ? (
+            <p className="wiki-note wiki-draft-merged" data-testid="wiki-draft-merged" role="status">
+              {EDITOR_COPY.merged}
+            </p>
+          ) : null}
+          {note === 'merged' && mergeFlagged > 0 ? (
+            <p className="wiki-note wiki-merge-marks-review" data-testid="wiki-merge-marks-review" role="status">
+              {EDITOR_COPY.mergedMarksNeedReview(mergeFlagged)}
+            </p>
+          ) : null}
           {localSaveFailed ? (
             <p className="wiki-note wiki-draft-local-failed" data-testid="wiki-draft-local-failed" role="status">
               {EDITOR_COPY.draftNotStoredLocally}
@@ -1496,6 +1542,7 @@ export function WikiEditSession(props: WikiEditSessionProps) {
             setConflict({...conflict, confirming: false})
           }}
           onOverwrite={() => void overwrite()}
+          onUseMerged={output => void applyMerge(output)}
           onReload={() => void loadCurrent()}
           onKeepEditing={leaveConflict}
         />
@@ -1897,6 +1944,7 @@ function ConflictView({
   onAskOverwrite,
   onCancelOverwrite,
   onOverwrite,
+  onUseMerged,
   onReload,
   onKeepEditing,
 }: {
@@ -1909,10 +1957,13 @@ function ConflictView({
   readonly onAskOverwrite: () => void
   readonly onCancelOverwrite: () => void
   readonly onOverwrite: () => void
+  readonly onUseMerged: (output: MergeOutput) => void
   readonly onReload: () => void
   readonly onKeepEditing: () => void
 }) {
   const {display, current} = conflict
+  // A page conflict is resolved by merging. The other kinds compare the two versions as they were.
+  const merging = display.kind === 'conflict-page' && current.kind === 'ready'
   const canOverwrite = display.actions.includes('overwrite')
   const currentLabel = display.versionLabel ?? EDITOR_COPY.conflictCurrentHeading
 
@@ -1946,7 +1997,18 @@ function ConflictView({
         </p>
       ) : null}
 
-      {current.kind === 'ready' ? (
+      {merging && current.kind === 'ready' ? (
+        <WikiMerge
+          key={current.page.pageBlobSha}
+          mine={draft}
+          base={base.text}
+          theirs={current.page.body}
+          busy={busy}
+          onUse={onUseMerged}
+        />
+      ) : null}
+
+      {!merging && current.kind === 'ready' ? (
         <section className="wiki-conflict-version" aria-labelledby="wiki-conflict-current-heading">
           <h4 id="wiki-conflict-current-heading">{currentLabel}</h4>
           <pre className="wiki-page-body wiki-conflict-current" data-testid="wiki-conflict-current">
@@ -1955,12 +2017,14 @@ function ConflictView({
         </section>
       ) : null}
 
-      <section className="wiki-conflict-version" aria-labelledby="wiki-conflict-draft-heading">
-        <h4 id="wiki-conflict-draft-heading">{EDITOR_COPY.conflictDraftHeading}</h4>
-        <pre className="wiki-page-body wiki-conflict-draft" data-testid="wiki-conflict-draft">
-          {draft}
-        </pre>
-      </section>
+      {merging ? null : (
+        <section className="wiki-conflict-version" aria-labelledby="wiki-conflict-draft-heading">
+          <h4 id="wiki-conflict-draft-heading">{EDITOR_COPY.conflictDraftHeading}</h4>
+          <pre className="wiki-page-body wiki-conflict-draft" data-testid="wiki-conflict-draft">
+            {draft}
+          </pre>
+        </section>
+      )}
 
       {display.kind === 'conflict-corrections' && conflict.corrections !== null ? (
         <div className="wiki-conflict-corrections-compare" data-testid="wiki-conflict-corrections">

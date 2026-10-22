@@ -400,15 +400,16 @@ describe('save — conflict', () => {
       await editAndSave()
     }
 
-    it('names the kind, shows the current version and the draft as plain text, and keeps the draft', async () => {
+    it('names the kind, shows both versions of the overlapping change as plain text, and keeps the draft', async () => {
       await conflicted()
 
       const view = screen.getByTestId('wiki-conflict')
       expect(view).toHaveAttribute('data-conflict-kind', 'page')
       expect(within(view).getByRole('heading', {name: 'The page changed'})).toBeInTheDocument()
-      expect(screen.getByTestId('wiki-conflict-current').tagName).toBe('PRE')
-      expect(screen.getByTestId('wiki-conflict-current').textContent).toBe(NEWER)
-      expect(screen.getByTestId('wiki-conflict-draft').textContent).toBe(EDITED)
+      expect(screen.getByTestId('wiki-merge')).toHaveAttribute('data-hunks', '1')
+      expect(screen.getByTestId('wiki-merge-theirs').tagName).toBe('PRE')
+      expect(screen.getByTestId('wiki-merge-theirs').textContent).toBe('Someone else rewrote this.\n')
+      expect(screen.getByTestId('wiki-merge-mine').textContent).toBe('Alpha builds widgets. See [[nope]] and [[also-nope]].\nOne more line.\n')
       expect(records()[0]?.draftText).toBe(EDITED)
       expect(records()[0]?.pending).toBeNull()
       expect(screen.queryByRole('textbox')).toBeNull()
@@ -420,7 +421,8 @@ describe('save — conflict', () => {
       getSpy.mockResolvedValue(ok(pageOf({body: '<img src=x onerror=alert(1)>', pageBlobSha: 'blob-2'})))
       await editAndSave('<script>alert(2)</script>')
       expect(document.querySelector('img, script')).toBeNull()
-      expect(screen.getByTestId('wiki-conflict-current').textContent).toBe('<img src=x onerror=alert(1)>')
+      expect(screen.getByTestId('wiki-merge-theirs').textContent).toBe('<img src=x onerror=alert(1)>')
+      expect(screen.getByTestId('wiki-merge-mine').textContent).toBe('<script>alert(2)</script>')
     })
 
     it('requires an explicit, confirmed overwrite, which re-bases the draft on the current blob', async () => {
@@ -474,7 +476,7 @@ describe('save — conflict', () => {
       await flush()
 
       expect(button('Overwrite with my draft')).toBeEnabled()
-      expect(screen.getByTestId('wiki-conflict-current').textContent).toBe(NEWER)
+      expect(screen.getByTestId('wiki-merge-theirs').textContent).toBe('Someone else rewrote this.\n')
     })
 
     it('the page vanishing while the comparison loads says so and cannot be overwritten', async () => {

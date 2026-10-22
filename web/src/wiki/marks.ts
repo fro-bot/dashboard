@@ -266,6 +266,9 @@ function anchored(text: string, mark: Mark, range: Range): Mark {
   return {...mark, ...range, text: text.slice(range.start, range.end), ...contextAround(text, range.start, range.end)}
 }
 
+/** The mark placed on `range` of `text`, with its text and the context around it read from there. */
+export const anchorMark = anchored
+
 /**
  * Whether an insertion is, as far as the text can tell, at `floor`. The same text results from
  * inserting at any offset the inserted run can slide to: typing "c" before "cat" gives "ccat",

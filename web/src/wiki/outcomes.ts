@@ -105,7 +105,7 @@ export const OUTCOME_COPY = {
   rejectedHeadline: 'The change was rejected',
   conflictPageHeadline: 'The page changed',
   conflictPageDetail:
-    'The page changed since your draft started. Your draft is kept. Compare the two versions, then overwrite or keep editing.',
+    'The page changed since your draft started. Your draft is kept. Resolve the changes that overlap and use the merged text, or overwrite, or keep editing.',
   conflictCorrectionsHeadline: 'The corrections changed',
   conflictCorrectionsDetail:
     'The corrections for this page changed since your draft started. Your draft is kept. Compare the two, then overwrite or keep editing.',

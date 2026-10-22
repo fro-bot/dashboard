@@ -1276,7 +1276,7 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 
 ### U13. Compare-and-merge, mark remap, and page-removed variant
 
-- [ ] Landed
+- [x] Landed
 
 **Goal:** Resolve a conflict hunk by hunk, carry marks through the merge, and handle a page removed upstream.
 
