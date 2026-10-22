@@ -348,8 +348,8 @@ The verdict is `extend`. The write operation, the Git Data client, and the gates
 ### Deferred to Implementation
 
 - The exact environment variable names for the Fro Bot key slot. The plan proposes `DASHBOARD_FRO_BOT_APP_ID` and `DASHBOARD_FRO_BOT_APP_KEY` with `_FILE` precedence. U1 fixes the names, and the runbook hands them to infra.
-- Whether the Fro Bot App is on the bypass list of the "data branch: Fro Bot App only" ruleset. The closing real save proves it, and U3 maps a ruleset refusal to a failure.
-- The real HTTP status GitHub returns for a non-forced ref update on a moved head and for a ruleset refusal. KTD9 does not depend on the status, but the first real save confirms the mapping.
+- Whether the Fro Bot App is on the bypass list of the "data branch: Fro Bot App only" ruleset. It is: the closing real save updated `data`. U3 maps a ruleset refusal to a failure.
+- The real HTTP status GitHub returns for a non-forced ref update on a moved head and for a ruleset refusal. Neither has been observed, and KTD9 does not depend on the status.
 - The cold-read measurement result and whether anything beyond the blob cache is warranted (U2).
 - The production value of the gateway operator origin and whether it equals the browser's dashboard origin (U1), and that a service-worker-controlled POST carries the expected `Origin` header (PR 2 browser pass).
 - How much of each finding message to pass through. Default: kind, path, `target` when present in the submission, and the gate's own message only when it names submitted text or a page path. U3 sweeps the shared gates' messages to confirm.
@@ -482,7 +482,9 @@ The Fro Bot App installation on `fro-bot/.github` must grant contents write. `do
 
 ### Closing check
 
-After the infra handoff and PR 4, the operator saves one real correction, sees the promotion PR, and merges it. This is the only check that proves the real credential, the ruleset bypass, the dispatch, and the privacy-check read end to end.
+- [x] Passed
+
+After the infra handoff and PR 4, the operator saved one real edit and merged the promotion PR. The commit landed on `data` signed and verified as `fro-bot[bot]` with both trailers, changing only the page and `knowledge/log.md`. Its `promote-data` dispatch started `merge-data`, and every privacy check passed. This proves the real credential, the ruleset bypass, commit verification, the dispatch and the privacy checks end to end. A save that writes `knowledge/corrections.yaml` has not yet run against GitHub.
 
 ---
 
@@ -873,7 +875,7 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 - The fixture session is the Arctic autologin. The fixture needs `DASHBOARD_OPERATOR_LOGIN` and a cookie key for the `canWrite` path, because autologin mints no session without them. The runbook documents both for `dev:fixture`, and the tests set them.
 - Responses mirror the production wire shapes exactly, because the routes are the production routes.
 - Fixture mode keeps its existing guards: development or test environment and a loopback bind.
-- The fixture cannot prove GitHub's own status codes. The first real save confirms those.
+- The fixture cannot prove GitHub's own status codes. The first real save proved the success path; failure statuses have not been observed.
 
 **Patterns to follow:**
 
@@ -1373,7 +1375,7 @@ flowchart TB
 | `node-diff3` performance at a 512 KB worst case.                                                                                                                                                                                             | U12 and U13 build the simple path, measure, and add a fallback only if the measurement fails.                                                                                                                                              |
 | The Fro Bot App installation grants broad write scopes, including `administration`, `secrets` and `workflows`, on `fro-bot/.github`.                                                                                                         | Every mint requests `{contents: 'write'}` for the one repository. The pre-U1 check confirmed the minted token comes back as exactly `{contents: write, metadata: read}`. U1's permission type makes any wider request unrepresentable.     |
 | Gateway session cookie attributes, including SameSite, live in `fro-bot/agent` and cannot be read here.                                                                                                                                      | The design does not depend on SameSite. The exact `Origin` check, the JSON-only content type, and the absence of CORS carry the CSRF protection. The runbook records the attributes once confirmed.                                        |
-| The token grants contents write across all of `fro-bot/.github`, and the allowlist lives in application code. `main` is protected with required checks (observed). `data` has a ruleset "Fro Bot App only" whose bypass list is not visible. | Mint requests scope the token to the one repository. AGENTS.md states the cost plainly. The key sits behind a read-only mount. The closing real save proves the ruleset bypass, and a ruleset refusal is a failure, not a conflict (KTD9). |
+| The token grants contents write across all of `fro-bot/.github`, and the allowlist lives in application code. `main` is protected with required checks (observed). `data` has a ruleset "Fro Bot App only" whose bypass list is not visible. | Mint requests scope the token to the one repository. AGENTS.md states the cost plainly. The key sits behind a read-only mount. The closing real save proved the ruleset bypass, and a ruleset refusal is a failure, not a conflict (KTD9). |
 | The editor shows raw `data` content, including any private repository names, and caches blob text in process.                                                                                                                                | The origin document accepts this for the single operator. The cache is memory-only and bounded. Logs never carry page text. The promotion privacy check stays the boundary for `main`.                                                     |
 | Pages without a `node_id` cannot hold marks.                                                                                                                                                                                                 | The editor says so and offers no marking (KTD11). Edits to those pages stay unmarked and need confirmation.                                                                                                                                |
 | `merge-data` is a workflow in another repository. A change to its steps or names changes how blocked reads.                                                                                                                                  | The reason mapping tolerates unknown step names and still reports blocked with a link.                                                                                                                                                     |

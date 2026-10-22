@@ -395,13 +395,15 @@ after the next save that goes through. Restarting resets everything.
 | `topics.fixture-rejected`              | Rejected by a real gate: the page holds an inline frame. Remove the line and save. |
 | `entities.fixture-vanishes`            | The page is removed first: page-removed conflict. It returns on the next list read. |
 
-The fixture cannot prove GitHub's own status codes or response shapes. The first real save does.
+The fixture cannot prove GitHub's own status codes or response shapes. The first real save proved
+the success path. GitHub's statuses for a refused or moved ref update have not been observed.
 
 ---
 
 ## Closing check
 
-After the infra change is live, save one real correction. Confirm the commit lands on `data` with
-both trailers and the App's attribution, the promotion run starts, and the promotion PR shows the
-change. Merge the PR by hand. This is the only check that proves the real credential, the ruleset
-bypass, the dispatch and the privacy-check read together.
+The first real save passed. Its commit landed on `data` signed and verified as `fro-bot[bot]`, with
+both trailers, and changed only the page and `knowledge/log.md`. Its `promote-data` dispatch
+started `merge-data`, every privacy check passed, and the promotion PR merged by hand. That proves
+the real credential, the `data` ruleset bypass, commit verification, the dispatch and the privacy
+checks together. A save that writes `knowledge/corrections.yaml` has not yet run against GitHub.
