@@ -333,6 +333,7 @@ export const FIXTURE_PAGE_IDS = {
   correctionsConflict: 'repos.fixture--corrections-conflict',
   noNodeId: 'topics.fixture-no-node-id',
   conflict: 'topics.fixture-conflict',
+  pageConflict: 'repos.fixture--page-conflict',
   timeoutLanded: 'topics.fixture-timeout-landed',
   timeoutLost: 'topics.fixture-timeout-lost',
   dispatchFailure: 'topics.fixture-dispatch-failure',
@@ -389,6 +390,15 @@ const CONFLICT_SPAN = 'The first marked sentence stays put.'
 const UPSTREAM_SPAN = 'The second sentence is marked by the other writer.'
 const CONFLICT_NODE_ID = 'R_fixture_corrections_conflict'
 const PLAIN_NODE_ID = 'R_fixture_plain'
+const PAGE_CONFLICT_NODE_ID = 'R_fixture_page_conflict'
+
+// The page-conflict page: the other writer inserts a line above the paragraphs and
+// changes one line in the middle, so a mark in an untouched paragraph merges cleanly
+// and an edit to the middle line overlaps.
+const PAGE_CONFLICT_HEADING = '# fixture/page-conflict'
+const PAGE_CONFLICT_INSERTED = 'Another writer added this line above the paragraphs.'
+const PAGE_CONFLICT_MIDDLE_BASE = 'The middle paragraph says the widgets ship weekly.'
+const PAGE_CONFLICT_MIDDLE_UPSTREAM = 'The middle paragraph says the widgets ship daily.'
 
 const SEED_PAGES: readonly SeedPage[] = [
   {
@@ -404,6 +414,13 @@ const SEED_PAGES: readonly SeedPage[] = [
     title: 'fixture/corrections-conflict',
     nodeId: CONFLICT_NODE_ID,
     body: `\n# fixture/corrections-conflict\n\nSave a correction change on this page and another writer will already have changed its corrections.\n\n${CONFLICT_SPAN}\n\n${UPSTREAM_SPAN}\n`,
+  },
+  {
+    id: IDS.pageConflict,
+    type: 'repo',
+    title: 'fixture/page-conflict',
+    nodeId: PAGE_CONFLICT_NODE_ID,
+    body: `\n${PAGE_CONFLICT_HEADING}\n\nSave an edit on this page and another writer will already have changed it.\n\nThe first paragraph stays as it is.\n\n${PAGE_CONFLICT_MIDDLE_BASE}\n\nThe last paragraph stays as it is.\n`,
   },
   {
     id: IDS.noNodeId,
@@ -771,6 +788,27 @@ export function buildFixtureWikiDeps(options: FixtureOptions): FixtureWikiTarget
     repo.pipelineCommit({[path]: `${current.trimEnd()}\n\nUpdated upstream by another writer.\n`}, 'chore(pipeline): refresh page')
   }
 
+  /**
+   * Another writer inserts a line above the paragraphs and changes the middle line.
+   * Each arming flips the middle line between its two wordings and adds the inserted
+   * line only when absent, so the page text changes on every arming.
+   */
+  function changePageConflictUpstream(id: string): void {
+    const path = pathOfId(id)
+    const current = repo.files()[path]
+    if (current === undefined) return
+    let next = current.includes(PAGE_CONFLICT_INSERTED)
+      ? current
+      : current.replace(`${PAGE_CONFLICT_HEADING}\n`, `${PAGE_CONFLICT_HEADING}\n\n${PAGE_CONFLICT_INSERTED}\n`)
+    if (next.includes(PAGE_CONFLICT_MIDDLE_BASE)) {
+      next = next.replace(PAGE_CONFLICT_MIDDLE_BASE, PAGE_CONFLICT_MIDDLE_UPSTREAM)
+    } else if (next.includes(PAGE_CONFLICT_MIDDLE_UPSTREAM)) {
+      next = next.replace(PAGE_CONFLICT_MIDDLE_UPSTREAM, PAGE_CONFLICT_MIDDLE_BASE)
+    }
+    if (next === current) next = `${current.trimEnd()}\n\nUpdated upstream by another writer.\n`
+    repo.pipelineCommit({[path]: next}, 'chore(pipeline): refresh page')
+  }
+
   /** Another writer adds a correction on the page. */
   function changeCorrectionsUpstream(): void {
     const files = repo.files()
@@ -809,6 +847,9 @@ export function buildFixtureWikiDeps(options: FixtureOptions): FixtureWikiTarget
     if (id === IDS.conflict && armed.has(id)) {
       take(id)
       changePageUpstream(id)
+    } else if (id === IDS.pageConflict && armed.has(id)) {
+      take(id)
+      changePageConflictUpstream(id)
     } else if (id === IDS.correctionsConflict && carriesCorrectionChange(input) && armed.has(id)) {
       take(id)
       changeCorrectionsUpstream()

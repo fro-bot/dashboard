@@ -365,6 +365,7 @@ after the next save that goes through. Restarting resets everything.
 | `comparisons.fixture-a-vs-b`           | Saves.                                                            |
 | `topics.fixture-no-node-id`            | Saves. No `node_id`, so no marks.                                 |
 | `topics.fixture-conflict`              | Page conflict: another writer changed the page.                   |
+| `repos.fixture--page-conflict`         | Page conflict on a page with a `node_id`, so it takes marks. The other writer inserts a line above the paragraphs and changes the middle line: a mark in an untouched paragraph moves with its text, an edit to the middle line overlaps. |
 | `repos.fixture--corrections-conflict`  | Corrections conflict, for a save that carries a mark or transition. |
 | `topics.fixture-timeout-landed`        | Timeout; the commit landed. Lookup finds it.                      |
 | `topics.fixture-timeout-lost`          | Timeout; the commit did not land. Lookup reports missing.         |

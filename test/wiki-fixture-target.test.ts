@@ -389,6 +389,83 @@ describe('blob mismatch page', () => {
   })
 })
 
+function paragraphsOf(body: string): string[] {
+  return body
+    .split(/\n\s*\n/u)
+    .map(part => part.trim())
+    .filter(part => part !== '' && !part.startsWith('#'))
+}
+
+describe('markable page conflict page', () => {
+  const INSERTED = 'Another writer added this line above the paragraphs.'
+  const MIDDLE_BASE = 'The middle paragraph says the widgets ship weekly.'
+  const MIDDLE_UPSTREAM = 'The middle paragraph says the widgets ship daily.'
+
+  it('has a node_id, so it takes marks, and at least three paragraphs', async () => {
+    const world = await makeWorld()
+
+    const model = await readPage(world, IDS.pageConflict)
+
+    expect(model.canMark).toBe(true)
+    expect(model.nodeId).toMatch(/^R_/u)
+    expect(model.body).toContain(MIDDLE_BASE)
+    expect(paragraphsOf(model.body).length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('returns a page conflict whose current text inserts a line above the paragraphs and changes the middle line', async () => {
+    const world = await makeWorld()
+    const model = await readPage(world, IDS.pageConflict)
+    const untouched = paragraphsOf(model.body).filter(part => !part.includes(MIDDLE_BASE))
+
+    const first = await postSave(world, IDS.pageConflict, saveBodyFor(model, 1))
+    const conflict = (await first.json()) as {state: string; kind: string; currentBlobSha: string}
+
+    expect(first.status).toBe(409)
+    expect(conflict).toMatchObject({state: 'conflict', kind: 'page'})
+    expect(conflict.currentBlobSha).not.toBe(model.pageBlobSha)
+    expect(world.target.repo.count('createCommit')).toBe(0)
+
+    const current = await readPage(world, IDS.pageConflict)
+    expect(current.pageBlobSha).toBe(conflict.currentBlobSha)
+    expect(current.body).toContain(INSERTED)
+    expect(current.body).toContain(MIDDLE_UPSTREAM)
+    expect(current.body).not.toContain(MIDDLE_BASE)
+    // The inserted line sits above every existing paragraph, which are otherwise untouched.
+    const insertedAt = current.body.indexOf(INSERTED)
+    for (const paragraph of untouched) {
+      expect(current.body, paragraph).toContain(paragraph)
+      expect(current.body.indexOf(paragraph), paragraph).toBeGreaterThan(insertedAt)
+    }
+  })
+
+  it('saves on the reloaded base, then conflicts again on the first save after that', async () => {
+    const world = await makeWorld()
+    await openAndSave(world, IDS.pageConflict, 1)
+    const reloaded = await readPage(world, IDS.pageConflict)
+    expect((await postSave(world, IDS.pageConflict, saveBodyFor(reloaded, 2))).status).toBe(200)
+
+    const third = await openAndSave(world, IDS.pageConflict, 3)
+
+    expect(third.res.status).toBe(409)
+    expect(third.json).toMatchObject({state: 'conflict', kind: 'page'})
+    expect((third.json as {currentBlobSha: string}).currentBlobSha).not.toBe(third.model.pageBlobSha)
+    expect((await readPage(world, IDS.pageConflict)).body).toContain(INSERTED)
+  })
+
+  it('conflicts a save that carries a mark too', async () => {
+    const world = await makeWorld()
+
+    const {res, json} = await openAndSave(world, IDS.pageConflict, 1, model => {
+      const text = paragraphsOf(model.body)[0] as string
+      const start = model.body.indexOf(text)
+      return {marks: [{text, start, end: start + text.length}]}
+    })
+
+    expect(res.status).toBe(409)
+    expect(json).toMatchObject({state: 'conflict', kind: 'page'})
+  })
+})
+
 describe('corrections conflict page', () => {
   it('conflicts a save that carries a correction change, then saves on the new base', async () => {
     const world = await makeWorld()
