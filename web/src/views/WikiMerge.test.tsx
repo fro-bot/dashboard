@@ -164,12 +164,24 @@ describe('WikiMerge — using the merged text', () => {
     expect((onUse.mock.calls[0]?.[0] as MergeOutput).text).toBe('1\ntx\n2\nty\n3\nz\nT4\n')
   })
 
-  it('cannot be used while busy', () => {
-    renderMerge({busy: true})
+  it('cannot be used while busy, even with every change resolved', () => {
+    const onUse = vi.fn<(output: MergeOutput) => void>()
+    const props = {mine: MINE, base: BASE, theirs: THEIRS, onUse}
+    const view = render(<WikiMerge {...props} busy={false} />)
     acceptIn(0, 'mine')
-    acceptIn(1, 'mine')
+    acceptIn(1, 'theirs')
+    expect(useMerged()).toBeEnabled()
+
+    view.rerender(<WikiMerge {...props} busy />)
+
     expect(useMerged()).toBeDisabled()
+    fireEvent.click(useMerged())
+    expect(onUse).not.toHaveBeenCalled()
     expect(within(hunks()[0] as HTMLElement).getByRole('button', {name: 'Accept mine'})).toBeDisabled()
+    expect(within(hunks()[1] as HTMLElement).getByRole('button', {name: 'Accept theirs'})).toBeDisabled()
+
+    view.rerender(<WikiMerge {...props} busy={false} />)
+    expect(useMerged()).toBeEnabled()
   })
 })
 

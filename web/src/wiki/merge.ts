@@ -20,7 +20,10 @@
  * A line diff costs about the number of matching line pairs times the number of lines, and a page
  * with many identical lines, such as blank ones, has pairs that grow with the square of its length.
  * The cost is sized before the diff runs (`mergeWork`). A page over `MAX_MERGE_WORK` is not compared:
- * the whole page is one change, and the operator takes their draft or the current page.
+ * the whole page is one change, and the operator takes their draft or the current page. At 512 KB
+ * only a page whose lines average about 23 bytes or more stays under the bound, so short-line and
+ * blank-line-heavy pages are one change. Paragraph prose with a blank line between paragraphs is
+ * one change above about 140 KB.
  */
 
 import {diff3MergeRegions, diffIndices} from 'node-diff3'
@@ -95,16 +98,24 @@ function baseToMine(baseLength: number, baseVersusMine: readonly IndexChunk[]): 
   return map
 }
 
-interface Region {
-  readonly stable: boolean
-  readonly buffer?: 'o' | 'a' | 'b'
-  readonly bufferStart?: number
-  readonly bufferContent?: string[]
-  readonly aStart?: number
-  readonly aContent?: string[]
-  readonly oContent?: string[]
-  readonly bContent?: string[]
+/** A run of lines neither side changed (`o`), or only the draft changed (`a`), or only the page (`b`). */
+interface StableRegion {
+  readonly stable: true
+  readonly buffer: 'o' | 'a' | 'b'
+  readonly bufferStart: number
+  readonly bufferContent: string[]
 }
+
+/** Lines both sides changed. `aStart` is where the draft's lines start in the draft. */
+interface ChangeRegion {
+  readonly stable: false
+  readonly aStart: number
+  readonly aContent: string[]
+  readonly oContent: string[]
+  readonly bContent: string[]
+}
+
+type Region = StableRegion | ChangeRegion
 
 function sameLines(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((line, index) => line === b[index])
@@ -112,9 +123,10 @@ function sameLines(a: readonly string[], b: readonly string[]): boolean {
 
 /**
  * The most work the line diffs of one merge may do, in matching line pairs times lines, summed over
- * the three diffs a merge runs. A merge costs about 0.4 ns per unit, so this keeps it near 0.6 s. A
- * page of distinct lines has about as many pairs as lines, so its work is the square of its line
- * count and stays far under the bound.
+ * the three diffs a merge runs. A merge costs roughly 0.4 to 1 ns per unit across shapes, so the
+ * bound is about 0.6 to 1.5 s on the measuring machine. A page of distinct lines has about as many
+ * pairs as lines, so its work is the square of its line count: 512 KB of lines averaging about 23
+ * bytes or more stays under the bound, and shorter lines do not.
  */
 export const MAX_MERGE_WORK = 1_500_000_000
 
@@ -171,36 +183,40 @@ export function mergeTexts(mine: string, base: string, theirs: string): ThreeWay
   const theirsLines = splitLines(theirs)
   const mineOffsets = offsetsOf(mineLines)
   const mineOfBase = baseToMine(baseLines.length, diffIndices(baseLines, mineLines) as IndexChunk[])
+  const mineOffsetAt = (line: number | undefined): number => {
+    const offset = line === undefined ? undefined : mineOffsets[line]
+    if (offset === undefined) throw new Error(`the diff placed a line outside the draft: ${String(line)}`)
+    return offset
+  }
 
   const hunks: MergeHunk[] = []
   const pieces: Piece[] = []
   for (const region of diff3MergeRegions(mineLines, baseLines, theirsLines) as Region[]) {
     if (region.stable) {
-      const text = (region.bufferContent as string[]).join('')
-      const start = region.bufferStart as number
+      const text = region.bufferContent.join('')
       if (region.buffer === 'o') {
-        pieces.push({kind: 'text', source: 'base', text, mineStart: mineOffsets[mineOfBase[start] as number] as number})
+        // Lines neither side changed stand in the draft where the draft's diff against the base puts them.
+        const mineLine = mineOfBase[region.bufferStart]
+        if (mineLine === undefined || mineLine < 0) {
+          throw new Error(`the base line ${String(region.bufferStart)} has no place in the draft`)
+        }
+        pieces.push({kind: 'text', source: 'base', text, mineStart: mineOffsetAt(mineLine)})
       } else if (region.buffer === 'a') {
-        pieces.push({kind: 'text', source: 'mine', text, mineStart: mineOffsets[start] as number})
+        pieces.push({kind: 'text', source: 'mine', text, mineStart: mineOffsetAt(region.bufferStart)})
       } else {
         pieces.push({kind: 'text', source: 'theirs', text, mineStart: null})
       }
       continue
     }
 
-    const aContent = region.aContent as string[]
-    const mineStart = mineOffsets[region.aStart as number] as number
-    if (sameLines(aContent, region.bContent as string[])) {
+    const mineStart = mineOffsetAt(region.aStart)
+    if (sameLines(region.aContent, region.bContent)) {
       // Both sides made this change.
-      pieces.push({kind: 'text', source: 'mine', text: aContent.join(''), mineStart})
+      pieces.push({kind: 'text', source: 'mine', text: region.aContent.join(''), mineStart})
       continue
     }
     pieces.push({kind: 'hunk', index: hunks.length, mineStart})
-    hunks.push({
-      mine: aContent.join(''),
-      base: (region.oContent as string[]).join(''),
-      theirs: (region.bContent as string[]).join(''),
-    })
+    hunks.push({mine: region.aContent.join(''), base: region.oContent.join(''), theirs: region.bContent.join('')})
   }
   return {hunks, pieces, coarse: false}
 }

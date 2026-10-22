@@ -154,10 +154,13 @@ survive regeneration.
   a mark clips the mark to what survives of its original span outside the edit and flags it *needs
   review*. An edit that covers the whole mark, such as deleting exactly its text, keeps the mark's
   text and flags it too. The mark is missing where that text no longer stands. Where the same text
-  stands elsewhere the mark is found there, but it stays flagged until the operator keeps or removes
-  it.
-- A mark whose text has left the draft is *missing*. A mark flagged for review (set by a merge) is
-  *needs review*. Save waits until each is removed, or for a flagged mark, kept.
+  stands elsewhere, the mark is not at its own offsets there, so it is missing too and can only be
+  removed.
+- A mark whose text has left the draft is *missing*. A flagged mark is *needs review* when its text
+  stands at the offsets the mark records, and *missing* when it does not. Save waits until each
+  is removed, or for a *needs review* mark, kept. **Keep** is offered only on a *needs review* mark and
+  clears the flag without moving the mark, so a kept mark is the span the operator marked and never
+  another occurrence of the same words.
 - On Save, a changed draft is compared with the page it started from, line by line and then word by
   word. A draft whose changes all fall inside marked spans saves without a question. A change
   outside every mark asks for confirmation. So does a deletion unless one mark surrounds the gap,
@@ -222,22 +225,34 @@ range of the merged text came from mine, base or theirs. Offsets are UTF-16 code
 - A mark entirely inside one unbroken run of text taken from the draft, whether the draft changed it
   or left it as the base had it, moves with that run. Its text is read back at the new position and its
   prefix and suffix are read again from the merged text.
-- Every other mark gets *needs review* and keeps the text it was made on: a mark that touches text
-  taken from theirs, one whose lines the merge dropped, one in a hunk resolved as theirs, one whose text
-  does not verify at the new position, and one that was not in the draft's text to begin with. A flagged
-  mark is never moved to another place where its text stands. Where its text stands elsewhere it shows
-  as needing review; where it does not, it shows as missing. Save waits until each is kept or removed.
-- A mark that was already flagged stays flagged.
+- Every other mark is left *unplaced*: flagged, with the text it was made on and no position. That is
+  a mark that touches text taken from theirs, one whose lines the merge dropped, one in a hunk resolved
+  as theirs, one whose text does not verify at the new position, one that was not in the draft's text
+  to begin with, and a flagged one that was not at its own offsets in the draft. An unplaced mark is
+  stored with its end at the largest safe integer, which no text has, so the draft schema is
+  unchanged. It is *missing* even where its words stand elsewhere, it cannot be kept, no edit places
+  it, and it is never sent. The panel offers only **Remove**, and the operator marks the text again.
+  Save waits until it is removed.
+- A mark that was already flagged and is carried stays flagged, and can be kept.
 
 #### Pages too large to compare
 
 A line diff costs about the number of matching line pairs times the number of lines, and a page with
 many identical lines, such as blank ones, has pairs that grow with the square of its length. The
 merge sizes its work first (`mergeWork` in `web/src/wiki/merge.ts`): matching pairs times lines,
-summed over the three diffs a merge runs. Over `MAX_MERGE_WORK` (1.5 billion, about 0.6 s) nothing is
-diffed and the whole page is one hunk: take the draft or take the current page. Prose of about
-128 KB with a blank line after every fourth line is inside the budget. A 512 KB page of that shape is
-not. Pages of distinct lines, with edits on both sides, merge line by line at 512 KB in about 0.1 s.
+summed over the three diffs a merge runs. A merge costs roughly 0.4 to 1 ns per unit across shapes, so
+`MAX_MERGE_WORK` (1.5 billion) is about 0.6 to 1.5 s on the measuring machine.
+
+A page over the budget shows one whole-page change: nothing is diffed, and the operator takes the
+draft or the current page. Taking the current page flags every mark and leaves it unplaced, because no line is carried.
+A draft identical to its base takes the current page without a question.
+
+- Paragraph prose with a blank line between paragraphs reaches the budget at about 140 KB.
+- At 512 KB, only a page whose lines average about 23 bytes or more stays under it. Short-line and
+  blank-line-heavy pages are one change at that size.
+- Pages of distinct lines under the budget, with edits on both sides, merge line by line in about
+  0.1 s at 512 KB.
+
 `web/src/wiki/merge.measure.test.ts` asserts which shapes land where; it does not assert elapsed time.
 
 ### Two tabs on one page

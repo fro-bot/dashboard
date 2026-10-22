@@ -252,6 +252,43 @@ describe('merge — changes that do not overlap', () => {
   })
 })
 
+describe('merge — pressing Use merged text twice', () => {
+  it('applies once: a second press before the write settles changes nothing', async () => {
+    const mine = BODY.replace('Intro line.', 'Intro edited line with more text.')
+    const theirs = `Top.\n\n${BODY.replace('Tail line.', 'Tail rewritten.')}`
+    const merged = `Top.\n\n${mine.replace('Tail line.', 'Tail rewritten.')}`
+    await renderPage()
+    await edit(mine)
+    markText('Alpha builds widgets')
+    pageChanged(theirs)
+    await save()
+
+    // The write of the merged draft is held until both presses are in.
+    const put = store.putDraft.bind(store)
+    let release = () => {}
+    const held = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const putSpy = vi.spyOn(store, 'putDraft').mockImplementation(async (...args) => {
+      await held
+      return put(...args)
+    })
+
+    fireEvent.click(useMerged())
+    fireEvent.click(useMerged())
+    await act(async () => {
+      release()
+    })
+    await flush()
+
+    expect(putSpy).toHaveBeenCalledTimes(1)
+    expect(textbox().value).toBe(merged)
+    expect(markItem()).toHaveAttribute('data-mark-state', 'ok')
+    const start = merged.indexOf('Alpha builds widgets')
+    expect(record().marks).toEqual([expect.objectContaining({start, end: start + 'Alpha builds widgets'.length, needsReview: false})])
+  })
+})
+
 describe('merge — overlapping changes', () => {
   const MINE = BODY.replace('Intro line.', 'Intro mine.').replace('Middle line.', 'Middle mine.')
   const THEIRS = BODY.replace('Intro line.', 'Intro theirs.').replace('Middle line.', 'Middle theirs.')
@@ -413,7 +450,7 @@ describe('merge — marks that touch text from the current version', () => {
     expect(textbox().value.slice(record().marks[0]?.start, record().marks[0]?.end)).toBe('MY widgets')
   })
 
-  it('does not move a flagged mark to where its words stand in the new line, and lets the operator keep it', async () => {
+  it('leaves a mark the merge could not carry without a place, so it can only be removed', async () => {
     await renderPage()
     await edit(BODY.replace('Intro line.', 'Intro edited.'))
     markText('Alpha builds widgets')
@@ -423,14 +460,81 @@ describe('merge — marks that touch text from the current version', () => {
     fireEvent.click(useMerged())
     await flush()
 
-    const original = BODY.replace('Intro line.', 'Intro edited.').indexOf('Alpha builds widgets')
-    expect(record().marks[0]).toMatchObject({start: original, needsReview: true})
-    expect(markItem()).toHaveAttribute('data-mark-state', 'review')
+    expect(record().marks[0]).toMatchObject({text: 'Alpha builds widgets', needsReview: true})
+    expect(markItem()).toHaveAttribute('data-mark-state', 'detached')
+    expect(within(markItem()).queryByRole('button', {name: 'Keep'})).toBeNull()
+    expect(markItem()).toHaveTextContent(/moved or changed in the merge/iu)
     expect(button('Save')).toBeDisabled()
 
-    fireEvent.click(within(markItem()).getByRole('button', {name: 'Keep'}))
-    expect(markItem()).toHaveAttribute('data-mark-state', 'ok')
+    fireEvent.click(within(markItem()).getByRole('button', {name: 'Remove'}))
+    expect(screen.queryByTestId('wiki-mark-item')).toBeNull()
     expect(button('Save')).toBeEnabled()
+  })
+})
+
+describe('merge — a flagged mark is never kept on another occurrence of its words', () => {
+  const BASE_TEXT = 'Note: look at the plan.\nSee the plan again.\n'
+  const MINE = 'Note: see the plan.\nSee the plan again.\n'
+  const THEIRS = 'Note: read the spec.\nSee the plan again.\n'
+
+  async function mergedAsTheirs() {
+    getSpy.mockResolvedValue(ok(pageOf({body: BASE_TEXT})))
+    await renderPage()
+    await edit(MINE)
+    markText('the plan')
+    expect(textbox().value.indexOf('the plan')).toBe(10)
+    pageChanged(THEIRS)
+    await save()
+    expect(hunks()).toHaveLength(1)
+    accept(0, 'theirs')
+    fireEvent.click(useMerged())
+    await flush()
+  }
+
+  it('offers no Keep, offers Remove, and Save waits', async () => {
+    await mergedAsTheirs()
+
+    expect(textbox().value).toBe(THEIRS)
+    expect(markItem()).toHaveAttribute('data-mark-state', 'detached')
+    expect(within(markItem()).queryByRole('button', {name: 'Keep'})).toBeNull()
+    expect(within(markItem()).getByRole('button', {name: 'Remove'})).toBeEnabled()
+    expect(button('Save')).toBeDisabled()
+    expect(screen.getByTestId('wiki-marks-blocking')).toBeInTheDocument()
+  })
+
+  it('sends no mark at the other occurrence once the mark is removed', async () => {
+    await mergedAsTheirs()
+    fireEvent.click(within(markItem()).getByRole('button', {name: 'Remove'}))
+    // The text now equals the current page, so there is nothing to save until it changes.
+    expect(button('Save')).toBeDisabled()
+    type(`${THEIRS}more\n`)
+    expect(button('Save')).toBeEnabled()
+
+    saveSpy.mockResolvedValue(ok({state: 'saved', ...COMMIT, operationId: 'op-2'}))
+    await save()
+
+    expect(sentSave(1).marks).toEqual([])
+    expect(sentSave(1).marks).not.toContainEqual(expect.objectContaining({start: 25, end: 33}))
+  })
+
+  it('keeps the mark unplaced through further typing', async () => {
+    await mergedAsTheirs()
+    type(`${THEIRS}more\n`)
+    expect(markItem()).toHaveAttribute('data-mark-state', 'detached')
+    expect(within(markItem()).queryByRole('button', {name: 'Keep'})).toBeNull()
+    expect(button('Save')).toBeDisabled()
+  })
+
+  it('carries a mark on text the draft kept, and it stays settled', async () => {
+    getSpy.mockResolvedValue(ok(pageOf({body: BASE_TEXT})))
+    await renderPage()
+    await edit(MINE)
+    markText('the plan')
+    pageChanged(`${BASE_TEXT}Tail.\n`)
+    await save()
+    fireEvent.click(useMerged())
+    await flush()
+    expect(markItem()).toHaveAttribute('data-mark-state', 'ok')
   })
 })
 

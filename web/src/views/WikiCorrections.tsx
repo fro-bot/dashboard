@@ -14,7 +14,7 @@
 
 import type {WikiCorrection} from '../api/wiki.ts'
 import {CORRECTION_STATUS_LABEL, CORRECTIONS_COPY, PAGE_COPY} from '../wiki/copy.ts'
-import type {Mark, MarkState} from '../wiki/marks.ts'
+import {isPlaced, type Mark, type MarkState} from '../wiki/marks.ts'
 import {availableActions, type StagedAction, type StagedKind} from '../wiki/staged.ts'
 
 export interface MarkRow {
@@ -95,7 +95,11 @@ function Marks({
               <q>{mark.text}</q>
             </p>
             {state === 'review' ? <p className="wiki-mark-state">{CORRECTIONS_COPY.markReview}</p> : null}
-            {state === 'detached' ? <p className="wiki-mark-state">{CORRECTIONS_COPY.markDetached}</p> : null}
+            {state === 'detached' ? (
+              <p className="wiki-mark-state">
+                {isPlaced(mark) ? CORRECTIONS_COPY.markDetached : CORRECTIONS_COPY.markUnplaced}
+              </p>
+            ) : null}
             <div className="wiki-mark-actions">
               {state === 'detached' ? null : (
                 <button type="button" className="wiki-mark-jump" onClick={() => { onJump(mark.id) }}>

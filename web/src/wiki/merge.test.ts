@@ -1,4 +1,5 @@
 import {describe, expect, it} from 'vitest'
+import {diff3MergeRegions, diffIndices} from 'node-diff3'
 import {
   applyResolutions,
   MAX_MERGE_WORK,
@@ -145,6 +146,14 @@ describe('mergeTexts', () => {
     expect(resolved(applyResolutions(merge, [])).text).toBe('a\nsame\nc\nd\ne\n')
   })
 
+  it('applies a change both sides made once, next to a hunk', () => {
+    const merge = mergeTexts('a\nSAME\nc\nd\nX\n', BASE, 'a\nSAME\nc\nd\nY\n')
+    expect(merge.hunks).toEqual([{mine: 'X\n', base: 'e\n', theirs: 'Y\n'}])
+    const output = resolved(applyResolutions(merge, ['theirs']))
+    expect(output.text).toBe('a\nSAME\nc\nd\nY\n')
+    expect(output.text.split('SAME\n')).toHaveLength(2)
+  })
+
   it('handles an empty base, draft and page', () => {
     expect(resolved(applyResolutions(mergeTexts('', '', ''), [])).text).toBe('')
     expect(resolved(applyResolutions(mergeTexts('', '', 'theirs\n'), [])).text).toBe('theirs\n')
@@ -195,5 +204,31 @@ describe('mergeTexts', () => {
       at = stretch.outEnd
     }
     expect(at).toBe(output.text.length)
+  })
+})
+
+describe('the node-diff3 shapes the merge relies on', () => {
+  const lines = (text: string) => splitLines(text)
+
+  it('diffIndices returns, per differing chunk, [start, length] tuples for both buffers', () => {
+    const chunks = diffIndices(lines('a\nb\nc\n'), lines('a\nX\nY\nc\n')) as unknown[]
+    expect(chunks).toHaveLength(1)
+    expect(chunks[0]).toMatchObject({buffer1: [1, 1], buffer2: [1, 2]})
+  })
+
+  it('diff3MergeRegions returns stable regions tagged o, a or b with their start and content', () => {
+    const regions = diff3MergeRegions(lines('A\nb\nc\nd\ne\n'), lines(BASE), lines('a\nb\nc\nd\nE\n')) as unknown[]
+    expect(regions).toEqual([
+      expect.objectContaining({stable: true, buffer: 'a', bufferStart: 0, bufferContent: ['A\n']}),
+      expect.objectContaining({stable: true, buffer: 'o', bufferStart: 1, bufferContent: ['b\n', 'c\n', 'd\n']}),
+      expect.objectContaining({stable: true, buffer: 'b', bufferStart: 4, bufferContent: ['E\n']}),
+    ])
+  })
+
+  it('diff3MergeRegions returns an unstable region with the three versions and where the draft side starts', () => {
+    const regions = diff3MergeRegions(lines('a\nMINE\nc\nd\ne\n'), lines(BASE), lines('a\nTHEIRS\nc\nd\ne\n')) as unknown[]
+    expect(regions).toContainEqual(
+      expect.objectContaining({stable: false, aStart: 1, aContent: ['MINE\n'], oContent: ['b\n'], bContent: ['THEIRS\n']}),
+    )
   })
 })

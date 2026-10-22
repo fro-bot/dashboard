@@ -6,13 +6,15 @@
  * changed it or left it as the base had it, moves with that run. The text is then read back at the new
  * position, and a mark whose text is not there is flagged.
  *
- * Every other mark is flagged for review and keeps the text it was made on: one that touches text
- * taken from the page, one whose lines the merge dropped, and one that was already off the draft. A
- * flagged mark is not moved to another place where its text happens to stand. The operator keeps or
- * removes it, and Save waits until then.
+ * Every other mark is left unplaced: flagged, with the text it was made on and no position. That
+ * covers a mark that touches text taken from the page, one whose lines the merge dropped, one whose
+ * text does not verify at the new position, and one that was already off the draft. An unplaced mark
+ * is never moved to another place where its text happens to stand, and it cannot be kept. The operator
+ * removes it and marks the text again, and Save waits until then. A mark that was already unplaced
+ * stays so.
  */
 
-import {anchorMark, locateMark, type Mark} from './marks.ts'
+import {anchorMark, isPlaced, locateMark, markState, unplaceMark, type Mark} from './marks.ts'
 import type {MergeOutput} from './merge.ts'
 
 /** A stretch of the draft carried into the merged text unbroken, in both texts. */
@@ -26,7 +28,7 @@ interface Run {
 function carriedRuns(output: MergeOutput): Run[] {
   const runs: Run[] = []
   for (const stretch of output.stretches) {
-    if (stretch.mineStart === null) continue
+    if (typeof stretch.mineStart !== 'number') continue
     const length = stretch.outEnd - stretch.outStart
     const last = runs.at(-1)
     if (last !== undefined && last.mineEnd === stretch.mineStart && last.outStart + (last.mineEnd - last.mineStart) === stretch.outStart) {
@@ -60,18 +62,20 @@ export function remapMarks(marks: readonly Mark[], mineText: string, output: Mer
   const runs = carriedRuns(output)
 
   return marks.map(mark => {
+    // A mark with no place, one whose text is not in the draft, and a flagged one that is not at its
+    // own offsets have nothing to carry. The last must not be taken to wherever its text is found.
+    if (!isPlaced(mark) || markState(mineText, mark) === 'detached') return unplaceMark(mark)
     const found = locateMark(mineText, mark)
-    // Its text is not in the draft, so there is nothing to carry.
-    if (found === null) return {...mark, needsReview: true}
+    if (found === null) return unplaceMark(mark)
 
     const run = runAt(runs, found.start)
-    const offset = run === undefined ? found.start : run.outStart + (found.start - run.mineStart)
     if (run !== undefined && found.end <= run.mineEnd) {
+      const offset = run.outStart + (found.start - run.mineStart)
       const range = {start: offset, end: offset + (found.end - found.start)}
       if (output.text.slice(range.start, range.end) === mark.text) {
         return {...anchorMark(output.text, mark, range), needsReview: mark.needsReview}
       }
     }
-    return {...mark, start: offset, end: offset + mark.text.length, needsReview: true}
+    return unplaceMark(mark)
   })
 }

@@ -116,9 +116,36 @@ export function removeMark(marks: readonly Mark[], id: string): Mark[] {
   return marks.filter(mark => mark.id !== id)
 }
 
-/** Keep a flagged mark: clear its flag. */
-export function keepMark(marks: readonly Mark[], id: string): Mark[] {
-  return marks.map(mark => (mark.id === id ? {...mark, needsReview: false} : mark))
+/**
+ * The end offset of a mark that has no place in the text. It is the largest safe integer, so no text
+ * has a position there and the stored mark still reads back as a valid mark.
+ */
+const UNPLACED_END = Number.MAX_SAFE_INTEGER
+
+/**
+ * The mark with no place in the text: it keeps its text, is flagged, and cannot be kept or sent. A merge
+ * that cannot carry a mark leaves it so, because the draft's offsets mean nothing in the merged text.
+ */
+export function unplaceMark(mark: Mark): Mark {
+  return {...mark, start: UNPLACED_END - mark.text.length, end: UNPLACED_END, needsReview: true}
+}
+
+export function isPlaced(mark: Mark): boolean {
+  return mark.end !== UNPLACED_END
+}
+
+/** Whether the mark's text stands at the offsets the mark records, and a search for it finds that place. */
+function standsAtOwnOffsets(text: string, mark: Mark): boolean {
+  const found = locateMark(text, mark)
+  return found !== null && found.start === mark.start && found.end === mark.end
+}
+
+/**
+ * Keep a flagged mark: clear its flag. A mark is kept only where its text stands at its own offsets,
+ * so a kept mark is the span the operator marked and never another occurrence of the same words.
+ */
+export function keepMark(marks: readonly Mark[], id: string, text: string): Mark[] {
+  return marks.map(mark => (mark.id === id && standsAtOwnOffsets(text, mark) ? {...mark, needsReview: false} : mark))
 }
 
 // ---------------------------------------------------------------------------
@@ -170,15 +197,22 @@ export function locateMark(text: string, mark: Mark): Range | null {
   return best === null ? null : {start: best.start, end: best.start + quoted.length}
 }
 
+/**
+ * `review` is a flagged mark that can be kept, which is one whose text stands at its own offsets. A
+ * flagged mark whose text stands only somewhere else, or that has no place, is `detached`: it can
+ * only be removed, and the text marked again.
+ */
 export function markState(text: string, mark: Mark): MarkState {
   if (locateMark(text, mark) === null) return 'detached'
-  return mark.needsReview ? 'review' : 'ok'
+  if (!mark.needsReview) return 'ok'
+  return standsAtOwnOffsets(text, mark) ? 'review' : 'detached'
 }
 
 /** The marks that go on the wire: each attached mark with its current text and offsets, in text order. */
 export function saveMarksOf(text: string, marks: readonly Mark[]): SaveMark[] {
   const located: SaveMark[] = []
   for (const mark of marks) {
+    if (!isPlaced(mark)) continue
     const range = locateMark(text, mark)
     if (range !== null) located.push({text: text.slice(range.start, range.end), start: range.start, end: range.end})
   }
@@ -282,6 +316,8 @@ function insertionCouldStartAt(newText: string, start: number, length: number, f
 }
 
 function rebaseOne(mark: Mark, oldText: string, newText: string, change: Change): Mark {
+  // An unplaced mark has no place to carry, and an edit does not give it one.
+  if (!isPlaced(mark)) return mark
   const wasAttached = oldText.startsWith(mark.text, mark.start) && mark.end === mark.start + mark.text.length
   if (!wasAttached) {
     // Detached before this edit: the edit may have brought its text back.
@@ -336,8 +372,8 @@ function rebaseOne(mark: Mark, oldText: string, newText: string, change: Change)
  *   that survives outside the region and is flagged for review, so unmarked text is never taken into
  *   a mark.
  * - A mark whose whole span lies in the region keeps its text and is flagged for review. It is
- *   detached where that text no longer stands. Where the same text stands elsewhere, the mark is
- *   found there but stays flagged, so Save waits until the operator keeps or removes it.
+ *   detached where that text no longer stands. Where the same text stands elsewhere, the mark is not
+ *   at its own offsets there, so it is detached too and can only be removed.
  */
 export function rebaseMarks(
   marks: readonly Mark[],

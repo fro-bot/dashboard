@@ -448,6 +448,8 @@ export function WikiEditSession(props: WikiEditSessionProps) {
   /** The operation whose answer is awaited. Any other answer is stale. */
   const opRef = useRef<string | null>(null)
   const sendingRef = useRef(false)
+  /** A merge is being applied: the draft is written before the conflict view goes. */
+  const applyingMergeRef = useRef(false)
   const checkingRef = useRef(false)
   const openLookupRef = useRef(false)
   /** Bumped whenever the saved panel is replaced, so a late dispatch answer can be told apart. */
@@ -714,7 +716,7 @@ export function WikiEditSession(props: WikiEditSessionProps) {
 
   const confirmMark = (markId: string) => {
     setAnnouncement(MARK_COPY.kept)
-    changeWork(current => ({...current, marks: keepMark(current.marks, markId)}))
+    changeWork(current => ({...current, marks: keepMark(current.marks, markId, current.text)}))
   }
 
   // -------------------------------------------------------------------------
@@ -927,29 +929,36 @@ export function WikiEditSession(props: WikiEditSessionProps) {
    * so a recorded unmarked-change confirmation no longer applies.
    */
   const applyMerge = async (output: MergeOutput) => {
+    // The conflict stays up until the write settles. A second press must not merge the merged marks again.
+    if (applyingMergeRef.current) return
     const current = docRef.current
     if (conflict === null || conflict.current.kind !== 'ready' || current === null) return
-    const latest = conflict.current.page
-    const correctionsBase: CorrectionsBase = {entries: latest.corrections, digest: latest.correctionsBase}
+    applyingMergeRef.current = true
+    try {
+      const latest = conflict.current.page
+      const correctionsBase: CorrectionsBase = {entries: latest.corrections, digest: latest.correctionsBase}
 
-    const marks = remapMarks(current.marks, current.text, output)
-    const merged: Doc = {
-      ...current,
-      text: output.text,
-      marks,
-      base: {blobSha: latest.pageBlobSha, text: latest.body, correctionsBase},
-      unknownOp: null,
+      const marks = remapMarks(current.marks, current.text, output)
+      const merged: Doc = {
+        ...current,
+        text: output.text,
+        marks,
+        base: {blobSha: latest.pageBlobSha, text: latest.body, correctionsBase},
+        unknownOp: null,
+      }
+      setDoc(refreshCorrections(correctionsBase.entries, merged) ?? merged)
+      setConfirmOpen(null)
+      setConfirmed(null)
+      setMergeFlagged(marks.filter((mark, index) => mark.needsReview && current.marks[index]?.needsReview === false).length)
+      await persistNow({dropPending: true})
+      if (!mountedRef.current) return
+      setConflict(null)
+      setOutcome(null)
+      setNote('merged')
+      setMode('editing')
+    } finally {
+      applyingMergeRef.current = false
     }
-    setDoc(refreshCorrections(correctionsBase.entries, merged) ?? merged)
-    setConfirmOpen(null)
-    setConfirmed(null)
-    setMergeFlagged(marks.filter((mark, index) => mark.needsReview && current.marks[index]?.needsReview === false).length)
-    await persistNow({dropPending: true})
-    if (!mountedRef.current) return
-    setConflict(null)
-    setOutcome(null)
-    setNote('merged')
-    setMode('editing')
   }
 
   // -------------------------------------------------------------------------

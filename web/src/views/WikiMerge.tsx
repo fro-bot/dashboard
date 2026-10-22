@@ -7,7 +7,7 @@
  * focus never moves. Once every hunk is resolved, "Use merged text" hands the merged text and its
  * stretches to the caller. A merge with no hunks is applied the same way, in one step.
  *
- * Markup only: stable class names and `data-*` hooks for the later visual pass. No styling lives here.
+ * Markup only: stable class names and `data-*` hooks. The styling lives in `web/src/index.css`.
  */
 
 import {useMemo, useState} from 'react'

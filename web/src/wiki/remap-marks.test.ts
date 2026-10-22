@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {createMark, locateMark, markState, type Mark} from './marks.ts'
+import {createMark, isPlaced, keepMark, locateMark, markState, saveMarksOf, type Mark} from './marks.ts'
 import {applyResolutions, mergeTexts, type MergeOutput, type Resolution} from './merge.ts'
 import {remapMarks} from './remap-marks.ts'
 
@@ -116,7 +116,8 @@ describe('remapMarks — text from theirs', () => {
 
     expect(remapped?.needsReview).toBe(true)
     expect(remapped?.text).toBe('three')
-    expect(remapped?.start).toBe(mark.start)
+    // The draft's offsets mean nothing in the merged text, so the mark has no place.
+    expect(isPlaced(remapped as Mark)).toBe(false)
     // Its text is gone, so it waits to be removed.
     expect(markState(output.text, remapped as Mark)).toBe('detached')
   })
@@ -164,8 +165,13 @@ describe('remapMarks — text from theirs', () => {
     const [remapped] = remapMarks([mark], mine, output)
 
     expect(remapped?.needsReview).toBe(true)
-    expect(remapped?.start).toBe(mark.start)
+    expect(isPlaced(remapped as Mark)).toBe(false)
     expect(remapped?.start).not.toBe(elsewhere)
+    // Its words stand elsewhere, but the mark is not there: it can only be removed.
+    expect(locateMark(output.text, remapped as Mark)).toEqual({start: elsewhere, end: elsewhere + mark.text.length})
+    expect(markState(output.text, remapped as Mark)).toBe('detached')
+    expect(keepMark([remapped as Mark], mark.id, output.text)[0]?.needsReview).toBe(true)
+    expect(saveMarksOf(output.text, [remapped as Mark])).toEqual([])
   })
 
   it('flags a mark inside a hunk resolved as theirs, even where the same word stands in the page text', () => {
@@ -176,10 +182,11 @@ describe('remapMarks — text from theirs', () => {
     const [remapped] = remapMarks([mark], mine, output)
     // The same word stands in the page's version, but it is theirs, not the marked text.
     expect(remapped?.needsReview).toBe(true)
-    expect(remapped?.start).toBe(mark.start)
+    expect(isPlaced(remapped as Mark)).toBe(false)
+    expect(markState(output.text, remapped as Mark)).toBe('detached')
   })
 
-  it('keeps a flag that was already set', () => {
+  it('keeps a flag that was already set, on a mark that was carried and can still be kept', () => {
     const mine = BASE
     const theirs = `top\n${BASE}`
     const flagged = {...markOf(mine, 'three'), needsReview: true}
@@ -187,6 +194,26 @@ describe('remapMarks — text from theirs', () => {
     const [remapped] = remapMarks([flagged], mine, output)
     expect(remapped?.needsReview).toBe(true)
     expect(remapped?.start).toBe(output.text.indexOf('three'))
+    expect(markState(output.text, remapped as Mark)).toBe('review')
+    expect(keepMark([remapped as Mark], flagged.id, output.text)[0]?.needsReview).toBe(false)
+  })
+
+  it('does not carry a flagged mark that is not at its own offsets in the draft to where its text stands', () => {
+    const mine = 'one two, two again\nlast\n'
+    const stale = {...markOf(mine, 'two'), start: 10, end: 13, needsReview: true}
+    expect(markState(mine, stale)).toBe('detached')
+    const output = merged(mine, mine, `top\n${mine}`)
+    const [remapped] = remapMarks([stale], mine, output)
+    expect(isPlaced(remapped as Mark)).toBe(false)
+  })
+
+  it('leaves an unplaced mark unplaced', () => {
+    const mine = BASE
+    const [first] = remapMarks([markOf(mine, 'three')], mine, merged(mine, BASE, 'one\ntwo\nTHREE\nfour\nfive\nsix\nseven\n'))
+    const output = merged(mine, BASE, `top\n${BASE}`)
+    const [again] = remapMarks([first as Mark], mine, output)
+    expect(isPlaced(again as Mark)).toBe(false)
+    expect(again?.needsReview).toBe(true)
   })
 
   it('flags a mark whose text was not in the draft to begin with', () => {
@@ -196,6 +223,19 @@ describe('remapMarks — text from theirs', () => {
     const [remapped] = remapMarks([detached], mine, output)
     expect(remapped?.needsReview).toBe(true)
     expect(remapped?.text).toBe('not in the draft')
+    expect(isPlaced(remapped as Mark)).toBe(false)
+  })
+
+  it('does not carry a mark across a stretch that has no draft position', () => {
+    const mine = BASE
+    const mark = markOf(mine, 'three')
+    const output = {
+      text: mine,
+      stretches: [{source: 'mine', outStart: 0, outEnd: mine.length}],
+    } as unknown as MergeOutput
+    const [remapped] = remapMarks([mark], mine, output)
+    expect(isPlaced(remapped as Mark)).toBe(false)
+    expect(remapped?.needsReview).toBe(true)
   })
 
   it('flags a mark when the quote does not verify at the new position', () => {
@@ -209,6 +249,7 @@ describe('remapMarks — text from theirs', () => {
     const [remapped] = remapMarks([mark], mine, output)
     expect(remapped?.needsReview).toBe(true)
     expect(remapped?.text).toBe('three')
+    expect(isPlaced(remapped as Mark)).toBe(false)
   })
 })
 

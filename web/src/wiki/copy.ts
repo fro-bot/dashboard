@@ -196,6 +196,7 @@ export const CORRECTIONS_COPY = {
   remove: 'Remove',
   markReview: 'Needs review. Keep it or remove it.',
   markDetached: 'This span is no longer in the text. Remove the mark, or restore the text.',
+  markUnplaced: 'This mark\u2019s text moved or changed in the merge. Remove it, then mark the text again.',
   marksBlocking: 'Keep or remove each mark that needs attention before you can save.',
   stagingFull: 'This draft already has the most changes a save can carry. Undo one, or save first.',
   stagedDroppedOne: 'One staged change was dropped because its correction changed or is no longer on the page.',
