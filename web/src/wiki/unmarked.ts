@@ -8,20 +8,20 @@
  * 2. A word-level diff inside each block finds the changed ranges, in draft coordinates.
  * 3. A changed range is marked when the union of the marked spans covers all of it. A range
  *    outside every span is unmarked. A deletion has no text left in the draft to cover, so it
- *    is marked when a span touches the gap where the text was removed, which puts a mark
- *    on the text around the deletion.
+ *    is marked only when a span surrounds the gap where the text was removed, with marked text on
+ *    both sides of it. A span that only touches one edge of the gap does not cover the deletion.
  *
- * A word-level diff of a very large block would hang the tab: its cost grows much faster than the
- * block. So before any word-level diff runs, every block is sized (base characters times draft
- * characters, which is what the cost follows), and a draft with a block over `MAX_DIFF_AREA` is
- * answered `unavailable` without diffing anything. The caller must treat that as unmarked changes
- * it cannot rule out, never as no changes.
+ * A diff of a very large input would hang the tab: its cost grows much faster than the input. So
+ * each stage is sized before it runs, and a draft over any budget is answered `unavailable`
+ * without diffing anything. The line-level diff is sized by its work, matching line pairs times
+ * lines (`MAX_LINE_WORK`). The word-level diffs are sized by area, base characters times draft
+ * characters: each block against `MAX_DIFF_AREA`, and all of them together against
+ * `MAX_TOTAL_DIFF_AREA`. The caller must treat `unavailable` as unmarked changes it cannot rule
+ * out, never as no changes.
  *
  * The word-level diff runs over the words and punctuation only. Whitespace is left out of the
  * diff and compared between the words that match: a whitespace run repeats so often that, as
- * diff tokens, it makes a plain longest-common-subsequence diff cubic in the size of a block
- * (measured: 100 changed lines took seconds with whitespace in the diff and tens of milliseconds
- * without). Text is compared exactly, with no normalization, so a change in whitespace is still a
+ * diff tokens, it makes a plain longest-common-subsequence diff cubic in the size of a block. Text is compared exactly, with no normalization, so a change in whitespace is still a
  * change. Offsets are UTF-16 code units, as in the textarea and on the wire. The diff primitive is
  * `diffIndices` from `node-diff3`, a plain longest-common-subsequence diff.
  */
@@ -31,12 +31,30 @@ import type {SaveMark} from '../api/wiki.ts'
 
 /**
  * The most a single word-level diff may cost: base characters times draft characters of the block
- * (or the line pair) it compares. Measured on a 512 KB page of ordinary text, a diff of area
- * 100 million took about 0.1 s, 200 million about 0.3 s and 400 million about 0.85 s, rising to
- * 3.1 s at 1,000 million. The threshold is the 200 million mark: about 14,000 characters on each side.
- * Every scattered edit is a line of about a hundred characters, an area near ten thousand.
+ * (or the line pair) it compares. A diff costs about 0.1 s at an area of 100 million and about
+ * 0.3 s at 200 million, and grows faster than the area beyond that. 200 million is about 14,000
+ * characters on each side. A scattered edit is a line of about a hundred characters, an area near
+ * ten thousand.
  */
 export const MAX_DIFF_AREA = 200_000_000
+
+/**
+ * The most the comparisons of one draft may cost together: the sum of the areas of every block and
+ * line pair the word-level diff would run on. Cost is about 1 ms per million of area, so this bound
+ * keeps detection near half a second however the area is split among blocks.
+ */
+export const MAX_TOTAL_DIFF_AREA = 400_000_000
+
+/**
+ * The most work the line-level diff may do on a draft: matching line pairs times the larger line
+ * count. A pair is a base line and a draft line with the same text, so blank lines and repeated
+ * separators make many: for each distinct line, its count in the base times its count in the draft.
+ * The diff scans the pairs for every line, so its cost follows pairs times lines: about 0.4 ms per
+ * million. This bound keeps the line diff near half a second. A page of distinct lines has about as
+ * many pairs as lines, so its work is the square of its line count, and a paragraph page with a
+ * blank line after every three content lines has pairs growing with the square of its length.
+ */
+export const MAX_LINE_WORK = 1_000_000_000
 
 /**
  * `marked`: every change is inside a marked span, or nothing changed. `unmarked`: a change is outside
@@ -179,10 +197,25 @@ interface Problem {
   readonly offset: number
 }
 
+/** Matching line pairs: for each distinct line, its count in the base times its count in the draft. */
+function matchingLinePairs(baseLines: readonly string[], draftLines: readonly string[]): number {
+  const draftCounts = new Map<string, number>()
+  for (const line of draftLines) draftCounts.set(line, (draftCounts.get(line) ?? 0) + 1)
+  const baseCounts = new Map<string, number>()
+  for (const line of baseLines) baseCounts.set(line, (baseCounts.get(line) ?? 0) + 1)
+  let pairs = 0
+  for (const [line, count] of baseCounts) pairs += count * (draftCounts.get(line) ?? 0)
+  return pairs
+}
+
 /** The line-level diff, as the comparisons the word-level diff has to make. Cheap: no words yet. */
-function problemsOf(baseText: string, draftText: string): Problem[] {
+function problemsOf(baseText: string, draftText: string): Problem[] | 'unavailable' {
   const baseLines = splitLines(baseText)
   const draftLines = splitLines(draftText)
+  // The line diff scans the matching pairs for every line, so it is sized before it runs.
+  if (matchingLinePairs(baseLines, draftLines) * Math.max(baseLines.length, draftLines.length) > MAX_LINE_WORK) {
+    return 'unavailable'
+  }
   const lineOffsets = offsetsOf(draftLines)
   const problems: Problem[] = []
 
@@ -231,8 +264,8 @@ function mergedSpans(marks: readonly SaveMark[], length: number): Span[] {
 function isMarked(change: Change, spans: readonly Span[]): boolean {
   return spans.some(span =>
     change.start === change.end
-      ? // A deletion: a span that reaches the gap the text was removed from is a mark on the text around it.
-        span.start <= change.gapEnd && change.gapStart <= span.end
+      ? // A deletion: only a span that surrounds the gap, with marked text on both sides, covers it.
+        span.start < change.gapStart && span.end > change.gapEnd
       : span.start <= change.start && change.end <= span.end,
   )
 }
@@ -246,7 +279,16 @@ export function checkUnmarkedChanges(input: UnmarkedInput): UnmarkedResult {
   if (marks.length === 0) return 'unmarked'
 
   const problems = problemsOf(baseText, draftText)
-  if (problems.some(problem => problem.base.length * problem.draft.length > MAX_DIFF_AREA)) return 'unavailable'
+  if (problems === 'unavailable') return 'unavailable'
+
+  // One block over the limit is enough, and is the fast path. Blocks that each fit can still add up.
+  let totalArea = 0
+  for (const problem of problems) {
+    const area = problem.base.length * problem.draft.length
+    if (area > MAX_DIFF_AREA) return 'unavailable'
+    totalArea += area
+  }
+  if (totalArea > MAX_TOTAL_DIFF_AREA) return 'unavailable'
 
   const spans = mergedSpans(marks, draftText.length)
   for (const problem of problems) {

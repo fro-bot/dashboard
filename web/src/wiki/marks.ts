@@ -235,31 +235,60 @@ function rebaseOne(mark: Mark, oldText: string, newText: string, change: Change)
 
   const {start: a, end: b} = mark
   const delta = change.newEnd - change.oldEnd
-  let range: Range
   if (b <= change.start) {
-    // The edit is after the mark, or begins exactly where it ends.
-    range = {start: a, end: b}
-  } else if (a >= change.oldEnd) {
-    // The edit is before the mark, or ends exactly where it begins.
-    range = {start: a + delta, end: b + delta}
-  } else {
-    // The edit reaches into the mark: the mark follows what is there now.
-    range = {start: Math.min(a, change.start), end: b > change.oldEnd ? b + delta : change.newEnd}
-    if (range.end <= range.start) return mark
+    // The change is after the mark, or begins exactly where it ends.
+    return anchored(newText, mark, {start: a, end: b})
   }
-  return anchored(newText, mark, range)
+  if (a >= change.oldEnd) {
+    // The change is before the mark, or ends exactly where it begins.
+    return anchored(newText, mark, {start: a + delta, end: b + delta})
+  }
+  if (change.start >= a && change.oldEnd <= b) {
+    // The change lies entirely inside the mark: the mark follows what is there now.
+    // A change that deletes the whole mark leaves nothing of it. It keeps its text and is flagged.
+    return b + delta <= a ? {...mark, needsReview: true} : anchored(newText, mark, {start: a, end: b + delta})
+  }
+
+  // The change crosses an edge of the mark. Only what survives of the original span outside the
+  // changed region stays marked, and the operator is asked to keep it or remove it.
+  const before = change.start > a ? {start: a, end: change.start} : null
+  const after = change.oldEnd < b ? {start: change.oldEnd + delta, end: b + delta} : null
+  // Not both: a change that leaves text on both sides of itself lies inside the mark, handled above.
+  const survivor = before ?? after
+  if (survivor === null) return {...mark, needsReview: true}
+  return {...anchored(newText, mark, survivor), needsReview: true}
 }
 
 /**
- * Carry the marks through an edit from `oldText` to `newText`. The change is taken as one region,
- * the text between the common head and the common tail, which is exact for typing, pasting and
- * deleting. A mark outside the region moves with the text. A mark the region reaches into follows
- * the text now there. A mark whose text is deleted is detached and stays as it was.
+ * Carry the marks through an edit from `oldText` to `newText`. The edit is taken as one region, the
+ * text between the common head and the common tail, which is exact for typing, pasting and deleting.
+ * A mark outside the region moves with the text. A mark grows only when the region lies entirely
+ * inside it. When the region crosses an edge of a mark, the mark is clipped to the part of its
+ * original span that survives outside the region and is flagged for review, so unmarked text is
+ * never taken into a mark. A mark whose whole span lies in the region keeps its old text and is
+ * flagged for review. It is detached where that text no longer stands. Where the same text stands
+ * elsewhere, the mark is found there but stays flagged, so Save waits until the operator keeps or
+ * removes it.
  */
 export function rebaseMarks(marks: readonly Mark[], oldText: string, newText: string): readonly Mark[] {
   if (oldText === newText || marks.length === 0) return marks
   const change = changeBetween(oldText, newText)
   return marks.map(mark => rebaseOne(mark, oldText, newText, change))
+}
+
+/**
+ * Rebase the marks, then drop any whose text has grown past what the server accepts. A mark that long
+ * could not be stored in the draft or sent in a save, so it must not outlive the edit that made it.
+ * `dropped` counts the marks removed, for the notice.
+ */
+export function rebaseAndLimit(
+  marks: readonly Mark[],
+  oldText: string,
+  newText: string,
+): {readonly marks: readonly Mark[]; readonly dropped: number} {
+  const rebased = rebaseMarks(marks, oldText, newText)
+  const kept = rebased.filter(mark => mark.text.length <= MAX_MARK_TEXT_LENGTH)
+  return kept.length === rebased.length ? {marks: rebased, dropped: 0} : {marks: kept, dropped: rebased.length - kept.length}
 }
 
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ import * as wikiApi from '../api/wiki.ts'
 import type {SaveInput, WikiCorrection, WikiPage} from '../api/wiki.ts'
 import {createDraftStore, type DraftInput, type DraftStore} from '../wiki/drafts.ts'
 import type {Mark} from '../wiki/marks.ts'
+import {MAX_STAGED} from '../wiki/staged.ts'
 import {MAX_DIFF_AREA} from '../wiki/unmarked.ts'
 import {createMemoryIdb} from '../wiki/test-support/memory-idb.ts'
 import {WikiEditor} from './WikiEditor.tsx'
@@ -424,6 +425,96 @@ describe('marking a span', () => {
   })
 })
 
+describe('a mark that grows past the length the server accepts', () => {
+  const HUNDRED = 'x'.repeat(100)
+  const LONG_BODY = `\nBefore ${HUNDRED} after.\n`
+
+  async function markHundred() {
+    getSpy.mockResolvedValue(ok(pageOf({body: LONG_BODY, corrections: []})))
+    await renderPage()
+    await edit(`${LONG_BODY}tail\n`)
+    selectText(HUNDRED)
+    fireEvent.click(markButton())
+    expect(screen.getByTestId('wiki-mark-item')).toBeInTheDocument()
+  }
+
+  function pasteInside(length: number) {
+    const text = textbox().value
+    const at = text.indexOf(HUNDRED) + 50
+    type(`${text.slice(0, at)}${'y'.repeat(length)}${text.slice(at)}`)
+  }
+
+  it('is dropped with a notice when about 4,000 characters are pasted inside it', async () => {
+    await markHundred()
+    pasteInside(4000)
+
+    expect(screen.queryByTestId('wiki-mark-item')).toBeNull()
+    expect(screen.getByTestId('wiki-mark-status')).toHaveTextContent(/grew past the length limit, so it was removed/iu)
+    expect(screen.getByTestId('wiki-mark-status')).toHaveAttribute('role', 'status')
+  })
+
+  it('never reaches the draft store: the draft is written without it and reads back', async () => {
+    await markHundred()
+    pasteInside(4000)
+    cleanup()
+    await flush()
+
+    const stored = await store.getDraft(PAGE_ID)
+    expect(stored.ok).toBe(true)
+    expect(stored.ok && stored.value?.marks).toEqual([])
+    expect(stored.ok && stored.value?.draftText).toContain('y'.repeat(4000))
+  })
+
+  it('never reaches the save request', async () => {
+    await markHundred()
+    pasteInside(4000)
+    fireEvent.click(button('Save'))
+    fireEvent.click(button('Confirm save'))
+    await flush()
+
+    expect(sentSave().marks).toEqual([])
+  })
+
+  it('keeps a mark that grows but stays within the limit', async () => {
+    await markHundred()
+    pasteInside(500)
+
+    expect(screen.getByTestId('wiki-mark-item')).toBeInTheDocument()
+    expect(screen.queryByTestId('wiki-mark-status')).toBeNull()
+  })
+})
+
+describe('a paste that crosses the edge of a mark', () => {
+  const PAGE_TEXT = 'The cat sat on the mat. Dogs bark loudly at night.\n'
+
+  it('does not take the pasted text into the mark: the mark is detached and Save is blocked', async () => {
+    getSpy.mockResolvedValue(ok(pageOf({body: PAGE_TEXT, corrections: []})))
+    await renderPage()
+    await edit(PAGE_TEXT.replace('cat', 'CAT'))
+    selectText('CAT')
+    fireEvent.click(markButton())
+
+    // One paste replaces everything from "CAT" to the end with "dog".
+    type('The dog')
+
+    expect(screen.getByTestId('wiki-mark-item')).toHaveAttribute('data-mark-state', 'detached')
+    expect(button('Save')).toBeDisabled()
+    expect(saveSpy).not.toHaveBeenCalled()
+  })
+
+  it('flags a mark that is clipped by a paste over its end, and Save waits', async () => {
+    getSpy.mockResolvedValue(ok(pageOf({body: PAGE_TEXT, corrections: []})))
+    await renderPage()
+    await edit(PAGE_TEXT.replace('cat', 'CAT'))
+    selectText('CAT sat')
+    fireEvent.click(markButton())
+    type(PAGE_TEXT.replace('cat sat on the mat', 'CAT ran'))
+
+    expect(screen.getByTestId('wiki-mark-item')).toHaveAttribute('data-mark-state', 'review')
+    expect(button('Save')).toBeDisabled()
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Marks and staged actions persist
 // ---------------------------------------------------------------------------
@@ -726,6 +817,49 @@ describe('staged actions when the corrections refresh', () => {
   })
 })
 
+describe('the staging cap', () => {
+  const many = Array.from({length: MAX_STAGED + 1}, (_unused, index) => correction(`c${String(index)}`))
+  const stagedFor = (list: readonly WikiCorrection[]) =>
+    list.map(item => ({correctionId: item.id, action: 'retire' as const, from: 'active' as const, spanText: item.span.text}))
+
+  it('refuses a new staged action at the cap, says so, and keeps what is staged', async () => {
+    getSpy.mockResolvedValue(ok(pageOf({corrections: many})))
+    await store.putDraft(storedDraft({draftText: BODY, correctionsBase: {entries: many, digest: 'digest-1'}, staged: stagedFor(many.slice(0, MAX_STAGED))}))
+    await renderPage()
+
+    fireEvent.click(within(correctionItem(`c${String(MAX_STAGED)}`)).getByRole('button', {name: 'Retire'}))
+
+    expect(correctionItem(`c${String(MAX_STAGED)}`)).not.toHaveAttribute('data-staged')
+    expect(screen.getByTestId('wiki-stage-status')).toHaveTextContent(/most changes a save can carry/iu)
+    expect(screen.getByTestId('wiki-stage-status')).toHaveAttribute('role', 'status')
+    expect(panel().querySelectorAll('[data-staged]')).toHaveLength(MAX_STAGED)
+  })
+
+  it('still lets Undo free a place, and then stages the next one', async () => {
+    getSpy.mockResolvedValue(ok(pageOf({corrections: many})))
+    await store.putDraft(storedDraft({draftText: BODY, correctionsBase: {entries: many, digest: 'digest-1'}, staged: stagedFor(many.slice(0, MAX_STAGED))}))
+    await renderPage()
+
+    fireEvent.click(within(correctionItem('c0')).getByRole('button', {name: 'Undo'}))
+    fireEvent.click(within(correctionItem(`c${String(MAX_STAGED)}`)).getByRole('button', {name: 'Retire'}))
+    expect(correctionItem(`c${String(MAX_STAGED)}`)).toHaveAttribute('data-staged', 'retire')
+    expect(screen.queryByTestId('wiki-stage-status')).toBeNull()
+  })
+
+  it('writes a draft at the cap that can be read back', async () => {
+    getSpy.mockResolvedValue(ok(pageOf({corrections: many})))
+    await store.putDraft(storedDraft({draftText: BODY, correctionsBase: {entries: many, digest: 'digest-1'}, staged: stagedFor(many.slice(0, MAX_STAGED - 1))}))
+    await renderPage()
+    fireEvent.click(within(correctionItem(`c${String(MAX_STAGED - 1)}`)).getByRole('button', {name: 'Retire'}))
+    fireEvent.click(within(correctionItem(`c${String(MAX_STAGED)}`)).getByRole('button', {name: 'Retire'}))
+    cleanup()
+    await flush()
+
+    const loaded = await store.getDraft(PAGE_ID)
+    expect(loaded.ok && loaded.value?.staged).toHaveLength(MAX_STAGED)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Flagged marks
 // ---------------------------------------------------------------------------
@@ -821,17 +955,28 @@ describe('Save and the unmarked changes', () => {
     expect(sentSave().marks).toEqual([{text: 'gadgets', start: expect.any(Number), end: expect.any(Number)}])
   })
 
-  it('counts a deletion with a mark on the text around it as marked', async () => {
+  it('counts a deletion with a mark around the gap, on both sides of it, as marked', async () => {
     await renderPage()
     const draft = BODY.replace('widgets', '')
     await edit(draft)
-    selectText('Alpha builds ')
+    selectText('Alpha builds .')
     fireEvent.click(markButton())
     fireEvent.click(button('Save'))
     await flush()
 
     expect(confirmation()).toBeNull()
     expect(saveSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('asks about a deletion whose mark only touches one side of the gap', async () => {
+    await renderPage()
+    await edit(BODY.replace('widgets', ''))
+    selectText('Alpha builds ')
+    fireEvent.click(markButton())
+    fireEvent.click(button('Save'))
+
+    expect(confirmation()).toBeInTheDocument()
+    expect(saveSpy).not.toHaveBeenCalled()
   })
 
   it('counts a deletion with no mark as unmarked', async () => {

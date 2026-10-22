@@ -1,6 +1,12 @@
 import {describe, expect, it} from 'vitest'
 import type {SaveMark} from '../api/wiki.ts'
-import {checkUnmarkedChanges, MAX_DIFF_AREA, type UnmarkedInput} from './unmarked.ts'
+import {
+  checkUnmarkedChanges,
+  MAX_DIFF_AREA,
+  MAX_LINE_WORK,
+  MAX_TOTAL_DIFF_AREA,
+  type UnmarkedInput,
+} from './unmarked.ts'
 
 /** True when the draft holds a change outside every mark. The unavailable result is its own tests'. */
 function hasUnmarkedChanges(input: UnmarkedInput): boolean {
@@ -149,17 +155,38 @@ const ROWS: readonly Row[] = [
     unmarked: false,
   },
   {
-    label: 'a deletion next to a marked word, on the side of the deleted text',
+    label: 'a deletion with a mark that only touches the gap, on the word before it',
     base: 'Alpha builds old widgets.\n',
     draft: 'Alpha builds widgets.\n',
     marked: ['builds'],
-    unmarked: false,
+    unmarked: true,
   },
   {
-    label: 'a deletion next to a marked word, on the other side',
+    label: 'a deletion with a mark that only touches the gap, on the word after it',
     base: 'Alpha builds old widgets.\n',
     draft: 'Alpha builds widgets.\n',
     marked: ['widgets'],
+    unmarked: true,
+  },
+  {
+    label: 'a deletion with marked text on both sides of the gap',
+    base: 'Alpha builds old widgets.\n',
+    draft: 'Alpha builds widgets.\n',
+    marked: ['Alpha builds widgets.'],
+    unmarked: false,
+  },
+  {
+    label: 'a long clause deleted after a mark on one word',
+    base: 'Paris is the capital of France, a city of art, food and long history. Beta ships.\n',
+    draft: 'Paris. Beta ships.\n',
+    marked: ['Paris'],
+    unmarked: true,
+  },
+  {
+    label: 'a long clause deleted inside a mark that spans the gap',
+    base: 'Paris is the capital of France, a city of art, food and long history. Beta ships.\n',
+    draft: 'Paris. Beta ships.\n',
+    marked: ['Paris. Beta'],
     unmarked: false,
   },
   {
@@ -170,10 +197,17 @@ const ROWS: readonly Row[] = [
     unmarked: true,
   },
   {
-    label: 'a deleted space beside a marked word',
+    label: 'a deleted space beside a marked word that only touches the gap',
     base: 'Alpha.  Beta.\n',
     draft: 'Alpha. Beta.\n',
     marked: ['Beta.'],
+    unmarked: true,
+  },
+  {
+    label: 'a deleted space inside a mark that spans it',
+    base: 'Alpha.  Beta.\n',
+    draft: 'Alpha. Beta.\n',
+    marked: ['Alpha. Beta.'],
     unmarked: false,
   },
   {
@@ -205,17 +239,24 @@ const ROWS: readonly Row[] = [
     unmarked: true,
   },
   {
-    label: 'a deleted line with a mark on the line after it',
+    label: 'a deleted line with a mark only on the line after it',
     base: 'A\nB\nC\n',
     draft: 'A\nC\n',
     marked: ['C'],
-    unmarked: false,
+    unmarked: true,
   },
   {
-    label: 'a deleted line with a mark on the line before it',
+    label: 'a deleted line with a mark only on the line before it',
     base: 'A\nB\nC\n',
     draft: 'A\nC\n',
     marked: ['A\n'],
+    unmarked: true,
+  },
+  {
+    label: 'a deleted line with one mark across the lines on both sides of it',
+    base: 'A\nB\nC\n',
+    draft: 'A\nC\n',
+    marked: ['A\nC'],
     unmarked: false,
   },
   {
@@ -395,5 +436,119 @@ describe('the block-size guard', () => {
     const added = wordsText(WIDE)
     expect(checkUnmarkedChanges({baseText: '', draftText: added, marks: [{text: added, start: 0, end: added.length}]})).toBe('marked')
     expect(checkUnmarkedChanges({baseText: added, draftText: '', marks: [{text: 'x', start: 0, end: 1}]})).toBe('unmarked')
+  })
+})
+
+describe('the line-work budget', () => {
+  /** Lines of distinct prose, with a blank line after every `content` lines. */
+  const paragraphPage = (count: number, content = 3): string[] =>
+    Array.from({length: count}, (_unused, index) =>
+      index % (content + 1) === content ? '' : `paragraph line ${String(index)} with some ordinary prose words in it`,
+    )
+  /** `count` lines of distinct text, with every `blankEvery`th line blank. */
+  const pageWithBlanks = (count: number, blankEvery: number): string[] =>
+    Array.from({length: count}, (_unused, index) => (index % blankEvery === 0 ? '' : `line ${String(index)} of the page`))
+  const joined = (lines: readonly string[]): string => `${lines.join('\n')}\n`
+  const wholeMark = (text: string) => [{text, start: 0, end: text.length}]
+  const edited = (lines: readonly string[]): string[] => lines.map((line, index) => (index === 11 ? 'EDITED' : line))
+  const check = (lines: readonly string[]) => {
+    const draftText = joined(edited(lines))
+    return checkUnmarkedChanges({baseText: joined(lines), draftText, marks: wholeMark(draftText)})
+  }
+
+  /** Matching pairs times lines, the work the line diff does. */
+  function lineWork(lines: readonly string[]): number {
+    const counts = new Map<string, number>()
+    for (const line of lines) counts.set(line, (counts.get(line) ?? 0) + 1)
+    let pairs = 0
+    for (const count of counts.values()) pairs += count * count
+    return pairs * lines.length
+  }
+
+  it.each([999, 1599])('compares a %i-line paragraph page with a blank line after every three content lines', count => {
+    const lines = paragraphPage(count)
+    expect(lineWork(lines)).toBeLessThan(MAX_LINE_WORK)
+    expect(check(lines)).toBe('marked')
+  })
+
+  it('says unavailable for a 3,199-line paragraph page, before the line diff', () => {
+    const lines = paragraphPage(3199)
+    expect(lineWork(lines)).toBeGreaterThan(MAX_LINE_WORK)
+    expect(check(lines)).toBe('unavailable')
+  })
+
+  it('says unavailable for a page of 35,000 unique short lines, which have few pairs but many lines', () => {
+    const lines = Array.from({length: 35_000}, (_unused, index) => `row ${String(index)}`)
+    expect(lineWork(lines)).toBeGreaterThan(MAX_LINE_WORK)
+    expect(check(lines)).toBe('unavailable')
+  })
+
+  it('says unavailable for a page dense with blank lines', () => {
+    const lines = pageWithBlanks(3000, 3)
+    expect(lineWork(lines)).toBeGreaterThan(MAX_LINE_WORK)
+    expect(check(lines)).toBe('unavailable')
+  })
+
+  it('counts repeated non-blank lines the same way', () => {
+    const lines = Array.from({length: 3000}, (_unused, index) => (index % 2 === 0 ? '---' : `row ${String(index)}`))
+    expect(lineWork(lines)).toBeGreaterThan(MAX_LINE_WORK)
+    expect(check(lines)).toBe('unavailable')
+  })
+
+  it('compares a small page however dense its blank lines are', () => {
+    expect(check(pageWithBlanks(150, 3))).toBe('marked')
+  })
+
+  it('does not trip on a long page of distinct lines', () => {
+    const lines = Array.from({length: 8000}, (_unused, index) => `row ${String(index)}`)
+    expect(check(lines)).toBe('marked')
+  })
+
+  it('uses the larger of the two line counts', () => {
+    // 30,000 shared lines: 30,000 pairs. Times the larger count (35,000) is over the budget; times the smaller is not.
+    const base = Array.from({length: 35_000}, (_unused, index) => `row ${String(index)}`)
+    const draft = base.slice(0, 30_000)
+    draft[11] = 'EDITED'
+    const draftText = joined(draft)
+    expect(30_000 * 30_000).toBeLessThan(MAX_LINE_WORK)
+    expect(30_000 * 35_000).toBeGreaterThan(MAX_LINE_WORK)
+    expect(checkUnmarkedChanges({baseText: joined(base), draftText, marks: wholeMark(draftText)})).toBe('unavailable')
+  })
+
+  it('does not size anything when nothing is marked', () => {
+    const lines = pageWithBlanks(3000, 3)
+    expect(checkUnmarkedChanges({baseText: joined(lines), draftText: joined(edited(lines)), marks: []})).toBe('unmarked')
+  })
+})
+
+describe('the total-area budget', () => {
+  /** A changed block of `lines` lines whose draft has one more line, so it is compared as one block. */
+  function pageWithBlocks(blocks: number, lines: number): {baseText: string; draftText: string} {
+    const base: string[] = []
+    const draft: string[] = []
+    for (let block = 0; block < blocks; block += 1) {
+      const body = Array.from({length: lines}, (_unused, index) => `block ${String(block)} line ${String(index)} with some words in it`)
+      base.push(`separator ${String(block)} a`, `separator ${String(block)} b`, ...body)
+      draft.push(`separator ${String(block)} a`, `separator ${String(block)} b`, ...body.map(line => `${line} EDITED`), 'one more line')
+    }
+    return {baseText: `${base.join('\n')}\n`, draftText: `${draft.join('\n')}\n`}
+  }
+
+  it('says unavailable when many blocks each under the per-block limit add up to more than the total budget', () => {
+    const {baseText, draftText} = pageWithBlocks(3, 300)
+    const side = baseText.length / 3
+    expect(side * side).toBeLessThan(MAX_DIFF_AREA)
+    expect(3 * side * side).toBeGreaterThan(MAX_TOTAL_DIFF_AREA)
+
+    expect(checkUnmarkedChanges({baseText, draftText, marks: [{text: draftText, start: 0, end: draftText.length}]})).toBe(
+      'unavailable',
+    )
+  })
+
+  it('compares the same blocks when they fit the total budget', () => {
+    const {baseText, draftText} = pageWithBlocks(1, 300)
+    expect(checkUnmarkedChanges({baseText, draftText, marks: [{text: draftText, start: 0, end: draftText.length}]})).toBe(
+      'marked',
+    )
   })
 })

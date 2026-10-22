@@ -197,6 +197,7 @@ export const CORRECTIONS_COPY = {
   markReview: 'Needs review. Keep it or remove it.',
   markDetached: 'This span is no longer in the text. Remove the mark, or restore the text.',
   marksBlocking: 'Keep or remove each mark that needs attention before you can save.',
+  stagingFull: 'This draft already has the most changes a save can carry. Undo one, or save first.',
   stagedDroppedOne: 'One staged change was dropped because its correction changed or is no longer on the page.',
   stagedDroppedMany: (count: number) =>
     `${String(count)} staged changes were dropped because their corrections changed or are no longer on the page.`,
@@ -212,6 +213,8 @@ export const MARK_COPY = {
   tooLong: 'That selection is too long to mark as one correction. Select a shorter span.',
   tooMany: 'This draft already has the most marks a save can carry. Remove one first.',
   duplicate: 'That span is already marked.',
+  grewTooLong:
+    'A marked span grew past the length limit, so it was removed. Mark a shorter span to keep it as a correction.',
 } as const
 
 export const EDITOR_COPY = {

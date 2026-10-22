@@ -1,30 +1,22 @@
 /**
- * Measurement of marked-span detection on a 512 KB document with scattered edits (U12).
+ * Detection of marked spans on a 512 KB document (U12).
  *
- * The plan builds the simple path first and adds a "marked-span detection unavailable" state only
- * if this measurement fails a bound. The bound is one second: detection runs once, when the operator
- * presses Save, and a press that takes longer than that reads as a hang. Measured on the
- * development machine (Node 24), the scattered cases below take 40 to 100 ms warm and up to
- * about 200 ms on a cold run, so the bound has headroom for a slow CI machine.
+ * The check runs once, when the operator presses Save, and has to finish quickly enough not to read
+ * as a hang: under about a second. Scattered edits on a page this size are well inside that. A diff's
+ * cost grows much faster than its input, so some shapes are not: a whole-page rewrite that also adds
+ * or removes a line, a single 512 KB line, a page dense with blank lines (the line diff scans every
+ * matching line pair for every line), a page of tens of thousands of short lines, and many changed
+ * blocks that each fit but add up. The guards in `unmarked.ts` size each stage before it runs and
+ * answer `unavailable`, and the editor then asks for the confirmation as if the changes were unmarked.
  *
- * Two other shapes never finish without a guard: a whole-page rewrite that also adds or removes a
- * line, and a single 512 KB line (neither completed in 100 s). The block-size guard in `unmarked.ts`
- * answers `unavailable` for them before any word-level diff runs, and the editor then says detection
- * is unavailable and still asks for the confirmation. This file checks that those shapes are caught
- * quickly and that no scattered-edit case is.
- *
- * It is a guard as well as a measurement: it fails if the algorithm slows by an order of magnitude.
+ * This file does not assert elapsed time, which is not stable on a loaded machine. It asserts the
+ * outcome of the guards: the shapes above are answered `unavailable`, and no scattered-edit case is.
+ * The budgets are documented beside each constant in `unmarked.ts`.
  */
 
 import {describe, expect, it} from 'vitest'
 import type {SaveMark} from '../api/wiki.ts'
 import {checkUnmarkedChanges} from './unmarked.ts'
-
-/** The most a detection may take on these documents, in milliseconds. */
-const BOUND_MS = 1000
-
-/** What a caught case may take: the line-level diff and the sizing, with no word-level diff. */
-const CAUGHT_MS = 500
 
 const DOCUMENT_BYTES = 512 * 1024
 
@@ -75,87 +67,67 @@ function scatteredEdits(base: readonly string[], edits: number): {draftText: str
   return {draftText, marks}
 }
 
-function timed<T>(run: () => T): {result: T; ms: number} {
-  const started = performance.now()
-  const result = run()
-  return {result, ms: performance.now() - started}
-}
-
 describe('marked-span detection on a 512 KB document', () => {
   const base = documentLines()
   const baseText = `${base.join('\n')}\n`
+  const whole = (text: string): SaveMark[] => [{text, start: 0, end: text.length}]
+  const joined = (lines: readonly string[]): string => `${lines.join('\n')}\n`
 
   it('is a 512 KB document', () => {
     expect(baseText.length).toBeGreaterThanOrEqual(DOCUMENT_BYTES)
   })
 
-  it.each([10, 200, 1000])('finds %i scattered edits, all marked, within the bound', edits => {
-    const {draftText, marks} = scatteredEdits(base, edits)
-    const {result, ms} = timed(() => checkUnmarkedChanges({baseText, draftText, marks}))
-
-    expect(result).toBe('marked')
-    expect(ms).toBeLessThan(BOUND_MS)
-  })
-
-  it('finds a scattered edit that is not marked, within the bound', () => {
-    const {draftText, marks} = scatteredEdits(base, 200)
-    const {result, ms} = timed(() => checkUnmarkedChanges({baseText, draftText, marks: marks.slice(1)}))
-
-    expect(result).toBe('unmarked')
-    expect(ms).toBeLessThan(BOUND_MS)
-  })
-
-  it('handles a run of consecutive edited lines within the bound', () => {
-    const draft = [...base]
-    for (let index = 1000; index < 1400; index += 1) {
-      draft[index] = (draft[index] as string).replace(/\b\w+\b/u, 'EDITED')
-    }
-    const draftText = `${draft.join('\n')}\n`
-    const {result, ms} = timed(() =>
-      checkUnmarkedChanges({baseText, draftText, marks: [{text: draftText, start: 0, end: draftText.length}]}),
-    )
-
-    expect(result).toBe('marked')
-    expect(ms).toBeLessThan(BOUND_MS)
-  })
-
-  it('handles a page with the same line count rewritten throughout, within the bound', () => {
-    const draft = base.map(line => line.replace(/\b\w+\b/u, 'EDITED'))
-    const draftText = `${draft.join('\n')}\n`
-    const {result, ms} = timed(() =>
-      checkUnmarkedChanges({baseText, draftText, marks: [{text: draftText, start: 0, end: draftText.length}]}),
-    )
-
-    expect(result).toBe('marked')
-    expect(ms).toBeLessThan(BOUND_MS)
-  })
-
-  // The cases that hang without the guard.
-  describe('the block-size guard', () => {
-    const whole = (text: string): SaveMark[] => [{text, start: 0, end: text.length}]
-
-    it('catches a whole-page rewrite that also adds a line, well under the bound', () => {
-      const draft = base.map(line => line.replace(/\b\w+\b/u, 'EDITED'))
-      draft.splice(100, 0, 'an extra line')
-      const draftText = `${draft.join('\n')}\n`
-      const {result, ms} = timed(() => checkUnmarkedChanges({baseText, draftText, marks: whole(draftText)}))
-
-      expect(result).toBe('unavailable')
-      expect(ms).toBeLessThan(CAUGHT_MS)
+  describe('scattered edits are compared', () => {
+    it.each([10, 200, 1000])('finds %i scattered edits, all marked', edits => {
+      const {draftText, marks} = scatteredEdits(base, edits)
+      expect(checkUnmarkedChanges({baseText, draftText, marks})).toBe('marked')
     })
 
-    it('catches a 400-line run of edited lines that also adds a line (about 3 s unguarded)', () => {
+    it('finds a scattered edit that is not marked', () => {
+      const {draftText, marks} = scatteredEdits(base, 200)
+      expect(checkUnmarkedChanges({baseText, draftText, marks: marks.slice(1)})).toBe('unmarked')
+    })
+
+    it('compares 5% inserted lines', () => {
+      const inserted: string[] = []
+      base.forEach((line, index) => {
+        inserted.push(line)
+        if (index % 20 === 0) inserted.push(`inserted ${String(index)}`)
+      })
+      const draftText = joined(inserted)
+      expect(checkUnmarkedChanges({baseText, draftText, marks: whole(draftText)})).toBe('marked')
+    })
+
+    it('compares a 400-line run of edited lines when the line count is unchanged', () => {
+      const draft = [...base]
+      for (let index = 1000; index < 1400; index += 1) draft[index] = (draft[index] as string).replace(/\b\w+\b/u, 'EDITED')
+      const draftText = joined(draft)
+      expect(checkUnmarkedChanges({baseText, draftText, marks: whole(draftText)})).toBe('marked')
+    })
+
+    it('compares a page rewritten throughout when the line count is unchanged', () => {
+      const draftText = joined(base.map(line => line.replace(/\b\w+\b/u, 'EDITED')))
+      expect(checkUnmarkedChanges({baseText, draftText, marks: whole(draftText)})).toBe('marked')
+    })
+  })
+
+  describe('the guards answer unavailable', () => {
+    it('for a whole-page rewrite that also adds a line', () => {
+      const draft = base.map(line => line.replace(/\b\w+\b/u, 'EDITED'))
+      draft.splice(100, 0, 'an extra line')
+      const draftText = joined(draft)
+      expect(checkUnmarkedChanges({baseText, draftText, marks: whole(draftText)})).toBe('unavailable')
+    })
+
+    it('for a 400-line run of edited lines that also adds a line', () => {
       const draft = [...base]
       for (let index = 1000; index < 1400; index += 1) draft[index] = (draft[index] as string).replace(/\b\w+\b/u, 'EDITED')
       draft.splice(1003, 0, 'an extra line inside the block')
-      const draftText = `${draft.join('\n')}\n`
-      const {result, ms} = timed(() => checkUnmarkedChanges({baseText, draftText, marks: whole(draftText)}))
-
-      expect(result).toBe('unavailable')
-      expect(ms).toBeLessThan(CAUGHT_MS)
+      const draftText = joined(draft)
+      expect(checkUnmarkedChanges({baseText, draftText, marks: whole(draftText)})).toBe('unavailable')
     })
 
-    it('catches a 512 KB single line with scattered edits, well under the bound', () => {
+    it('for a 512 KB single line with scattered edits', () => {
       const words = base.join(' ').split(' ')
       const bigBase = words.join(' ')
       const edited = [...words]
@@ -167,31 +139,34 @@ describe('marked-span detection on a 512 KB document', () => {
         if (index % 400 === 0) marks.push({text: word, start: offset, end: offset + word.length})
         offset += word.length + 1
       })
-      const {result, ms} = timed(() => checkUnmarkedChanges({baseText: bigBase, draftText, marks}))
 
       expect(bigBase.length).toBeGreaterThanOrEqual(DOCUMENT_BYTES)
-      expect(result).toBe('unavailable')
-      expect(ms).toBeLessThan(CAUGHT_MS)
+      expect(checkUnmarkedChanges({baseText: bigBase, draftText, marks})).toBe('unavailable')
     })
 
-    it.each([10, 200, 1000])('does not trip on %i scattered edits', edits => {
-      const {draftText, marks} = scatteredEdits(base, edits)
-      expect(checkUnmarkedChanges({baseText, draftText, marks})).not.toBe('unavailable')
+    it.each([10, 3])('for a page with one line in %i blank', blankEvery => {
+      const dense = base.map((line, index) => (index % blankEvery === 0 ? '' : line))
+      const baseDense = joined(dense)
+      const draftText = joined(dense.map((line, index) => (index === 500 ? 'EDITED' : line)))
+      expect(checkUnmarkedChanges({baseText: baseDense, draftText, marks: whole(draftText)})).toBe('unavailable')
     })
 
-    it('does not trip on 5% inserted lines, or on a 400-line run of edited lines with the line count unchanged', () => {
-      const inserted: string[] = []
-      base.forEach((line, index) => {
-        inserted.push(line)
-        if (index % 20 === 0) inserted.push(`inserted ${String(index)}`)
-      })
-      const insertedText = `${inserted.join('\n')}\n`
-      expect(checkUnmarkedChanges({baseText, draftText: insertedText, marks: whole(insertedText)})).not.toBe('unavailable')
+    it('for a page of 35,000 unique short lines, which have few matching pairs but many lines', () => {
+      const lines = Array.from({length: 35_000}, (_unused, index) => `row ${String(index)}`)
+      const draftText = joined(lines.map((line, index) => (index === 500 ? 'EDITED' : line)))
+      expect(checkUnmarkedChanges({baseText: joined(lines), draftText, marks: whole(draftText)})).toBe('unavailable')
+    })
 
-      const run = [...base]
-      for (let index = 1000; index < 1400; index += 1) run[index] = (run[index] as string).replace(/\b\w+\b/u, 'EDITED')
-      const runText = `${run.join('\n')}\n`
-      expect(checkUnmarkedChanges({baseText, draftText: runText, marks: whole(runText)})).not.toBe('unavailable')
+    it('for many changed blocks that each fit the per-block limit but add up', () => {
+      const lines: string[] = []
+      const edited: string[] = []
+      for (let block = 0; block < 40; block += 1) {
+        const body = Array.from({length: 300}, (_unused, index) => `block ${String(block)} line ${String(index)} with some words in it`)
+        lines.push(`separator ${String(block)} a`, `separator ${String(block)} b`, ...body)
+        edited.push(`separator ${String(block)} a`, `separator ${String(block)} b`, ...body.map(line => `${line} EDITED`), 'one more line')
+      }
+      const draftText = joined(edited)
+      expect(checkUnmarkedChanges({baseText: joined(lines), draftText, marks: whole(draftText)})).toBe('unavailable')
     })
   })
 })

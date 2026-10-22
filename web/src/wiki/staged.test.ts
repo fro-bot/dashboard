@@ -2,9 +2,11 @@ import {describe, expect, it} from 'vitest'
 import type {CorrectionStatus, WikiCorrection} from '../api/wiki.ts'
 import {
   availableActions,
+  MAX_STAGED,
   parseStaged,
   reconcileStaged,
   stageAction,
+  stagingFull,
   transitionsOf,
   undoStaged,
   type StagedAction,
@@ -52,6 +54,43 @@ describe('stageAction', () => {
     expect(stageAction([], correction('c1', 'needs-reconfirmation'), 'reconfirm')).toEqual([
       {correctionId: 'c1', action: 'reconfirm', from: 'needs-reconfirmation', spanText: 'span of c1'},
     ])
+  })
+})
+
+describe('the staging cap', () => {
+  const full = (): StagedAction[] =>
+    Array.from({length: MAX_STAGED}, (_unused, index) => ({
+      correctionId: `c${String(index)}`,
+      action: 'retire' as const,
+      from: 'active' as const,
+      spanText: `span of c${String(index)}`,
+    }))
+
+  it('refuses a new correction once MAX_STAGED actions are staged', () => {
+    const staged = full()
+    expect(stagingFull(staged, 'c-new')).toBe(true)
+    expect(stageAction(staged, correction('c-new'), 'retire')).toEqual(staged)
+  })
+
+  it('accepts the last entry below the cap', () => {
+    const staged = full().slice(1)
+    expect(stagingFull(staged, 'c-new')).toBe(false)
+    expect(stageAction(staged, correction('c-new'), 'retire')).toHaveLength(MAX_STAGED)
+  })
+
+  it('still replaces the action staged for a correction at the cap', () => {
+    const staged = full()
+    expect(stagingFull(staged, 'c3')).toBe(false)
+    const replaced = stageAction(staged, correction('c3', 'active', 'span of c3'), 'flag')
+    expect(replaced).toHaveLength(MAX_STAGED)
+    expect(replaced.find(item => item.correctionId === 'c3')?.action).toBe('flag')
+  })
+
+  it('never stages what parseStaged would refuse', () => {
+    let staged: StagedAction[] = []
+    for (let index = 0; index < MAX_STAGED + 20; index += 1) staged = stageAction(staged, correction(`c${String(index)}`), 'retire')
+    expect(staged).toHaveLength(MAX_STAGED)
+    expect(parseStaged(staged)).toEqual(staged)
   })
 })
 
@@ -124,6 +163,24 @@ describe('parseStaged', () => {
     ['two actions for one correction', [good, {...good, action: 'flag'}]],
   ])('refuses %s', (_label, value) => {
     expect(parseStaged(value)).toBeNull()
+  })
+
+  it('accepts every kind and every status', () => {
+    const kinds = ['retire', 'flag', 'reconfirm'] as const
+    const statuses = ['active', 'superseded', 'retired', 'needs-reconfirmation'] as const
+    const all = kinds.flatMap(action =>
+      statuses.map(from => ({correctionId: `${action}-${from}`, action, from, spanText: 'x'})),
+    )
+    expect(parseStaged(all)).toEqual(all)
+  })
+
+  it.each([
+    ['an inherited property name as the action', {action: 'toString'}],
+    ['an inherited property name as the status', {from: 'constructor'}],
+    ['a non-string action', {action: 1}],
+    ['a non-string status', {from: null}],
+  ])('refuses %s', (_label, change) => {
+    expect(parseStaged([{...good, ...change}])).toBeNull()
   })
 
   it('refuses more actions than the server accepts', () => {

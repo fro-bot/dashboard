@@ -11,7 +11,7 @@ import {
   sendWithPendingOperation,
 } from './drafts.ts'
 import type {Mark} from './marks.ts'
-import type {StagedAction} from './staged.ts'
+import {MAX_STAGED, type StagedAction} from './staged.ts'
 import {createMemoryIdb, type MemoryIdb} from './test-support/memory-idb.ts'
 
 const OPERATION_ID = '00000000-0000-4000-8000-000000000001'
@@ -352,6 +352,36 @@ describe('marks and staged actions', () => {
 
     expect(loaded).toEqual({ok: false, error: {kind: 'unreadable', pageId: 'repos.acme--alpha'}})
     expect(idb.records()).toHaveLength(1)
+  })
+})
+
+describe('a draft at the staging cap', () => {
+  it('round-trips exactly MAX_STAGED staged actions and stays readable', async () => {
+    const {store} = setup()
+    const staged: StagedAction[] = Array.from({length: MAX_STAGED}, (_unused, index) => ({
+      correctionId: `c${String(index)}`,
+      action: 'retire',
+      from: 'active',
+      spanText: `span ${String(index)}`,
+    }))
+    await store.putDraft(input({staged}))
+
+    const loaded = await mustLoad(store)
+    expect(loaded.staged).toEqual(staged)
+    expect(loaded.staged).toHaveLength(MAX_STAGED)
+  })
+
+  it('flags a record with one action over the cap as unreadable', async () => {
+    const {idb, store} = setup()
+    const staged = Array.from({length: MAX_STAGED + 1}, (_unused, index) => ({
+      correctionId: `c${String(index)}`,
+      action: 'retire',
+      from: 'active',
+      spanText: 'x',
+    }))
+    idb.plant({...input(), marks: [], staged, schemaVersion: 2, updatedAt: NOW})
+
+    expect(await store.getDraft('repos.acme--alpha')).toEqual({ok: false, error: {kind: 'unreadable', pageId: 'repos.acme--alpha'}})
   })
 })
 

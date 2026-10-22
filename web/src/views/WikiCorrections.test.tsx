@@ -168,6 +168,18 @@ describe('staging correction actions', () => {
     expect(notice).toHaveAttribute('role', 'status')
   })
 
+  it('shows a status when an action could not be staged', () => {
+    renderPanel({corrections: [correction('c1')], stageStatus: 'Too many staged.'})
+    const status = screen.getByTestId('wiki-stage-status')
+    expect(status).toHaveTextContent('Too many staged.')
+    expect(status).toHaveAttribute('role', 'status')
+  })
+
+  it('shows no staging status by default', () => {
+    renderPanel({corrections: [correction('c1')]})
+    expect(screen.queryByTestId('wiki-stage-status')).toBeNull()
+  })
+
   it('shows no notice by default', () => {
     renderPanel()
     expect(screen.queryByTestId('wiki-staged-dropped')).toBeNull()

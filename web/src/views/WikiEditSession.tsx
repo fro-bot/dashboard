@@ -50,7 +50,7 @@ import {
   keepMark,
   locateMark,
   markState,
-  rebaseMarks,
+  rebaseAndLimit,
   removeMark,
   saveMarksOf,
   type Mark,
@@ -76,6 +76,7 @@ import {
   undoStaged,
   type StagedAction,
   type StagedKind,
+  stagingFull,
 } from '../wiki/staged.ts'
 import {checkUnmarkedChanges} from '../wiki/unmarked.ts'
 import {usePromotionPolling} from '../wiki/use-promotion-polling.ts'
@@ -407,6 +408,8 @@ export function WikiEditSession(props: WikiEditSessionProps) {
   /** The text area's selection, kept so the Mark as correction button follows it. */
   const [selection, setSelection] = useState({start: 0, end: 0})
   const [markStatus, setMarkStatus] = useState<string | null>(null)
+  /** Said when an action could not be staged because the draft already holds as many as a save can carry. */
+  const [stageStatus, setStageStatus] = useState<string | null>(null)
 
   const mountedRef = useRef(false)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -508,10 +511,12 @@ export function WikiEditSession(props: WikiEditSessionProps) {
   }
 
   const onTextChange = (value: string) => {
-    // The marks follow the text through the edit.
-    setDoc(current => (current === null ? current : {...current, text: value, marks: rebaseMarks(current.marks, current.text, value)}))
+    // The marks follow the text through the edit. A mark that grew past the length limit is dropped,
+    // so it never reaches the draft store or a save.
+    const rebased = docRef.current === null ? null : rebaseAndLimit(docRef.current.marks, docRef.current.text, value)
+    setDoc(current => (current === null || rebased === null ? current : {...current, text: value, marks: rebased.marks}))
     setNote(null)
-    setMarkStatus(null)
+    setMarkStatus(rebased !== null && rebased.dropped > 0 ? MARK_COPY.grewTooLong : null)
     scheduleDraftWrite()
     syncSelection()
   }
@@ -690,12 +695,18 @@ export function WikiEditSession(props: WikiEditSessionProps) {
 
   const stage = (correction: WikiCorrection, action: StagedKind) => {
     if (!canStage) return
+    if (stagingFull(docRef.current?.staged ?? [], correction.id)) {
+      setStageStatus(CORRECTIONS_COPY.stagingFull)
+      return
+    }
+    setStageStatus(null)
     setDroppedNotice(null)
     changeWork(current => ({...current, staged: stageAction(current.staged, correction, action)}))
   }
 
   const undoStage = (correctionId: string) => {
     if (!canStage) return
+    setStageStatus(null)
     changeWork(current => ({...current, staged: undoStaged(current.staged, correctionId)}))
   }
 
@@ -1472,6 +1483,7 @@ export function WikiEditSession(props: WikiEditSessionProps) {
         actions={editingSurface && markable}
         busy={busy || hasUnknown}
         droppedNotice={droppedNotice}
+        stageStatus={stageStatus}
         onStage={stage}
         onUndo={undoStage}
         onJumpToMark={jumpToMark}

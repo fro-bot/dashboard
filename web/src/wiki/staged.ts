@@ -23,8 +23,21 @@ export interface StagedAction {
 /** The server refuses a save with more transitions than this. */
 export const MAX_STAGED = 100
 
-const KINDS: readonly unknown[] = ['retire', 'flag', 'reconfirm']
-const STATUSES: readonly unknown[] = ['active', 'superseded', 'retired', 'needs-reconfirmation']
+const KINDS: Readonly<Record<StagedKind, true>> = {retire: true, flag: true, reconfirm: true}
+const STATUSES: Readonly<Record<CorrectionStatus, true>> = {
+  active: true,
+  superseded: true,
+  retired: true,
+  'needs-reconfirmation': true,
+}
+
+function isStagedKind(value: unknown): value is StagedKind {
+  return typeof value === 'string' && Object.hasOwn(KINDS, value)
+}
+
+function isCorrectionStatus(value: unknown): value is CorrectionStatus {
+  return typeof value === 'string' && Object.hasOwn(STATUSES, value)
+}
 
 /** An active correction can be retired or flagged. A flagged one can be reconfirmed. */
 export function availableActions(correction: WikiCorrection): readonly StagedKind[] {
@@ -33,9 +46,17 @@ export function availableActions(correction: WikiCorrection): readonly StagedKin
   return []
 }
 
-/** Stage an action for a correction, replacing any action already staged for it. */
+/**
+ * No more actions can be staged: a draft with more than `MAX_STAGED` could not be read back, and the
+ * server would refuse the save. Replacing the action staged for the same correction is still allowed.
+ */
+export function stagingFull(staged: readonly StagedAction[], correctionId: string): boolean {
+  return staged.length >= MAX_STAGED && !staged.some(item => item.correctionId === correctionId)
+}
+
+/** Stage an action for a correction, replacing any action already staged for it. A full list refuses a new one. */
 export function stageAction(staged: readonly StagedAction[], correction: WikiCorrection, action: StagedKind): StagedAction[] {
-  if (!availableActions(correction).includes(action)) return [...staged]
+  if (!availableActions(correction).includes(action) || stagingFull(staged, correction.id)) return [...staged]
   return [
     ...staged.filter(item => item.correctionId !== correction.id),
     {correctionId: correction.id, action, from: correction.status, spanText: correction.span.text},
@@ -81,14 +102,9 @@ export function parseStaged(value: unknown): StagedAction[] | null {
     if (!isRecord(item)) return null
     const {correctionId, action, from, spanText} = item
     if (typeof correctionId !== 'string' || correctionId === '' || seen.has(correctionId)) return null
-    if (!KINDS.includes(action) || !STATUSES.includes(from) || typeof spanText !== 'string') return null
+    if (!isStagedKind(action) || !isCorrectionStatus(from) || typeof spanText !== 'string') return null
     seen.add(correctionId)
-    staged.push({
-      correctionId,
-      action: action as StagedKind,
-      from: from as CorrectionStatus,
-      spanText,
-    })
+    staged.push({correctionId, action, from, spanText})
   }
   return staged
 }

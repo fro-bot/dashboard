@@ -8,6 +8,7 @@ import {
   MAX_MARKS,
   markState,
   parseMarks,
+  rebaseAndLimit,
   rebaseMarks,
   removeMark,
   saveMarksOf,
@@ -78,6 +79,35 @@ describe('createMark', () => {
     expect(mark.suffix).not.toMatch(/[\u{D800}-\u{DBFF}]$/u)
     expect([...mark.prefix].every(char => char === '👍')).toBe(true)
     expect([...mark.suffix].every(char => char === '👎')).toBe(true)
+  })
+
+  it('trims a prefix window that starts on the low half of a pair', () => {
+    // 'a', 12 emoji, 'x', then the mark: the 24-unit window before the mark starts on a low surrogate.
+    const text = `a${'👍'.repeat(12)}xMARK`
+    const start = text.indexOf('MARK')
+    const window = text.slice(start - MARK_CONTEXT_LENGTH, start)
+    expect(window.charCodeAt(0)).toBeGreaterThanOrEqual(0xdc00)
+    expect(window.charCodeAt(0)).toBeLessThanOrEqual(0xdfff)
+
+    const mark = created(text, start, start + 4)
+    expect(mark.prefix).toBe(window.slice(1))
+    expect(mark.prefix).toHaveLength(MARK_CONTEXT_LENGTH - 1)
+    expect(mark.prefix.charCodeAt(0)).toBeGreaterThanOrEqual(0xd800)
+    expect(mark.prefix.charCodeAt(0)).toBeLessThanOrEqual(0xdbff)
+    expect(mark.prefix.endsWith('x')).toBe(true)
+  })
+
+  it('trims a suffix window that ends on the high half of a pair', () => {
+    // The mark, 'x', then 20 emoji: the 24-unit window after the mark is 'x', 11 emoji, and a high surrogate.
+    const text = `MARK${'x'}${'👍'.repeat(20)}`
+    const window = text.slice(4, 4 + MARK_CONTEXT_LENGTH)
+    const last = window.charCodeAt(window.length - 1)
+    expect(last).toBeGreaterThanOrEqual(0xd800)
+    expect(last).toBeLessThanOrEqual(0xdbff)
+
+    const mark = created(text, 0, 4)
+    expect(mark.suffix).toBe(window.slice(0, -1))
+    expect(mark.suffix).toBe(`x${'👍'.repeat(11)}`)
   })
 
   it('moves a selection that splits a surrogate pair out to the whole code point', () => {
@@ -278,11 +308,168 @@ describe('rebaseMarks', () => {
     expect(markState(next, edited as Mark)).toBe('ok')
   })
 
-  it('follows text that replaces the whole marked span', () => {
+  it('follows text that replaces exactly the marked span: the change lies inside the mark', () => {
     const mark = markOn(text, 'widgets')
-    const next = text.replace('widgets', 'gadgets')
+    const next = text.replace('widgets', 'XYZ')
     const [replaced] = rebaseMarks([mark], text, next)
-    expect(replaced).toMatchObject({text: 'gadgets'})
+    expect(replaced).toMatchObject({text: 'XYZ', start: mark.start, end: mark.start + 3, needsReview: false})
+  })
+
+  it('replaces an emoji inside a mark and stays on whole code points', () => {
+    const emoji = 'Say 👍 and 😀 now.'
+    const mark = markOn(emoji, '👍 and 😀')
+    const next = emoji.replace('👍', '👎')
+    const [moved] = rebaseMarks([mark], emoji, next)
+    expect(moved).toMatchObject({text: '👎 and 😀'})
+    expect(next.slice(moved?.start, moved?.end)).toBe('👎 and 😀')
+    expect(next.slice(moved?.start, moved?.end)).not.toMatch(/[\u{D800}-\u{DBFF}](?![\u{DC00}-\u{DFFF}])|(?<![\u{D800}-\u{DBFF}])[\u{DC00}-\u{DFFF}]/u)
+  })
+
+  it('replaces an emoji that is the whole mark and keeps whole code points', () => {
+    const emoji = 'Say 👍 now.'
+    const mark = markOn(emoji, '👍')
+    const next = emoji.replace('👍', '👎')
+    const [moved] = rebaseMarks([mark], emoji, next)
+    expect(moved).toMatchObject({text: '👎', start: mark.start, end: mark.end, needsReview: false})
+  })
+
+  describe('an emoji replaced at the edge of a mark', () => {
+    const lone = /[\u{D800}-\u{DBFF}](?![\u{DC00}-\u{DFFF}])|(?<![\u{D800}-\u{DBFF}])[\u{DC00}-\u{DFFF}]/u
+
+    it('clips to whole code points when the common head ends inside the pair', () => {
+      // The two emoji share their high surrogate, so the common head would end between the halves.
+      const base = 'x👍y'
+      const mark = markOn(base, 'x👍')
+      const next = 'x👎z'
+      const [rebased] = rebaseMarks([mark], base, next)
+      expect(rebased).toMatchObject({text: 'x', needsReview: true})
+      expect(lone.test(rebased?.text ?? '')).toBe(false)
+      expect(lone.test(next.slice(rebased?.start, rebased?.end))).toBe(false)
+    })
+
+    it('leaves no half of a pair when the common tail starts inside the pair', () => {
+      // The two characters share their low surrogate, so the common tail would start between the halves.
+      const base = 'ab👍y'
+      const mark = markOn(base, '👍')
+      const next = 'aQ\u{2F44D}y'
+      const [rebased] = rebaseMarks([mark], base, next)
+      expect(lone.test(rebased?.text ?? '')).toBe(false)
+      expect(lone.test(next.slice(rebased?.start, rebased?.end))).toBe(false)
+    })
+  })
+
+  describe('a change that crosses the edge of a mark', () => {
+    const page = 'The cat sat on the mat. Dogs bark loudly at night.'
+
+    it('clips the mark to what survives, flags it, and does not cover the new text (adversarial paste)', () => {
+      const mark = markOn(page, 'cat')
+      const next = 'The dog'
+      // One paste replaces everything from "cat" to the end with "dog".
+      const [rebased] = rebaseMarks([mark], page, next)
+      expect(rebased).toBeDefined()
+      expect(markState(next, rebased as Mark)).toBe('detached')
+      const range = locateMark(next, rebased as Mark)
+      expect(range).toBeNull()
+    })
+
+    it('keeps the part of the mark before the change, flagged for review', () => {
+      const mark = markOn(page, 'cat sat')
+      // "sat on the mat" is replaced: the change starts inside the mark and runs past its end.
+      const next = page.replace('sat on the mat', 'ran')
+      const [rebased] = rebaseMarks([mark], page, next)
+      expect(rebased).toMatchObject({text: 'cat ', needsReview: true})
+      expect(next.slice(rebased?.start, rebased?.end)).toBe('cat ')
+      expect(markState(next, rebased as Mark)).toBe('review')
+    })
+
+    it('keeps the part of the mark after the change, flagged for review', () => {
+      const mark = markOn(page, 'cat sat')
+      // "The cat" is replaced: the change starts before the mark and ends inside it.
+      const next = page.replace('The cat', 'A dog')
+      const [rebased] = rebaseMarks([mark], page, next)
+      expect(rebased).toMatchObject({text: ' sat', needsReview: true})
+      expect(next.slice(rebased?.start, rebased?.end)).toBe(' sat')
+    })
+
+    it('detaches a mark the change covers entirely', () => {
+      const mark = markOn(page, 'cat')
+      const next = page.replace('The cat sat', 'One')
+      const [rebased] = rebaseMarks([mark], page, next)
+      expect(markState(next, rebased as Mark)).toBe('detached')
+    })
+
+    it('does not stretch a mark over a deletion at one end and an insertion at the other', () => {
+      const base = 'alpha beta gamma delta'
+      const mark = markOn(base, 'beta')
+      const next = 'beta gamma delta!'
+      const [rebased] = rebaseMarks([mark], base, next)
+      expect(rebased?.needsReview).toBe(true)
+      expect(markState(next, rebased as Mark)).toBe('review')
+      const range = locateMark(next, rebased as Mark)
+      expect(range).toEqual({start: 0, end: 4})
+      expect(next.slice(range?.start, range?.end)).toBe('beta')
+      // The "!" is not inside the mark, whatever the mark's state.
+      expect(range?.end).toBeLessThan(next.indexOf('!'))
+    })
+
+    describe('a change that covers the whole mark while the same text stands elsewhere', () => {
+      const twice = 'Alpha builds widgets. Beta builds widgets.'
+
+      it('flags the mark when one edit deletes exactly its text, and never settles it on the other occurrence', () => {
+        const mark = markOn(twice, 'widgets')
+        const next = twice.replace('widgets', '')
+        const [rebased] = rebaseMarks([mark], twice, next)
+
+        expect(rebased).toMatchObject({text: 'widgets', needsReview: true})
+        expect(markState(next, rebased as Mark)).toBe('review')
+        expect(markState(next, rebased as Mark)).not.toBe('ok')
+      })
+
+      it('flags the mark when one edit replaces a range wider than it on both sides', () => {
+        const mark = markOn(twice, 'widgets')
+        // " widgets." becomes "XX": the range runs past the mark at both ends.
+        const next = twice.replace(' widgets.', 'XX')
+        const [rebased] = rebaseMarks([mark], twice, next)
+
+        expect(next.startsWith('Alpha buildsXX Beta builds widgets.')).toBe(true)
+        expect(rebased).toMatchObject({text: 'widgets', needsReview: true})
+        expect(markState(next, rebased as Mark)).toBe('review')
+      })
+
+      it('stays flagged through a later edit that moves the text it now finds', () => {
+        const mark = markOn(twice, 'widgets')
+        const deleted = twice.replace('widgets', '')
+        const [flagged] = rebaseMarks([mark], twice, deleted)
+        const later = `Intro. ${deleted}`
+        const [moved] = rebaseMarks([flagged as Mark], deleted, later)
+        expect(moved?.needsReview).toBe(true)
+        expect(markState(later, moved as Mark)).toBe('review')
+      })
+
+      it('is detached, and flagged, when the text stands nowhere else', () => {
+        const once = 'Alpha builds widgets.'
+        const mark = markOn(once, 'widgets')
+        const next = once.replace('widgets', '')
+        const [rebased] = rebaseMarks([mark], once, next)
+        expect(rebased?.needsReview).toBe(true)
+        expect(markState(next, rebased as Mark)).toBe('detached')
+      })
+    })
+
+    it('does not mark unmarked text through the whole check: the pasted text stays unmarked or Save waits', () => {
+      const mark = markOn(page, 'cat')
+      const next = 'The dog'
+      const [rebased] = rebaseMarks([mark], page, next)
+      const sent = saveMarksOf(next, [rebased as Mark])
+      expect(sent).toEqual([])
+    })
+  })
+
+  it('grows a mark only when the change lies entirely inside it', () => {
+    const mark = markOn(text, 'builds widgets for')
+    const next = text.replace('widgets', 'WIDGETS AND MORE')
+    const [grown] = rebaseMarks([mark], text, next)
+    expect(grown).toMatchObject({text: 'builds WIDGETS AND MORE for', needsReview: false})
   })
 
   it('detaches a mark whose text is deleted, and keeps what it said', () => {
@@ -300,8 +487,8 @@ describe('rebaseMarks', () => {
     const removed = withTag.replace('[KEEP]', '')
     const [gone] = rebaseMarks([mark], withTag, removed)
     const [back] = rebaseMarks([gone as Mark], removed, withTag)
-    expect(back).toMatchObject({text: '[KEEP]', start: mark.start, end: mark.end})
-    expect(markState(withTag, back as Mark)).toBe('ok')
+    expect(back).toMatchObject({text: '[KEEP]', start: mark.start, end: mark.end, needsReview: true})
+    expect(markState(withTag, back as Mark)).toBe('review')
   })
 
   it('keeps every mark attached through an edit between and around them', () => {
@@ -379,5 +566,44 @@ describe('parseMarks', () => {
   it('refuses a list longer than the server accepts', () => {
     const many = Array.from({length: MAX_MARKS + 1}, (_unused, index) => ({...good, id: `m${index}`}))
     expect(parseMarks(many)).toBeNull()
+  })
+})
+
+describe('rebaseAndLimit', () => {
+  const hundred = 'x'.repeat(100)
+  const page = `Start ${hundred} end.`
+
+  it('drops a mark that grew past the length the server accepts', () => {
+    const mark = markOn(page, hundred)
+    const pasted = 'y'.repeat(MAX_MARK_TEXT_LENGTH - 50)
+    const next = `${page.slice(0, mark.start + 50)}${pasted}${page.slice(mark.start + 50)}`
+
+    const plain = rebaseMarks([mark], page, next)
+    expect((plain[0] as Mark).text.length).toBeGreaterThan(MAX_MARK_TEXT_LENGTH)
+
+    const limited = rebaseAndLimit([mark], page, next)
+    expect(limited.marks).toEqual([])
+    expect(limited.dropped).toBe(1)
+  })
+
+  it('keeps a mark that grew but is still within the limit, and the others', () => {
+    const mark = markOn(page, hundred)
+    const other = markOn(page, 'Start', [mark])
+    const next = `${page.slice(0, mark.start + 50)}${'y'.repeat(500)}${page.slice(mark.start + 50)}`
+
+    const limited = rebaseAndLimit([mark, other], page, next)
+    expect(limited.marks.map(item => item.id)).toEqual([mark.id, other.id])
+    expect(limited.dropped).toBe(0)
+  })
+
+  it('counts several dropped marks', () => {
+    const a = markOn(page, hundred)
+    const next = `${page.slice(0, a.start + 10)}${'z'.repeat(MAX_MARK_TEXT_LENGTH)}${page.slice(a.start + 10)}`
+    expect(rebaseAndLimit([a, {...a, id: 'm9'}], page, next)).toMatchObject({marks: [], dropped: 2})
+  })
+
+  it('returns the marks untouched for an unchanged text', () => {
+    const marks = [markOn(page, hundred)]
+    expect(rebaseAndLimit(marks, page, page)).toEqual({marks, dropped: 0})
   })
 })

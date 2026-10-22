@@ -33,6 +33,8 @@ export interface WikiCorrectionsProps {
   readonly busy?: boolean
   /** Said once when staged actions were dropped because their corrections changed. */
   readonly droppedNotice: string | null
+  /** Said when an action could not be staged. */
+  readonly stageStatus?: string | null
   readonly onStage: (correction: WikiCorrection, action: StagedKind) => void
   readonly onUndo: (correctionId: string) => void
   readonly onJumpToMark: (markId: string) => void
@@ -123,6 +125,7 @@ export function WikiCorrections({
   actions,
   busy = false,
   droppedNotice,
+  stageStatus = null,
   onStage,
   onUndo,
   onJumpToMark,
@@ -136,6 +139,12 @@ export function WikiCorrections({
       {droppedNotice === null ? null : (
         <p className="wiki-note wiki-staged-dropped" data-testid="wiki-staged-dropped" role="status">
           {droppedNotice}
+        </p>
+      )}
+
+      {stageStatus === null ? null : (
+        <p className="wiki-note wiki-stage-status" data-testid="wiki-stage-status" role="status">
+          {stageStatus}
         </p>
       )}
 
