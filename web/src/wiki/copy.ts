@@ -194,7 +194,21 @@ export const EDITOR_COPY = {
   draftStaleTail: 'Saving will compare the two and ask you to resolve any conflict.',
   draftNotStoredLocally:
     'Draft not saved locally. Your edits are still here, but they will be lost if you leave this page.',
-  draftUnreadable: 'A draft for this page could not be read from this device. It has been left in place.',
+  draftUnreadable:
+    'A draft for this page could not be read from this device. It is left in place until you edit the page, which replaces it, or you discard it.',
+  draftUnreadableReplaced: 'The draft that could not be read was replaced by your edits.',
+  discardUnreadable: 'Discard unreadable draft',
+  discardUnreadableHeading: 'Discard the unreadable draft?',
+  discardUnreadableDetail: 'It is deleted from this device. This cannot be undone.',
+  discardUnreadableConfirm: 'Yes, discard it',
+  discardUnreadableCancel: 'Keep it',
+  discardUnreadableDone: 'The unreadable draft was discarded.',
+  unreadableAlreadyReplaced: 'That draft was already replaced by another tab, so it was left alone.',
+  discardKeptStored:
+    'Your edits were discarded. The draft already stored on this device could not be removed and is still there.',
+  discardUnreadableFailed: 'The unreadable draft could not be discarded. It is still on this device.',
+  draftReadFailed:
+    'The draft stored for this page could not be read. Your edits will not be stored on this device, and that draft is left as it is.',
   draftKept: 'Your draft is kept on this device.',
   cancelHeading: 'Keep or discard your draft?',
   cancelDetail: 'You have changes that are not saved to the wiki.',

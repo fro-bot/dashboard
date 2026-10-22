@@ -6,13 +6,14 @@
  *
  *   factory:        open
  *   open request:   result, error, onsuccess, onerror, onupgradeneeded, onblocked
- *   database:       createObjectStore, transaction
+ *   database:       createObjectStore, transaction, close, onversionchange
  *   transaction:    objectStore, error, oncomplete, onerror, onabort
  *   object store:   get, put, delete, getAll
  *   request:        result, error, onsuccess, onerror
  *
  * Writes are staged and apply when the transaction completes. A transaction aborts as a
- * whole, so a failed write leaves earlier data untouched. Values are structured-cloned in
+ * whole, so a failed write leaves earlier data untouched. A write fault behaves as in a
+ * browser: `request.onerror`, then `tx.onerror`, then `tx.onabort`, and never `onsuccess`. Values are structured-cloned in
  * and out. Test controls (`plant`, `failNext`, ...) sit on the returned object, not on the
  * factory, so they are outside the restricted surface.
  */
@@ -20,7 +21,11 @@
 import {DRAFT_DB_NAME, DRAFT_STORE_NAME} from '../drafts.ts'
 
 export type FaultOperation = 'get' | 'getAll' | 'put' | 'delete'
-export type OpenMode = 'ok' | 'blocked' | 'error' | 'throw'
+/**
+ * `blocked` fires `onblocked` and never settles. `blocked-then-ok` fires `onblocked` and then
+ * opens anyway, as a browser does once the blocking connection closes. `hang` fires nothing.
+ */
+export type OpenMode = 'ok' | 'blocked' | 'blocked-then-ok' | 'hang' | 'error' | 'throw'
 
 export interface MemoryIdb {
   readonly factory: IDBFactory
@@ -32,8 +37,8 @@ export interface MemoryIdb {
   /** Store a value directly, as if an older or damaged build had written it. */
   plant: (value: unknown) => void
   /**
-   * Fail the next matching operation. `put` and `delete` abort their transaction at commit
-   * with this error name (a quota error is the usual case). `get` and `getAll` fail the request.
+   * Fail the next matching operation: the request errors with this error name (a quota error
+   * is the usual case) and the transaction aborts. A failed `put` or `delete` is not applied.
    * `skip` lets that many matching operations through first.
    */
   failNext: (operation: FaultOperation, errorName: string, options?: {skip?: number}) => void
@@ -41,6 +46,10 @@ export interface MemoryIdb {
   afterNextCommit: (change: (live: Record<string, unknown>[]) => void) => void
   /** Close every open connection, as the browser may do when storage is cleared. */
   dropConnection: () => void
+  /** Tell every open connection that a newer schema wants to open, as another tab's upgrade does. */
+  versionChange: () => void
+  /** How many connections are open: opened and not closed. */
+  openConnections: () => number
 }
 
 type Handler = ((event: unknown) => void) | null
@@ -78,7 +87,11 @@ interface StoreState {
 interface DbState {
   version: number
   readonly stores: Map<string, StoreState>
+}
+
+interface ConnectionState {
   closed: boolean
+  onversionchange: Handler
 }
 
 const DELETED = Symbol('deleted')
@@ -112,6 +125,7 @@ export function createMemoryIdb(): MemoryIdb {
   const operations: string[] = []
   const faults: Fault[] = []
   const commitHooks: ((live: Record<string, unknown>[]) => void)[] = []
+  const connections: ConnectionState[] = []
   let openMode: OpenMode = 'ok'
 
   const used = (name: string): void => {
@@ -176,12 +190,12 @@ export function createMemoryIdb(): MemoryIdb {
       pending += 1
       queueMicrotask(() => {
         const fault = takeFault(operation)
-        if (fault !== null && (operation === 'get' || operation === 'getAll')) {
+        if (fault !== null) {
+          // A failed request errors and aborts its transaction. It never succeeds, and a failed write is not applied.
           request.error = new DOMException('The request failed.', fault.errorName)
           fire(request.onerror, proxy)
           abortWith(request.error)
         } else {
-          if (fault !== null) failure = fault.errorName
           request.result = run()
           fire(request.onsuccess, proxy)
         }
@@ -275,7 +289,49 @@ export function createMemoryIdb(): MemoryIdb {
       ['onsuccess', 'onerror', 'onupgradeneeded', 'onblocked'],
     )
 
+    const proceed = (): void => {
+      let db = databases.get(name)
+      const upgrading = db === undefined || db.version < version
+      if (db === undefined) {
+        db = {version, stores: new Map()}
+        databases.set(name, db)
+      } else if (upgrading) {
+        db.version = version
+      }
+      const state = db
+
+      // Each open is its own connection, so closing one does not close the others.
+      const connection: ConnectionState = {closed: false, onversionchange: null}
+      connections.push(connection)
+
+      const database = restrict(
+        'database',
+        Object.assign(connection, {
+          createObjectStore: (storeName: string, options: {keyPath: string}) => {
+            used('createObjectStore')
+            state.stores.set(storeName, {keyPath: options.keyPath, data: new Map()})
+            return undefined
+          },
+          transaction: (storeNames: string | string[], mode?: string) => {
+            used('transaction')
+            if (connection.closed) throw new DOMException('The database connection is closing.', 'InvalidStateError')
+            return createTransaction(state, Array.isArray(storeNames) ? storeNames : [storeNames], mode ?? 'readonly')
+          },
+          close: () => {
+            used('close')
+            connection.closed = true
+          },
+        }),
+        ['createObjectStore', 'transaction', 'close', 'onversionchange'],
+        ['onversionchange'],
+      )
+      request.result = database
+      if (upgrading) fire(request.onupgradeneeded, proxy)
+      fire(request.onsuccess, proxy)
+    }
+
     queueMicrotask(() => {
+      if (openMode === 'hang') return
       if (openMode === 'blocked') {
         fire(request.onblocked, proxy)
         return
@@ -285,38 +341,13 @@ export function createMemoryIdb(): MemoryIdb {
         fire(request.onerror, proxy)
         return
       }
-
-      let db = databases.get(name)
-      const upgrading = db === undefined || db.version < version
-      if (db === undefined) {
-        db = {version, stores: new Map(), closed: false}
-        databases.set(name, db)
-      } else if (upgrading) {
-        db.version = version
+      if (openMode === 'blocked-then-ok') {
+        // The open is queued behind another connection and goes through once that one closes.
+        fire(request.onblocked, proxy)
+        queueMicrotask(proceed)
+        return
       }
-      const state = db
-      state.closed = false
-
-      const database = restrict(
-        'database',
-        {
-          createObjectStore: (storeName: string, options: {keyPath: string}) => {
-            used('createObjectStore')
-            state.stores.set(storeName, {keyPath: options.keyPath, data: new Map()})
-            return undefined
-          },
-          transaction: (storeNames: string | string[], mode?: string) => {
-            used('transaction')
-            if (state.closed) throw new DOMException('The database connection is closing.', 'InvalidStateError')
-            return createTransaction(state, Array.isArray(storeNames) ? storeNames : [storeNames], mode ?? 'readonly')
-          },
-        },
-        ['createObjectStore', 'transaction'],
-        [],
-      )
-      request.result = database
-      if (upgrading) fire(request.onupgradeneeded, proxy)
-      fire(request.onsuccess, proxy)
+      proceed()
     })
     return proxy as unknown as IDBOpenDBRequest
   }
@@ -334,7 +365,7 @@ export function createMemoryIdb(): MemoryIdb {
     operations,
     records: () => allValues().map(value => structuredClone(value)),
     plant: value => {
-      const db = databases.get(DRAFT_DB_NAME) ?? {version: 1, stores: new Map<string, StoreState>(), closed: false}
+      const db = databases.get(DRAFT_DB_NAME) ?? {version: 1, stores: new Map<string, StoreState>()}
       databases.set(DRAFT_DB_NAME, db)
       const store = db.stores.get(DRAFT_STORE_NAME) ?? {keyPath: 'pageId', data: new Map<string, unknown>()}
       db.stores.set(DRAFT_STORE_NAME, store)
@@ -347,7 +378,13 @@ export function createMemoryIdb(): MemoryIdb {
       commitHooks.push(change)
     },
     dropConnection: () => {
-      for (const db of databases.values()) db.closed = true
+      for (const connection of connections) connection.closed = true
     },
+    versionChange: () => {
+      for (const connection of connections) {
+        if (!connection.closed) fire(connection.onversionchange, connection)
+      }
+    },
+    openConnections: () => connections.filter(connection => !connection.closed).length,
   }
 }

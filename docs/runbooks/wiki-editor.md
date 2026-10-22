@@ -136,6 +136,12 @@ retried in the request a few times. Every save then dispatches `promote-data`. I
 fails, the save reports "saved, not promoted" and the editor offers a retry that sends only the
 dispatch.
 
+### Two tabs on one page
+
+Editing the same page in two tabs at the same time is not supported. The tabs share one local draft
+per page, so unsaved text in one tab can be replaced or removed by the other. Commits stay safe:
+the server checks the page's blob SHA, so a stale save becomes a conflict instead of overwriting.
+
 ### Cold and warm reads
 
 A snapshot lists the whole `data` tree in one request and reads only the blobs the gates need:

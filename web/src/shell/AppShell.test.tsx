@@ -1,3 +1,5 @@
+import {readFileSync} from 'node:fs'
+import {resolve} from 'node:path'
 import {fireEvent, render, screen, within} from '@testing-library/react'
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {getLogoutAbortSignal} from '../push/logout-abort.ts'
@@ -516,6 +518,40 @@ describe('AppShell', () => {
       rerender(<AppShell currentView="operator">content</AppShell>)
       expect(screen.getByRole('button', {name: 'Runs'})).toHaveAttribute('aria-current', 'page')
       expect(screen.getByRole('button', {name: 'Wiki'})).not.toHaveAttribute('aria-current')
+    })
+
+    it('styles the Wiki entry from a class, not an inline style (CSP)', () => {
+      render(<AppShell currentView="wiki">content</AppShell>)
+      const wiki = screen.getByRole('button', {name: 'Wiki'})
+      expect(wiki).not.toHaveAttribute('style')
+      expect(wiki).toHaveClass('app-nav-button')
+    })
+
+    it('the app-nav-button rule carries the look the inline style had, selected state included', () => {
+      const css = readFileSync(resolve(import.meta.dirname, '../index.css'), 'utf8')
+      const rule = (selector: string) => {
+        const start = css.indexOf(`${selector} {`)
+        expect(start).toBeGreaterThanOrEqual(0)
+        return css.slice(start, css.indexOf('}', start))
+      }
+      const base = rule('.app-nav-button')
+      for (const declaration of [
+        'min-height: 32px',
+        'padding: var(--space-1) var(--space-3)',
+        'background: transparent',
+        'color: var(--color-text-muted)',
+        'border: none',
+        'border-radius: var(--radius-md)',
+        'cursor: pointer',
+        'font-size: var(--text-body-sm)',
+        'font-weight: 600',
+        'transition: all var(--duration-fast) var(--ease-standard)',
+      ]) {
+        expect(base).toContain(declaration)
+      }
+      const current = rule(".app-nav-button[aria-current='page']")
+      expect(current).toContain('background: var(--color-surface-raised)')
+      expect(current).toContain('color: var(--color-text)')
     })
   })
 })

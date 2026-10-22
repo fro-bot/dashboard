@@ -223,10 +223,10 @@ describe('describePreSendFailure', () => {
 })
 
 describe('describeLookup — resolving an unknown save', () => {
-  it('found: Saved, not promoted, because the dispatch outcome is unknown; retry dispatch is safe', () => {
+  it('found: Saved, publication unknown, because the dispatch outcome is unknown; retry dispatch is safe', () => {
     const display = describeLookup({ok: true, value: {state: 'found', commitSha: 'c1', committedAt: null}})
     expect(display.kind).toBe('lookup-found')
-    expect(display.headline).toBe('Saved, not promoted')
+    expect(display.headline).toBe('Saved, publication unknown')
     expect(display.draft).toBe('cleared')
     expect(display.actions).toEqual(['retry-dispatch'])
     expect(display.detail).toMatch(/safe/iu)
@@ -326,6 +326,8 @@ describe('describeDispatchFailure', () => {
   })
 
   it('shows no raw codes', () => {
-    expect(describeDispatchFailure({kind: 'forbidden'})).not.toContain('forbidden')
+    const message = describeDispatchFailure({kind: 'forbidden'})
+    expect(message).toBe('This session is not allowed to send the publication request.')
+    expect(message).not.toContain('forbidden')
   })
 })

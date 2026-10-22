@@ -123,6 +123,10 @@ const CASES: readonly SampleCase[] = [
     call: callPage,
     expected: succeed({
       id: 'repos.acme--alpha',
+      type: 'repos',
+      title: 'acme/alpha',
+      updated: '2026-02-01',
+      body: '\n# acme/alpha\n\nAlpha builds widgets for factories. See [[beta-topic]] and [[acme--beta]].\n',
       pageBlobSha: 'blob-bc079bf35740',
       nodeId: 'R_alpha',
       canMark: true,
@@ -598,41 +602,43 @@ function mutate(group: string, key: string, change: (body: Record<string, unknow
 
 describe('contract drift', () => {
   const drift = {ok: false, error: {kind: 'contract-drift'}}
+  // A save that drifts may have landed, so it is status-unknown, never a definite failure.
+  const saveDrift = {ok: false, error: {kind: 'status-unknown', cause: 'contract-drift'}}
 
   it('treats an unknown save state as drift, not a crash', async () => {
     nextResponse(jsonResponse(200, {state: 'teleported', operationId: OPERATION_ID}))
 
-    expect(await callSave()).toEqual(drift)
+    expect(await callSave()).toEqual(saveDrift)
   })
 
   it('treats a known save state on the wrong status as drift', async () => {
     nextResponse(jsonResponse(200, {state: 'conflict', kind: 'page-removed'}))
 
-    expect(await callSave()).toEqual(drift)
+    expect(await callSave()).toEqual(saveDrift)
   })
 
   it('treats an unknown conflict kind as drift', async () => {
     nextResponse(mutate('save', 'conflictPage', body => (body.kind = 'branch')))
 
-    expect(await callSave()).toEqual(drift)
+    expect(await callSave()).toEqual(saveDrift)
   })
 
   it('treats a saved response without a commit SHA as drift', async () => {
     nextResponse(mutate('save', 'saved', body => delete body.commitSha))
 
-    expect(await callSave()).toEqual(drift)
+    expect(await callSave()).toEqual(saveDrift)
   })
 
   it('treats a conflict without the current blob SHA as drift', async () => {
     nextResponse(mutate('save', 'conflictPage', body => delete body.currentBlobSha))
 
-    expect(await callSave()).toEqual(drift)
+    expect(await callSave()).toEqual(saveDrift)
   })
 
   it('treats a rejection with an unknown reason as drift', async () => {
     nextResponse(mutate('save', 'rejected', body => (body.reason = 'vibes')))
 
-    expect(await callSave()).toEqual(drift)
+    expect(await callSave()).toEqual(saveDrift)
   })
 
   it('treats a malformed finding as drift', async () => {
@@ -642,19 +648,19 @@ describe('contract drift', () => {
       }),
     )
 
-    expect(await callSave()).toEqual(drift)
+    expect(await callSave()).toEqual(saveDrift)
   })
 
   it('treats a contract rejection whose retry flag contradicts its kind as drift', async () => {
     nextResponse(mutate('save', 'contractRejected', body => (body.retry = true)))
 
-    expect(await callSave()).toEqual(drift)
+    expect(await callSave()).toEqual(saveDrift)
   })
 
   it('treats a failed response without a retryable flag as drift', async () => {
     nextResponse(mutate('save', 'failed', body => delete body.retryable))
 
-    expect(await callSave()).toEqual(drift)
+    expect(await callSave()).toEqual(saveDrift)
   })
 
   it('treats a non-JSON success as drift', async () => {

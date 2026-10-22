@@ -2051,6 +2051,25 @@
   overflow-wrap: anywhere;
 }
 
+/* The Wiki entry in the header navigation. The selected view carries aria-current. */
+.app-nav-button {
+  min-height: 32px;
+  padding: var(--space-1) var(--space-3);
+  background: transparent;
+  color: var(--color-text-muted);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--text-body-sm);
+  font-weight: 600;
+  transition: all var(--duration-fast) var(--ease-standard);
+}
+
+.app-nav-button[aria-current='page'] {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+
 .wiki-list-heading { margin-bottom: var(--space-6); }
 .wiki-page-nav { margin: 0 0 var(--space-4); }
 .wiki-back,

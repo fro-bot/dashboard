@@ -323,18 +323,7 @@ export function AppShell({
                 type="button"
                 aria-current={currentView === 'wiki' ? 'page' : undefined}
                 onClick={() => onNavigate?.('wiki')}
-                style={{
-                  minHeight: '32px',
-                  padding: 'var(--space-1) var(--space-3)',
-                  background: currentView === 'wiki' ? 'var(--color-surface-raised)' : 'transparent',
-                  color: currentView === 'wiki' ? 'var(--color-text)' : 'var(--color-text-muted)',
-                  border: 'none',
-                  borderRadius: 'var(--radius-md)',
-                  cursor: 'pointer',
-                  fontSize: 'var(--text-body-sm)',
-                  fontWeight: 600,
-                  transition: 'all var(--duration-fast) var(--ease-standard)',
-                }}
+                className="app-nav-button"
               >
                 Wiki
               </button>

@@ -4,6 +4,7 @@ import {afterEach, describe, expect, it, vi} from 'vitest'
 import {getWikiPage, saveWikiPage} from '../api/wiki.ts'
 import {
   createDraftStore,
+  DRAFT_OPEN_TIMEOUT_MS,
   type DraftInput,
   type DraftRecord,
   type DraftStore,
@@ -49,6 +50,7 @@ async function mustLoad(store: DraftStore, pageId = 'repos.acme--alpha'): Promis
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.useRealTimers()
 })
 
 // ---------------------------------------------------------------------------
@@ -321,13 +323,26 @@ describe('unavailable IndexedDB', () => {
     expect(await store.getDraft('repos.a')).toEqual({ok: false, error: {kind: 'unavailable'}})
   })
 
-  it.each(['blocked', 'error', 'throw'] as const)('returns unavailable when opening the database is %s', async mode => {
+  // A browser with no IndexedDB, or one that refuses it outright, holds no drafts. An open that
+  // fails, is blocked or times out may be hiding a record the editor has not seen: that is `failed`.
+  it('returns unavailable when the browser refuses to open IndexedDB at all', async () => {
     const idb = createMemoryIdb()
-    idb.openMode = mode
+    idb.openMode = 'throw'
     const store = createDraftStore({indexedDB: idb.factory})
 
     expect(await store.putDraft(input())).toEqual({ok: false, error: {kind: 'unavailable'}})
     expect(await store.getDraft('repos.a')).toEqual({ok: false, error: {kind: 'unavailable'}})
+  })
+
+  it.each(['blocked', 'error'] as const)('returns open-failed, not unavailable, when opening the database is %s', async mode => {
+    const idb = createMemoryIdb()
+    idb.openMode = mode
+    const store = createDraftStore({indexedDB: idb.factory})
+
+    expect(await store.putDraft(input())).toEqual({ok: false, error: {kind: 'open-failed'}})
+    expect(await store.getDraft('repos.a')).toEqual({ok: false, error: {kind: 'open-failed'}})
+    expect(await store.listDrafts()).toEqual({ok: false, error: {kind: 'open-failed'}})
+    expect(await store.deleteDraft('repos.a')).toEqual({ok: false, error: {kind: 'open-failed'}})
   })
 
   it('opens the database on a later call once it stops being blocked', async () => {
@@ -348,6 +363,67 @@ describe('unavailable IndexedDB', () => {
 
     expect(await store.getDraft('repos.acme--alpha')).toEqual({ok: false, error: {kind: 'unavailable'}})
     expect((await mustLoad(store)).draftText).toContain('gadgets')
+  })
+
+  it('closes its connection when a newer schema wants to open, and reopens on the next call', async () => {
+    const {idb, store} = setup()
+    await store.putDraft(input())
+    expect(idb.openConnections()).toBe(1)
+
+    idb.versionChange()
+
+    expect(idb.openConnections()).toBe(0)
+    expect((await mustLoad(store)).draftText).toContain('gadgets')
+    expect(idb.openConnections()).toBe(1)
+    expect(idb.operations.filter(name => name === 'open')).toHaveLength(2)
+  })
+
+  it('closes an open that was blocked and goes through later, and still reports failed for the blocked call', async () => {
+    const idb = createMemoryIdb()
+    idb.openMode = 'blocked-then-ok'
+    const store = createDraftStore({indexedDB: idb.factory, now: () => NOW})
+
+    expect(await store.getDraft('repos.a')).toEqual({ok: false, error: {kind: 'open-failed'}})
+    await new Promise<void>(done => setTimeout(done, 0))
+
+    expect(idb.openConnections()).toBe(0)
+  })
+
+  it('opens normally on a later call after a blocked open went through late', async () => {
+    const idb = createMemoryIdb()
+    idb.openMode = 'blocked-then-ok'
+    const store = createDraftStore({indexedDB: idb.factory, now: () => NOW})
+    await store.getDraft('repos.a')
+    await new Promise<void>(done => setTimeout(done, 0))
+    idb.openMode = 'ok'
+
+    expect((await store.putDraft(input())).ok).toBe(true)
+    expect(idb.openConnections()).toBe(1)
+  })
+
+  it('gives up on an open that never answers, as unavailable, and opens on a later call', async () => {
+    vi.useFakeTimers()
+    const idb = createMemoryIdb()
+    idb.openMode = 'hang'
+    const store = createDraftStore({indexedDB: idb.factory, now: () => NOW})
+    const answered = vi.fn()
+    void store.getDraft('repos.a').then(answered)
+
+    await vi.advanceTimersByTimeAsync(DRAFT_OPEN_TIMEOUT_MS - 1)
+    expect(answered).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(answered).toHaveBeenCalledWith({ok: false, error: {kind: 'open-failed'}})
+
+    idb.openMode = 'ok'
+    expect((await store.putDraft(input())).ok).toBe(true)
+  })
+
+  it('does not leave the open timer running once the database has opened', async () => {
+    vi.useFakeTimers()
+    const {store} = setup()
+    await store.putDraft(input())
+
+    expect(vi.getTimerCount()).toBe(0)
   })
 })
 
@@ -373,7 +449,8 @@ describe('memory IndexedDB fake', () => {
     const store = db.transaction('s', 'readwrite').objectStore('s')
 
     expect(() => idb.factory.deleteDatabase('probe')).toThrow(/unsupported/iu)
-    expect(() => db.close()).toThrow(/unsupported/iu)
+    expect(() => db.version).toThrow(/unsupported/iu)
+    expect(() => db.onclose).toThrow(/unsupported/iu)
     expect(() => db.objectStoreNames).toThrow(/unsupported/iu)
     expect(() => db.deleteObjectStore('s')).toThrow(/unsupported/iu)
     expect(() => store.openCursor()).toThrow(/unsupported/iu)
@@ -414,6 +491,69 @@ describe('memory IndexedDB fake', () => {
     await new Promise<void>(done => {
       tx.oncomplete = () => done()
     })
+    expect(idb.records()).toEqual([{pageId: 'x'}])
+  })
+
+  it('allows close and onversionchange on a database, because the store declares them', async () => {
+    const idb = createMemoryIdb()
+    const db = await openDb(idb)
+    const seen = vi.fn()
+
+    db.onversionchange = seen
+    idb.versionChange()
+    expect(seen).toHaveBeenCalledTimes(1)
+    expect(idb.openConnections()).toBe(1)
+    db.close()
+    expect(idb.openConnections()).toBe(0)
+    expect(() => db.transaction('s')).toThrow(/closing/iu)
+  })
+
+  it('fires request.onerror, then tx.onerror, then onabort for a failed write, and never onsuccess', async () => {
+    const idb = createMemoryIdb()
+    const db = await openDb(idb)
+    idb.failNext('put', 'QuotaExceededError')
+    const tx = db.transaction('s', 'readwrite')
+    const events: string[] = []
+    const request = tx.objectStore('s').put({pageId: 'x'})
+    request.onsuccess = () => events.push('request.onsuccess')
+    request.onerror = () => events.push('request.onerror')
+    tx.onerror = () => events.push('tx.onerror')
+    tx.oncomplete = () => events.push('tx.oncomplete')
+    await new Promise<void>(done => {
+      tx.onabort = () => {
+        events.push('tx.onabort')
+        done()
+      }
+    })
+
+    expect(events).toEqual(['request.onerror', 'tx.onerror', 'tx.onabort'])
+    expect(tx.error?.name).toBe('QuotaExceededError')
+    expect(idb.records()).toEqual([])
+  })
+
+  it('fails a delete the same way and leaves the record in place', async () => {
+    const idb = createMemoryIdb()
+    const db = await openDb(idb)
+    const seed = db.transaction('s', 'readwrite')
+    seed.objectStore('s').put({pageId: 'x'})
+    await new Promise<void>(done => {
+      seed.oncomplete = () => done()
+    })
+    idb.failNext('delete', 'UnknownError')
+    const tx = db.transaction('s', 'readwrite')
+    const events: string[] = []
+    const request = tx.objectStore('s').delete('x')
+    request.onsuccess = () => events.push('request.onsuccess')
+    request.onerror = () => events.push('request.onerror')
+    tx.onerror = () => events.push('tx.onerror')
+    await new Promise<void>(done => {
+      tx.onabort = () => {
+        events.push('tx.onabort')
+        done()
+      }
+    })
+
+    expect(events).toEqual(['request.onerror', 'tx.onerror', 'tx.onabort'])
     expect(idb.records()).toEqual([{pageId: 'x'}])
   })
 
@@ -490,6 +630,141 @@ describe('pending operation', () => {
   })
 })
 
+describe('autosave and conditional delete (two tabs, one record per page)', () => {
+  const pending = {operationId: OPERATION_ID, sentAt: NOW, bodyChanged: true, state: 'unknown'} as const
+
+  it('keeps the pending operation another tab stored when the new draft has none', async () => {
+    const {store} = setup()
+    await store.putDraft(input({pending}))
+
+    const result = await store.putDraft(input({draftText: 'tab b text', pending: null}), {keepStoredPending: true})
+
+    expect(result.ok && result.value.pending).toEqual(pending)
+    const loaded = await mustLoad(store)
+    expect(loaded.pending).toEqual(pending)
+    expect(loaded.draftText).toBe('tab b text')
+  })
+
+  it('replaces the pending operation without the option, as before', async () => {
+    const {store} = setup()
+    await store.putDraft(input({pending}))
+
+    await store.putDraft(input({draftText: 'tab b text', pending: null}))
+
+    expect((await mustLoad(store)).pending).toBeNull()
+  })
+
+  it('lets a pending operation on the new draft win over the stored one', async () => {
+    const {store} = setup()
+    await store.putDraft(input({pending}))
+    const newer = {...pending, operationId: '00000000-0000-4000-8000-000000000002', state: 'sending'} as const
+
+    await store.putDraft(input({pending: newer}), {keepStoredPending: true})
+
+    expect((await mustLoad(store)).pending).toEqual(newer)
+  })
+
+  it('stores no pending operation when there is none to keep', async () => {
+    const {store} = setup()
+
+    await store.putDraft(input(), {keepStoredPending: true})
+
+    expect((await mustLoad(store)).pending).toBeNull()
+  })
+
+  it('keeps nothing from an unreadable record it was told to replace', async () => {
+    const {idb, store} = setup()
+    idb.plant({schemaVersion: 1, pageId: 'repos.acme--alpha', draftText: 7})
+
+    const result = await store.putDraft(input(), {keepStoredPending: true, replaceUnreadable: true})
+
+    expect(result.ok).toBe(true)
+    expect((await mustLoad(store)).pending).toBeNull()
+  })
+
+  it('deletes the record when the predicate accepts it', async () => {
+    const {idb, store} = setup()
+    await store.putDraft(input({pending}))
+    const onlyIf = vi.fn((record: DraftRecord) => record.pending?.operationId === OPERATION_ID)
+
+    expect(await store.deleteDraft('repos.acme--alpha', {onlyIf})).toEqual({ok: true, value: undefined})
+
+    expect(onlyIf).toHaveBeenCalledTimes(1)
+    expect(idb.records()).toEqual([])
+  })
+
+  it('keeps the record when the predicate refuses it', async () => {
+    const {idb, store} = setup()
+    await store.putDraft(input({draftText: 'tab b text'}))
+
+    expect(await store.deleteDraft('repos.acme--alpha', {onlyIf: () => false})).toEqual({ok: true, value: undefined})
+
+    expect(idb.records()).toHaveLength(1)
+  })
+
+  it('never deletes an unreadable record conditionally, and never asks the predicate about it', async () => {
+    const {idb, store} = setup()
+    idb.plant({schemaVersion: 99, pageId: 'repos.acme--alpha'})
+    const onlyIf = vi.fn(() => true)
+
+    expect(await store.deleteDraft('repos.acme--alpha', {onlyIf})).toEqual({ok: true, value: undefined})
+
+    expect(onlyIf).not.toHaveBeenCalled()
+    expect(idb.records()).toHaveLength(1)
+  })
+
+  it('has nothing to do when a conditional delete finds no record', async () => {
+    const {store} = setup()
+
+    expect(await store.deleteDraft('repos.nothing', {onlyIf: () => true})).toEqual({ok: true, value: undefined})
+  })
+
+  it('still deletes an unreadable record when the caller asks for an unconditional delete', async () => {
+    const {idb, store} = setup()
+    idb.plant({schemaVersion: 99, pageId: 'repos.acme--alpha'})
+
+    expect((await store.deleteDraft('repos.acme--alpha')).ok).toBe(true)
+
+    expect(idb.records()).toEqual([])
+  })
+})
+
+describe('deleteUnreadableDraft', () => {
+  it('deletes a record that still fails validation', async () => {
+    const {idb, store} = setup()
+    idb.plant({schemaVersion: 99, pageId: 'repos.acme--alpha'})
+
+    expect(await store.deleteUnreadableDraft('repos.acme--alpha')).toEqual({ok: true, value: 'deleted'})
+
+    expect(idb.records()).toEqual([])
+  })
+
+  it('leaves a record alone that is readable now, and says so', async () => {
+    const {idb, store} = setup()
+    await store.putDraft(input({draftText: 'another tab replaced it'}))
+
+    expect(await store.deleteUnreadableDraft('repos.acme--alpha')).toEqual({ok: true, value: 'readable'})
+
+    expect(idb.records()).toHaveLength(1)
+    expect((await mustLoad(store)).draftText).toBe('another tab replaced it')
+  })
+
+  it('reports a record that is already gone', async () => {
+    const {store} = setup()
+
+    expect(await store.deleteUnreadableDraft('repos.nothing')).toEqual({ok: true, value: 'missing'})
+  })
+
+  it('reports a failed delete and keeps the record', async () => {
+    const {idb, store} = setup()
+    idb.plant({schemaVersion: 99, pageId: 'repos.acme--alpha'})
+    idb.failNext('delete', 'UnknownError')
+
+    expect(await store.deleteUnreadableDraft('repos.acme--alpha')).toEqual({ok: false, error: {kind: 'failed'}})
+    expect(idb.records()).toHaveLength(1)
+  })
+})
+
 describe('sendWithPendingOperation', () => {
   it('has the pending operation readable from the store at the moment the request is sent', async () => {
     const {store} = setup()
@@ -557,8 +832,20 @@ describe('sendWithPendingOperation', () => {
     expect(send).toHaveBeenCalledTimes(1)
   })
 
-  it.each(['blocked', 'error', 'throw'] as const)(
-    'sends and reports not persisted when opening the database is %s',
+  it('sends and reports not persisted when the browser refuses to open IndexedDB at all', async () => {
+    const idb = createMemoryIdb()
+    idb.openMode = 'throw'
+    const store = createDraftStore({indexedDB: idb.factory})
+    const send = vi.fn(async () => 'sent')
+
+    const result = await sendWithPendingOperation(store, {draft: input(), operationId: OPERATION_ID, bodyChanged: true}, send)
+
+    expect(result).toEqual({ok: true, value: 'sent', persisted: false})
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['blocked', 'error'] as const)(
+    'sends and reports not persisted when opening the database is %s, so the editor stays usable',
     async mode => {
       const idb = createMemoryIdb()
       idb.openMode = mode
@@ -571,6 +858,21 @@ describe('sendWithPendingOperation', () => {
       expect(send).toHaveBeenCalledTimes(1)
     },
   )
+
+  it('sends and reports not persisted when the open times out', async () => {
+    vi.useFakeTimers()
+    const idb = createMemoryIdb()
+    idb.openMode = 'hang'
+    const store = createDraftStore({indexedDB: idb.factory})
+    const send = vi.fn(async () => 'sent')
+    const answered = vi.fn()
+    void sendWithPendingOperation(store, {draft: input(), operationId: OPERATION_ID, bodyChanged: true}, send).then(answered)
+
+    await vi.advanceTimersByTimeAsync(DRAFT_OPEN_TIMEOUT_MS)
+
+    expect(answered).toHaveBeenCalledWith({ok: true, value: 'sent', persisted: false})
+    expect(send).toHaveBeenCalledTimes(1)
+  })
 
   it('sends and reports not persisted when the store goes away between the write and the read back', async () => {
     const {idb, store} = setup()
@@ -631,6 +933,21 @@ describe('sendWithPendingOperation', () => {
 
     expect(result).toEqual({ok: false, error: {kind: 'unreadable', pageId: 'repos.acme--alpha'}})
     expect(send).not.toHaveBeenCalled()
+  })
+
+  it('replaces an unreadable record and sends when the caller says it may', async () => {
+    const {idb, store} = setup()
+    idb.plant({schemaVersion: 1, pageId: 'repos.acme--alpha', draftText: 7})
+    const send = vi.fn(async () => 'sent')
+
+    const result = await sendWithPendingOperation(
+      store,
+      {draft: input(), operationId: OPERATION_ID, bodyChanged: true, replaceUnreadable: true},
+      send,
+    )
+
+    expect(result).toEqual({ok: true, value: 'sent', persisted: true})
+    expect((await mustLoad(store)).pending?.operationId).toBe(OPERATION_ID)
   })
 
   it('keeps the pending operation after the send, for the caller to resolve', async () => {

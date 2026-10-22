@@ -720,7 +720,9 @@ describe('save — status unknown', () => {
     expect(records()).toHaveLength(0)
     const panel = screen.getByTestId('wiki-saved')
     expect(panel).toHaveAttribute('data-saved', 'saved-not-promoted')
-    expect(panel).toHaveTextContent('Saved, not promoted')
+    // The lookup cannot see the dispatch result, so the headline does not claim one.
+    expect(within(panel).getByRole('heading', {level: 3})).toHaveTextContent('Saved, publication unknown')
+    expect(panel).not.toHaveTextContent('Saved, not promoted')
     expect(within(panel).getByRole('button', {name: 'Retry dispatch'})).toBeEnabled()
     expect(screen.queryByTestId('wiki-outcome')).toBeNull()
     expect(guardedWikiPageId()).toBeNull()
@@ -1226,5 +1228,190 @@ describe('save — a late response for an operation that is no longer current', 
     expect(screen.getByRole('heading', {level: 2, name: 'Beta'})).toBeInTheDocument()
     expect(screen.queryByTestId('wiki-outcome')).toBeNull()
     expect(screen.queryByText('late finding')).toBeNull()
+  })
+})
+
+describe('save — with the keep or discard question open', () => {
+  function deferredSave() {
+    let finish: (value: never) => void = () => {}
+    saveSpy.mockReturnValue(
+      new Promise(resolve => {
+        finish = resolve as (value: never) => void
+      }),
+    )
+    return (value: unknown) =>
+      act(async () => {
+        finish(value as never)
+      })
+  }
+
+  it('Save closes the question, so Keep draft cannot erase the pending operation mid-send', async () => {
+    const answer = deferredSave()
+    await renderPage()
+    await startEditing()
+    fireEvent.click(button('Cancel'))
+    expect(screen.getByTestId('wiki-cancel-confirm')).toBeInTheDocument()
+
+    clickSave()
+    await flush()
+
+    expect(screen.getByTestId('wiki-editor')).toHaveAttribute('data-phase', 'saving')
+    expect(screen.queryByTestId('wiki-cancel-confirm')).toBeNull()
+    expect(queryButton('Keep draft')).toBeNull()
+    expect(queryButton('Discard draft')).toBeNull()
+
+    await answer(saveFailure({kind: 'status-unknown', cause: 'timeout'}))
+    await flush()
+
+    expect(outcome()).toHaveAttribute('data-outcome', 'status-unknown')
+    expect(records()[0]?.pending).toMatchObject({operationId: 'op-1', state: 'unknown'})
+  })
+
+  it('Keep draft and Discard draft wait while a status check is running, and nothing is deleted', async () => {
+    saveSpy.mockResolvedValue(saveFailure({kind: 'status-unknown', cause: 'timeout'}))
+    let finish: (value: never) => void = () => {}
+    lookupSpy.mockReturnValue(
+      new Promise(resolve => {
+        finish = resolve as (value: never) => void
+      }),
+    )
+    await renderPage()
+    await editAndSave()
+    fireEvent.click(button('Cancel'))
+    fireEvent.click(button('Check save status'))
+    await flush()
+
+    expect(screen.getByTestId('wiki-editor')).toHaveAttribute('data-phase', 'checking')
+    expect(button('Keep draft')).toBeDisabled()
+    expect(button('Discard draft')).toBeDisabled()
+    fireEvent.click(button('Discard draft'))
+    await flush()
+    expect(records()).toHaveLength(1)
+    expect(records()[0]?.pending).toMatchObject({operationId: 'op-1'})
+
+    await act(async () => {
+      finish(lookupOk({state: 'missing'}))
+    })
+    await flush()
+
+    expect(screen.getByTestId('wiki-editor')).toHaveAttribute('data-phase', 'idle')
+    expect(button('Keep draft')).toBeEnabled()
+    expect(button('Discard draft')).toBeEnabled()
+    expect(textbox()).not.toHaveAttribute('readonly')
+  })
+})
+
+describe('save — a draft another tab stored meanwhile', () => {
+  const draftOf = (overrides: Partial<DraftInput> = {}) =>
+    pendingDraft({pending: null, draftText: 'the other tab’s words', ...overrides})
+
+  it('a successful save leaves the other tab’s draft in place', async () => {
+    let finish: (value: never) => void = () => {}
+    saveSpy.mockReturnValue(
+      new Promise(resolve => {
+        finish = resolve as (value: never) => void
+      }),
+    )
+    await renderPage()
+    await editAndSave()
+    await store.putDraft(draftOf())
+
+    await act(async () => {
+      finish(ok({state: 'saved', ...COMMIT}) as never)
+    })
+    await flush()
+
+    expect(screen.getByTestId('wiki-saved')).toHaveAttribute('data-saved', 'saved')
+    expect(records()).toHaveLength(1)
+    expect(records()[0]?.draftText).toBe('the other tab’s words')
+  })
+
+  it('a successful save deletes a record with the same base and text, even if the pending operation was replaced', async () => {
+    let finish: (value: never) => void = () => {}
+    saveSpy.mockReturnValue(
+      new Promise(resolve => {
+        finish = resolve as (value: never) => void
+      }),
+    )
+    await renderPage()
+    await editAndSave()
+    await store.putDraft(draftOf({draftText: EDITED}))
+
+    await act(async () => {
+      finish(ok({state: 'saved', ...COMMIT}) as never)
+    })
+    await flush()
+
+    expect(records()).toHaveLength(0)
+  })
+
+  it('a successful save still deletes its own record', async () => {
+    await renderPage()
+    await editAndSave()
+    expect(records()).toHaveLength(0)
+  })
+
+  it('a save found late by the check leaves the other tab’s draft in place', async () => {
+    saveSpy.mockResolvedValue(saveFailure({kind: 'status-unknown', cause: 'timeout'}))
+    lookupSpy.mockResolvedValue(lookupOk({state: 'found', commitSha: 'c1', committedAt: COMMIT.committedAt}))
+    await renderPage()
+    await editAndSave()
+    await store.putDraft(draftOf())
+
+    fireEvent.click(button('Check save status'))
+    await flush()
+
+    expect(screen.getByTestId('wiki-saved')).toHaveAttribute('data-saved', 'saved-not-promoted')
+    expect(records()).toHaveLength(1)
+    expect(records()[0]?.draftText).toBe('the other tab’s words')
+  })
+})
+
+describe('save — a draft record that cannot be read', () => {
+  beforeEach(() => {
+    idb.plant({pageId: PAGE_ID, schemaVersion: 99})
+  })
+
+  it('does not block Save: the request goes out and the record is replaced, then removed by the save', async () => {
+    await renderPage()
+    await startEditing()
+    clickSave()
+    await flush()
+
+    expect(queryButton('Save again')).toBeNull()
+    expect(screen.queryByText('Save not sent')).toBeNull()
+    expect(saveSpy).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('wiki-saved')).toHaveAttribute('data-saved', 'saved')
+    expect(records()).toHaveLength(0)
+  })
+
+  it('keeps a valid record with the pending operation when the outcome is unknown', async () => {
+    saveSpy.mockResolvedValue(saveFailure({kind: 'status-unknown', cause: 'timeout'}))
+    await renderPage()
+    await editAndSave()
+
+    expect(records()).toHaveLength(1)
+    expect(records()[0]).toMatchObject({draftText: EDITED, pending: {operationId: 'op-1', state: 'unknown'}})
+  })
+})
+
+describe('save — overwrite from the possibly-saved view', () => {
+  it('leaves no marker behind when the draft becomes the page body', async () => {
+    saveSpy.mockResolvedValue(saveFailure({kind: 'status-unknown', cause: 'timeout'}))
+    lookupSpy.mockResolvedValue(lookupOk({state: 'unknown'}))
+    await renderPage()
+    await editAndSave()
+    expect(records()[0]?.pending).toMatchObject({operationId: 'op-1', state: 'unknown'})
+
+    // The page now holds exactly the draft text, so the re-based draft equals its base.
+    getSpy.mockResolvedValue(ok(pageOf({body: EDITED, pageBlobSha: 'blob-2'})))
+    fireEvent.click(button('Check save status'))
+    await flush()
+    fireEvent.click(button('Overwrite with my draft'))
+    fireEvent.click(button('Yes, overwrite'))
+    await flush()
+
+    expect(records()).toHaveLength(0)
+    expect(guardedWikiPageId()).toBeNull()
   })
 })

@@ -1,4 +1,4 @@
-import {act, cleanup, fireEvent, render, screen, waitFor, within} from '@testing-library/react'
+import {act, cleanup, fireEvent, render, screen, within} from '@testing-library/react'
 import {afterEach, beforeEach, describe, expect, it, vi, type MockInstance} from 'vitest'
 import * as wikiApi from '../api/wiki.ts'
 import type {PromotionStatus, WikiPageList, WikiPageSummary} from '../api/wiki.ts'
@@ -450,17 +450,21 @@ describe('WikiList — hygiene', () => {
     for (const spy of spies) expect(spy).not.toHaveBeenCalled()
   })
 
-  it('does not set state after unmount while requests are pending', async () => {
+  // React 18+ no longer warns about state updates after unmount, so a console spy proves nothing.
+  // The answer handler runs `clearWikiSignInGuard()` just before it sets state. Both sit behind
+  // the same `cancelled` check, so a late answer that still ran would clear the guard.
+  it('ignores a list answer that arrives after unmount', async () => {
     let resolveList!: (value: ReturnType<typeof ok<WikiPageList>>) => void
     listSpy.mockReturnValue(new Promise(resolve => (resolveList = resolve)))
-    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const clearGuard = vi.spyOn(sessionRecovery, 'clearWikiSignInGuard')
     const view = await renderList()
     view.unmount()
     await act(async () => {
       resolveList(ok(listOf([ALPHA])))
     })
-    await waitFor(() => {})
-    expect(errors).not.toHaveBeenCalled()
+    await act(async () => {})
+    expect(clearGuard).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('wiki-list')).toBeNull()
   })
 })
 

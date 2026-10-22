@@ -16,7 +16,7 @@
  *   - Every state has a visible way forward: a button, a link, or Cancel.
  */
 
-import {useEffect, useRef, useState} from 'react'
+import {useEffect, useMemo, useRef, useState} from 'react'
 import {
   getWikiPage,
   lookupWikiOperation,
@@ -33,10 +33,11 @@ import {
   type CorrectionsBase,
   type DraftInput,
   type DraftRecord,
+  type DraftResult,
   type DraftStore,
 } from '../wiki/drafts.ts'
 import {DRAFT_DEBOUNCE_MS} from '../wiki/editor-timing.ts'
-import {registerNavigationGuard} from '../wiki/navigation-guard.ts'
+import {confirmLeaveWiki, registerNavigationGuard} from '../wiki/navigation-guard.ts'
 import {
   describeDispatchFailure,
   describeLookup,
@@ -63,8 +64,16 @@ export interface WikiEditSessionProps {
   readonly page: WikiPage
   /** The local draft found when the page opened, or null. */
   readonly draft: DraftRecord | null
-  /** A draft record exists for this page but could not be read. It is left in place. */
+  /**
+   * A draft record exists for this page but fails validation. It is left in place until the
+   * operator discards it or their first edit replaces it.
+   */
   readonly draftUnreadable: boolean
+  /**
+   * Reading the draft failed, so a record may exist that was never seen. Nothing is written
+   * or deleted for this page while the editor is open, so that record is not overwritten.
+   */
+  readonly draftReadFailed: boolean
   readonly store: DraftStore
   readonly openPromotion: OpenPromotion
   /** The shell is re-reading the page after a save, so its blob is not yet current. */
@@ -127,6 +136,37 @@ function docFromPage(page: WikiPage): Doc {
     },
     unknownOp: null,
   }
+}
+
+const WRITES_WITHHELD: DraftResult<never> = {ok: false, error: {kind: 'unavailable'}}
+
+/**
+ * The store with every write turned into `unavailable`. The editor already copes with a store
+ * that cannot write: edits stay in the session, the guard says they are not stored, and a save
+ * is sent without a pending record.
+ */
+function withheldWrites(store: DraftStore): DraftStore {
+  return {
+    now: store.now,
+    getDraft: store.getDraft,
+    listDrafts: store.listDrafts,
+    putDraft: async () => WRITES_WITHHELD,
+    deleteDraft: async () => WRITES_WITHHELD,
+    deleteUnreadableDraft: async () => WRITES_WITHHELD,
+    markPendingUnknown: async () => WRITES_WITHHELD,
+    clearPendingOperation: async () => WRITES_WITHHELD,
+  }
+}
+
+/**
+ * The stored record is this save's: it carries this operation, or it holds the base and text
+ * this tab sent. Another tab's draft for the same page is neither.
+ */
+function belongsToSave(record: DraftRecord, operationId: string, sent: Doc): boolean {
+  return (
+    record.pending?.operationId === operationId ||
+    (record.baseBlobSha === sent.base.blobSha && record.draftText === sent.text)
+  )
 }
 
 function draftInputOf(pageId: string, doc: Doc): DraftInput {
@@ -193,19 +233,39 @@ function sameSnapshot(a: Snapshot | null, b: Snapshot | null): boolean {
 
 type Mode = 'viewing' | 'editing' | 'conflict'
 type Phase = 'idle' | 'saving' | 'checking'
-type Note = 'kept' | 'rebased' | null
+type Note = 'kept' | 'kept-failed' | 'discard-kept-stored' | 'rebased' | null
 
-interface SavedState {
-  readonly kind: 'saved' | 'saved-not-promoted'
+/** What the operator has been told about a draft record that could not be read. */
+type UnreadableNotice = 'none' | 'present' | 'replaced' | 'resolved'
+
+interface SavedBase {
   /** Passed to the status read: runs created before the commit are ignored. */
   readonly since: string
+}
+
+/** The save was sent for publication. Promotion status is read while it is pending. */
+interface PromotedState extends SavedBase {
+  readonly kind: 'saved'
   readonly promotion: PromotionStatus | null
   readonly unavailable: boolean
   readonly polling: boolean
-  readonly dispatch: {readonly kind: 'idle'} | {readonly kind: 'sending'} | {readonly kind: 'failed'; readonly message: string}
+}
+
+interface DispatchState {
+  readonly dispatch:
+    | {readonly kind: 'idle'}
+    | {readonly kind: 'sending'}
+    | {readonly kind: 'failed'; readonly message: string}
+}
+
+/** The commit landed but the publication request did not go out, or its result is unknown. */
+interface NotPromotedState extends SavedBase, DispatchState {
+  readonly kind: 'saved-not-promoted'
   /** The save was found by the lookup rather than seen. */
   readonly foundLate: boolean
 }
+
+type SavedState = PromotedState | NotPromotedState
 
 type ConflictCurrent =
   | {readonly kind: 'loading'}
@@ -235,8 +295,12 @@ function announcementOf(display: OutcomeDisplay): string {
 // ---------------------------------------------------------------------------
 
 export function WikiEditSession(props: WikiEditSessionProps) {
-  const {page, store, draftUnreadable, openPromotion, refreshing, refreshFailed, onRefresh, onReload} = props
+  const {page, draftUnreadable, draftReadFailed, openPromotion, refreshing, refreshFailed, onRefresh, onReload} = props
   const pageId = page.id
+  const store = useMemo(
+    () => (draftReadFailed ? withheldWrites(props.store) : props.store),
+    [draftReadFailed, props.store],
+  )
 
   const [initial] = useState(() => {
     const doc = page.canWrite && props.draft !== null ? docFromDraft(props.draft) : null
@@ -250,7 +314,10 @@ export function WikiEditSession(props: WikiEditSessionProps) {
     initial.unknownOp === null ? null : unknownSaveDisplay(initial.unknownOp),
   )
   const [announcement, setAnnouncement] = useState('')
-  const [localSaveFailed, setLocalSaveFailed] = useState(false)
+  const [localSaveFailed, setLocalSaveFailed] = useState(draftReadFailed)
+  const [unreadable, setUnreadable] = useState<UnreadableNotice>(draftUnreadable ? 'present' : 'none')
+  const [discardingUnreadable, setDiscardingUnreadable] = useState(false)
+  const [unreadableStatus, setUnreadableStatus] = useState<string | null>(null)
   const [note, setNote] = useState<Note>(null)
   const [saved, setSaved] = useState<SavedState | null>(null)
   const [conflict, setConflict] = useState<ConflictState | null>(null)
@@ -290,17 +357,38 @@ export function WikiEditSession(props: WikiEditSessionProps) {
     timerRef.current = null
   }
 
-  /** Write the working copy to the draft store now. No changes and nothing pending means no draft. */
-  const persistNow = async () => {
+  /** The first write that goes through replaces a draft record that could not be read. */
+  const noteUnreadableReplaced = () => {
+    if (mountedRef.current) setUnreadable(current => (current === 'present' ? 'replaced' : current))
+  }
+
+  /**
+   * Write the working copy to the draft store now. No changes and nothing pending means no
+   * draft. One record per page is shared by every tab, so another tab's unknown-save marker is
+   * kept (unless this tab abandons its own, `dropPending`), and a record is removed only when it
+   * is empty. An unreadable record is replaced by the first write, never removed. Returns false
+   * when the write was refused.
+   */
+  const persistNow = async (options?: {readonly dropPending?: boolean}): Promise<boolean> => {
     clearTimer()
     const current = docRef.current
-    if (current === null) return
+    if (current === null) return true
     if (current.text === current.base.text && current.unknownOp === null) {
-      await store.deleteDraft(pageId)
-      return
+      // Abandoning this tab's own unknown save removes its marker with the record. Otherwise another
+      // tab's marker is not ours to delete.
+      const result = await store.deleteDraft(
+        pageId,
+        {onlyIf: options?.dropPending === true ? () => true : record => record.pending === null},
+      )
+      return result.ok
     }
-    const result = await store.putDraft(draftInputOf(pageId, current))
+    const result = await store.putDraft(draftInputOf(pageId, current), {
+      keepStoredPending: current.unknownOp === null && options?.dropPending !== true,
+      replaceUnreadable: draftUnreadable,
+    })
     if (mountedRef.current) setLocalSaveFailed(!result.ok)
+    if (result.ok) noteUnreadableReplaced()
+    return result.ok
   }
 
   const persistNowRef = useRef(persistNow)
@@ -313,6 +401,24 @@ export function WikiEditSession(props: WikiEditSessionProps) {
     },
     [],
   )
+
+  // A reload or a closing tab skips the unmount above, so a pending debounce is also written when
+  // the page is hidden or put away. This narrows the window for losing the last keystrokes; the
+  // browser does not promise an unload write finishes.
+  useEffect(() => {
+    const flush = () => {
+      if (timerRef.current !== null) void persistNowRef.current()
+    }
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') flush()
+    }
+    window.addEventListener('pagehide', flush)
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => {
+      window.removeEventListener('pagehide', flush)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
+  }, [])
 
   const onTextChange = (value: string) => {
     setDoc(current => (current === null ? current : {...current, text: value}))
@@ -396,15 +502,17 @@ export function WikiEditSession(props: WikiEditSessionProps) {
   // -------------------------------------------------------------------------
 
   usePromotionPolling({
-    active: saved?.polling === true,
+    active: saved?.kind === 'saved' && saved.polling,
     since: saved?.since,
     onStatus: status => {
       setSaved(current =>
-        current === null ? current : {...current, promotion: status, unavailable: false, polling: status.state === 'pending'},
+        current?.kind === 'saved'
+          ? {...current, promotion: status, unavailable: false, polling: status.state === 'pending'}
+          : current,
       )
     },
     onUnavailable: () => {
-      setSaved(current => (current === null ? current : {...current, unavailable: true}))
+      setSaved(current => (current?.kind === 'saved' ? {...current, unavailable: true} : current))
     },
   })
 
@@ -422,7 +530,9 @@ export function WikiEditSession(props: WikiEditSessionProps) {
 
   const cancel = () => {
     if (!dirty) {
-      void store.deleteDraft(pageId)
+      // Only an empty record is cleared. Another tab's draft or marker, and a record that could not
+      // be read, are not ours to delete.
+      void store.deleteDraft(pageId, {onlyIf: record => record.pending === null && record.draftText === record.baseText})
       setDoc(null)
       setOutcome(null)
       setMode('viewing')
@@ -433,14 +543,16 @@ export function WikiEditSession(props: WikiEditSessionProps) {
   }
 
   const keepDraft = async () => {
-    await persistNow()
+    if (phase !== 'idle') return
+    const stored = await persistNow()
     if (!mountedRef.current) return
     setCancelOpen(false)
-    setNote('kept')
+    setNote(stored ? 'kept' : 'kept-failed')
     setMode('viewing')
   }
 
   const discardDraft = async () => {
+    if (phase !== 'idle') return
     const result = await store.deleteDraft(pageId)
     if (!mountedRef.current) return
     if (!result.ok && result.error.kind !== 'unavailable') {
@@ -453,8 +565,26 @@ export function WikiEditSession(props: WikiEditSessionProps) {
     setCancelStatus(null)
     setOutcome(null)
     setConflict(null)
-    setNote(null)
+    // With the read failed, the stored draft was never touched: say it is still there.
+    setNote(draftReadFailed ? 'discard-kept-stored' : null)
     setMode('viewing')
+  }
+
+  const discardUnreadable = async () => {
+    if (phase !== 'idle') return
+    const result = await store.deleteUnreadableDraft(pageId)
+    if (!mountedRef.current) return
+    setDiscardingUnreadable(false)
+    if (result.ok) {
+      // `readable`: another tab replaced the record since this tab read it, so it is not unreadable
+      // any more and is left alone.
+      setUnreadable('resolved')
+      setUnreadableStatus(
+        result.value === 'readable' ? EDITOR_COPY.unreadableAlreadyReplaced : EDITOR_COPY.discardUnreadableDone,
+      )
+    } else {
+      setUnreadableStatus(EDITOR_COPY.discardUnreadableFailed)
+    }
   }
 
   const copyDraft = async () => {
@@ -513,7 +643,7 @@ export function WikiEditSession(props: WikiEditSessionProps) {
       base: {blobSha: latest.pageBlobSha, text: latest.body, correctionsBase},
       unknownOp: null,
     })
-    await persistNow()
+    await persistNow({dropPending: true})
     if (!mountedRef.current) return
     setConflict(null)
     setOutcome(null)
@@ -536,6 +666,9 @@ export function WikiEditSession(props: WikiEditSessionProps) {
 
     sendingRef.current = true
     clearTimer()
+    // Keep draft and Discard draft rewrite or delete the record this save is about to write.
+    setCancelOpen(false)
+    setCancelStatus(null)
     const operationId = crypto.randomUUID()
     opRef.current = operationId
     savedEpochRef.current += 1
@@ -548,7 +681,12 @@ export function WikiEditSession(props: WikiEditSessionProps) {
     const startedAt = store.now()
     const sent = await sendWithPendingOperation(
       store,
-      {draft: {...draftInputOf(pageId, working), pending: null}, operationId, bodyChanged: true},
+      {
+        draft: {...draftInputOf(pageId, working), pending: null},
+        operationId,
+        bodyChanged: true,
+        replaceUnreadable: draftUnreadable,
+      },
       () =>
         saveWikiPage({
           pageId,
@@ -574,24 +712,23 @@ export function WikiEditSession(props: WikiEditSessionProps) {
 
     const {value: result, persisted} = sent
     const display = describeSaveResult(result, {persisted})
+    if (persisted) noteUnreadableReplaced()
 
     if (result.ok) {
       setAnnouncement(announcementOf(display))
-      await store.deleteDraft(pageId)
+      // Another tab may have stored its own draft for this page meanwhile. Only this save's record goes.
+      await store.deleteDraft(pageId, {onlyIf: record => belongsToSave(record, operationId, working)})
       if (!mountedRef.current) return
       savedEpochRef.current += 1
       setDoc(null)
       setConflict(null)
       setMode('viewing')
-      setSaved({
-        kind: result.value.state,
-        since: result.value.committedAt,
-        promotion: null,
-        unavailable: false,
-        polling: result.value.state === 'saved',
-        dispatch: {kind: 'idle'},
-        foundLate: false,
-      })
+      const since = result.value.committedAt
+      setSaved(
+        result.value.state === 'saved'
+          ? {kind: 'saved', since, promotion: null, unavailable: false, polling: true}
+          : {kind: 'saved-not-promoted', since, dispatch: {kind: 'idle'}, foundLate: false},
+      )
       onRefresh()
       return
     }
@@ -639,7 +776,13 @@ export function WikiEditSession(props: WikiEditSessionProps) {
     const result = await lookupWikiOperation({operationId: op.operationId, pageId, startedAt: op.sentAt})
     checkingRef.current = false
 
-    if (!mountedRef.current || docRef.current?.unknownOp?.operationId !== op.operationId) return
+    if (!mountedRef.current) return
+    if (docRef.current?.unknownOp?.operationId !== op.operationId) {
+      // The operation was dropped while the lookup ran. Do not leave the editor waiting, unless a
+      // newer save has taken over the phase.
+      if (!sendingRef.current) setPhase('idle')
+      return
+    }
     setPhase('idle')
 
     const display = describeLookup(result)
@@ -653,7 +796,10 @@ export function WikiEditSession(props: WikiEditSessionProps) {
     switch (result.value.state) {
       case 'found': {
         const committedAt = result.value.committedAt
-        await store.deleteDraft(pageId)
+        const sentDoc = docRef.current
+        await store.deleteDraft(pageId, {
+          onlyIf: record => sentDoc !== null && belongsToSave(record, op.operationId, sentDoc),
+        })
         if (!mountedRef.current) return
         savedEpochRef.current += 1
         setDoc(null)
@@ -663,9 +809,6 @@ export function WikiEditSession(props: WikiEditSessionProps) {
         setSaved({
           kind: 'saved-not-promoted',
           since: committedAt ?? new Date(op.sentAt).toISOString(),
-          promotion: null,
-          unavailable: false,
-          polling: false,
           dispatch: {kind: 'idle'},
           foundLate: true,
         })
@@ -718,13 +861,15 @@ export function WikiEditSession(props: WikiEditSessionProps) {
       setSaved(current =>
         current === null
           ? current
-          : {...current, kind: 'saved', dispatch: {kind: 'idle'}, promotion: null, unavailable: false, polling: true},
+          : {kind: 'saved', since: current.since, promotion: null, unavailable: false, polling: true},
       )
       return
     }
     const message = describeDispatchFailure(result.error)
     setAnnouncement(message)
-    setSaved(current => (current === null ? current : {...current, dispatch: {kind: 'failed', message}}))
+    setSaved(current =>
+      current?.kind === 'saved-not-promoted' ? {...current, dispatch: {kind: 'failed', message}} : current,
+    )
   }
 
   // -------------------------------------------------------------------------
@@ -765,6 +910,23 @@ export function WikiEditSession(props: WikiEditSessionProps) {
 
   const busy = phase !== 'idle'
 
+  const unreadableNotice = (
+    <UnreadableDraft
+      state={unreadable}
+      confirming={discardingUnreadable}
+      status={unreadableStatus}
+      busy={busy}
+      onAskDiscard={() => {
+        setDiscardingUnreadable(true)
+        setUnreadableStatus(null)
+      }}
+      onCancelDiscard={() => {
+        setDiscardingUnreadable(false)
+      }}
+      onDiscard={() => void discardUnreadable()}
+    />
+  )
+
   return (
     <article
       className="wiki-page-content wiki-editor"
@@ -797,10 +959,21 @@ export function WikiEditSession(props: WikiEditSessionProps) {
       {!page.contract.ok && page.contract.kind === 'unreadable' ? (
         <div className="wiki-note wiki-contract-notice" data-testid="wiki-contract-notice" data-contract="unreadable" role="status">
           <p>{EDITOR_COPY.contractUnreadableNotice}</p>
-          <button type="button" onClick={onReload}>
+          <button
+            type="button"
+            onClick={() => {
+              // Reading the page again drops the working copy, so the navigation guard asks first.
+              if (confirmLeaveWiki(null)) onReload()
+            }}
+          >
             {EDITOR_COPY.retry}
           </button>
         </div>
+      ) : null}
+      {draftReadFailed ? (
+        <p className="wiki-note wiki-draft-read-failed" data-testid="wiki-draft-read-failed" role="status">
+          {EDITOR_COPY.draftReadFailed}
+        </p>
       ) : null}
 
       <p
@@ -858,14 +1031,24 @@ export function WikiEditSession(props: WikiEditSessionProps) {
             {page.body}
           </pre>
 
-          {draftUnreadable ? (
-            <p className="wiki-note wiki-draft-unreadable" data-testid="wiki-draft-unreadable" role="status">
-              {EDITOR_COPY.draftUnreadable}
-            </p>
-          ) : null}
+          {unreadableNotice}
           {note === 'kept' ? (
             <p className="wiki-note wiki-draft-kept" data-testid="wiki-draft-kept" role="status">
               {EDITOR_COPY.draftKept}
+            </p>
+          ) : null}
+          {note === 'discard-kept-stored' ? (
+            <p
+              className="wiki-note wiki-draft-discard-kept-stored"
+              data-testid="wiki-draft-discard-kept-stored"
+              role="status"
+            >
+              {EDITOR_COPY.discardKeptStored}
+            </p>
+          ) : null}
+          {note === 'kept-failed' ? (
+            <p className="wiki-note wiki-draft-local-failed" data-testid="wiki-draft-local-failed" role="status">
+              {EDITOR_COPY.draftNotStoredLocally}
             </p>
           ) : null}
 
@@ -902,6 +1085,7 @@ export function WikiEditSession(props: WikiEditSessionProps) {
               {EDITOR_COPY.draftNotStoredLocally}
             </p>
           ) : null}
+          {unreadableNotice}
 
           <label id="wiki-edit-text-label" htmlFor="wiki-edit-text">
             {EDITOR_COPY.textLabel}
@@ -962,10 +1146,10 @@ export function WikiEditSession(props: WikiEditSessionProps) {
               <h3 id="wiki-cancel-heading">{EDITOR_COPY.cancelHeading}</h3>
               <p>{EDITOR_COPY.cancelDetail}</p>
               {hasUnknown ? <p>{EDITOR_COPY.cancelPendingDetail}</p> : null}
-              <button type="button" className="wiki-keep-draft" onClick={() => void keepDraft()}>
+              <button type="button" className="wiki-keep-draft" onClick={() => void keepDraft()} disabled={busy}>
                 {EDITOR_COPY.keepDraft}
               </button>
-              <button type="button" className="wiki-discard-draft" onClick={() => void discardDraft()}>
+              <button type="button" className="wiki-discard-draft" onClick={() => void discardDraft()} disabled={busy}>
                 {EDITOR_COPY.discardDraft}
               </button>
               <button
@@ -1010,6 +1194,76 @@ export function WikiEditSession(props: WikiEditSessionProps) {
 
       <Corrections corrections={page.corrections} />
     </article>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Draft record that could not be read
+// ---------------------------------------------------------------------------
+
+function UnreadableDraft({
+  state,
+  confirming,
+  status,
+  busy,
+  onAskDiscard,
+  onCancelDiscard,
+  onDiscard,
+}: {
+  readonly state: UnreadableNotice
+  readonly confirming: boolean
+  readonly status: string | null
+  readonly busy: boolean
+  readonly onAskDiscard: () => void
+  readonly onCancelDiscard: () => void
+  readonly onDiscard: () => void
+}) {
+  if (state === 'none') return null
+  if (state === 'replaced') {
+    return (
+      <p
+        className="wiki-note wiki-draft-unreadable-replaced"
+        data-testid="wiki-draft-unreadable-replaced"
+        role="status"
+      >
+        {EDITOR_COPY.draftUnreadableReplaced}
+      </p>
+    )
+  }
+
+  const statusNote =
+    status === null ? null : (
+      <p className="wiki-note wiki-draft-unreadable-status" data-testid="wiki-draft-unreadable-status" role="status">
+        {status}
+      </p>
+    )
+  if (state === 'resolved') return statusNote
+
+  return (
+    <div className="wiki-note wiki-draft-unreadable" data-testid="wiki-draft-unreadable" role="status">
+      <p>{EDITOR_COPY.draftUnreadable}</p>
+      <button type="button" className="wiki-discard wiki-discard-unreadable" onClick={onAskDiscard} disabled={confirming || busy}>
+        {EDITOR_COPY.discardUnreadable}
+      </button>
+      {confirming ? (
+        <div
+          className="wiki-discard-confirm wiki-discard-unreadable-confirm"
+          data-testid="wiki-discard-unreadable-confirm"
+          role="group"
+          aria-labelledby="wiki-discard-unreadable-heading"
+        >
+          <h3 id="wiki-discard-unreadable-heading">{EDITOR_COPY.discardUnreadableHeading}</h3>
+          <p>{EDITOR_COPY.discardUnreadableDetail}</p>
+          <button type="button" className="wiki-discard-confirm-yes wiki-discard-unreadable-yes" onClick={onDiscard} disabled={busy}>
+            {EDITOR_COPY.discardUnreadableConfirm}
+          </button>
+          <button type="button" className="wiki-discard-confirm-no wiki-discard-unreadable-no" onClick={onCancelDiscard} disabled={busy}>
+            {EDITOR_COPY.discardUnreadableCancel}
+          </button>
+        </div>
+      ) : null}
+      {statusNote}
+    </div>
   )
 }
 
@@ -1154,7 +1408,7 @@ function SavedPanel({saved, onRetryDispatch}: {readonly saved: SavedState; reado
         data-testid="wiki-saved"
         data-saved="saved-not-promoted"
       >
-        <h3>{OUTCOME_COPY.savedNotPromotedHeadline}</h3>
+        <h3>{saved.foundLate ? OUTCOME_COPY.lookupFoundHeadline : OUTCOME_COPY.savedNotPromotedHeadline}</h3>
         <p>{saved.foundLate ? OUTCOME_COPY.lookupFoundDetail : OUTCOME_COPY.savedNotPromotedDetail}</p>
         <button
           type="button"

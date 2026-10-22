@@ -14,8 +14,9 @@
  * Rate limit: lookups share the server's per-operator budget (10 a minute) with saves. This
  * module never polls a lookup. A caller that polls must stay inside that budget.
  *
- * A save with `contract-drift` may also have landed. The caller's stored pending operation
- * is what resolves it.
+ * A save with `contract-drift` may also have landed, so `saveWikiPage` reports it as
+ * `status-unknown` with cause `contract-drift`. The caller's stored pending operation is
+ * what resolves it.
  */
 
 // ---------------------------------------------------------------------------
@@ -184,7 +185,7 @@ export type SaveError =
   /** The commit may or may not have landed. The caller must not retry; it asks for a lookup. */
   | {
     readonly kind: 'status-unknown'
-    readonly cause: 'indeterminate' | 'session-lost' | 'network' | 'timeout'
+    readonly cause: 'indeterminate' | 'session-lost' | 'network' | 'timeout' | 'contract-drift'
   }
   | {
     readonly kind: 'forbidden' | 'not-found' | 'bad-request' | 'unsupported-media-type' | 'payload-too-large'
@@ -571,8 +572,9 @@ function interpretSave(status: number, body: unknown): Interpreted<SavedCommit, 
 }
 
 /**
- * Save a page. Never retries. A lost session, a network error or a timeout comes back as
- * `status-unknown`, because the commit may have landed. Store the pending operation first
+ * Save a page. Never retries. A lost session, a network error, a timeout or a reply the
+ * client cannot read (`contract-drift`) comes back as `status-unknown`, because the commit
+ * may have landed. Store the pending operation first
  * (see `sendWithPendingOperation`).
  */
 export async function saveWikiPage(input: SaveInput): Promise<WikiResult<SavedCommit, SaveError>> {
@@ -596,6 +598,7 @@ export async function saveWikiPage(input: SaveInput): Promise<WikiResult<SavedCo
     case 'session-lost':
     case 'network':
     case 'timeout':
+    case 'contract-drift':
       return {ok: false, error: {kind: 'status-unknown', cause: result.error.kind}}
     default:
       return result

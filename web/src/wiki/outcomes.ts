@@ -16,6 +16,7 @@ import type {
   LookupError,
   LookupOutcome,
   PromotionStatus,
+  RejectReason,
   SaveError,
   SavedCommit,
   TransportError,
@@ -139,7 +140,7 @@ export const OUTCOME_COPY = {
     'The dashboard and the server disagree about the request. Nothing was saved. Reload the page. Your draft is kept.',
   tooLargeHeadline: 'The page is too large',
   tooLargeDetail: 'The page is too large to save. Shorten it, then save. Your draft is kept.',
-  lookupFoundHeadline: 'Saved, not promoted',
+  lookupFoundHeadline: 'Saved, publication unknown',
   lookupFoundDetail:
     'Your earlier save landed. Whether it was sent for publication is unknown. Sending the publication request again is safe and makes no new commit.',
   lookupMissingHeadline: 'That save did not land',
@@ -155,7 +156,7 @@ export const OUTCOME_COPY = {
     'Your session has ended. Sign in, then check again. Your draft and the unconfirmed save are kept.',
 } as const
 
-const REJECT_DETAIL: Readonly<Record<string, string>> = {
+const REJECT_DETAIL: Readonly<Record<RejectReason, string>> = {
   gate: 'The wiki checks refused this change. Nothing was saved. Fix the findings, then save.',
   'no-change': 'There are no changes to save. Nothing was saved.',
   'invalid-request': 'The save request was not valid. Nothing was saved. Your draft is kept.',
@@ -164,8 +165,6 @@ const REJECT_DETAIL: Readonly<Record<string, string>> = {
   'mark-unavailable': 'Marking is not available for this page. Nothing was saved.',
   'invalid-transition': 'A staged correction change is not valid. Nothing was saved.',
 }
-
-const REJECT_FALLBACK = 'The change was refused. Nothing was saved. Your draft is kept.'
 
 function secondsPhrase(seconds: number | null): string {
   const value = seconds === null ? RATE_LIMIT_FALLBACK_SECONDS : seconds
@@ -199,7 +198,7 @@ function describeSaveError(error: SaveError | TransportError, persisted: boolean
       return display({
         kind: 'rejected',
         headline: OUTCOME_COPY.rejectedHeadline,
-        detail: REJECT_DETAIL[error.reason] ?? REJECT_FALLBACK,
+        detail: REJECT_DETAIL[error.reason],
         draft: 'kept',
         findings: error.findings,
       })
@@ -405,8 +404,8 @@ function lookupFailure(error: LookupError | TransportError): OutcomeDisplay {
 }
 
 /**
- * Map one lookup answer to a display model. A found commit is Saved, not promoted, because
- * the dispatch outcome of a save that landed late is unknown. A missing commit restores the
+ * Map one lookup answer to a display model. A found commit is Saved, publication unknown,
+ * because the dispatch outcome of a save that landed late is unknown. A missing commit restores the
  * draft. An undecidable lookup shows the newer version labeled as possibly the operator's.
  */
 export function describeLookup(result: LookupAnswer): OutcomeDisplay {

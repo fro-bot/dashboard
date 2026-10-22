@@ -1208,7 +1208,7 @@ describe('GET /wiki/:id shell', () => {
 
     const res = await (await gatewayApp(world.deps)).request('/wiki', {method: 'POST', headers: {cookie: 'x'}})
 
-    expect(res.status).not.toBe(200)
+    expect(res.status).toBe(404)
   })
 
   it('redirects an unauthenticated request for /wiki to login and sets the list return cookie', async () => {

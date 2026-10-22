@@ -22,7 +22,7 @@ import {
   readFailureCopy,
   type ReadFailureCopyKey,
 } from '../wiki/copy.ts'
-import type {DraftRecord, DraftStore} from '../wiki/drafts.ts'
+import type {DraftRecord, DraftResult, DraftStore} from '../wiki/drafts.ts'
 import {isPlainClick, WIKI_LIST_URL} from '../wiki/location.ts'
 import {clearWikiSignInGuard, navigateToWikiSignIn, wikiSignInUrl} from '../wiki/session-recovery.ts'
 import {sharedDraftStore} from '../wiki/shared-store.ts'
@@ -38,17 +38,34 @@ export interface WikiEditorProps {
 
 type PageState =
   | {readonly kind: 'loading'}
-  /** `draft`: the local draft for this page, if any. `draftUnreadable`: one exists but fails validation. */
+  /**
+   * `draft`: the local draft for this page, if any. `draftUnreadable`: one exists but fails validation.
+   * `draftReadFailed`: the read itself failed, so a draft may exist that the editor has not seen.
+   */
   | {
     readonly kind: 'ready'
     readonly page: WikiPage
     readonly draft: DraftRecord | null
     readonly draftUnreadable: boolean
+    readonly draftReadFailed: boolean
   }
   /** `draftUnreadable`: a draft record exists for this ID but fails validation. It is left in place. */
   | {readonly kind: 'not-found'; readonly draftUnreadable: boolean}
   | {readonly kind: 'orphaned-draft'; readonly draft: DraftRecord}
   | {readonly kind: 'failed'; readonly failure: ReadFailureCopyKey}
+
+/**
+ * Why a draft read did not give a draft. `unreadable`: a record exists but fails validation.
+ * `failed`: the read itself failed (a store error, quota, or an open that errored, was blocked or
+ * timed out), so nothing is known about the record.
+ * A store that is missing (`unavailable`) holds no draft, so it is not a problem here.
+ */
+function draftReadProblem(result: DraftResult<DraftRecord | null>): 'unreadable' | 'failed' | null {
+  if (result.ok) return null
+  if (result.error.kind === 'unreadable') return 'unreadable'
+  const {kind} = result.error
+  return kind === 'failed' || kind === 'quota' || kind === 'open-failed' ? 'failed' : null
+}
 
 export function WikiEditor({pageId, onBackToList, draftStore}: WikiEditorProps) {
   const [state, setState] = useState<PageState>({kind: 'loading'})
@@ -82,11 +99,13 @@ export function WikiEditor({pageId, onBackToList, draftStore}: WikiEditorProps) 
         clearWikiSignInGuard()
         const draft = await store.getDraft(pageId)
         if (cancelled) return
+        const problem = draftReadProblem(draft)
         setState({
           kind: 'ready',
           page: result.value,
           draft: draft.ok ? draft.value : null,
-          draftUnreadable: !draft.ok && draft.error.kind === 'unreadable',
+          draftUnreadable: problem === 'unreadable',
+          draftReadFailed: problem === 'failed',
         })
         return
       }
@@ -99,10 +118,7 @@ export function WikiEditor({pageId, onBackToList, draftStore}: WikiEditorProps) 
       const draft = await store.getDraft(pageId)
       if (cancelled) return
       if (draft.ok && draft.value !== null) setState({kind: 'orphaned-draft', draft: draft.value})
-      else {
-        const unreadable = !draft.ok && (draft.error.kind === 'unreadable' || draft.error.kind === 'failed')
-        setState({kind: 'not-found', draftUnreadable: unreadable})
-      }
+      else setState({kind: 'not-found', draftUnreadable: draftReadProblem(draft) !== null})
     })()
 
     return () => {
@@ -164,6 +180,7 @@ export function WikiEditor({pageId, onBackToList, draftStore}: WikiEditorProps) 
           page={state.page}
           draft={state.draft}
           draftUnreadable={state.draftUnreadable}
+          draftReadFailed={state.draftReadFailed}
           store={draftStore ?? sharedDraftStore()}
           openPromotion={promotion}
           refreshing={refresh.refreshing}
