@@ -638,6 +638,66 @@ describe('typing over a selection that crosses the edge of a mark, as a browser 
   })
 })
 
+describe('the pending operation of an unknown save records whether the body was sent', () => {
+  const unknown = () => saveSpy.mockResolvedValue({ok: false as const, error: {kind: 'status-unknown', cause: 'timeout'}} as never)
+  const pending = () => (idb.records()[0] as {pending: {bodyChanged: boolean; state: string} | null}).pending
+
+  /** Cancel and Keep draft rewrite the draft record while the unknown save is still pending. */
+  async function keepDraftWhilePending() {
+    fireEvent.click(button('Cancel'))
+    fireEvent.click(button('Keep draft'))
+    await flush()
+  }
+
+  it('is bodyChanged false for a save that only carries a staged action, and stays false when the draft is rewritten', async () => {
+    unknown()
+    await renderPage()
+    fireEvent.click(button('Edit'))
+    await flush()
+    fireEvent.click(within(correctionItem('c1')).getByRole('button', {name: 'Retire'}))
+    fireEvent.click(button('Save'))
+    await flush()
+
+    expect(sentSave().body).toBe(BODY)
+    expect(sentSave().transitions).toEqual([{id: 'c1', action: 'retire'}])
+    expect(pending()).toMatchObject({state: 'unknown', bodyChanged: false})
+
+    await keepDraftWhilePending()
+    expect(pending()).toMatchObject({state: 'unknown', bodyChanged: false})
+  })
+
+  it('is bodyChanged true for a save that changes the body, and stays true when the draft is rewritten', async () => {
+    unknown()
+    await renderPage()
+    await edit(GADGETS)
+    fireEvent.click(button('Save'))
+    fireEvent.click(button('Confirm save'))
+    await flush()
+
+    expect(pending()).toMatchObject({state: 'unknown', bodyChanged: true})
+
+    await keepDraftWhilePending()
+    expect(pending()).toMatchObject({state: 'unknown', bodyChanged: true})
+  })
+
+  it('keeps the value when the page is opened again from the stored record', async () => {
+    unknown()
+    await renderPage()
+    fireEvent.click(button('Edit'))
+    await flush()
+    fireEvent.click(within(correctionItem('c1')).getByRole('button', {name: 'Retire'}))
+    fireEvent.click(button('Save'))
+    await flush()
+    cleanup()
+    await flush()
+    expect(pending()).toMatchObject({bodyChanged: false})
+
+    await renderPage()
+    await keepDraftWhilePending()
+    expect(pending()).toMatchObject({state: 'unknown', bodyChanged: false})
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Marks and staged actions persist
 // ---------------------------------------------------------------------------

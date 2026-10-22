@@ -133,6 +133,8 @@ interface UnknownOperation {
   readonly operationId: string
   /** When the request was sent, in ms since the epoch. The lookup passes it as `startedAt`. */
   readonly sentAt: number
+  /** Whether the request carried a changed body, as it was sent. A save of staged actions alone does not. */
+  readonly bodyChanged: boolean
   /** False when the draft store could not hold the record, so only this session can resolve it. */
   readonly persisted: boolean
 }
@@ -160,7 +162,12 @@ function docFromDraft(draft: DraftRecord): Doc {
     unknownOp:
       draft.pending === null
         ? null
-        : {operationId: draft.pending.operationId, sentAt: draft.pending.sentAt, persisted: true},
+        : {
+            operationId: draft.pending.operationId,
+            sentAt: draft.pending.sentAt,
+            bodyChanged: draft.pending.bodyChanged,
+            persisted: true,
+          },
   }
 }
 
@@ -226,7 +233,12 @@ function draftInputOf(pageId: string, doc: Doc): DraftInput {
     pending:
       doc.unknownOp === null || !doc.unknownOp.persisted
         ? null
-        : {operationId: doc.unknownOp.operationId, sentAt: doc.unknownOp.sentAt, bodyChanged: true, state: 'unknown'},
+        : {
+            operationId: doc.unknownOp.operationId,
+            sentAt: doc.unknownOp.sentAt,
+            bodyChanged: doc.unknownOp.bodyChanged,
+            state: 'unknown',
+          },
   }
 }
 
@@ -994,7 +1006,7 @@ export function WikiEditSession(props: WikiEditSessionProps) {
       const marked = persisted ? await store.markPendingUnknown(pageId) : null
       if (!mountedRef.current) return
       const sentAt = marked?.ok && marked.value.pending !== null ? marked.value.pending.sentAt : startedAt
-      setDoc(current => (current === null ? current : {...current, unknownOp: {operationId, sentAt, persisted}}))
+      setDoc(current => (current === null ? current : {...current, unknownOp: {operationId, sentAt, bodyChanged: working.text !== working.base.text, persisted}}))
       setOutcome(display)
       return
     }
