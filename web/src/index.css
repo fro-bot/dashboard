@@ -2277,17 +2277,16 @@
 .wiki-page button:disabled,
 .wiki-orphaned-draft button:disabled { opacity: .55; cursor: not-allowed; }
 .wiki-edit-actions .wiki-save,
-.wiki-outcome-actions .wiki-action-save-again,
-.wiki-conflict-actions .wiki-action-overwrite {
+.wiki-outcome-actions .wiki-action-save-again {
   border-color: transparent;
   background: var(--color-cta);
   color: var(--frobot-white);
 }
 .wiki-edit-actions .wiki-save:hover:not(:disabled),
-.wiki-outcome-actions .wiki-action-save-again:hover:not(:disabled),
-.wiki-conflict-actions .wiki-action-overwrite:hover:not(:disabled) { background: var(--color-cta-hover); }
+.wiki-outcome-actions .wiki-action-save-again:hover:not(:disabled) { background: var(--color-cta-hover); }
 .wiki-edit-actions .wiki-cancel,
-.wiki-conflict-actions .wiki-keep-editing { color: var(--color-text-muted); }
+.wiki-conflict-actions .wiki-keep-editing,
+.wiki-conflict-actions .wiki-action-overwrite { color: var(--color-text-muted); }
 
 .wiki-note,
 .wiki-promotion,
@@ -2384,6 +2383,85 @@
 .wiki-conflict-corrections-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); margin-top: var(--space-4); }
 .wiki-conflict-corrections { min-width: 0; padding: var(--space-3); border: 1px solid var(--color-border-muted); border-radius: var(--radius-sm); overflow-wrap: anywhere; }
 .wiki-conflict-corrections li + li { margin-top: var(--space-2); }
+
+/* Page-merge decisions stay in document order so keyboard users can resolve one hunk at a time. */
+.wiki-merge { margin-block: var(--space-5) var(--space-4); }
+.wiki-merge > h4 { margin: 0 0 var(--space-2); font-size: var(--text-body-lg); line-height: 1.35; }
+.wiki-merge-summary { max-width: 70ch; margin: 0; color: var(--color-text-muted); line-height: 1.55; }
+.wiki-merge-progress {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.75rem;
+  margin: var(--space-3) 0 0;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border-accent);
+  border-radius: var(--radius-sm);
+  color: var(--color-accent);
+  font-size: var(--text-label);
+  font-weight: 650;
+}
+.wiki-merge[data-coarse="true"] .wiki-merge-summary {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 50%, var(--color-border-muted));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-warning) 6%, var(--color-surface));
+}
+.wiki-merge-hunks { display: grid; gap: var(--space-4); margin: var(--space-4) 0; padding: 0; list-style: none; }
+.wiki-merge-hunk {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  min-width: 0;
+  padding-block: var(--space-4);
+  border-top: 1px solid var(--color-border-muted);
+}
+.wiki-merge-hunk > h5 { grid-column: 1 / -1; margin: 0; font-size: var(--text-body); line-height: 1.4; }
+.wiki-merge-version { min-width: 0; margin: 0; }
+.wiki-merge-version h6 {
+  margin: 0 0 var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--text-label);
+  font-weight: 650;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+.wiki-merge-version .wiki-page-body { max-height: min(42vh, 28rem); }
+.wiki-merge-removed { margin: 0; color: var(--color-text-muted); font-size: var(--text-body-sm); line-height: 1.55; }
+.wiki-merge-hunk[data-resolution="mine"] .wiki-merge-mine-block .wiki-page-body,
+.wiki-merge-hunk[data-resolution="theirs"] .wiki-merge-theirs-block .wiki-page-body {
+  border-color: var(--color-border-accent);
+  background: color-mix(in srgb, var(--color-accent) 8%, var(--color-bg));
+}
+.wiki-merge-hunk[data-resolution="mine"] .wiki-merge-mine-block h6,
+.wiki-merge-hunk[data-resolution="theirs"] .wiki-merge-theirs-block h6 { color: var(--color-accent); }
+.wiki-merge-hunk[data-resolution="mine"] .wiki-merge-theirs-block .wiki-page-body,
+.wiki-merge-hunk[data-resolution="theirs"] .wiki-merge-mine-block .wiki-page-body {
+  background: color-mix(in srgb, var(--color-bg) 45%, var(--color-surface));
+  color: var(--color-text-muted);
+}
+.wiki-merge-resolution { grid-column: 1 / -1; margin: 0; color: var(--color-text-muted); font-size: var(--text-body-sm); line-height: 1.5; }
+.wiki-merge-hunk[data-resolution="mine"] .wiki-merge-resolution,
+.wiki-merge-hunk[data-resolution="theirs"] .wiki-merge-resolution { color: var(--color-success); }
+.wiki-merge-choices { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.wiki-merge .wiki-merge-accept[aria-pressed="true"] {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-bg);
+}
+.wiki-merge .wiki-merge-accept[aria-pressed="true"]:hover:not(:disabled) { background: var(--color-accent-hover); }
+.wiki-merge-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-top: var(--space-4); }
+.wiki-merge .wiki-merge-use { border-color: transparent; background: var(--color-cta); color: var(--frobot-white); }
+.wiki-merge .wiki-merge-use:hover:not(:disabled) { background: var(--color-cta-hover); }
+.wiki-merge-waiting { color: var(--color-text-muted); font-size: var(--text-body-sm); }
+.wiki-draft-merged {
+  border-color: color-mix(in srgb, var(--color-success) 45%, var(--color-border-muted));
+  background: color-mix(in srgb, var(--color-success) 6%, var(--color-surface));
+}
+.wiki-merge-marks-review {
+  border-color: color-mix(in srgb, var(--color-warning) 55%, var(--color-border-muted));
+  background: color-mix(in srgb, var(--color-warning) 7%, var(--color-surface));
+}
 
 .wiki-corrections { margin-top: var(--space-10); padding-top: var(--space-5); border-top: 1px solid var(--color-border); }
 .wiki-correction-list { display: grid; gap: var(--space-3); }
@@ -2558,6 +2636,9 @@
 .wiki-page-loading { color: var(--color-text-muted); }
 
 @media (max-width: 640px) {
+  header > div { flex-wrap: wrap; gap: var(--space-2) !important; }
+  header nav { min-width: 0; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-1) var(--space-2) !important; }
+  header nav > div:first-child button { padding-inline: var(--space-2) !important; }
   .wiki-list-heading { margin-bottom: var(--space-4); }
   .wiki-page-meta { margin-bottom: var(--space-4); }
   .wiki-page-row,
@@ -2587,6 +2668,16 @@
   .wiki-conflict[data-conflict-kind="page"] .wiki-conflict-version { display: block; width: 100%; }
   .wiki-conflict[data-conflict-kind="page"] .wiki-conflict-version + .wiki-conflict-version { margin-left: 0; }
   .wiki-conflict-corrections-compare { grid-template-columns: minmax(0, 1fr); }
+  .wiki-merge { margin-block: var(--space-4); }
+  .wiki-merge-hunk { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); padding-block: var(--space-3); }
+  .wiki-merge-hunk > h5,
+  .wiki-merge-resolution,
+  .wiki-merge-choices { grid-column: 1; }
+  .wiki-merge-version .wiki-page-body { max-height: min(38vh, 22rem); padding: var(--space-3); font-size: 0.8125rem; }
+  .wiki-merge-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .wiki-merge-choices button { width: 100%; min-width: 0; padding-inline: var(--space-2); }
+  .wiki-merge-actions { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-2); }
+  .wiki-merge-use { width: 100%; }
   .wiki-edit-actions,
   .wiki-outcome-actions,
   .wiki-conflict-actions { gap: var(--space-2); }
