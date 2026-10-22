@@ -236,7 +236,9 @@ describe('WikiEditor — corrections', () => {
     expect(items[0]).toHaveTextContent('Alpha builds widgets')
     expect(items[0]).toHaveTextContent('It builds gadgets now.')
     expect(items[0]).toHaveTextContent('marcus')
-    expect(items[0]).toHaveTextContent('2026-02-04T10:00:00Z')
+    expect(items[0]).toHaveTextContent('marcus, 2026-02-04')
+    expect(items[0]).not.toHaveTextContent('T10:00:00Z')
+    expect(within(section).getByText('2026-02-04')).toHaveAttribute('datetime', '2026-02-04T10:00:00Z')
     expect(items[0]).not.toHaveTextContent('Out of date')
 
     expect(items[1]).toHaveAttribute('data-status', 'superseded')

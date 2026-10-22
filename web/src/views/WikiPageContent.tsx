@@ -7,6 +7,11 @@
 import type {WikiCorrection} from '../api/wiki.ts'
 import {CORRECTION_STATUS_LABEL, PAGE_COPY} from '../wiki/copy.ts'
 
+/** The calendar date of an ISO timestamp, matching the list's date display. Anything else is shown as stored. */
+function recordedDate(value: string): string {
+  return /^\d{4}-\d{2}-\d{2}T/.test(value) ? value.slice(0, 10) : value
+}
+
 export function Corrections({corrections}: {readonly corrections: readonly WikiCorrection[]}) {
   return (
     <section
@@ -48,7 +53,8 @@ export function Corrections({corrections}: {readonly corrections: readonly WikiC
               {correction.attribution === null ? null : (
                 <p className="wiki-correction-attribution">
                   <span className="wiki-label">{PAGE_COPY.recordedLabel}: </span>
-                  {correction.attribution.actor}, <time dateTime={correction.attribution.recordedAt}>{correction.attribution.recordedAt}</time>
+                  {correction.attribution.actor},{' '}
+                  <time dateTime={correction.attribution.recordedAt}>{recordedDate(correction.attribution.recordedAt)}</time>
                 </p>
               )}
               {correction.supersededBy === null ? null : (
