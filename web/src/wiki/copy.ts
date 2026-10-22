@@ -169,6 +169,7 @@ export const PAGE_COPY = {
   noCorrections: 'No corrections recorded for this page.',
   readOnlyHeading: 'Read-only',
   stale: 'Out of date',
+  staleDetail: 'Its text no longer matches the page.',
   spanLabel: 'Corrected text',
   reasonLabel: 'Reason',
   recordedLabel: 'Recorded',
@@ -177,6 +178,40 @@ export const PAGE_COPY = {
   signIn: 'Sign in',
   notFoundHeadline: 'Page not found',
   notFoundDetail: 'No page has this ID. It may have been renamed or removed.',
+} as const
+
+/** The corrections panel, the marks of a draft, and the actions staged on corrections (U12). */
+export const CORRECTIONS_COPY = {
+  retire: 'Retire',
+  flag: 'Flag for reconfirmation',
+  reconfirm: 'Reconfirm',
+  undo: 'Undo',
+  stagedRetire: 'Will be retired when you save.',
+  stagedFlag: 'Will be flagged for reconfirmation when you save.',
+  stagedReconfirm: 'Will be reconfirmed when you save.',
+  marksHeading: 'New corrections in this draft',
+  marksNote: 'These spans are recorded as corrections when you save.',
+  jump: 'Jump to span',
+  keep: 'Keep',
+  remove: 'Remove',
+  markReview: 'Needs review. Keep it or remove it.',
+  markDetached: 'This span is no longer in the text. Remove the mark, or restore the text.',
+  marksBlocking: 'Keep or remove each mark that needs attention before you can save.',
+  stagedDroppedOne: 'One staged change was dropped because its correction changed or is no longer on the page.',
+  stagedDroppedMany: (count: number) =>
+    `${String(count)} staged changes were dropped because their corrections changed or are no longer on the page.`,
+} as const
+
+/** Marking a span of the draft as a correction (U12). */
+export const MARK_COPY = {
+  button: 'Mark as correction',
+  hint: 'Select text in the page text, then choose Mark as correction.',
+  marked: 'Marked as a correction.',
+  removed: 'Mark removed.',
+  kept: 'Mark kept.',
+  tooLong: 'That selection is too long to mark as one correction. Select a shorter span.',
+  tooMany: 'This draft already has the most marks a save can carry. Remove one first.',
+  duplicate: 'That span is already marked.',
 } as const
 
 export const EDITOR_COPY = {
@@ -244,6 +279,9 @@ export const EDITOR_COPY = {
   overwriteCancel: 'Keep comparing',
   rebased: 'Your draft now starts from the current version. Review it, then save.',
   findingShow: 'Show in text',
+  findingRetire: 'Retire this correction',
+  findingRetireStaged: 'A retire is staged for this correction. Save to apply it.',
+  findingCorrectionLabel: 'Correction',
   findingPageLevel: 'About the page as a whole',
   findingsHeading: 'Findings',
   savedRetrySent: 'The publication request was sent.',
@@ -255,12 +293,12 @@ export const EDITOR_COPY = {
 } as const
 
 /**
- * Only marked corrections survive the next regeneration of a page (KTD16). Marking is not
- * available yet, so every change is unmarked. A page without a `node_id` cannot be marked at all.
+ * Only marked corrections survive the next regeneration of a page (KTD16). A change inside a marked
+ * span is marked; any other change is unmarked. A page without a `node_id` cannot be marked at all.
  */
 export const UNMARKED_COPY = {
   noticeMarkedOnly:
-    'Only marked corrections survive the next regeneration of this page. Marking is not available yet, so changes made here will be lost then.',
+    'Only marked corrections survive the next regeneration of this page. Select text and choose Mark as correction to keep a change; changes that are not marked will be lost then.',
   noticeNoNodeId:
     'Edits to this page do not survive regeneration. This page cannot be marked, so changes made here will be lost the next time it is regenerated.',
   confirmHeading: 'Save unmarked changes?',
@@ -268,6 +306,8 @@ export const UNMARKED_COPY = {
     'Your changes are not marked as corrections. Unmarked changes will be lost at the next regeneration of this page.',
   confirmNoNodeId:
     'This page cannot be marked. Your changes will be saved, but edits to this page do not survive the next regeneration. Unmarked changes will be lost at the next regeneration.',
+  unavailable:
+    'The editor could not check which changes are marked: this change is too large to check. Saving asks you to confirm as if the changes were not marked.',
   confirm: 'Confirm save',
   cancel: 'Back to editing',
 } as const

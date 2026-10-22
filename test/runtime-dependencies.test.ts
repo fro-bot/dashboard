@@ -101,6 +101,23 @@ describe('server runtime dependencies', () => {
   })
 })
 
+describe('client-only packages', () => {
+  // Vite bundles these into the client, so the production image never needs them.
+  it('keeps node-diff3 out of the production dependencies, pinned exactly as a dev dependency', async () => {
+    const packageJson = JSON.parse(await readFile(join(repositoryRoot, 'package.json'), 'utf8')) as {
+      dependencies?: Record<string, string>
+      devDependencies?: Record<string, string>
+    }
+
+    expect(packageJson.dependencies).not.toHaveProperty('node-diff3')
+    expect(packageJson.devDependencies?.['node-diff3']).toBe('3.2.1')
+  })
+
+  it('is not imported by src/', async () => {
+    expect([...importedPackages(await readServerSources()).keys()]).not.toContain('node-diff3')
+  })
+})
+
 describe('server runtime dependencies (scan rules)', () => {
   const declared = {hono: '1', '@scope/pkg': '1'}
 

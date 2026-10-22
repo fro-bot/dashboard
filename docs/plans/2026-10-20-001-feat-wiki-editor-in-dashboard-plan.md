@@ -1205,7 +1205,7 @@ UI units (U9 to U13) state the behavior. `@designer` owns the visual and interac
 
 ### U12. Span marking, corrections panel, and marked-span detection
 
-- [ ] Landed
+- [x] Landed
 
 **Goal:** Mark corrected spans, list the page's corrections with status, stage retire and flag actions, and count only changes outside marked spans as unmarked.
 

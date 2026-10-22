@@ -136,6 +136,39 @@ retried in the request a few times. Every save then dispatches `promote-data`. I
 fails, the save reports "saved, not promoted" and the editor offers a retry that sends only the
 dispatch.
 
+### Marking corrections
+
+Only marked corrections survive the next regeneration of a page. In the editor, select text and
+choose **Mark as correction**. The button follows the text area's selection, so it works from the
+keyboard and by touch. A page without a `node_id` cannot be marked and says its edits will not
+survive regeneration.
+
+- A mark is a UTF-16 start and end plus the exact text with a short prefix and suffix. The text is what
+  the server stores. The offsets are hints that the editor keeps current as the draft changes.
+- A mark whose text has left the draft is *missing*. A mark flagged for review (set by a merge) is
+  *needs review*. Save waits until each is removed, or for a flagged mark, kept.
+- On Save, a changed draft is compared with the page it started from, line by line and then word by
+  word. A draft whose changes all fall inside marked spans saves without a question. A change
+  outside every mark, or a deletion with no mark on the text around it, asks for confirmation.
+  A save that only carries staged correction actions, with the body unchanged, skips the check.
+- The corrections panel lists the page's corrections with their status. **Retire** and **Flag for
+  reconfirmation** are offered on an active correction and **Reconfirm** on a flagged one. They are
+  staged in the draft, shown as staged, can be undone, and are committed with Save. A staged
+  action whose correction has changed or gone when the page is read again is dropped with a notice.
+- When a save is rejected because a marked correction is no longer in the page
+  (`correction-eroded`), the finding names the correction and offers **Retire this correction**.
+  Staging the retire lets the next save pass.
+
+Drafts are schema version 2. A version 1 draft is read as a version 2 draft with no marks and nothing
+staged, and is written as version 2 the next time it is saved to the device.
+
+Measured on a 512 KB page, detection of the marked spans takes about 50 ms for scattered edits and
+for a long run of edited lines (see `web/src/wiki/unmarked.measure.test.ts`). A word-level comparison
+of one very large block would hang the tab, so a block over `MAX_DIFF_AREA` (about 14,000 characters
+on each side, or a run of that many characters of edited lines that also adds or removes a line) is
+not compared. The editor then says it could not check which changes are marked, and Save asks for
+the unmarked-changes confirmation. A page rewritten whole, or a single 512 KB line, lands there.
+
 ### Two tabs on one page
 
 Editing the same page in two tabs at the same time is not supported. The tabs share one local draft

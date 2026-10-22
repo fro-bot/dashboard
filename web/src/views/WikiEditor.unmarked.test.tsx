@@ -1,6 +1,6 @@
 /**
- * The unmarked-change notice and the confirmation on Save (U11).
- * Until marking exists, every change to the text is unmarked.
+ * The unmarked-change notice and the confirmation on Save (U11). These drafts carry no marks, so
+ * every change to the text is unmarked. Marks are in `WikiEditor.marking.test.tsx`.
  */
 
 import {act, cleanup, fireEvent, render, screen, within} from '@testing-library/react'
@@ -93,14 +93,14 @@ async function startEditing(text = EDITED) {
 }
 
 describe('the unmarked-change notice', () => {
-  it('is visible while editing a markable page: only marked corrections survive, and marking is not available yet', async () => {
+  it('is visible while editing a markable page: only marked corrections survive, and how to mark', async () => {
     await renderPage()
     await startEditing()
 
     const notice = screen.getByTestId('wiki-unmarked-notice')
     expect(notice).toHaveAttribute('data-notice', 'marked-only')
     expect(notice).toHaveTextContent(/only marked corrections survive the next regeneration/iu)
-    expect(notice).toHaveTextContent(/marking is not available yet/iu)
+    expect(notice).toHaveTextContent(/mark as correction/iu)
   })
 
   it('is visible in the read-only view of a markable page', async () => {

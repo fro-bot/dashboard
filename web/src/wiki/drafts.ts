@@ -29,10 +29,17 @@
 import type {WikiCorrection} from '../api/wiki.ts'
 
 import {parseWikiCorrection} from '../api/wiki.ts'
+import {parseMarks, type Mark} from './marks.ts'
+import {parseStaged, type StagedAction} from './staged.ts'
 
 export const DRAFT_DB_NAME = 'fro-bot-wiki'
 export const DRAFT_STORE_NAME = 'drafts'
-export const DRAFT_SCHEMA_VERSION = 1
+/**
+ * Version 2 adds the draft's marks and staged correction actions. A version 1 record is read as a
+ * version 2 record with neither, and becomes version 2 on disk the next time it is written. The
+ * IndexedDB database itself is unchanged: both versions live in the same store.
+ */
+export const DRAFT_SCHEMA_VERSION = 2
 
 const DB_VERSION = 1
 
@@ -61,12 +68,22 @@ export interface DraftRecord {
   readonly baseText: string
   readonly correctionsBase: CorrectionsBase
   readonly draftText: string
+  /** The spans the operator marked as corrections in `draftText`. */
+  readonly marks: readonly Mark[]
+  /** Correction actions to commit with the next save. */
+  readonly staged: readonly StagedAction[]
   readonly updatedAt: number
   readonly pending: PendingOperation | null
 }
 
-/** What a caller supplies; the store stamps the schema version and update time. */
-export type DraftInput = Omit<DraftRecord, 'schemaVersion' | 'updatedAt'>
+/**
+ * What a caller supplies; the store stamps the schema version and update time. Marks and staged
+ * actions default to none.
+ */
+export type DraftInput = Omit<DraftRecord, 'schemaVersion' | 'updatedAt' | 'marks' | 'staged'> & {
+  readonly marks?: readonly Mark[]
+  readonly staged?: readonly StagedAction[]
+}
 
 export type DraftError =
   | {readonly kind: 'unavailable'}
@@ -169,8 +186,16 @@ function parseCorrectionsBase(value: unknown): CorrectionsBase | null {
   return {entries, digest: value.digest}
 }
 
+/** Marks and staged actions: absent from a version 1 record, required in version 2. */
+function parseWork(value: Record<string, unknown>): {marks: Mark[]; staged: StagedAction[]} | null {
+  if (value.schemaVersion === 1) return {marks: [], staged: []}
+  const marks = parseMarks(value.marks)
+  const staged = parseStaged(value.staged)
+  return marks === null || staged === null ? null : {marks, staged}
+}
+
 function parseRecord(value: unknown): DraftRecord | null {
-  if (!isRecord(value) || value.schemaVersion !== DRAFT_SCHEMA_VERSION) return null
+  if (!isRecord(value) || (value.schemaVersion !== 1 && value.schemaVersion !== DRAFT_SCHEMA_VERSION)) return null
   const {pageId, baseBlobSha, baseText, draftText, updatedAt} = value
   if (!isNonEmptyString(pageId) || !isNonEmptyString(baseBlobSha)) return null
   if (typeof baseText !== 'string' || typeof draftText !== 'string') return null
@@ -178,7 +203,8 @@ function parseRecord(value: unknown): DraftRecord | null {
 
   const correctionsBase = parseCorrectionsBase(value.correctionsBase)
   const pending = parsePending(value.pending)
-  if (correctionsBase === null || pending === undefined) return null
+  const work = parseWork(value)
+  if (correctionsBase === null || pending === undefined || work === null) return null
 
   return {
     schemaVersion: DRAFT_SCHEMA_VERSION,
@@ -187,6 +213,8 @@ function parseRecord(value: unknown): DraftRecord | null {
     baseText,
     correctionsBase,
     draftText,
+    marks: work.marks,
+    staged: work.staged,
     updatedAt,
     pending,
   }
@@ -370,7 +398,13 @@ export function createDraftStore(options: DraftStoreOptions = {}): DraftStore {
   }
 
   async function putDraft(input: DraftInput, putOptions?: PutOptions): Promise<DraftResult<DraftRecord>> {
-    const draft: DraftRecord = {...input, schemaVersion: DRAFT_SCHEMA_VERSION, updatedAt: now()}
+    const draft: DraftRecord = {
+      ...input,
+      marks: input.marks ?? [],
+      staged: input.staged ?? [],
+      schemaVersion: DRAFT_SCHEMA_VERSION,
+      updatedAt: now(),
+    }
     return transact<DraftRecord>('readwrite', (store, run, settle) => {
       run(store.get(draft.pageId), existing => {
         const stored = existing === undefined ? null : parseRecord(existing)

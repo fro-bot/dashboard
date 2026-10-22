@@ -27,7 +27,15 @@ import {
   type WikiCorrection,
   type WikiPage,
 } from '../api/wiki.ts'
-import {canWriteReasonCopy, EDITOR_COPY, PAGE_COPY, PAGE_TYPE_LABEL, UNMARKED_COPY} from '../wiki/copy.ts'
+import {
+  canWriteReasonCopy,
+  CORRECTIONS_COPY,
+  EDITOR_COPY,
+  MARK_COPY,
+  PAGE_COPY,
+  PAGE_TYPE_LABEL,
+  UNMARKED_COPY,
+} from '../wiki/copy.ts'
 import {
   sendWithPendingOperation,
   type CorrectionsBase,
@@ -37,6 +45,17 @@ import {
   type DraftStore,
 } from '../wiki/drafts.ts'
 import {DRAFT_DEBOUNCE_MS} from '../wiki/editor-timing.ts'
+import {
+  createMark,
+  keepMark,
+  locateMark,
+  markState,
+  rebaseMarks,
+  removeMark,
+  saveMarksOf,
+  type Mark,
+  type MarkRefusal,
+} from '../wiki/marks.ts'
 import {confirmLeaveWiki, registerNavigationGuard} from '../wiki/navigation-guard.ts'
 import {
   describeDispatchFailure,
@@ -50,10 +69,21 @@ import {
   type OutcomeDisplay,
 } from '../wiki/outcomes.ts'
 import {wikiSignInUrl} from '../wiki/session-recovery.ts'
-import {hasUnmarkedChanges} from '../wiki/unmarked.ts'
+import {
+  reconcileStaged,
+  stageAction,
+  transitionsOf,
+  undoStaged,
+  type StagedAction,
+  type StagedKind,
+} from '../wiki/staged.ts'
+import {checkUnmarkedChanges} from '../wiki/unmarked.ts'
 import {usePromotionPolling} from '../wiki/use-promotion-polling.ts'
 import {PromotionBanner} from './PromotionBanner.tsx'
-import {Corrections} from './WikiPageContent.tsx'
+import {WikiCorrections} from './WikiCorrections.tsx'
+
+/** The gate's finding for a marked correction that is no longer in the page. Its target is the correction ID. */
+const ERODED_FINDING = 'correction-eroded'
 
 export type OpenPromotion =
   | {readonly kind: 'loading'}
@@ -108,6 +138,10 @@ interface UnknownOperation {
 interface Doc {
   readonly text: string
   readonly base: Base
+  /** The spans marked as corrections in `text`. */
+  readonly marks: readonly Mark[]
+  /** Correction actions to commit with the next save. */
+  readonly staged: readonly StagedAction[]
   readonly unknownOp: UnknownOperation | null
 }
 
@@ -119,6 +153,8 @@ function docFromDraft(draft: DraftRecord): Doc {
       text: draft.baseText,
       correctionsBase: draft.correctionsBase,
     },
+    marks: draft.marks,
+    staged: draft.staged,
     unknownOp:
       draft.pending === null
         ? null
@@ -134,8 +170,15 @@ function docFromPage(page: WikiPage): Doc {
       text: page.body,
       correctionsBase: {entries: page.corrections, digest: page.correctionsBase},
     },
+    marks: [],
+    staged: [],
     unknownOp: null,
   }
+}
+
+/** The draft holds work the wiki does not have yet, other than an unconfirmed save. */
+function hasWork(doc: Doc): boolean {
+  return doc.text !== doc.base.text || doc.marks.length > 0 || doc.staged.length > 0
 }
 
 const WRITES_WITHHELD: DraftResult<never> = {ok: false, error: {kind: 'unavailable'}}
@@ -176,6 +219,8 @@ function draftInputOf(pageId: string, doc: Doc): DraftInput {
     baseText: doc.base.text,
     correctionsBase: doc.base.correctionsBase,
     draftText: doc.text,
+    marks: doc.marks,
+    staged: doc.staged,
     pending:
       doc.unknownOp === null || !doc.unknownOp.persisted
         ? null
@@ -211,6 +256,8 @@ interface Snapshot {
   readonly baseText: string
   readonly digest: string
   readonly text: string
+  /** The marked spans, so removing a mark makes it a different snapshot. */
+  readonly marks: string
 }
 
 function snapshotOf(doc: Doc): Snapshot {
@@ -219,6 +266,7 @@ function snapshotOf(doc: Doc): Snapshot {
     baseText: doc.base.text,
     digest: doc.base.correctionsBase.digest,
     text: doc.text,
+    marks: JSON.stringify(saveMarksOf(doc.text, doc.marks)),
   }
 }
 
@@ -229,7 +277,8 @@ function sameSnapshot(a: Snapshot | null, b: Snapshot | null): boolean {
     a.blobSha === b.blobSha &&
     a.baseText === b.baseText &&
     a.digest === b.digest &&
-    a.text === b.text
+    a.text === b.text &&
+    a.marks === b.marks
   )
 }
 
@@ -240,6 +289,18 @@ function sameSnapshot(a: Snapshot | null, b: Snapshot | null): boolean {
 type Mode = 'viewing' | 'editing' | 'conflict'
 type Phase = 'idle' | 'saving' | 'checking'
 type Note = 'kept' | 'kept-failed' | 'discard-kept-stored' | 'rebased' | null
+
+function droppedNoticeFor(count: number): string | null {
+  if (count === 0) return null
+  return count === 1 ? CORRECTIONS_COPY.stagedDroppedOne : CORRECTIONS_COPY.stagedDroppedMany(count)
+}
+
+const MARK_REFUSAL_COPY: Readonly<Record<MarkRefusal, string>> = {
+  empty: MARK_COPY.hint,
+  'too-long': MARK_COPY.tooLong,
+  'too-many': MARK_COPY.tooMany,
+  duplicate: MARK_COPY.duplicate,
+}
 
 /** What the operator has been told about a draft record that could not be read. */
 type UnreadableNotice = 'none' | 'present' | 'replaced' | 'resolved'
@@ -309,8 +370,12 @@ export function WikiEditSession(props: WikiEditSessionProps) {
   )
 
   const [initial] = useState(() => {
-    const doc = page.canWrite && props.draft !== null ? docFromDraft(props.draft) : null
-    return {doc, unknownOp: doc?.unknownOp ?? null}
+    const restored = page.canWrite && props.draft !== null ? docFromDraft(props.draft) : null
+    // The page has been read again since the draft was stored. An action staged on a correction that
+    // has gone, or changed, is dropped instead of being sent.
+    const reconciled = restored === null ? null : reconcileStaged(restored.staged, page.corrections)
+    const doc = restored === null || reconciled === null ? null : {...restored, staged: reconciled.kept}
+    return {doc, unknownOp: doc?.unknownOp ?? null, dropped: reconciled?.dropped.length ?? 0}
   })
 
   const [doc, setDoc, docRef] = useLatestState<Doc | null>(initial.doc)
@@ -334,6 +399,14 @@ export function WikiEditSession(props: WikiEditSessionProps) {
   const [confirmOpen, setConfirmOpen] = useState<Snapshot | null>(null)
   /** The operator confirmed unmarked changes for this snapshot, or null. */
   const [confirmed, setConfirmed] = useState<Snapshot | null>(null)
+  /** The open confirmation is for a change too large to check which parts are marked. */
+  const [confirmUnavailable, setConfirmUnavailable] = useState(false)
+  /** The corrections as the page last read them, or as a re-base found them. */
+  const [corrections, setCorrections] = useState<readonly WikiCorrection[]>(page.corrections)
+  const [droppedNotice, setDroppedNotice] = useState<string | null>(droppedNoticeFor(initial.dropped))
+  /** The text area's selection, kept so the Mark as correction button follows it. */
+  const [selection, setSelection] = useState({start: 0, end: 0})
+  const [markStatus, setMarkStatus] = useState<string | null>(null)
 
   const mountedRef = useRef(false)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -379,7 +452,7 @@ export function WikiEditSession(props: WikiEditSessionProps) {
     clearTimer()
     const current = docRef.current
     if (current === null) return true
-    if (current.text === current.base.text && current.unknownOp === null) {
+    if (!hasWork(current) && current.unknownOp === null) {
       // Abandoning this tab's own unknown save removes its marker with the record. Otherwise another
       // tab's marker is not ours to delete.
       const result = await store.deleteDraft(
@@ -426,9 +499,7 @@ export function WikiEditSession(props: WikiEditSessionProps) {
     }
   }, [])
 
-  const onTextChange = (value: string) => {
-    setDoc(current => (current === null ? current : {...current, text: value}))
-    setNote(null)
+  const scheduleDraftWrite = () => {
     clearTimer()
     timerRef.current = setTimeout(() => {
       timerRef.current = null
@@ -436,21 +507,46 @@ export function WikiEditSession(props: WikiEditSessionProps) {
     }, DRAFT_DEBOUNCE_MS)
   }
 
+  const onTextChange = (value: string) => {
+    // The marks follow the text through the edit.
+    setDoc(current => (current === null ? current : {...current, text: value, marks: rebaseMarks(current.marks, current.text, value)}))
+    setNote(null)
+    setMarkStatus(null)
+    scheduleDraftWrite()
+    syncSelection()
+  }
+
+  /** Change the marks or the staged actions of the draft. They are written like a text edit. */
+  const changeWork = (change: (current: Doc) => Doc) => {
+    setDoc(current => (current === null ? current : change(current)))
+    setNote(null)
+    scheduleDraftWrite()
+  }
+
   // -------------------------------------------------------------------------
   // Derived
   // -------------------------------------------------------------------------
 
-  const textChanged = doc !== null && doc.text !== doc.base.text
   const hasUnknown = doc?.unknownOp != null
-  const dirty = textChanged || hasUnknown
+  const pendingWork = doc !== null && hasWork(doc)
+  const dirty = pendingWork || hasUnknown
   const holding = dirty || phase === 'saving'
   const contractMismatch = !page.contract.ok && page.contract.kind === 'mismatch'
   const draftIsStale = doc !== null && doc.base.blobSha !== page.pageBlobSha
 
+  // Each mark is settled, or Save waits: a flagged mark must be kept or removed, and a mark whose
+  // text has left the draft must be removed.
+  const markRows = useMemo(
+    () => (doc === null ? [] : doc.marks.map(mark => ({mark, state: markState(doc.text, mark)}))),
+    [doc],
+  )
+  const marksUnsettled = markRows.some(row => row.state !== 'ok')
+
   const saveBlocked =
     mode !== 'editing' ||
     phase !== 'idle' ||
-    !textChanged ||
+    !pendingWork ||
+    marksUnsettled ||
     hasUnknown ||
     contractMismatch ||
     (outcome?.saveDisabled ?? false)
@@ -498,10 +594,135 @@ export function WikiEditSession(props: WikiEditSessionProps) {
   useEffect(() => {
     if (outcome?.kind !== 'rejected') return
     const first = outcome.findings.find(
-      finding => finding.target !== undefined && finding.target !== '' && (textareaRef.current?.value.includes(finding.target) ?? false),
+      finding =>
+        // An eroded-correction finding names a correction ID, not text of the page.
+        finding.kind !== ERODED_FINDING &&
+        finding.target !== undefined &&
+        finding.target !== '' &&
+        (textareaRef.current?.value.includes(finding.target) ?? false),
     )
     if (first?.target !== undefined) selectTarget(first.target)
   }, [outcome])
+
+  // -------------------------------------------------------------------------
+  // Marking
+  // -------------------------------------------------------------------------
+
+  /** Read the text area's selection. Called from every event that can change it. */
+  const syncSelection = () => {
+    const area = textareaRef.current
+    if (area === null) return
+    const next = {start: area.selectionStart, end: area.selectionEnd}
+    setSelection(current => (current.start === next.start && current.end === next.end ? current : next))
+  }
+  const syncSelectionRef = useRef(syncSelection)
+  syncSelectionRef.current = syncSelection
+
+  // Keyboard, pointer and touch each change the selection by a different event, and the browser's
+  // `select` event does not fire when a selection collapses. The button follows the live selection.
+  const editingSurface = mode === 'editing' && doc !== null
+  useEffect(() => {
+    const area = textareaRef.current
+    if (!editingSurface || area === null) return
+    const sync = () => {
+      syncSelectionRef.current()
+    }
+    // The document fires `selectionchange` for every selection on the page. Only the focused text
+    // area's selection matters here, and dragging a touch selection handle fires nothing else.
+    const syncFocused = () => {
+      if (document.activeElement === area) sync()
+    }
+    const events = ['select', 'keyup', 'mouseup', 'touchend', 'focus', 'blur'] as const
+    for (const name of events) area.addEventListener(name, sync)
+    document.addEventListener('selectionchange', syncFocused)
+    sync()
+    return () => {
+      for (const name of events) area.removeEventListener(name, sync)
+      document.removeEventListener('selectionchange', syncFocused)
+    }
+  }, [editingSurface])
+
+  const markingAvailable = markable && mode === 'editing' && phase === 'idle' && !hasUnknown
+  const canMarkSelection = markingAvailable && selection.end > selection.start
+
+  const markSelection = () => {
+    const area = textareaRef.current
+    const working = docRef.current
+    if (area === null || working === null || !markingAvailable) return
+    // The live selection decides, not the last one seen: it is what the operator is looking at.
+    const result = createMark(working.text, {start: area.selectionStart, end: area.selectionEnd}, working.marks)
+    if (!result.ok) {
+      setMarkStatus(MARK_REFUSAL_COPY[result.reason])
+      return
+    }
+    setMarkStatus(null)
+    setAnnouncement(MARK_COPY.marked)
+    changeWork(current => ({...current, marks: [...current.marks, result.mark]}))
+  }
+
+  const jumpToMark = (markId: string) => {
+    const area = textareaRef.current
+    const working = docRef.current
+    const mark = working?.marks.find(item => item.id === markId)
+    if (area === null || working === undefined || working === null || mark === undefined) return
+    const range = locateMark(working.text, mark)
+    if (range === null) return
+    area.focus()
+    area.setSelectionRange(range.start, range.end)
+    syncSelection()
+  }
+
+  const dropMark = (markId: string) => {
+    setAnnouncement(MARK_COPY.removed)
+    changeWork(current => ({...current, marks: removeMark(current.marks, markId)}))
+  }
+
+  const confirmMark = (markId: string) => {
+    setAnnouncement(MARK_COPY.kept)
+    changeWork(current => ({...current, marks: keepMark(current.marks, markId)}))
+  }
+
+  // -------------------------------------------------------------------------
+  // Staged correction actions
+  // -------------------------------------------------------------------------
+
+  const canStage = markable && mode === 'editing' && phase === 'idle' && !hasUnknown
+
+  const stage = (correction: WikiCorrection, action: StagedKind) => {
+    if (!canStage) return
+    setDroppedNotice(null)
+    changeWork(current => ({...current, staged: stageAction(current.staged, correction, action)}))
+  }
+
+  const undoStage = (correctionId: string) => {
+    if (!canStage) return
+    changeWork(current => ({...current, staged: undoStaged(current.staged, correctionId)}))
+  }
+
+  /**
+   * The corrections were read again: after the page reloads, or after a re-base. An action staged on a
+   * correction that has gone or changed is dropped with a notice, never sent.
+   */
+  const refreshCorrections = (next: readonly WikiCorrection[], target: Doc | null = docRef.current): Doc | null => {
+    setCorrections(next)
+    if (target === null) return null
+    const {kept, dropped} = reconcileStaged(target.staged, next)
+    if (dropped.length === 0) return target
+    setDroppedNotice(droppedNoticeFor(dropped.length))
+    return {...target, staged: kept}
+  }
+
+  const seenCorrectionsRef = useRef(page.corrections)
+  useEffect(() => {
+    if (seenCorrectionsRef.current === page.corrections) return
+    seenCorrectionsRef.current = page.corrections
+    const next = refreshCorrections(page.corrections)
+    if (next !== null && next !== docRef.current) {
+      setDoc(next)
+      scheduleDraftWrite()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page.corrections])
 
   // -------------------------------------------------------------------------
   // Promotion polling (after a save)
@@ -644,11 +865,13 @@ export function WikiEditSession(props: WikiEditSessionProps) {
         : {entries: conflict.corrections.current, digest: conflict.corrections.digest}
 
     // The page blob and the corrections base are re-based together, and the draft record stores both.
-    setDoc({
-      text: current.text,
+    // The corrections just changed, so a staged action that no longer applies is dropped.
+    const rebased: Doc = {
+      ...current,
       base: {blobSha: latest.pageBlobSha, text: latest.body, correctionsBase},
       unknownOp: null,
-    })
+    }
+    setDoc(refreshCorrections(correctionsBase.entries, rebased) ?? rebased)
     await persistNow({dropPending: true})
     if (!mountedRef.current) return
     setConflict(null)
@@ -690,7 +913,7 @@ export function WikiEditSession(props: WikiEditSessionProps) {
       {
         draft: {...draftInputOf(pageId, working), pending: null},
         operationId,
-        bodyChanged: true,
+        bodyChanged: working.text !== working.base.text,
         replaceUnreadable: draftUnreadable,
       },
       () =>
@@ -700,6 +923,8 @@ export function WikiEditSession(props: WikiEditSessionProps) {
           pageBlobSha: working.base.blobSha,
           correctionsBase: working.base.correctionsBase.digest,
           body: working.text,
+          marks: saveMarksOf(working.text, working.marks),
+          transitions: transitionsOf(working.staged),
         }),
     )
 
@@ -882,16 +1107,27 @@ export function WikiEditSession(props: WikiEditSessionProps) {
   // Render
   // -------------------------------------------------------------------------
 
-  // Save of a changed draft asks first, unless this exact base and text were already confirmed.
+  // Save of a changed draft asks first, unless this exact base, text and marks were already confirmed.
+  // A change too large to check is treated as unmarked: the question is asked, and says why.
   const requestSave = () => {
     const working = docRef.current
     if (working === null || saveBlocked) return
-    const unmarked = hasUnmarkedChanges({baseText: working.base.text, draftText: working.text})
-    if (unmarked && !alreadyConfirmed) {
-      setConfirmOpen(snapshotOf(working))
+    // Only the body is checked. A save with staged actions and an unchanged body has nothing to mark.
+    if (working.text === working.base.text || alreadyConfirmed) {
+      void save()
       return
     }
-    void save()
+    const result = checkUnmarkedChanges({
+      baseText: working.base.text,
+      draftText: working.text,
+      marks: saveMarksOf(working.text, working.marks),
+    })
+    if (result === 'marked') {
+      void save()
+      return
+    }
+    setConfirmUnavailable(result === 'unavailable')
+    setConfirmOpen(snapshotOf(working))
   }
 
   const confirmSave = () => {
@@ -984,6 +1220,7 @@ export function WikiEditSession(props: WikiEditSessionProps) {
 
       <p
         className={`wiki-note wiki-unmarked-notice wiki-unmarked-notice-${markable ? 'marked-only' : 'no-node-id'}`}
+        id="wiki-unmarked-notice"
         data-testid="wiki-unmarked-notice"
         data-notice={markable ? 'marked-only' : 'no-node-id'}
       >
@@ -1026,6 +1263,12 @@ export function WikiEditSession(props: WikiEditSessionProps) {
           copyStatus={copyStatus}
           onAction={runAction}
           onShowFinding={selectTarget}
+          corrections={corrections}
+          staged={doc?.staged ?? []}
+          canStage={canStage}
+          onRetire={correction => {
+            stage(correction, 'retire')
+          }}
         />
       )}
 
@@ -1109,6 +1352,25 @@ export function WikiEditSession(props: WikiEditSessionProps) {
             }}
           />
 
+          <div className="wiki-mark-controls" data-testid="wiki-mark-controls">
+            <button
+              type="button"
+              className="wiki-mark"
+              data-testid="wiki-mark-button"
+              aria-describedby="wiki-unmarked-notice"
+              disabled={!canMarkSelection}
+              onClick={markSelection}
+            >
+              {MARK_COPY.button}
+            </button>
+            {markable ? <span className="wiki-mark-hint">{MARK_COPY.hint}</span> : null}
+          </div>
+          {markStatus === null ? null : (
+            <p className="wiki-note wiki-mark-status" data-testid="wiki-mark-status" role="status">
+              {markStatus}
+            </p>
+          )}
+
           <div className="wiki-edit-actions">
             <button type="button" className="wiki-save" onClick={requestSave} disabled={saveBlocked}>
               {EDITOR_COPY.save}
@@ -1133,6 +1395,11 @@ export function WikiEditSession(props: WikiEditSessionProps) {
               <p id="wiki-unmarked-confirm-detail">
                 {markable ? UNMARKED_COPY.confirmMarkedOnly : UNMARKED_COPY.confirmNoNodeId}
               </p>
+              {confirmUnavailable ? (
+                <p className="wiki-note wiki-unmarked-unavailable" data-testid="wiki-unmarked-unavailable">
+                  {UNMARKED_COPY.unavailable}
+                </p>
+              ) : null}
               <button type="button" className="wiki-unmarked-confirm-yes" onClick={confirmSave}>
                 {UNMARKED_COPY.confirm}
               </button>
@@ -1198,7 +1465,19 @@ export function WikiEditSession(props: WikiEditSessionProps) {
         />
       ) : null}
 
-      <Corrections corrections={page.corrections} />
+      <WikiCorrections
+        corrections={corrections}
+        staged={doc?.staged ?? []}
+        marks={mode === 'editing' && markable ? markRows : []}
+        actions={editingSurface && markable}
+        busy={busy || hasUnknown}
+        droppedNotice={droppedNotice}
+        onStage={stage}
+        onUndo={undoStage}
+        onJumpToMark={jumpToMark}
+        onKeepMark={confirmMark}
+        onRemoveMark={dropMark}
+      />
     </article>
   )
 }
@@ -1292,6 +1571,10 @@ function OutcomePanel({
   copyStatus,
   onAction,
   onShowFinding,
+  corrections,
+  staged,
+  canStage,
+  onRetire,
 }: {
   readonly outcome: OutcomeDisplay
   readonly pageId: string
@@ -1300,6 +1583,10 @@ function OutcomePanel({
   readonly copyStatus: string | null
   readonly onAction: (action: OutcomeAction) => void
   readonly onShowFinding: (target: string) => void
+  readonly corrections: readonly WikiCorrection[]
+  readonly staged: readonly StagedAction[]
+  readonly canStage: boolean
+  readonly onRetire: (correction: WikiCorrection) => void
 }) {
   return (
     <div
@@ -1312,7 +1599,16 @@ function OutcomePanel({
       <h3>{outcome.headline}</h3>
       <p>{outcome.detail}</p>
 
-      {outcome.findings.length === 0 ? null : <Findings findings={outcome.findings} onShow={onShowFinding} />}
+      {outcome.findings.length === 0 ? null : (
+        <Findings
+          findings={outcome.findings}
+          onShow={onShowFinding}
+          corrections={corrections}
+          staged={staged}
+          canStage={canStage && !busy}
+          onRetire={onRetire}
+        />
+      )}
 
       {outcome.actions.length === 0 ? null : (
         <div className="wiki-outcome-actions">
@@ -1355,9 +1651,17 @@ function OutcomePanel({
 function Findings({
   findings,
   onShow,
+  corrections,
+  staged,
+  canStage,
+  onRetire,
 }: {
   readonly findings: readonly GateFinding[]
   readonly onShow: (target: string) => void
+  readonly corrections: readonly WikiCorrection[]
+  readonly staged: readonly StagedAction[]
+  readonly canStage: boolean
+  readonly onRetire: (correction: WikiCorrection) => void
 }) {
   return (
     <section className="wiki-findings" data-testid="wiki-findings" aria-labelledby="wiki-findings-heading">
@@ -1366,6 +1670,43 @@ function Findings({
         {findings.map((finding, index) => {
           const target = finding.target
           const located = target !== undefined && target !== ''
+          // An eroded correction is named by ID. Retiring it is the way to let the save through.
+          const eroded =
+            finding.kind === ERODED_FINDING && located
+              ? corrections.find(correction => correction.id === target)
+              : undefined
+          if (eroded !== undefined) {
+            const retireStaged = staged.some(item => item.correctionId === eroded.id && item.action === 'retire')
+            return (
+              <li
+                key={index}
+                className="wiki-finding wiki-finding-eroded"
+                data-testid="wiki-finding"
+                data-finding-kind={finding.kind}
+                data-located="true"
+              >
+                <p className="wiki-finding-message">{finding.message}</p>
+                <p className="wiki-finding-target">
+                  <span className="wiki-label">{EDITOR_COPY.findingCorrectionLabel}: </span>
+                  <q>{eroded.span.text}</q>
+                </p>
+                {retireStaged ? (
+                  <p className="wiki-finding-retire-staged">{EDITOR_COPY.findingRetireStaged}</p>
+                ) : eroded.status === 'active' ? (
+                  <button
+                    type="button"
+                    className="wiki-finding-retire"
+                    disabled={!canStage}
+                    onClick={() => {
+                      onRetire(eroded)
+                    }}
+                  >
+                    {EDITOR_COPY.findingRetire}
+                  </button>
+                ) : null}
+              </li>
+            )
+          }
           return (
             <li
               // Findings carry no ID, and their order is stable for one response.

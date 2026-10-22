@@ -10,6 +10,8 @@ import {
   type DraftStore,
   sendWithPendingOperation,
 } from './drafts.ts'
+import type {Mark} from './marks.ts'
+import type {StagedAction} from './staged.ts'
 import {createMemoryIdb, type MemoryIdb} from './test-support/memory-idb.ts'
 
 const OPERATION_ID = '00000000-0000-4000-8000-000000000001'
@@ -66,12 +68,14 @@ describe('draft round trip', () => {
     expect(saved.ok).toBe(true)
 
     expect(await mustLoad(store)).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       pageId: 'repos.acme--alpha',
       baseBlobSha: 'blob-bc079bf35740',
       baseText: '\n# acme/alpha\n\nAlpha builds widgets.\n',
       correctionsBase: {entries: [CORRECTION], digest: '84af704b511188e099d585af405ec64aa728d795249bc5cccdffcec5602b731f'},
       draftText: '\n# acme/alpha\n\nAlpha builds gadgets.\n',
+      marks: [],
+      staged: [],
       updatedAt: NOW,
       pending,
     })
@@ -212,7 +216,7 @@ describe('unreadable records', () => {
 
   it('reports a record from a newer schema version as unreadable, not as a draft', async () => {
     const {idb, store} = setup()
-    idb.plant({...input(), schemaVersion: 2, updatedAt: NOW, extra: 'future'})
+    idb.plant({...input(), marks: [], staged: [], schemaVersion: 3, updatedAt: NOW, extra: 'future'})
 
     expect(await store.getDraft('repos.acme--alpha')).toEqual({
       ok: false,
@@ -271,6 +275,165 @@ describe('unreadable records', () => {
 
     expect((await store.deleteDraft('repos.bad')).ok).toBe(true)
     expect(idb.records()).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Marks and staged actions (schema version 2)
+// ---------------------------------------------------------------------------
+
+const MARK: Mark = {
+  id: 'm1',
+  start: 21,
+  end: 28,
+  text: 'gadgets',
+  prefix: 'Alpha builds ',
+  suffix: '.\n',
+  needsReview: false,
+}
+
+const STAGED: StagedAction = {correctionId: 'c1', action: 'retire', from: 'active', spanText: 'Alpha builds widgets'}
+
+describe('marks and staged actions', () => {
+  it('stores and loads marks and staged actions', async () => {
+    const {store} = setup()
+    await store.putDraft(input({marks: [MARK, {...MARK, id: 'm2', needsReview: true}], staged: [STAGED]}))
+
+    const loaded = await mustLoad(store)
+    expect(loaded.marks).toEqual([MARK, {...MARK, id: 'm2', needsReview: true}])
+    expect(loaded.staged).toEqual([STAGED])
+  })
+
+  it('stores a draft given without marks or staged actions as having none', async () => {
+    const {idb, store} = setup()
+    await store.putDraft(input())
+
+    expect(idb.records()[0]).toMatchObject({schemaVersion: 2, marks: [], staged: []})
+  })
+
+  it('keeps marks and staged actions across a reload of the store', async () => {
+    const idb = createMemoryIdb()
+    await createDraftStore({indexedDB: idb.factory, now: () => NOW}).putDraft(input({marks: [MARK], staged: [STAGED]}))
+
+    const reopened = createDraftStore({indexedDB: idb.factory, now: () => NOW})
+    const loaded = await mustLoad(reopened)
+    expect(loaded.marks).toEqual([MARK])
+    expect(loaded.staged).toEqual([STAGED])
+  })
+
+  it('keeps them when the pending operation is marked unknown or cleared', async () => {
+    const {store} = setup()
+    const pending = {operationId: OPERATION_ID, sentAt: NOW, bodyChanged: true, state: 'sending'} as const
+    await store.putDraft(input({marks: [MARK], staged: [STAGED], pending}))
+
+    await store.markPendingUnknown('repos.acme--alpha')
+    expect((await mustLoad(store)).marks).toEqual([MARK])
+    await store.clearPendingOperation('repos.acme--alpha')
+    const loaded = await mustLoad(store)
+    expect(loaded.marks).toEqual([MARK])
+    expect(loaded.staged).toEqual([STAGED])
+  })
+
+  it.each([
+    ['marks that are not a list', {marks: 'x'}],
+    ['a mark with an empty text', {marks: [{...MARK, text: ''}]}],
+    ['a mark with an end before its start', {marks: [{...MARK, end: 3}]}],
+    ['two marks with one ID', {marks: [MARK, MARK]}],
+    ['staged actions that are not a list', {staged: {}}],
+    ['an unknown staged action', {staged: [{...STAGED, action: 'delete'}]}],
+    ['two actions for one correction', {staged: [STAGED, {...STAGED, action: 'flag'}]}],
+    ['missing marks', {marks: undefined}],
+    ['missing staged actions', {staged: undefined}],
+  ])('flags a version 2 record with %s as unreadable', async (_label, change) => {
+    const {idb, store} = setup()
+    idb.plant({...input(), marks: [], staged: [], schemaVersion: 2, updatedAt: NOW, ...change})
+
+    const loaded = await store.getDraft('repos.acme--alpha')
+
+    expect(loaded).toEqual({ok: false, error: {kind: 'unreadable', pageId: 'repos.acme--alpha'}})
+    expect(idb.records()).toHaveLength(1)
+  })
+})
+
+describe('a version 1 record', () => {
+  function plantV1(idb: MemoryIdb, change: Record<string, unknown> = {}): void {
+    idb.plant({...input(), schemaVersion: 1, updatedAt: NOW, ...change})
+  }
+
+  it('reads as a version 2 record with no marks and no staged actions', async () => {
+    const {idb, store} = setup()
+    plantV1(idb)
+
+    expect(await mustLoad(store)).toEqual({
+      schemaVersion: 2,
+      pageId: 'repos.acme--alpha',
+      baseBlobSha: 'blob-bc079bf35740',
+      baseText: '\n# acme/alpha\n\nAlpha builds widgets.\n',
+      correctionsBase: {entries: [CORRECTION], digest: '84af704b511188e099d585af405ec64aa728d795249bc5cccdffcec5602b731f'},
+      draftText: '\n# acme/alpha\n\nAlpha builds gadgets.\n',
+      marks: [],
+      staged: [],
+      updatedAt: NOW,
+      pending: null,
+    })
+  })
+
+  it('keeps its pending operation when it migrates', async () => {
+    const {idb, store} = setup()
+    const pending = {operationId: OPERATION_ID, sentAt: NOW - 5, bodyChanged: true, state: 'unknown'} as const
+    plantV1(idb, {pending})
+
+    expect((await mustLoad(store)).pending).toEqual(pending)
+  })
+
+  it('is listed as a draft, not as unreadable', async () => {
+    const {idb, store} = setup()
+    plantV1(idb)
+
+    const listed = await store.listDrafts()
+    expect(listed.ok && listed.value.drafts.map(d => [d.pageId, d.schemaVersion])).toEqual([['repos.acme--alpha', 2]])
+    expect(listed.ok && listed.value.unreadable).toEqual([])
+  })
+
+  it('is replaced by a version 2 record on the next write, with no need to replace an unreadable one', async () => {
+    const {idb, store} = setup()
+    plantV1(idb)
+
+    const written = await store.putDraft(input({draftText: 'edited', marks: [MARK]}))
+
+    expect(written.ok).toBe(true)
+    expect(idb.records()).toHaveLength(1)
+    expect(idb.records()[0]).toMatchObject({schemaVersion: 2, draftText: 'edited', marks: [MARK], staged: []})
+  })
+
+  it('keeps its pending operation when marked unknown, and writes the record as version 2', async () => {
+    const {idb, store} = setup()
+    const pending = {operationId: OPERATION_ID, sentAt: NOW - 5, bodyChanged: true, state: 'sending'} as const
+    plantV1(idb, {pending})
+
+    await store.markPendingUnknown('repos.acme--alpha')
+
+    expect(idb.records()[0]).toMatchObject({schemaVersion: 2, marks: [], staged: [], pending: {state: 'unknown'}})
+  })
+
+  it('still follows the unreadable policy when it is malformed', async () => {
+    const {idb, store} = setup()
+    plantV1(idb, {draftText: 42})
+
+    expect(await store.getDraft('repos.acme--alpha')).toEqual({
+      ok: false,
+      error: {kind: 'unreadable', pageId: 'repos.acme--alpha'},
+    })
+    expect(idb.records()).toHaveLength(1)
+  })
+
+  it('does not take marks from a version 1 record that carries a stray marks field', async () => {
+    const {idb, store} = setup()
+    plantV1(idb, {marks: [MARK], staged: [STAGED]})
+
+    const loaded = await mustLoad(store)
+    expect(loaded.marks).toEqual([])
+    expect(loaded.staged).toEqual([])
   })
 })
 

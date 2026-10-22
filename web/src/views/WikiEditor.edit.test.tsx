@@ -773,7 +773,7 @@ describe('WikiEditor — an unreadable draft', () => {
     await advance(DRAFT_DEBOUNCE_MS)
 
     expect(idb.records()).toHaveLength(1)
-    expect(idb.records()[0]).toMatchObject({pageId: PAGE_ID, schemaVersion: 1, draftText: 'my words'})
+    expect(idb.records()[0]).toMatchObject({pageId: PAGE_ID, schemaVersion: 2, draftText: 'my words'})
     expect(screen.queryByTestId('wiki-draft-unreadable')).toBeNull()
     expect(screen.getByTestId('wiki-draft-unreadable-replaced')).toHaveTextContent(/was replaced/iu)
     expect(screen.queryByTestId('wiki-draft-local-failed')).toBeNull()

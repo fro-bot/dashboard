@@ -169,6 +169,8 @@ describe('save — the happy path', () => {
       pageBlobSha: 'blob-1',
       correctionsBase: 'digest-1',
       body: EDITED,
+      marks: [],
+      transitions: [],
     })
     expect(uuidSpy).toHaveBeenCalledTimes(1)
   })
