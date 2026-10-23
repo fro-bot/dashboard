@@ -9,8 +9,11 @@
     },
     {
       // The packageManager pin, the Dockerfile oven/bun image and its digest move together.
+      // config:best-practices sets a 3-day age only for the npm datasource, so the image needs the same floor
+      // or it ships ahead of the pin and fails test/bun-version-pin.test.ts.
       "matchDepNames": ["bun", "oven/bun"],
-      "groupName": "Bun"
+      "groupName": "Bun",
+      "minimumReleaseAge": "3 days"
     }
   ],
   "postUpgradeTasks": {
