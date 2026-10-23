@@ -484,7 +484,7 @@ The Fro Bot App installation on `fro-bot/.github` must grant contents write. `do
 
 - [x] Passed
 
-After the infra handoff and PR 4, the operator saved one real edit and merged the promotion PR. The commit landed on `data` signed and verified as `fro-bot[bot]` with both trailers, changing only the page and `knowledge/log.md`. Its `promote-data` dispatch started `merge-data`, and every privacy check passed. This proves the real credential, the ruleset bypass, commit verification, the dispatch and the privacy checks end to end. A save that writes `knowledge/corrections.yaml` has not yet run against GitHub.
+After the infra handoff and PR 4, the operator saved one real edit and merged the promotion PR. The commit landed on `data` signed and verified as `fro-bot[bot]` with both trailers, changing only the page and `knowledge/log.md`. Its `promote-data` dispatch started `merge-data`, and every privacy check passed. This proves the real credential, the ruleset bypass, commit verification, the dispatch and the privacy checks end to end. A later marked save wrote a new `knowledge/corrections.yaml` entry for the page's `node_id` in the same verified commit as the page and log.
 
 ---
 

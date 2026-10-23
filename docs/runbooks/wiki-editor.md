@@ -406,4 +406,5 @@ The first real save passed. Its commit landed on `data` signed and verified as `
 both trailers, and changed only the page and `knowledge/log.md`. Its `promote-data` dispatch
 started `merge-data`, every privacy check passed, and the promotion PR merged by hand. That proves
 the real credential, the `data` ruleset bypass, commit verification, the dispatch and the privacy
-checks together. A save that writes `knowledge/corrections.yaml` has not yet run against GitHub.
+checks together. A later marked save wrote a new `knowledge/corrections.yaml` entry for the page's
+`node_id` in the same verified commit as the page and log.
