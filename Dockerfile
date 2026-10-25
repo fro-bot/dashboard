@@ -2,7 +2,7 @@
 # Digest-pinned multi-arch index. The bare version tag must equal package.json
 # packageManager (enforced by test/bun-version-pin.test.ts). Only the bun binary
 # is copied out of this stage; nothing from it reaches the runtime image.
-FROM oven/bun:1.4.3@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598 AS bun
+FROM oven/bun:1.4.4@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS bun
 
 # ── Builder stage ─────────────────────────────────────────────────────────────
 FROM node:24-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS builder
