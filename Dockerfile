@@ -5,7 +5,7 @@
 FROM oven/bun:1.4.4@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS bun
 
 # ── Builder stage ─────────────────────────────────────────────────────────────
-FROM node:24-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS builder
+FROM node:24-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a AS builder
 
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 
@@ -26,7 +26,7 @@ ENV VITE_DASHBOARD_VERSION=$DASHBOARD_VERSION
 RUN bun run build:web
 
 # ── Production dependency stage ───────────────────────────────────────────────
-FROM node:24-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS prod-deps
+FROM node:24-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a AS prod-deps
 
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 
@@ -40,7 +40,7 @@ COPY package.json bun.lock bunfig.toml ./
 RUN bun install --production --frozen-lockfile --ignore-scripts
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-FROM node:24-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea
+FROM node:24-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a
 
 WORKDIR /app
 
