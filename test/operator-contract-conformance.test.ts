@@ -20,6 +20,7 @@ import type {
   OperatorPushTriggerKind,
   OperatorRunStatus,
   OperatorUpdateFailureReason,
+  OperatorWaitReason,
   OperatorWebStatus,
   QuestionDecisionInvalidReason,
   QuestionDecisionResponse,
@@ -88,6 +89,7 @@ import {
   UPDATE_FAILURE_REASONS,
 } from '../src/gateway/operator-contract/index.ts'
 import {isOperatorFailureKind, OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
+import {isOperatorWaitReason, OPERATOR_WAIT_REASONS} from '../src/gateway/operator-contract/wait-reason.ts'
 
 // ---------------------------------------------------------------------------
 // Type-level assignability: dashboard types ↔ canonical contract types
@@ -1764,6 +1766,46 @@ describe('parseRunSummary — prompt', () => {
   it('omits the key when the input has no prompt', () => {
     const result = parseRunSummary(base)
     expect(result.success && Object.hasOwn(result.data, 'prompt')).toBe(false)
+  })
+})
+
+// Exhaustive over the union: adding or removing a member without updating this record fails tsc.
+const WAIT_REASON_RECORD = {
+  'agent-working': true,
+  'awaiting-reply': true,
+  'awaiting-background-task': true,
+  'confirming-completion': true,
+} satisfies Record<OperatorWaitReason, true>
+
+describe('wait reason vocabulary', () => {
+  it('the exported list equals the union, with no duplicates', () => {
+    expect([...OPERATOR_WAIT_REASONS].toSorted()).toEqual(Object.keys(WAIT_REASON_RECORD).toSorted())
+    expect(new Set(OPERATOR_WAIT_REASONS).size).toBe(OPERATOR_WAIT_REASONS.length)
+  })
+
+  it('the guard accepts every wire value', () => {
+    for (const value of OPERATOR_WAIT_REASONS) expect(isOperatorWaitReason(value), value).toBe(true)
+  })
+
+  it('the guard rejects prototype names, near misses and non-strings', () => {
+    for (const value of ['toString', 'constructor', '__proto__', 'hasOwnProperty', '', 'Agent-Working', 'future-reason']) {
+      expect(isOperatorWaitReason(value), value).toBe(false)
+    }
+    for (const value of [undefined, null, 1, true, {}, ['agent-working']]) {
+      expect(isOperatorWaitReason(value), JSON.stringify(value)).toBe(false)
+    }
+  })
+})
+
+describe('parseRunSummary — waitReason', () => {
+  it('drops a waitReason key on a run row: the summary has no such field', () => {
+    const row = {runId: 'run-1', repo: 'fro-bot/agent', status: 'running', createdAt: '2026-06-01T00:00:00.000Z', waitReason: 'agent-working'}
+    const result = parseRunSummary(row)
+    expect(result.success).toBe(true)
+    expect(result.success && Object.hasOwn(result.data, 'waitReason')).toBe(false)
+    const list = parseRunsListResponse({runs: [row]})
+    expect(list.success).toBe(true)
+    expect(list.success && list.data.runs.some(run => Object.hasOwn(run, 'waitReason'))).toBe(false)
   })
 })
 

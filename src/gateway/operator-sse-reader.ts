@@ -30,6 +30,7 @@ import {isOperatorProviderFailureReason} from './operator-contract/provider-fail
 import {parseQuestionFrame} from './operator-contract/question-frame.ts'
 import {isOperatorFailureKind} from './operator-contract/run-status.ts'
 import {OPERATOR_CONTRACT_VERSION} from './operator-contract/version.ts'
+import {isOperatorWaitReason} from './operator-contract/wait-reason.ts'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -192,6 +193,10 @@ function parseSseRecord(record: string): SseParseResult | null {
       isOperatorProviderFailureReason(candidate.providerFailureReason)
         ? candidate.providerFailureReason
         : undefined
+    // waitReason follows the same rule and is meaningful only on a `running` status; on any other status,
+    // or for an unknown or non-string value, it is omitted and the frame is kept.
+    const waitReason =
+      candidate.status === 'running' && isOperatorWaitReason(candidate.waitReason) ? candidate.waitReason : undefined
     // checkoutProvenance and checkoutPreparation follow the same rule: parsed
     // field-by-field by the vendored validators; malformed or absent values
     // become absent and never reject the frame. No caps or sanitizing here —
@@ -213,6 +218,7 @@ function parseSseRecord(record: string): SseParseResult | null {
           stale: candidate.stale,
           ...(failureKind === undefined ? {} : {failureKind}),
           ...(providerFailureReason === undefined ? {} : {providerFailureReason}),
+          ...(waitReason === undefined ? {} : {waitReason}),
           ...(checkoutProvenance === undefined ? {} : {checkoutProvenance}),
           ...(checkoutPreparation === undefined ? {} : {checkoutPreparation}),
         },

@@ -21,6 +21,10 @@ inlined boundary types for RunPhase/Surface/RunState).
   `isOperatorProviderFailureReason`, a `Set`-backed membership guard for untrusted input, in the
   same way `run-status.ts` keeps `isOperatorFailureKind`. Upstream's internal-reason mapping and
   projection helpers are gateway-side and are omitted.
+- `wait-reason.ts` — vendored from the operator-contract barrel, wire values only:
+  `OPERATOR_WAIT_REASONS` and `OperatorWaitReason`. The dashboard adds `isOperatorWaitReason`, a
+  `Set`-backed membership guard for untrusted input (the upstream guard has the same shape). The
+  mapping from the gateway's internal completion-gate codes is gateway-side and is omitted.
 - `provenance.ts` — vendored from the operator-contract barrel, whole: it keeps
   upstream's types and parsers (`parseOperatorCheckoutProvenance`,
   `parseOperatorCheckoutPreparation`) as-is. Beyond the comment rewording below,
@@ -90,6 +94,9 @@ inlined boundary types for RunPhase/Surface/RunState).
 - `run-status.ts` also adds `providerFailureReason` to `OperatorRunStatus`. The server status-frame
   reader copies it under the same rule as the summary: a known value on a `FAILED` phase with
   `failureKind` `session-error`, otherwise omitted.
+- `run-status.ts` also adds `waitReason` to `OperatorRunStatus`. The server status-frame reader copies
+  it only when the status is `running` and the value is a known wire reason; on any other status, or
+  for an unknown or non-string value, it is omitted and the frame is kept. `RunSummary` never carries it.
 - `sse-frames.ts` — dashboard-authored; upstream has no matching file. It types the named
   events that `packages/gateway/src/web/sse/run-stream-route.ts` writes on the run stream
   (`ready`, `status`, `reset`, `output`, `approval`, `question`). `ResetReason` copies the union
@@ -134,6 +141,8 @@ The following upstream exports are omitted because they depend on upstream-only 
 - `toOperatorProviderFailureReason`, `parseOperatorProviderFailureReason`, `projectProviderFailureReason`,
   the internal-reason mapping and the details key (`provider-failure-reason.ts`) — require `RunPhase` from
   `@fro-bot/runtime` and the gateway's internal reason type from `../execute/`.
+- `DRAIN_REJECT_CODE_TO_WAIT_REASON` and `toOperatorWaitReason` (`wait-reason.ts`) — require the gateway's
+  `DrainRejectCode` from `../execute/drain-completion.js`.
 
 The PUBLIC frozen types (OperatorDecisionState, OperatorWebStatus, OperatorRunStatus,
 OperatorSessionInfo, OperatorCsrfToken, OperatorOk, OperatorError, OperatorIdentity,
@@ -151,4 +160,6 @@ preparation types) are all present and correct.
 - `launch-prompt.ts`: `import type {Surface} from '@fro-bot/runtime'` → removed (projection helper omitted)
 - `provider-failure-reason.ts`: `import type {RunPhase} from '@fro-bot/runtime'` and
   `import type {ProviderFailureReason} from '../execute/provider-failure.js'` → removed (mapping and projection helpers omitted)
+- `wait-reason.ts`: `import type {DrainRejectCode} from '../execute/drain-completion.js'` → removed (mapping helpers omitted)
 - `run-status.ts` and `run-summary.ts`: `import type {OperatorProviderFailureReason} from './provider-failure-reason.js'` → `./provider-failure-reason.ts`
+- `run-status.ts`: `import type {OperatorWaitReason} from './wait-reason.js'` → `./wait-reason.ts`

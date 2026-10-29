@@ -17,6 +17,7 @@ import type {Logger} from '../src/logger.ts'
 import {describe, expect, it, vi} from 'vitest'
 import {OPERATOR_PROVIDER_FAILURE_REASONS} from '../src/gateway/operator-contract/provider-failure-reason.ts'
 import {OPERATOR_CONTRACT_VERSION} from '../src/gateway/operator-contract/version.ts'
+import {OPERATOR_WAIT_REASONS} from '../src/gateway/operator-contract/wait-reason.ts'
 import {FIXTURE_RUN_ID_FOR_TESTS, FIXTURE_SCENARIO_NAMES, serializeScenarioToSse} from '../src/gateway/operator-fixture-sse.ts'
 import {createOperatorSseReader, MAX_SSE_BUFFER_BYTES, parseSseChunk} from '../src/gateway/operator-sse-reader.ts'
 
@@ -2674,6 +2675,61 @@ describe('parseSseChunk — providerFailureReason', () => {
     const data = parseStatusData(failed({providerFailureReason: 'unclassified', prompt: 'fixture prompt'}))
     expect(data?.providerFailureReason).toBe('unclassified')
     expect(Object.hasOwn(data ?? {}, 'prompt')).toBe(false)
+  })
+})
+
+describe('parseSseChunk — waitReason', () => {
+  const running = (overrides: Record<string, unknown> = {}) =>
+    statusPayload({phase: 'EXECUTING', status: 'running', ...overrides})
+  const hasWaitReason = (data: ReturnType<typeof parseStatusData>) => Object.hasOwn(data ?? {}, 'waitReason')
+
+  it.each(OPERATOR_WAIT_REASONS)('keeps "%s" on a running frame', waitReason => {
+    const data = parseStatusData(running({waitReason}))
+    expect(data?.status).toBe('running')
+    expect(data?.waitReason).toBe(waitReason)
+  })
+
+  it('omits an unknown, wrongly cased or prototype-key reason and keeps the frame', () => {
+    const values = ['future-reason', '', 'Agent-Working', 'agent working', '__proto__', 'toString', 'constructor']
+    for (const waitReason of values) {
+      const data = parseStatusData(running({waitReason}))
+      expect(data, waitReason).toBeDefined()
+      expect(data?.status, waitReason).toBe('running')
+      expect(hasWaitReason(data), waitReason).toBe(false)
+    }
+  })
+
+  it('omits a non-string reason and keeps the frame', () => {
+    for (const waitReason of [1, null, true, ['agent-working'], {}, {reason: 'agent-working'}]) {
+      const data = parseStatusData(running({waitReason}))
+      expect(data, JSON.stringify(waitReason)).toBeDefined()
+      expect(hasWaitReason(data), JSON.stringify(waitReason)).toBe(false)
+    }
+  })
+
+  it('omits a known reason on every status other than running and keeps the frame', () => {
+    const cases = [
+      {phase: 'PENDING', status: 'queued'},
+      {phase: 'PENDING', status: 'blocked'},
+      {phase: 'EXECUTING', status: 'waiting_for_approval'},
+      {phase: 'EXECUTING', status: 'waiting_for_question'},
+      {phase: 'COMPLETED', status: 'succeeded'},
+      {phase: 'FAILED', status: 'failed'},
+      {phase: 'CANCELLED', status: 'cancelled'},
+    ]
+    for (const overrides of cases) {
+      for (const waitReason of OPERATOR_WAIT_REASONS) {
+        const data = parseStatusData(statusPayload({...overrides, waitReason}))
+        expect(data?.status, `${overrides.status}/${waitReason}`).toBe(overrides.status)
+        expect(hasWaitReason(data), `${overrides.status}/${waitReason}`).toBe(false)
+      }
+    }
+  })
+
+  it('parses a running frame with no reason as before', () => {
+    const data = parseStatusData(running())
+    expect(data?.status).toBe('running')
+    expect(hasWaitReason(data)).toBe(false)
   })
 })
 

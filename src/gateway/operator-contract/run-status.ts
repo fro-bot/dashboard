@@ -13,6 +13,7 @@
 
 import type {OperatorCheckoutPreparation, OperatorCheckoutProvenance} from './provenance.ts'
 import type {OperatorProviderFailureReason} from './provider-failure-reason.ts'
+import type {OperatorWaitReason} from './wait-reason.ts'
 
 // ---------------------------------------------------------------------------
 // Inlined boundary types from @fro-bot/runtime (minimal, frozen literals only)
@@ -114,6 +115,14 @@ export interface OperatorRunStatus {
    * reached EXECUTING, one that predates this field, or a malformed stored value.
    */
   readonly checkoutPreparation?: OperatorCheckoutPreparation
+  /**
+   * Why a draining run has not finished yet: a closed enum with no raw text. Present only on a `running` status,
+   * and only while the completion gate is declining the run; absent on every other status (approval and question
+   * waits take precedence, terminal runs never carry it). Not derived from `RunState` and never stored: it is an
+   * in-memory overlay on a live run, so a client that reconnects reads it fresh. Consumers must tolerate a value they
+   * do not recognise and treat absence as "no detail".
+   */
+  readonly waitReason?: OperatorWaitReason
 }
 
 // ---------------------------------------------------------------------------
