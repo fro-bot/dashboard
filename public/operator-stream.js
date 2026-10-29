@@ -32,7 +32,7 @@ import {formatRelativeTime, normalizeIsoTimestamp} from './operator-time.js'
 // ---------------------------------------------------------------------------
 
 /** Contract version this client expects on the ready frame. */
-export const PINNED_CONTRACT_VERSION = '1.13.0'
+export const PINNED_CONTRACT_VERSION = '1.14.0'
 
 /** Base delay in milliseconds for exponential backoff. */
 export const RETRY_BASE_MS = 1000
@@ -235,6 +235,15 @@ const VALID_PROVIDER_FAILURE_REASONS = new Set([
   'provider-rejected-request',
   'unclassified',
 ])
+
+/**
+ * Allowlisted OperatorWaitReason values — out-of-set values normalize to absent.
+ * Mirrors src/gateway/operator-contract/wait-reason.ts OPERATOR_WAIT_REASONS. Membership is a Set check
+ * after a `typeof` string check, so prototype names and non-strings never match.
+ */
+const VALID_WAIT_REASONS = Object.freeze(
+  new Set(['agent-working', 'awaiting-reply', 'awaiting-background-task', 'confirming-completion']),
+)
 
 /**
  * Dashboard-owned display labels for known failure reasons — render labels from
@@ -845,6 +854,12 @@ export function parseSseFrame(record) {
       VALID_PROVIDER_FAILURE_REASONS.has(parsed.providerFailureReason)
         ? parsed.providerFailureReason
         : undefined
+    // waitReason follows the same soft rule and is meaningful only on a `running` status; on any other
+    // status, or for an unknown or non-string value, it is omitted and the frame is kept.
+    const waitReason =
+      parsed.status === 'running' && typeof parsed.waitReason === 'string' && VALID_WAIT_REASONS.has(parsed.waitReason)
+        ? parsed.waitReason
+        : undefined
     // checkoutProvenance / checkoutPreparation follow the same soft rule: validated
     // field by field, capped and sanitized, closed into a DTO. Invalid or absent →
     // omitted. They never fail the status frame.
@@ -864,6 +879,7 @@ export function parseSseFrame(record) {
           stale: parsed.stale,
           ...(failureKind === undefined ? {} : {failureKind}),
           ...(providerFailureReason === undefined ? {} : {providerFailureReason}),
+          ...(waitReason === undefined ? {} : {waitReason}),
           ...(checkoutProvenance === undefined ? {} : {checkoutProvenance}),
           ...(checkoutPreparation === undefined ? {} : {checkoutPreparation}),
         },
@@ -1258,7 +1274,7 @@ export function nextStreamState(current, event) {
       if (current.connection !== 'live') {
         return current
       }
-      const {runId, status, phase, startedAt, stale, failureKind, providerFailureReason, checkoutProvenance, checkoutPreparation} =
+      const {runId, status, phase, startedAt, stale, failureKind, providerFailureReason, waitReason, checkoutProvenance, checkoutPreparation} =
         event.data
       const isTerminal = TERMINAL_STATUSES.has(status)
       // Use a null-prototype object to guard against __proto__ key pollution.
@@ -1305,6 +1321,13 @@ export function nextStreamState(current, event) {
         // A non-terminal frame preserves whatever the prior entry carried (spread above).
         ...(isTerminal ? {cancelInFlight: false} : {}),
         ...(reasonLabel === undefined ? {} : {reasonLabel}),
+      }
+      // The wait reason is transient: every status frame sets it from the frame or removes it, so it is never
+      // inherited from the previous entry through the spread above.
+      if (waitReason === undefined) {
+        delete nextEntry.waitReason
+      } else {
+        nextEntry.waitReason = waitReason
       }
       // Checkout fields: latest VALID value wins, per field. An absent or invalid value
       // (the parser omitted it) keeps whatever is stored — including on the terminal frame.
@@ -1572,6 +1595,7 @@ export function nextStreamState(current, event) {
                   ? {}
                   : {questionOpen: new Map(), questionClaimedExempt: new Set()}),
               }
+          delete terminalEntry.waitReason
           if (typeof terminalEntry.outputSeq !== 'number') {
             terminalEntry.outputUnavailable = true
           }
@@ -1582,8 +1606,17 @@ export function nextStreamState(current, event) {
             shouldReconnect: false,
           }
         }
+        // The run's state is unknown from here, so a stored wait reason is dropped with it; the next
+        // status frame sets it again if it still applies.
+        let runs = current.runs
+        if (runEntry?.waitReason !== undefined) {
+          const withoutWaitReason = {...runEntry}
+          delete withoutWaitReason.waitReason
+          runs = Object.assign(Object.create(null), current.runs, {[resetRunId]: withoutWaitReason})
+        }
         return {
           ...current,
+          runs,
           snapshotMissing: Object.assign(Object.create(null), current.snapshotMissing, {[resetRunId]: true}),
         }
       }
