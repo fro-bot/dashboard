@@ -24,11 +24,14 @@ import type {
   QuestionDecisionResponse,
 } from './operator-contract/question-frame.ts'
 import type {OperatorFailureKind} from './operator-contract/run-status.ts'
+import type {OperatorWaitReason} from './operator-contract/wait-reason.ts'
 import {OPERATOR_CONTRACT_VERSION} from './operator-contract/version.ts'
 import {
+  FIXTURE_HARNESS_APPROVAL_REQUEST_ID,
   FIXTURE_KNOWN_FAILURE_REASON,
   FIXTURE_UNKNOWN_FAILURE_REASON,
   FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON,
+  FIXTURE_UNKNOWN_WAIT_REASON,
 } from './operator-fixtures.ts'
 
 /** Canonical scenario names. Code-safe: lowercase with underscores, no spaces. */
@@ -160,6 +163,14 @@ export const FIXTURE_SCENARIO_NAMES = {
   provider_failure_unknown_reason: 'provider_failure_unknown_reason',
   /** session-error with no providerFailureReason: the generic session-error label. */
   provider_failure_no_reason: 'provider_failure_no_reason',
+
+  // -- Wait reasons: a draining `running` run carries `waitReason` on its status frames. --
+  /** Paced running frames cycle through the four known reasons, then none, then output and terminal succeeded. */
+  wait_reason_draining: 'wait_reason_draining',
+  /** A running frame with a reason, an open approval, then waiting_for_approval with no reason; settling it sends running with a reason again. */
+  wait_reason_with_approval: 'wait_reason_with_approval',
+  /** A held-open running frame with a visibly synthetic wait reason outside the known set: the frame is kept, the field dropped. */
+  wait_reason_unknown: 'wait_reason_unknown',
 } as const
 
 /** Union of all canonical scenario name values. */
@@ -223,6 +234,9 @@ export type ProviderFailureScenarioName =
   | 'provider_failure_unknown_reason'
   | 'provider_failure_no_reason'
 
+/** The scenarios whose running status frames carry a `waitReason`. */
+export type WaitReasonScenarioName = 'wait_reason_draining' | 'wait_reason_with_approval' | 'wait_reason_unknown'
+
 const FIXTURE_RUN_ID_MALFORMED = 'run-fixture-malformed-001'
 
 /**
@@ -259,6 +273,8 @@ function readyFrame(contractVersion: string): string {
 interface CheckoutFrameFields {
   /** Emitted verbatim: a known reason, or a synthetic out-of-set value for the unknown-reason scenario. */
   readonly providerFailureReason?: string
+  /** Emitted verbatim on the status frame: a known wait reason, or a synthetic out-of-set value for the unknown-value scenario. */
+  readonly waitReason?: string
   readonly checkoutProvenance?: OperatorCheckoutProvenance
   readonly checkoutPreparation?: OperatorCheckoutPreparation
   /** Emitted as `checkoutPreparation` verbatim, untyped: only for scenarios that violate the contract on purpose. */
@@ -283,6 +299,7 @@ function statusFrame(
     stale: false,
     ...(failureKind === undefined ? {} : {failureKind}),
     ...(checkout.providerFailureReason === undefined ? {} : {providerFailureReason: checkout.providerFailureReason}),
+    ...(checkout.waitReason === undefined ? {} : {waitReason: checkout.waitReason}),
     ...(checkout.checkoutProvenance === undefined ? {} : {checkoutProvenance: checkout.checkoutProvenance}),
     ...(checkout.checkoutPreparation === undefined ? {} : {checkoutPreparation: checkout.checkoutPreparation}),
     ...(checkout.rawCheckoutPreparation === undefined ? {} : {checkoutPreparation: checkout.rawCheckoutPreparation}),
@@ -1110,11 +1127,15 @@ export function fixtureQuestionScript(scenarioName: string): FixtureQuestionScri
 
 /** True when the scenario's stream ends open, with no terminal frame, as the gateway's does for a live run. */
 export function isHeldOpenScenario(scenarioName: string): boolean {
+  const waitReasonSpec = waitReasonScenarioSpec(scenarioName)
+  if (waitReasonSpec !== undefined) return waitReasonSpec.holdOpen
   return isQuestionScenarioName(scenarioName) && QUESTION_SCENARIO_SPECS[scenarioName].holdOpen
 }
 
 /** True when the scenario's run has no open approval prompt, so the harness approval list is empty. */
 export function isNoApprovalScenario(scenarioName: string): boolean {
+  const waitReasonSpec = waitReasonScenarioSpec(scenarioName)
+  if (waitReasonSpec !== undefined) return waitReasonSpec.noApproval === true
   return isQuestionScenarioName(scenarioName) && QUESTION_SCENARIO_SPECS[scenarioName].noApproval === true
 }
 
@@ -1259,8 +1280,141 @@ function isMarkdownScenarioName(name: string): name is MarkdownScenarioName {
   return Object.hasOwn(MARKDOWN_SCENARIO_SPECS, name)
 }
 
+// ---------------------------------------------------------------------------
+// Wait reason scenarios
+//
+// Wire shape is the gateway's (contract 1.14.0): `waitReason` rides on a `running` status frame while the
+// completion gate declines a draining run, and a status frame goes out only when the status or the reason
+// changes. An approval or question wait replaces the status and carries no reason: the gateway sends
+// `waiting_for_approval` without one, and sends `running` again, with a reason if the run is still draining,
+// once the approval settles. Each row reads `running` before the stream is opened, like a list read just
+// before the run started draining, so the card streams live.
+// ---------------------------------------------------------------------------
+
+const WAIT_REASON_STARTED_AT = '2026-10-29T10:00:00Z'
+
+/** Pause between draining frames: long enough to read each label in a browser before the next arrives. */
+const WAIT_REASON_DRAINING_PACE_MS = 2500
+
+/** Pause between the approval scenario's frames. */
+const WAIT_REASON_APPROVAL_PACE_MS = 2000
+
+/** The reasons the draining scenario cycles through, in the order the frames carry them. */
+const WAIT_REASON_DRAINING_SEQUENCE = [
+  'agent-working',
+  'awaiting-reply',
+  'awaiting-background-task',
+  'confirming-completion',
+] as const satisfies readonly OperatorWaitReason[]
+
+/** The reason the approval scenario reports before the approval opens and again once it settles. */
+const WAIT_REASON_APPROVAL_REASON = 'awaiting-background-task' satisfies OperatorWaitReason
+
+function waitReasonRunningFrame(runId: string, waitReason?: string): string {
+  return statusFrame(
+    runId,
+    'running',
+    'EXECUTING',
+    WAIT_REASON_STARTED_AT,
+    undefined,
+    waitReason === undefined ? {} : {waitReason},
+  )
+}
+
+function buildWaitReasonDrainingScenario(runId: string): string {
+  return (
+    readyFrame(OPERATOR_CONTRACT_VERSION) +
+    WAIT_REASON_DRAINING_SEQUENCE.map(waitReason => waitReasonRunningFrame(runId, waitReason)).join('') +
+    // The gate stops declining: the reason clears while the run is still running.
+    waitReasonRunningFrame(runId) +
+    outputFrame(runId, '[Fixture output — synthetic run result]', false, 0) +
+    outputFrame(runId, '[Fixture output — synthetic run result (final)]', true, 1) +
+    statusFrame(runId, 'succeeded', 'COMPLETED', WAIT_REASON_STARTED_AT)
+  )
+}
+
+function buildWaitReasonWithApprovalScenario(runId: string): string {
+  return (
+    readyFrame(OPERATOR_CONTRACT_VERSION) +
+    waitReasonRunningFrame(runId, WAIT_REASON_APPROVAL_REASON) +
+    approvalOpenFrame(runId, FIXTURE_HARNESS_APPROVAL_REQUEST_ID, 'shell', '[fixture command — synthetic]') +
+    // The approval wait replaces the status, so this frame carries no reason.
+    statusFrame(runId, 'waiting_for_approval', 'EXECUTING', WAIT_REASON_STARTED_AT)
+  )
+}
+
+/** What the stream sends once the harness approval is settled: the settle frame, then `running` with a reason again. */
+function buildWaitReasonApprovalSettled(runId: string): string {
+  return (
+    approvalSettleFrame(runId, FIXTURE_HARNESS_APPROVAL_REQUEST_ID) +
+    waitReasonRunningFrame(runId, WAIT_REASON_APPROVAL_REASON)
+  )
+}
+
+function buildWaitReasonUnknownScenario(runId: string): string {
+  return readyFrame(OPERATOR_CONTRACT_VERSION) + waitReasonRunningFrame(runId, FIXTURE_UNKNOWN_WAIT_REASON)
+}
+
+interface WaitReasonScenarioSpec {
+  /** Milliseconds between frames; absent when the bytes are sent at once. */
+  readonly paceMs?: number
+  /** The stream ends open, as the gateway's does for a run that is not finished. */
+  readonly holdOpen: boolean
+  /** The harness approval list for the run is empty. */
+  readonly noApproval?: true
+  readonly build: (runId: string) => string
+  /** Bytes a held-open stream sends when the harness approval is settled. */
+  readonly onApprovalSettled?: (runId: string) => string
+}
+
+const WAIT_REASON_SCENARIO_SPECS: Readonly<Record<WaitReasonScenarioName, WaitReasonScenarioSpec>> = {
+  wait_reason_draining: {
+    paceMs: WAIT_REASON_DRAINING_PACE_MS,
+    holdOpen: false,
+    noApproval: true,
+    build: buildWaitReasonDrainingScenario,
+  },
+  wait_reason_with_approval: {
+    paceMs: WAIT_REASON_APPROVAL_PACE_MS,
+    holdOpen: true,
+    build: buildWaitReasonWithApprovalScenario,
+    onApprovalSettled: buildWaitReasonApprovalSettled,
+  },
+  wait_reason_unknown: {
+    holdOpen: true,
+    noApproval: true,
+    build: buildWaitReasonUnknownScenario,
+  },
+}
+
+/** Rows for the recent-runs list: one per wait reason scenario, all `running` and none carrying a wait reason. */
+export const FIXTURE_WAIT_REASON_SCENARIO_ROWS: readonly {
+  readonly scenario: WaitReasonScenarioName
+  readonly summaryStatus: 'running'
+}[] = (Object.keys(WAIT_REASON_SCENARIO_SPECS) as WaitReasonScenarioName[]).map(scenario => ({
+  scenario,
+  summaryStatus: 'running',
+}))
+
+function isWaitReasonScenarioName(name: string): name is WaitReasonScenarioName {
+  return Object.hasOwn(WAIT_REASON_SCENARIO_SPECS, name)
+}
+
+function waitReasonScenarioSpec(name: string): WaitReasonScenarioSpec | undefined {
+  return isWaitReasonScenarioName(name) ? WAIT_REASON_SCENARIO_SPECS[name] : undefined
+}
+
+/**
+ * The bytes a held-open stream sends when the harness approval is settled, or undefined for a scenario that sends
+ * nothing then.
+ */
+export function fixtureApprovalSettleBytes(scenarioName: string, runId: string): string | undefined {
+  return isWaitReasonScenarioName(scenarioName) ? WAIT_REASON_SCENARIO_SPECS[scenarioName].onApprovalSettled?.(runId) : undefined
+}
+
 /** Milliseconds to wait between frames when the scenario's stream is paced, or undefined when it is sent at once. */
 export function fixtureStreamPaceMs(scenarioName: string): number | undefined {
+  if (isWaitReasonScenarioName(scenarioName)) return WAIT_REASON_SCENARIO_SPECS[scenarioName].paceMs
   return isMarkdownScenarioName(scenarioName) ? MARKDOWN_SCENARIO_SPECS[scenarioName].paceMs : undefined
 }
 
@@ -1278,8 +1432,16 @@ const QUESTION_SCENARIO_BUILDERS = Object.fromEntries(
   ]),
 ) as Readonly<Record<QuestionScenarioName, (activeRunId: string) => string>>
 
+const WAIT_REASON_SCENARIO_BUILDERS = Object.fromEntries(
+  (Object.keys(WAIT_REASON_SCENARIO_SPECS) as WaitReasonScenarioName[]).map(scenario => [
+    scenario,
+    WAIT_REASON_SCENARIO_SPECS[scenario].build,
+  ]),
+) as Readonly<Record<WaitReasonScenarioName, (activeRunId: string) => string>>
+
 const SCENARIO_BUILDERS: Readonly<Record<FixtureScenarioName, (activeRunId: string) => string>> = {
   ...CHECKOUT_SCENARIO_BUILDERS,
+  ...WAIT_REASON_SCENARIO_BUILDERS,
   ...QUESTION_SCENARIO_BUILDERS,
   ...MARKDOWN_SCENARIO_BUILDERS,
   ...PROVIDER_FAILURE_SCENARIO_BUILDERS,

@@ -290,7 +290,7 @@ The gateway caches the overlaid status, wait reason included, and emits a status
 
 **Verification:** The label follows the decision table above, and no path leaves it painted on a non-running, closed or collapsed card.
 
-- [ ] **Unit 4: Fixture scenarios**
+- [x] **Unit 4: Fixture scenarios**
 
 **Goal:** Every label transition can be checked in a browser against the fixture harness.
 

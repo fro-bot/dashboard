@@ -366,6 +366,9 @@ describe('Operator — fixture scenario selector', () => {
         'provider_failure_unclassified',
         'provider_failure_unknown_reason',
         'provider_failure_no_reason',
+        'wait_reason_draining',
+        'wait_reason_with_approval',
+        'wait_reason_unknown',
       ].sort(),
     )
   })

@@ -14,11 +14,13 @@ import {describe, expect, it} from 'vitest'
 import {OPERATOR_LAUNCH_PROMPT_MAX_LENGTH} from '../src/gateway/operator-contract/launch-prompt.ts'
 import {OPERATOR_PROVIDER_FAILURE_REASONS} from '../src/gateway/operator-contract/provider-failure-reason.ts'
 import {OPERATOR_FAILURE_KINDS} from '../src/gateway/operator-contract/run-status.ts'
+import {OPERATOR_WAIT_REASONS} from '../src/gateway/operator-contract/wait-reason.ts'
 import {
   FIXTURE_APPROVAL_SCENARIO_ROWS,
   FIXTURE_PROVIDER_FAILURE_SCENARIO_ROWS,
   FIXTURE_QUESTION_SCENARIO_ROWS,
   FIXTURE_SCENARIO_NAMES,
+  FIXTURE_WAIT_REASON_SCENARIO_ROWS,
   fixtureQuestionScript,
   serializeScenarioToSse,
 } from '../src/gateway/operator-fixture-sse.ts'
@@ -29,6 +31,7 @@ import {
   FIXTURE_PROMPT_MARKDOWN,
   FIXTURE_UNKNOWN_FAILURE_REASON,
   FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON,
+  FIXTURE_UNKNOWN_WAIT_REASON,
 } from '../src/gateway/operator-fixtures.ts'
 
 const FIXTURE_FILES = [
@@ -545,11 +548,58 @@ describe('fixture no-leak guard — provider failure reasons', () => {
       for (const status of statuses) {
         expect(status.runId).toBe(providerRunIdFor(row.scenario))
         expect(String(status.entityRef)).toMatch(/^fixture-/)
-        const allowed = new Set(['entityRef', 'phase', 'runId', 'stale', 'startedAt', 'status', 'surface', 'failureKind', 'providerFailureReason'])
+        const allowed = new Set(['entityRef', 'phase', 'runId', 'stale', 'startedAt', 'status', 'surface', 'failureKind', 'providerFailureReason', 'waitReason'])
         for (const key of Object.keys(status)) expect(allowed.has(key), `${row.scenario}: ${key}`).toBe(true)
       }
       expect(sse, row.scenario).not.toContain('"prompt"')
     }
+  })
+})
+
+describe('fixture no-leak guard — wait reasons', () => {
+  const KNOWN_WAIT_REASONS = new Set<string>(OPERATOR_WAIT_REASONS)
+  const waitRunIdFor = (scenario: string): string => `run-fixture-index-${scenario.replaceAll('_', '-')}`
+
+  it('every waitReason literal in the fixture files is a known wire value or fixture-prefixed', () => {
+    const WAIT_REASON_LITERAL_PATTERN = /waitReason:\s*['"]([^'"]+)['"]/g
+    for (const filePath of FIXTURE_FILES) {
+      const source = readFixtureFile(filePath)
+      for (const match of source.matchAll(WAIT_REASON_LITERAL_PATTERN)) {
+        const value = match[1] ?? ''
+        expect(KNOWN_WAIT_REASONS.has(value) || value.startsWith('fixture-'), `waitReason literal "${value}" in ${filePath}`).toBe(true)
+      }
+    }
+  })
+
+  it('the unknown wait reason constant is fixture-prefixed, outside the known set, and trips no forbidden pattern', () => {
+    expect(FIXTURE_UNKNOWN_WAIT_REASON.startsWith('fixture-')).toBe(true)
+    expect(KNOWN_WAIT_REASONS.has(FIXTURE_UNKNOWN_WAIT_REASON)).toBe(false)
+    for (const [label, pattern] of FORBIDDEN_PATTERNS) {
+      expect(pattern.test(FIXTURE_UNKNOWN_WAIT_REASON), label).toBe(false)
+    }
+  })
+
+  it('the wait reason scenarios emit only the bound run ID and synthetic status fields, plus the reason when set', () => {
+    expect(FIXTURE_WAIT_REASON_SCENARIO_ROWS).toHaveLength(3)
+    for (const row of FIXTURE_WAIT_REASON_SCENARIO_ROWS) {
+      const sse = serializeScenarioToSse(row.scenario, waitRunIdFor(row.scenario))
+      const statuses = sse
+        .split('\n\n')
+        .filter(record => record.startsWith('event: status'))
+        .map(record => JSON.parse(record.split('data: ')[1] ?? '{}') as Record<string, unknown>)
+      expect(statuses.length, row.scenario).toBeGreaterThan(0)
+      for (const status of statuses) {
+        expect(status.runId).toBe(waitRunIdFor(row.scenario))
+        expect(String(status.entityRef)).toMatch(/^fixture-/)
+        const allowed = new Set(['entityRef', 'phase', 'runId', 'stale', 'startedAt', 'status', 'surface', 'waitReason'])
+        for (const key of Object.keys(status)) expect(allowed.has(key), `${row.scenario}: ${key}`).toBe(true)
+      }
+      expect(sse, row.scenario).not.toContain('"prompt"')
+    }
+  })
+
+  it('no row carries a waitReason', () => {
+    for (const row of FIXTURE_WAIT_REASON_SCENARIO_ROWS) expect('waitReason' in row, row.scenario).toBe(false)
   })
 })
 

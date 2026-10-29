@@ -132,6 +132,18 @@ export const FIXTURE_UNKNOWN_FAILURE_REASON = 'fixture-unrecognized-reason'
  */
 export const FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON = 'fixture-unrecognized-provider-reason'
 
+/**
+ * A visibly synthetic, fixture-prefixed `waitReason` outside the known set. Proves an unrecognized wait reason
+ * is dropped with the frame kept and never reaches the DOM.
+ */
+export const FIXTURE_UNKNOWN_WAIT_REASON = 'fixture-unknown-reason'
+
+/**
+ * The request ID of the one approval the harness lists for a run. A scenario whose stream opens an approval
+ * uses it, so the stream and the approvals list name the same request.
+ */
+export const FIXTURE_HARNESS_APPROVAL_REQUEST_ID = 'req-fixture-harness-001'
+
 // ---------------------------------------------------------------------------
 // Launch prompt fixtures — synthetic text for the `prompt` field on run-summary rows
 // ---------------------------------------------------------------------------

@@ -26,6 +26,8 @@ import {
   FIXTURE_PROVIDER_FAILURE_SCENARIO_ROWS,
   FIXTURE_QUESTION_SCENARIO_ROWS,
   FIXTURE_SCENARIO_NAMES,
+  FIXTURE_WAIT_REASON_SCENARIO_ROWS,
+  fixtureApprovalSettleBytes,
   fixtureQuestionScript,
   fixtureStreamPaceMs,
   isHeldOpenScenario,
@@ -34,6 +36,7 @@ import {
 } from '../gateway/operator-fixture-sse.ts'
 import {
   FIXTURE_CSRF,
+  FIXTURE_HARNESS_APPROVAL_REQUEST_ID,
   FIXTURE_KNOWN_FAILURE_REASON,
   FIXTURE_PROMPT_AT_LIMIT,
   FIXTURE_PROMPT_HTML,
@@ -51,7 +54,7 @@ const FIXTURE_REPOS = [
   {owner: 'fixture-org', repo: 'fixture-repo-2'},
 ]
 
-const FIXTURE_APPROVAL = {requestID: 'req-fixture-harness-001', permission: 'tool_use', command: 'bash'}
+const FIXTURE_APPROVAL = {requestID: FIXTURE_HARNESS_APPROVAL_REQUEST_ID, permission: 'tool_use', command: 'bash'}
 
 // Sorted newest-first; updatedAt absent on some entries to exercise the optional field.
 const FIXTURE_BASE_RUN_SUMMARIES: readonly RunSummary[] = [
@@ -151,6 +154,7 @@ const FIXTURE_SCENARIO_ROWS: readonly FixtureScenarioRow[] = [
   ...FIXTURE_APPROVAL_SCENARIO_ROWS,
   ...FIXTURE_MARKDOWN_SCENARIO_ROWS,
   ...FIXTURE_PROVIDER_FAILURE_SCENARIO_ROWS,
+  ...FIXTURE_WAIT_REASON_SCENARIO_ROWS,
 ]
 
 const FIXTURE_SCENARIO_RUN_SUMMARIES: readonly RunSummary[] = FIXTURE_SCENARIO_ROWS.map((row, index) => ({
@@ -287,11 +291,15 @@ function heldOpenStream(bytes: string, signal: AbortSignal): ReadableStream<Uint
   })
 }
 
+function splitSseRecords(bytes: string): string[] {
+  return bytes.split('\n\n').filter(record => record !== '').map(record => `${record}\n\n`)
+}
+
 // The records one at a time, `paceMs` apart, then the end of the stream: a run that streams its answer in pieces.
 // Ends early on client abort. The bytes are the same as when sent at once.
 function pacedStream(bytes: string, paceMs: number, signal: AbortSignal): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
-  const records = bytes.split('\n\n').filter(record => record !== '').map(record => `${record}\n\n`)
+  const records = splitSseRecords(bytes)
   let index = 0
   let timer: ReturnType<typeof setTimeout> | undefined
   return new ReadableStream<Uint8Array>({
@@ -317,6 +325,87 @@ function pacedStream(bytes: string, paceMs: number, signal: AbortSignal): Readab
     },
     cancel() {
       clearTimeout(timer)
+    },
+  })
+}
+
+// Per run, what settling the run's harness approval does to its open paced-then-held stream. Set while a stream
+// is open, removed when it ends, and replaced when the run's stream is opened again.
+const approvalSettleHooks = new Map<string, () => void>()
+
+// The records one at a time, `paceMs` apart, then silence with the stream held open, as the gateway's is for a run
+// that is not finished. Settling the run's harness approval sends `onSettle` once: at once when the paced records are
+// out, or right after they are if the approval was settled while they were still going. Ends on client abort, on
+// cancel, or at the cap.
+function pacedThenHeldStream(
+  runId: string,
+  bytes: string,
+  paceMs: number,
+  onSettle: string | undefined,
+  signal: AbortSignal,
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+  const records = splitSseRecords(bytes)
+  let index = 0
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let closed = false
+  let pacing = true
+  let settleRequested = false
+  let settleSent = false
+  let controllerRef: ReadableStreamDefaultController<Uint8Array> | undefined
+
+  const sendSettle = (): void => {
+    if (closed || settleSent || onSettle === undefined) return
+    settleSent = true
+    controllerRef?.enqueue(encoder.encode(onSettle))
+  }
+  const hook = (): void => {
+    if (pacing) settleRequested = true
+    else sendSettle()
+  }
+  const close = (): void => {
+    if (closed) return
+    closed = true
+    clearTimeout(timer)
+    if (approvalSettleHooks.get(runId) === hook) approvalSettleHooks.delete(runId)
+    controllerRef?.close()
+  }
+  const sendNext = (): void => {
+    if (closed) return
+    const record = records[index]
+    if (record === undefined) {
+      pacing = false
+      if (settleRequested) sendSettle()
+      timer = setTimeout(close, FIXTURE_HELD_OPEN_MS)
+      timer.unref()
+      return
+    }
+    index++
+    controllerRef?.enqueue(encoder.encode(record))
+    // The ready and status records go out at once; every later record waits.
+    if (index > 1) {
+      timer = setTimeout(sendNext, paceMs)
+      timer.unref()
+    } else {
+      sendNext()
+    }
+  }
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controllerRef = controller
+      approvalSettleHooks.set(runId, hook)
+      if (signal.aborted) {
+        close()
+        return
+      }
+      signal.addEventListener('abort', close, {once: true})
+      sendNext()
+    },
+    cancel() {
+      closed = true
+      clearTimeout(timer)
+      if (approvalSettleHooks.get(runId) === hook) approvalSettleHooks.delete(runId)
     },
   })
 }
@@ -639,8 +728,13 @@ export function buildFixtureHarnessRouter(): Hono {
     logger.debug('fixture-harness: GET /runs/:runId/stream', {status: 200})
     const paceMs = fixtureStreamPaceMs(scenario)
     let body: string | ReadableStream<Uint8Array> = sseBytes
-    if (isHeldOpenScenario(scenario)) body = heldOpenStream(sseBytes, c.req.raw.signal)
-    else if (paceMs !== undefined) body = pacedStream(sseBytes, paceMs, c.req.raw.signal)
+    approvalSettleHooks.delete(runId)
+    if (isHeldOpenScenario(scenario)) {
+      body =
+        paceMs === undefined
+          ? heldOpenStream(sseBytes, c.req.raw.signal)
+          : pacedThenHeldStream(runId, sseBytes, paceMs, fixtureApprovalSettleBytes(scenario, runId), c.req.raw.signal)
+    } else if (paceMs !== undefined) body = pacedStream(sseBytes, paceMs, c.req.raw.signal)
     return new Response(body, {
       status: 200,
       headers: {
@@ -694,6 +788,9 @@ export function buildFixtureHarnessRouter(): Hono {
       setNoStore(res.headers)
       return res
     }
+
+    // A claimed approval lets a held-open stream that is waiting on it move on.
+    approvalSettleHooks.get(runId)?.()
 
     logger.debug('fixture-harness: POST /runs/:runId/approvals/:reqId/decision', {status: 200})
     const res = c.json({state: 'claimed'})
@@ -1051,6 +1148,7 @@ export function resetFixtureHarnessForTesting(): void {
   pushSessionRecordMap.clear()
   cancelIdempotencyMap.clear()
   questionRunState.clear()
+  approvalSettleHooks.clear()
   sessionIdCounter = 0
   runIdCounter = 0
 }

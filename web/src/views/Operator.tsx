@@ -29,7 +29,7 @@ import {navigateToGatewaySignIn} from '../operator/sign-in-recovery.ts'
 import {isActionDisabled} from '../operator/state.ts'
 import type {OperatorState} from '../operator/state.ts'
 
-// Question, expired-snapshot, waiting, Markdown-output and provider-failure fixture scenarios. Gated on DEV (replaced at build time) so their
+// Question, expired-snapshot, waiting, Markdown-output, provider-failure and wait-reason fixture scenarios. Gated on DEV (replaced at build time) so their
 // names never reach the production bundle; the fixture build and tests keep them.
 const QUESTION_FIXTURE_SCENARIOS: readonly {readonly value: string; readonly label: string}[] = import.meta.env.DEV
   ? [
@@ -57,6 +57,9 @@ const QUESTION_FIXTURE_SCENARIOS: readonly {readonly value: string; readonly lab
       {value: 'provider_failure_unclassified', label: 'Provider failure: unclassified'},
       {value: 'provider_failure_unknown_reason', label: 'Provider failure: unknown reason'},
       {value: 'provider_failure_no_reason', label: 'Provider failure: no reason'},
+      {value: 'wait_reason_draining', label: 'Wait reason: draining, reason changes'},
+      {value: 'wait_reason_with_approval', label: 'Wait reason: approval mid-drain'},
+      {value: 'wait_reason_unknown', label: 'Wait reason: unknown value'},
     ]
   : []
 

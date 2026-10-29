@@ -26,18 +26,21 @@ import {parseSseFrame as browserParseSseFrame, nextStreamState, PINNED_CONTRACT_
 import {CHECKOUT_REFUSAL_REASONS, OBSTRUCTION_KINDS, OPERATOR_CONTRACT_VERSION, OPERATOR_LAUNCH_PROMPT_MAX_LENGTH, OPERATOR_LAUNCH_PROMPT_TOO_LONG, QUESTION_DECISION_STATES} from '../src/gateway/operator-contract/index.ts'
 import {isOperatorProviderFailureReason} from '../src/gateway/operator-contract/provider-failure-reason.ts'
 import {isOperatorFailureKind} from '../src/gateway/operator-contract/run-status.ts'
+import {isOperatorWaitReason} from '../src/gateway/operator-contract/wait-reason.ts'
 import {FIXTURE_OPERATOR_PREFIX} from '../src/gateway/operator-fixture-routes.ts'
 import {
   FIXTURE_MARKDOWN_SCENARIO_ROWS,
   FIXTURE_PROVIDER_FAILURE_SCENARIO_ROWS,
   FIXTURE_QUESTION_SCENARIO_ROWS,
   FIXTURE_SCENARIO_NAMES,
+  FIXTURE_WAIT_REASON_SCENARIO_ROWS,
   fixtureQuestionScript,
+  fixtureStreamPaceMs,
   isHeldOpenScenario,
   isNoApprovalScenario,
   serializeScenarioToSse,
 } from '../src/gateway/operator-fixture-sse.ts'
-import {FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON} from '../src/gateway/operator-fixtures.ts'
+import {FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON, FIXTURE_UNKNOWN_WAIT_REASON} from '../src/gateway/operator-fixtures.ts'
 import {parseSseChunk as serverParseSseChunk} from '../src/gateway/operator-sse-reader.ts'
 import {resetFixtureHarnessForTesting} from '../src/routes/operator-fixture-harness.ts'
 import {buildDashboardApp, resetRateLimitForTesting} from '../src/server.ts'
@@ -2737,7 +2740,7 @@ describe('question fixture scenarios — registry and manifest', () => {
     ])
   })
 
-  it('the scenario select in Operator.tsx lists exactly the manifest\'s question, expired-snapshot, Markdown and provider failure scenarios', async () => {
+  it('the scenario select in Operator.tsx lists exactly the manifest\'s question, expired-snapshot, Markdown, provider failure and wait reason scenarios', async () => {
     const fs = await import('node:fs/promises')
     const source = await fs.readFile('web/src/views/Operator.tsx', 'utf8')
     const block = source.slice(source.indexOf('QUESTION_FIXTURE_SCENARIOS'), source.indexOf('interface OperatorProps'))
@@ -2746,6 +2749,7 @@ describe('question fixture scenarios — registry and manifest', () => {
       ...QUESTION_SCENARIO_KEYS,
       ...FIXTURE_MARKDOWN_SCENARIO_ROWS.map(row => row.scenario),
       ...FIXTURE_PROVIDER_FAILURE_SCENARIO_ROWS.map(row => row.scenario),
+      ...FIXTURE_WAIT_REASON_SCENARIO_ROWS.map(row => row.scenario),
     ])
   })
 })
@@ -3932,6 +3936,388 @@ describe('provider failure and prompt fixtures — production artifacts carry no
       FIXTURE_UNKNOWN_PROVIDER_FAILURE_REASON,
       'run-fixture-index-prompt-',
     ]
+    for (const file of files) {
+      const src = await fs.readFile(file, 'utf8')
+      for (const needle of needles) expect(src, `${file} must not contain ${needle}`).not.toContain(needle)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Wait reason scenarios: a draining run explains why it has not finished
+// ---------------------------------------------------------------------------
+
+const WAIT_REASON_KEYS = FIXTURE_WAIT_REASON_SCENARIO_ROWS.map(row => row.scenario)
+const waitReasonRunId = (key: string): string => `run-fixture-index-${key.replaceAll('_', '-')}`
+const WAIT_REASON_APPROVAL_REQUEST_ID = 'req-fixture-harness-001'
+
+function statusDataOf(frames: WireFrame[]): Record<string, unknown>[] {
+  return frames.filter(frame => frame.type === 'status').map(frame => frame.data)
+}
+
+function decodeChunk(value: unknown): string {
+  return new TextDecoder().decode(value as Uint8Array)
+}
+
+/** Collects a response body as it arrives; `state.done` is set once the stream ends. */
+function probeStream(res: Response) {
+  if (res.body === null) throw new Error('expected a streaming body')
+  const reader = res.body.getReader()
+  const state = {text: '', done: false}
+  const pump = (async () => {
+    for (;;) {
+      const result = await reader.read()
+      if (result.done) break
+      state.text += decodeChunk(result.value)
+    }
+    state.done = true
+  })()
+  return {reader, state, pump}
+}
+
+/** Reads a response body to its end, advancing fake timers so paced records arrive. */
+async function readToEnd(res: Response, stepMs: number): Promise<string> {
+  const probe = probeStream(res)
+  while (!probe.state.done) await vi.advanceTimersByTimeAsync(stepMs)
+  await probe.pump
+  return probe.state.text
+}
+
+async function decideApproval(app: Awaited<ReturnType<typeof buildFixtureTestApp>>, fixtureSessionId: string, key: string): Promise<Response> {
+  return app.request(
+    `${FIXTURE_OPERATOR_PREFIX}/runs/${waitReasonRunId(key)}/approvals/${WAIT_REASON_APPROVAL_REQUEST_ID}/decision?fixtureSessionId=${fixtureSessionId}`,
+    {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({decision: 'once'})},
+  )
+}
+
+async function waitReasonHarness() {
+  const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+  const {fixtureSessionId} = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)).json() as {fixtureSessionId: string}
+  const {runs} = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs?fixtureSessionId=${fixtureSessionId}`)).json() as {runs: Record<string, unknown>[]}
+  const url = (key: string, suffix: string): string => `${FIXTURE_OPERATOR_PREFIX}/runs/${waitReasonRunId(key)}/${suffix}?fixtureSessionId=${fixtureSessionId}`
+  return {app, fixtureSessionId, runs, url}
+}
+
+describe('wait reason fixture scenarios — registry and manifest', () => {
+  it('registers the three scenarios, in order, each with a running fixture-prefixed row that carries no wait reason', async () => {
+    expect(WAIT_REASON_KEYS).toEqual(['wait_reason_draining', 'wait_reason_with_approval', 'wait_reason_unknown'])
+    expect(Object.values(FIXTURE_SCENARIO_NAMES)).toEqual(expect.arrayContaining(WAIT_REASON_KEYS))
+
+    const {app, runs} = await waitReasonHarness()
+    const body = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}`)).json() as {scenarios: string[]}
+    for (const key of WAIT_REASON_KEYS) expect(body.scenarios).toContain(key)
+    expect(WAIT_REASON_KEYS.map(waitReasonRunId)).toEqual([
+      'run-fixture-index-wait-reason-draining',
+      'run-fixture-index-wait-reason-with-approval',
+      'run-fixture-index-wait-reason-unknown',
+    ])
+    for (const key of WAIT_REASON_KEYS) {
+      const row = runs.find(candidate => candidate.runId === waitReasonRunId(key))
+      expect(row, key).toBeDefined()
+      expect(row?.status, key).toBe('running')
+      expect(row?.repo).toMatch(/fixture/)
+      expect('waitReason' in (row ?? {}), `${key} row carries no waitReason`).toBe(false)
+    }
+  })
+
+  it('the scenario select in Operator.tsx lists the wait reason scenarios', async () => {
+    const fs = await import('node:fs/promises')
+    const source = await fs.readFile('web/src/views/Operator.tsx', 'utf8')
+    const block = source.slice(source.indexOf('QUESTION_FIXTURE_SCENARIOS'), source.indexOf('interface OperatorProps'))
+    const values = [...block.matchAll(/value: '([a-z0-9_]+)'/g)].map(match => match[1])
+    expect(values.filter(value => value?.startsWith('wait_reason_'))).toEqual(WAIT_REASON_KEYS)
+  })
+
+  it('paces the draining and approval scenarios at 2 to 3 seconds per frame, and sends the unknown scenario at once', () => {
+    for (const key of ['wait_reason_draining', 'wait_reason_with_approval']) {
+      const pace = fixtureStreamPaceMs(key)
+      expect(pace, key).toBeGreaterThanOrEqual(2000)
+      expect(pace, key).toBeLessThanOrEqual(3000)
+    }
+    expect(fixtureStreamPaceMs('wait_reason_unknown')).toBeUndefined()
+  })
+
+  it('holds the approval and unknown scenarios open and ends the draining one; only the unknown one lists no approval', () => {
+    expect(isHeldOpenScenario('wait_reason_draining')).toBe(false)
+    expect(isHeldOpenScenario('wait_reason_with_approval')).toBe(true)
+    expect(isHeldOpenScenario('wait_reason_unknown')).toBe(true)
+    expect(isNoApprovalScenario('wait_reason_draining')).toBe(true)
+    expect(isNoApprovalScenario('wait_reason_with_approval')).toBe(false)
+    expect(isNoApprovalScenario('wait_reason_unknown')).toBe(true)
+  })
+
+  it('the unknown constant is fixture-prefixed and outside the known wire set', () => {
+    expect(FIXTURE_UNKNOWN_WAIT_REASON).toBe('fixture-unknown-reason')
+    expect(isOperatorWaitReason(FIXTURE_UNKNOWN_WAIT_REASON)).toBe(false)
+  })
+})
+
+describe('wait reason fixture scenarios — frames', () => {
+  it('wait_reason_draining: the four reasons in order, then none, then output and a terminal succeeded', () => {
+    const runId = waitReasonRunId('wait_reason_draining')
+    const sse = serializeScenarioToSse('wait_reason_draining', runId)
+    const server = serverFrames(sse)
+    const browser = browserFrames(sse)
+
+    expect(server[0]?.data.contractVersion).toBe(OPERATOR_CONTRACT_VERSION)
+    expect(server.map(frame => frame.type)).toEqual(['ready', 'status', 'status', 'status', 'status', 'status', 'output', 'output', 'status'])
+    expect(browser).toEqual(server)
+    for (const frame of server.slice(1)) expect(frame.data.runId).toBe(runId)
+
+    const statuses = statusDataOf(server)
+    expect(statuses.map(status => status.status)).toEqual(['running', 'running', 'running', 'running', 'running', 'succeeded'])
+    expect(statuses.map(status => status.waitReason)).toEqual([
+      'agent-working',
+      'awaiting-reply',
+      'awaiting-background-task',
+      'confirming-completion',
+      undefined,
+      undefined,
+    ])
+    // The fifth running frame is a real frame with the key absent, not a null or an empty string.
+    expect(statuses[4] !== undefined && 'waitReason' in statuses[4]).toBe(false)
+    expect(browserTerminalStatus(sse)?.status).toBe('succeeded')
+  })
+
+  it('wait_reason_draining: the browser reducer ends terminal with no wait reason on the entry', () => {
+    const runId = waitReasonRunId('wait_reason_draining')
+    let state: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
+    const seen: (string | undefined)[] = []
+    for (const frame of browserStreamFrames(serializeScenarioToSse('wait_reason_draining', runId))) {
+      state = nextStreamState(state, frame)
+      if (frame.type === 'status') seen.push((state.runs[runId] as {waitReason?: string} | undefined)?.waitReason)
+    }
+    expect(seen).toEqual(['agent-working', 'awaiting-reply', 'awaiting-background-task', 'confirming-completion', undefined, undefined])
+    expect((state.runs[runId] as {terminal?: boolean} | undefined)?.terminal).toBe(true)
+  })
+
+  it('wait_reason_with_approval: a reason, an open approval, then waiting_for_approval with no reason', () => {
+    const runId = waitReasonRunId('wait_reason_with_approval')
+    const sse = serializeScenarioToSse('wait_reason_with_approval', runId)
+    const server = serverFrames(sse)
+
+    expect(server.map(frame => frame.type)).toEqual(['ready', 'status', 'approval', 'status'])
+    expect(browserFrames(sse)).toEqual(server)
+    const [running, waiting] = statusDataOf(server)
+    expect(running?.status).toBe('running')
+    expect(isOperatorWaitReason(running?.waitReason)).toBe(true)
+    expect(waiting?.status).toBe('waiting_for_approval')
+    // The raw record has no reason either, so the parser did not just drop it.
+    expect(sse.split('\n\n').findLast(record => record.startsWith('event: status'))).not.toContain('waitReason')
+    const approval = server[2]?.data
+    expect(approval?.settled).toBe(false)
+    expect(approval?.requestID).toBe(WAIT_REASON_APPROVAL_REQUEST_ID)
+  })
+
+  it('wait_reason_with_approval: the browser reducer drops the stored reason on waiting_for_approval', () => {
+    const runId = waitReasonRunId('wait_reason_with_approval')
+    let state: StreamState = {connection: 'connecting', runs: {}, retryCount: 0, shouldReconnect: false}
+    const seen: (string | undefined)[] = []
+    for (const frame of browserStreamFrames(serializeScenarioToSse('wait_reason_with_approval', runId))) {
+      state = nextStreamState(state, frame)
+      if (frame.type === 'status') seen.push((state.runs[runId] as {waitReason?: string} | undefined)?.waitReason)
+    }
+    expect(seen).toEqual(['awaiting-background-task', undefined])
+  })
+
+  it('wait_reason_unknown: one running frame with the unknown value on the wire, kept by neither parser', () => {
+    const runId = waitReasonRunId('wait_reason_unknown')
+    const sse = serializeScenarioToSse('wait_reason_unknown', runId)
+    const server = serverFrames(sse)
+
+    expect(server.map(frame => frame.type)).toEqual(['ready', 'status'])
+    expect(browserFrames(sse)).toEqual(server)
+    expect(sse).toContain(`"waitReason":"${FIXTURE_UNKNOWN_WAIT_REASON}"`)
+    expect(server[1]?.data.status).toBe('running')
+    expect(server[1]?.data.runId).toBe(runId)
+    expect('waitReason' in (server[1]?.data ?? {})).toBe(false)
+    expect(browserTerminalStatus(sse)?.waitReason).toBeUndefined()
+  })
+
+  it('the settle bytes are an approval settle frame then a running status with a known reason, in the wire shape', async () => {
+    const {fixtureApprovalSettleBytes} = await import('../src/gateway/operator-fixture-sse.ts')
+    const runId = waitReasonRunId('wait_reason_with_approval')
+    const bytes = fixtureApprovalSettleBytes('wait_reason_with_approval', runId)
+    expect(bytes).toBeDefined()
+    const frames = serverFrames(bytes ?? '')
+    expect(frames.map(frame => frame.type)).toEqual(['approval', 'status'])
+    expect(browserFrames(bytes ?? '')).toEqual(frames)
+    expect(frames[0]?.data).toEqual({runId, requestID: WAIT_REASON_APPROVAL_REQUEST_ID, settled: true})
+    expect(frames[1]?.data.status).toBe('running')
+    expect(isOperatorWaitReason(frames[1]?.data.waitReason)).toBe(true)
+    expect(fixtureApprovalSettleBytes('wait_reason_draining', runId)).toBeUndefined()
+    expect(fixtureApprovalSettleBytes('approval_flow', runId)).toBeUndefined()
+    expect(fixtureApprovalSettleBytes('not_a_scenario', runId)).toBeUndefined()
+  })
+})
+
+describe('wait reason fixture scenarios — routes', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('wait_reason_draining: paced two to three seconds per frame, then the stream ends normally with the scenario bytes', async () => {
+    vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']})
+    const {app, url} = await waitReasonHarness()
+    const res = await app.request(url('wait_reason_draining', 'stream'))
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('text/event-stream')
+    const pace = fixtureStreamPaceMs('wait_reason_draining') ?? 0
+    const runId = waitReasonRunId('wait_reason_draining')
+    const sse = serializeScenarioToSse('wait_reason_draining', runId)
+    const records = sse.split('\n\n').filter(record => record !== '').map(record => `${record}\n\n`)
+    const probe = probeStream(res)
+
+    // The ready and first status records go out at once.
+    await vi.advanceTimersByTimeAsync(0)
+    expect(probe.state.text).toBe(records.slice(0, 2).join(''))
+    expect(probe.state.text).toContain('"waitReason":"agent-working"')
+
+    // The third record waits one pace; one millisecond short of it, nothing more has arrived.
+    await vi.advanceTimersByTimeAsync(pace - 1)
+    expect(probe.state.text).toBe(records.slice(0, 2).join(''))
+    await vi.advanceTimersByTimeAsync(1)
+    expect(probe.state.text).toBe(records.slice(0, 3).join(''))
+    expect(probe.state.text).toContain('"waitReason":"awaiting-reply"')
+
+    // Every later record is one pace apart too, and the stream then ends.
+    await vi.advanceTimersByTimeAsync(pace * records.length)
+    await probe.pump
+    expect(probe.state.done).toBe(true)
+    expect(probe.state.text).toBe(sse)
+    expect(probe.state.text.trimEnd().split('\n\n').at(-1)).toContain('"status":"succeeded"')
+  })
+
+  it('wait_reason_draining: the whole paced stream equals the scenario bytes', async () => {
+    vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']})
+    const {app, url} = await waitReasonHarness()
+    const res = await app.request(url('wait_reason_draining', 'stream'))
+    expect(await readToEnd(res, 500)).toBe(serializeScenarioToSse('wait_reason_draining', waitReasonRunId('wait_reason_draining')))
+  })
+
+  it('wait_reason_unknown: serves the scenario bytes and holds the stream open', async () => {
+    const {app, url} = await waitReasonHarness()
+    const res = await app.request(url('wait_reason_unknown', 'stream'))
+    expect(res.status).toBe(200)
+    const {text, endedAfterBytes} = await firstChunkThenOpen(res)
+    expect(text).toBe(serializeScenarioToSse('wait_reason_unknown', waitReasonRunId('wait_reason_unknown')))
+    expect(endedAfterBytes).toBe(false)
+  })
+
+  it('wait_reason_with_approval: paced frames, then the stream stays open; the approvals list returns the approval', async () => {
+    vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']})
+    const {app, url} = await waitReasonHarness()
+    const approvals = await app.request(url('wait_reason_with_approval', 'approvals'))
+    expect(approvals.status).toBe(200)
+    expect((await approvals.json() as {approvals: {requestID: string}[]}).approvals.map(approval => approval.requestID)).toEqual([WAIT_REASON_APPROVAL_REQUEST_ID])
+
+    const probe = probeStream(await app.request(url('wait_reason_with_approval', 'stream')))
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(probe.state.text).toBe(serializeScenarioToSse('wait_reason_with_approval', waitReasonRunId('wait_reason_with_approval')))
+
+    // After the paced frames nothing more arrives, however long it waits, and the stream does not end.
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000)
+    expect(probe.state.done).toBe(false)
+    expect(probe.state.text).toBe(serializeScenarioToSse('wait_reason_with_approval', waitReasonRunId('wait_reason_with_approval')))
+    await probe.reader.cancel()
+  })
+
+  it('wait_reason_with_approval: settling the approval emits a settle frame and then running with a reason', async () => {
+    vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']})
+    const {app, fixtureSessionId, url} = await waitReasonHarness()
+    const probe = probeStream(await app.request(url('wait_reason_with_approval', 'stream')))
+    await vi.advanceTimersByTimeAsync(10_000)
+    const beforeSettle = probe.state.text
+    expect(statusDataOf(serverFrames(beforeSettle)).map(status => status.status)).toEqual(['running', 'waiting_for_approval'])
+
+    const decision = await decideApproval(app, fixtureSessionId, 'wait_reason_with_approval')
+    expect(decision.status).toBe(200)
+    expect(await decision.json()).toEqual({state: 'claimed'})
+    await vi.advanceTimersByTimeAsync(0)
+
+    const followUp = probe.state.text.slice(beforeSettle.length)
+    const frames = serverFrames(followUp)
+    expect(frames.map(frame => frame.type)).toEqual(['approval', 'status'])
+    expect(frames[0]?.data.settled).toBe(true)
+    expect(frames[1]?.data.status).toBe('running')
+    expect(isOperatorWaitReason(frames[1]?.data.waitReason)).toBe(true)
+    expect(browserFrames(followUp)).toEqual(frames)
+    expect(probe.state.done).toBe(false)
+    await probe.reader.cancel()
+  })
+
+  it('wait_reason_with_approval: a decision made before the paced frames finish is held until they have, then emitted once', async () => {
+    vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']})
+    const {app, fixtureSessionId, url} = await waitReasonHarness()
+    const probe = probeStream(await app.request(url('wait_reason_with_approval', 'stream')))
+
+    expect((await decideApproval(app, fixtureSessionId, 'wait_reason_with_approval')).status).toBe(200)
+    expect((await decideApproval(app, fixtureSessionId, 'wait_reason_with_approval')).status).toBe(200)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(statusDataOf(serverFrames(probe.state.text)).map(status => status.status)).toEqual(['running'])
+
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(probe.state.done).toBe(false)
+    const frames = serverFrames(probe.state.text)
+    expect(frames.map(frame => frame.type)).toEqual(['ready', 'status', 'approval', 'status', 'approval', 'status'])
+    expect(statusDataOf(frames).map(status => status.status)).toEqual(['running', 'waiting_for_approval', 'running'])
+    await probe.reader.cancel()
+  })
+
+  it('reopening the stream replays the scenario, and a decision then settles only the new stream', async () => {
+    vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']})
+    const {app, fixtureSessionId, url} = await waitReasonHarness()
+    const first = probeStream(await app.request(url('wait_reason_with_approval', 'stream')))
+    await vi.advanceTimersByTimeAsync(10_000)
+    const second = probeStream(await app.request(url('wait_reason_with_approval', 'stream')))
+    await vi.advanceTimersByTimeAsync(10_000)
+    const firstBytes = first.state.text
+
+    await decideApproval(app, fixtureSessionId, 'wait_reason_with_approval')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(second.state.text.length).toBeGreaterThan(firstBytes.length)
+    expect(serverFrames(second.state.text).map(frame => frame.type).at(-1)).toBe('status')
+    expect(first.state.text).toBe(firstBytes)
+    await first.reader.cancel()
+    await second.reader.cancel()
+  })
+
+  it('a decision on a run with no live stream still answers claimed', async () => {
+    const {app, fixtureSessionId} = await waitReasonHarness()
+    const decision = await app.request(
+      `${FIXTURE_OPERATOR_PREFIX}/runs/${waitReasonRunId('wait_reason_with_approval')}/approvals/${WAIT_REASON_APPROVAL_REQUEST_ID}/decision?fixtureSessionId=${fixtureSessionId}`,
+      {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({decision: 'once'})},
+    )
+    expect(decision.status).toBe(200)
+    expect(await decision.json()).toEqual({state: 'claimed'})
+  })
+
+  it('a launched run with a wait reason scenario is served its own bytes', async () => {
+    const app = await buildFixtureTestApp({fixtureHarnessEnabled: true, bindHost: '127.0.0.1'})
+    const {fixtureSessionId} = await (await app.request(`${FIXTURE_OPERATOR_PREFIX}/session`)).json() as {fixtureSessionId: string}
+    const launch = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({scenario: 'wait_reason_unknown', idempotencyKey: 'fixture-idem-key-wait-reason-001', fixtureSessionId, csrfToken: 'fixture-csrf-placeholder', repo: 'fixture-org/fixture-repo', prompt: '[Fixture prompt]'}),
+    })
+    expect(launch.status).toBe(200)
+    const {runId} = await launch.json() as {runId: string}
+    const res = await app.request(`${FIXTURE_OPERATOR_PREFIX}/runs/${runId}/stream?fixtureSessionId=${fixtureSessionId}`)
+    const {text, endedAfterBytes} = await firstChunkThenOpen(res)
+    expect(text).toBe(serializeScenarioToSse('wait_reason_unknown', runId))
+    expect(endedAfterBytes).toBe(false)
+  })
+})
+
+describe('wait reason fixture scenarios — production artifacts carry no scenario names or row IDs', () => {
+  it('web/dist, the service worker, and the shipped browser modules contain neither', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const files = ['web/dist/sw.js', 'web/dist/index.html', 'public/operator-stream.js', 'public/operator-launch.js', 'public/operator-run-index.js', 'public/operator-time.js']
+    for (const file of await fs.readdir('web/dist/assets')) {
+      if (file.endsWith('.js') || file.endsWith('.css')) files.push(path.join('web/dist/assets', file))
+    }
+    const needles = [...WAIT_REASON_KEYS, ...WAIT_REASON_KEYS.map(waitReasonRunId), FIXTURE_UNKNOWN_WAIT_REASON]
     for (const file of files) {
       const src = await fs.readFile(file, 'utf8')
       for (const needle of needles) expect(src, `${file} must not contain ${needle}`).not.toContain(needle)
