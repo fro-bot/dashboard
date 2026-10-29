@@ -178,7 +178,7 @@ The gateway caches the overlaid status, wait reason included, and emits a status
 
 ## Implementation Units
 
-- [ ] **Unit 1: Contract pin, vendored wait reason, server reader**
+- [x] **Unit 1: Contract pin, vendored wait reason, server reader**
 
 **Goal:** The server side speaks 1.14.0 and parses `waitReason` tolerantly.
 
@@ -213,7 +213,7 @@ The gateway caches the overlaid status, wait reason included, and emits a status
 
 **Verification:** The contract version is 1.14.0, the version tests pass unchanged, and every reader case above passes.
 
-- [ ] **Unit 2: Browser parser and live run entry**
+- [x] **Unit 2: Browser parser and live run entry**
 
 **Goal:** The browser pins 1.14.0, parses `waitReason` the same way as the server, and holds it only on the live entry.
 
@@ -249,7 +249,7 @@ The gateway caches the overlaid status, wait reason included, and emits a status
 
 **Verification:** The browser pin equals the server constant and the parity table passes.
 
-- [ ] **Unit 3: Wait-reason label on the streamed card**
+- [x] **Unit 3: Wait-reason label on the streamed card**
 
 **Goal:** An expanded running card shows the current reason as a quiet header line, under one precedence rule, and nothing else can leave it stale.
 

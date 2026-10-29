@@ -83,6 +83,9 @@ export declare const FAILURE_REASON_LABELS: Readonly<Record<FailureKind, string>
  */
 export declare const PROVIDER_FAILURE_REASON_LABELS: ReadonlyMap<ProviderFailureReason, string>
 
+/** Dashboard-owned display labels for the run wait reason. The wire value never reaches the DOM. */
+export declare const WAIT_REASON_LABELS: ReadonlyMap<WaitReason, string>
+
 // ---------------------------------------------------------------------------
 // Checkout provenance / checkout preparation (closed browser DTOs)
 //
@@ -669,6 +672,12 @@ export declare function hasOpenQuestions(runEntry: RunEntry | undefined | null):
  * stored. Returns '' for an absent entry.
  */
 export declare function getEffectiveStatus(runEntry: RunEntry | undefined | null): string
+
+/**
+ * The wait-reason label for a run entry, or undefined when none shows: only a live, non-terminal run
+ * whose wire and effective status are `running`, with no checkout preparation and no cancel in flight.
+ */
+export declare function getWaitReasonLabel(runEntry: RunEntry | undefined | null, connection: string): string | undefined
 
 /**
  * Page-level question record for a run. Tombstones (settled requests, never evicted) and drafts

@@ -50,6 +50,7 @@ import {
   getOpenApprovals,
   getOpenQuestions,
   getQuestionPageStore,
+  getWaitReasonLabel,
   hasOpenApprovals,
   hasOpenQuestions,
   hasUsableFinishedRun,
@@ -80,6 +81,7 @@ import {
   sanitizeCheckoutText,
   takeUsableFinishedRun,
   toSafeRunView,
+  WAIT_REASON_LABELS,
 } from '../public/operator-stream.js'
 import {
   CHECKOUT_OPERATIONS,
@@ -10450,6 +10452,95 @@ describe('nextStreamState — waitReason', () => {
     const view = toSafeRunView(entry as never)
     expect(Object.keys(view)).not.toContain('waitReason')
     expect(JSON.stringify(view)).not.toContain('awaiting-reply')
+  })
+})
+
+describe('wait reason label', () => {
+  const live = (): StreamState => nextStreamState(INITIAL_STATE, {type: 'ready', data: {contractVersion: PINNED_CONTRACT_VERSION}})
+  const entryWith = (overrides: Record<string, unknown> = {}): RunEntry => {
+    const data = {...ACTIVE_STATUS, waitReason: 'awaiting-background-task', ...overrides} as StatusFrameData
+    return nextStreamState(live(), {type: 'status', data}).runs['run-abc'] as RunEntry
+  }
+
+  it('has copy for exactly the vendored wait reasons', () => {
+    expect([...WAIT_REASON_LABELS.keys()].sort()).toEqual([...OPERATOR_WAIT_REASONS].sort())
+  })
+
+  it.each([
+    ['agent-working', 'Agent still working'],
+    ['awaiting-reply', 'Finishing its reply'],
+    ['awaiting-background-task', 'Waiting on a background task'],
+    ['confirming-completion', 'Confirming it has finished'],
+  ])('maps %s to its copy', (waitReason, copy) => {
+    expect(WAIT_REASON_LABELS.get(waitReason as never)).toBe(copy)
+    expect(getWaitReasonLabel(entryWith({waitReason}), 'live')).toBe(copy)
+  })
+
+  it('no copy string repeats its wire value or an approval or question status', () => {
+    for (const [wire, copy] of WAIT_REASON_LABELS) {
+      expect(copy).not.toBe(wire)
+      expect(copy.toLowerCase()).not.toContain(wire)
+      expect(copy).not.toMatch(/waiting for (approval|answer|question)|^running$/i)
+    }
+  })
+
+  it('has no label without an entry or without a stored reason', () => {
+    expect(getWaitReasonLabel(undefined, 'live')).toBeUndefined()
+    expect(getWaitReasonLabel(entryWith({waitReason: undefined}), 'live')).toBeUndefined()
+  })
+
+  it('has no label unless the connection is live', () => {
+    const entry = entryWith()
+    for (const connection of ['connecting', 'reconnecting', 'failed', 'drift', 'not-found', 'backpressure', 'submitted-unobservable', 'closed']) {
+      expect(getWaitReasonLabel(entry, connection), connection).toBeUndefined()
+    }
+  })
+
+  it('has no label for a terminal entry, even one that still carries a reason', () => {
+    const terminal = {...entryWith(), terminal: true, status: 'succeeded'} as RunEntry
+    expect(getWaitReasonLabel(terminal, 'live')).toBeUndefined()
+  })
+
+  it('has no label while a cancel is in flight', () => {
+    const cancelling = nextStreamState(
+      nextStreamState(live(), {type: 'status', data: {...ACTIVE_STATUS, waitReason: 'awaiting-reply'}}),
+      {type: 'cancel', data: {runId: 'run-abc'}},
+    ).runs['run-abc'] as RunEntry
+    expect(cancelling.cancelInFlight).toBe(true)
+    expect(getWaitReasonLabel(cancelling, 'live')).toBeUndefined()
+  })
+
+  it('has no label while a checkout preparation is in progress', () => {
+    const preparing = {...entryWith(), checkoutPreparation: {outcome: 'refused', reason: 'detached'}} as unknown as RunEntry
+    expect(getWaitReasonLabel(preparing, 'live')).toBeUndefined()
+  })
+
+  it('has no label while an open approval overlays the running status, and returns when it closes', () => {
+    const open = nextStreamState(
+      nextStreamState(live(), {type: 'status', data: {...ACTIVE_STATUS, waitReason: 'awaiting-background-task'}}),
+      {type: 'approval', data: {runId: 'run-abc', requestID: 'req-1', permission: 'shell', command: 'echo', settled: false} as never},
+    )
+    const withApproval = open.runs['run-abc'] as RunEntry
+    expect(getEffectiveStatus(withApproval)).toBe('waiting_for_approval')
+    expect(withApproval.waitReason).toBe('awaiting-background-task')
+    expect(getWaitReasonLabel(withApproval, 'live')).toBeUndefined()
+
+    const settled = nextStreamState(open, {type: 'approval', data: {runId: 'run-abc', requestID: 'req-1', settled: true} as never})
+    expect(getWaitReasonLabel(settled.runs['run-abc'] as RunEntry, 'live')).toBe('Waiting on a background task')
+  })
+
+  it('has no label for a wire status other than running', () => {
+    for (const status of ['queued', 'blocked', 'waiting_for_approval', 'waiting_for_question']) {
+      const entry = {...entryWith(), status} as RunEntry
+      expect(getWaitReasonLabel(entry, 'live'), status).toBeUndefined()
+    }
+  })
+
+  it('cannot resolve a prototype member or an unknown value to copy', () => {
+    for (const waitReason of ['__proto__', 'toString', 'constructor', 'future-reason', '']) {
+      const entry = {...entryWith(), waitReason} as unknown as RunEntry
+      expect(getWaitReasonLabel(entry, 'live'), waitReason).toBeUndefined()
+    }
   })
 })
 

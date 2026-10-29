@@ -3328,6 +3328,90 @@ describe('run-index failure reason labels', () => {
   })
 })
 
+describe('updateCardInPlace — stream-owned reason line', () => {
+  afterEach(() => {
+    resetRunIndexState()
+    vi.restoreAllMocks()
+  })
+
+  const runId = 'run-reason-owner-001'
+  const stubList = runs => vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ok: true, status: 200, json: async () => ({runs})}))
+
+  async function loadWithReason(summary) {
+    stubList([summary])
+    const cards = []
+    stubDOMWithSubstructureCards(cards)
+    await initOperatorRunIndex({endpointBase: '/operator'})
+    const reasonEl = cards[0].querySelector('[data-role="run-reason"]')
+    return {cards, reasonEl}
+  }
+
+  it('leaves the reason line alone while the stream owns it', async () => {
+    const {reasonEl} = await loadWithReason(makeValidSummary({runId, status: 'running'}))
+    reasonEl.textContent = 'Waiting on a background task'
+    reasonEl.dataset.reasonState = 'wait'
+    reasonEl.dataset.reasonOwner = 'stream'
+
+    stubList([makeValidSummary({runId, status: 'running'})])
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(reasonEl.textContent).toBe('Waiting on a background task')
+    expect(reasonEl.dataset.reasonState).toBe('wait')
+    expect(reasonEl.dataset.reasonOwner).toBe('stream')
+  })
+
+  it('leaves a stream-painted headline alone even when the list view carries a reason', async () => {
+    const {reasonEl} = await loadWithReason(makeValidSummary({runId, status: 'running'}))
+    reasonEl.textContent = 'Checkout refused: detached HEAD'
+    reasonEl.dataset.reasonState = 'present'
+    reasonEl.dataset.reasonOwner = 'stream'
+
+    stubList([makeValidSummary({runId, status: 'failed', failureKind: 'inactivity-timeout'})])
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(reasonEl.textContent).toBe('Checkout refused: detached HEAD')
+    expect(reasonEl.dataset.reasonState).toBe('present')
+  })
+
+  it('still updates the rest of the card while the stream owns the reason line', async () => {
+    const {cards, reasonEl} = await loadWithReason(makeValidSummary({runId, status: 'running'}))
+    reasonEl.textContent = 'Agent still working'
+    reasonEl.dataset.reasonState = 'wait'
+    reasonEl.dataset.reasonOwner = 'stream'
+
+    stubList([makeValidSummary({runId, status: 'queued'})])
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(cards[0].querySelector('[data-role="run-status"]')?.textContent).toBe('Queued')
+    expect(reasonEl.textContent).toBe('Agent still working')
+  })
+
+  it('repaints list-owned text once the stream no longer owns the line', async () => {
+    const {reasonEl} = await loadWithReason(makeValidSummary({runId, status: 'running'}))
+    reasonEl.textContent = 'Agent still working'
+    reasonEl.dataset.reasonState = 'wait'
+    reasonEl.dataset.reasonOwner = 'stream'
+    delete reasonEl.dataset.reasonOwner
+
+    stubList([makeValidSummary({runId, status: 'failed', failureKind: 'inactivity-timeout'})])
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(reasonEl.textContent).toBe('No recent activity')
+    expect(reasonEl.dataset.reasonState).toBe('present')
+  })
+
+  it('treats any other owner value as list-owned', async () => {
+    const {reasonEl} = await loadWithReason(makeValidSummary({runId, status: 'running'}))
+    reasonEl.textContent = 'stale'
+    reasonEl.dataset.reasonOwner = 'something-else'
+
+    stubList([makeValidSummary({runId, status: 'failed', failureKind: 'inactivity-timeout'})])
+    await initOperatorRunIndex({endpointBase: '/operator'})
+
+    expect(reasonEl.textContent).toBe('No recent activity')
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Optimistic (launch-created) card — adoption yields full fetched-card anatomy
 // ---------------------------------------------------------------------------

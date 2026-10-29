@@ -893,7 +893,8 @@ function adoptLaunchSeededTime(card, view) {
  * datetime (on <time>), plus removing a launch-seeded <time> and its data-time-source marker on adoption.
  * Never touches data-run-id or data-expanded on the card itself. The one structural
  * addition is a missing <time> (see below), built with the same safe-DOM shape as renderRunCard.
- * Never called for the active-stream card (the diff write-protects it).
+ * Never called for the active-stream card (the diff write-protects it). On any other card the reason
+ * line is left alone while the stream owns it (data-reason-owner="stream").
  *
  * Terminal is sticky: a card already showing succeeded/failed/cancelled never takes a
  * non-terminal view. A run ID never returns to a non-terminal status once terminal (a launch
@@ -940,8 +941,10 @@ function updateCardInPlace(card, view) {
 
     paintPrompt(card, view.prompt)
 
+    // The reason line is the stream's while it carries data-reason-owner="stream": the wait label and the
+    // preparation headline exist only in the stream's state, and the list view cannot repaint them.
     const reasonEl = card.querySelector('[data-role="run-reason"]')
-    if (reasonEl !== null && reasonEl !== undefined) {
+    if (reasonEl !== null && reasonEl !== undefined && reasonEl.dataset?.reasonOwner !== 'stream') {
       reasonEl.textContent = view.reasonLabel ?? ''
       if (view.reasonLabel === undefined) {
         if (reasonEl.dataset) delete reasonEl.dataset.reasonState
