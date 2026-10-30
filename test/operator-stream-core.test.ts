@@ -10426,13 +10426,14 @@ describe('nextStreamState — waitReason', () => {
     expect(Object.hasOwn(state.runs['run-peer'] ?? {}, 'waitReason')).toBe(false)
   })
 
-  it('reset no-snapshot on a non-terminal run removes the stored reason and keeps the run live', () => {
+  it('reset no-snapshot on a non-terminal run keeps the stored reason and keeps the run live', () => {
     for (const summaryStatus of [undefined, 'running']) {
       const withReason = status(live(summaryStatus), {waitReason: 'awaiting-background-task'})
       const state = nextStreamState(withReason, {type: 'reset', data: {runId: 'run-abc', reason: 'no-snapshot'}})
       expect(state.connection, String(summaryStatus)).toBe('live')
       expect(state.runs['run-abc']?.status, String(summaryStatus)).toBe('running')
-      expect(hasWaitReason(state), String(summaryStatus)).toBe(false)
+      expect(state.runs['run-abc']?.waitReason, String(summaryStatus)).toBe('awaiting-background-task')
+      expect(state.snapshotMissing?.['run-abc'], String(summaryStatus)).toBe(true)
       // the earlier state is not mutated
       expect(withReason.runs['run-abc']?.waitReason).toBe('awaiting-background-task')
     }
@@ -10866,6 +10867,67 @@ describe('expired snapshot — selector/emitter parity', () => {
     ])
     expect(js).toContain("'run-output-unavailable'")
     expect(css).toMatch(/\.run-output-unavailable(?![\w-])/)
+  })
+})
+
+describe('reason line — static parity across modules and the stylesheet', () => {
+  const readSources = async () => {
+    const fs = await import('node:fs/promises')
+    const [stream, runIndex, css] = await Promise.all([
+      fs.readFile('public/operator-stream.js', 'utf8'),
+      fs.readFile('public/operator-run-index.js', 'utf8'),
+      fs.readFile('web/src/index.css', 'utf8'),
+    ])
+    return {stream, runIndex, css}
+  }
+  const literalsFor = (source: string, property: string, operator: string) =>
+    new Set([...source.matchAll(new RegExp(String.raw`\.dataset\??\.${property}\s*${operator}\s*'([^']+)'`, 'g'))].map(match => match[1]))
+
+  it('the stream writes the owner marker value the run list reads', async () => {
+    const {stream, runIndex} = await readSources()
+    // dataset.reasonOwner is the data-reason-owner attribute.
+    const written = literalsFor(stream, 'reasonOwner', '=')
+    const readByStream = literalsFor(stream, 'reasonOwner', '===')
+    const readByList = literalsFor(runIndex, 'reasonOwner', '!==?')
+    expect([...written]).toEqual(['stream'])
+    expect([...readByStream]).toEqual(['stream'])
+    expect([...readByList]).toEqual(['stream'])
+  })
+
+  it('every data-reason-state value the stylesheet selects is a value a module emits', async () => {
+    const {stream, runIndex, css} = await readSources()
+    const emitted = new Set([...literalsFor(stream, 'reasonState', '='), ...literalsFor(runIndex, 'reasonState', '=')])
+    expect(emitted).toEqual(new Set(['present', 'wait']))
+    const selected = [...css.matchAll(/\[data-reason-state="([^"]*)"\]/g)].map(match => match[1] as string)
+    expect(selected.length).toBeGreaterThan(0)
+    for (const value of selected) expect(emitted.has(value), `data-reason-state="${value}"`).toBe(true)
+  })
+
+  it('the wait value the stream emits has its desktop rules and its 480px rule in the stylesheet', async () => {
+    const {stream, css} = await readSources()
+    expect(literalsFor(stream, 'reasonState', '=')).toContain('wait')
+    const waitSelectors = [...css.matchAll(/\.run-reason\[data-reason-state="wait"\]/g)]
+    // the base rule, the desktop :has() rule and the 480px :has() rule
+    expect(waitSelectors).toHaveLength(3)
+    expect(css).toMatch(/\.run-card:has\(\.run-reason\[data-reason-state="wait"\]\)\s+\.run-repo/)
+    const mobileStart = css.lastIndexOf('@media (max-width: 480px)', waitSelectors.at(-1)?.index)
+    expect(mobileStart).toBeGreaterThan(-1)
+    expect(waitSelectors.at(-1)?.index).toBeGreaterThan(mobileStart)
+    expect(waitSelectors.at(-2)?.index).toBeLessThan(mobileStart)
+  })
+
+  it('the browser wait reason allowlist is the vendored one, compared in both directions', async () => {
+    const {stream} = await readSources()
+    const literal = stream.match(/const VALID_WAIT_REASONS = Object\.freeze\(\s*new Set\(\[([^\]]*)\]\)/)?.[1]
+    expect(literal, 'expected the VALID_WAIT_REASONS Set literal').toBeDefined()
+    const browser = new Set([...(literal ?? '').matchAll(/'([^']+)'/g)].map(match => match[1]))
+    const vendored = new Set<string>(OPERATOR_WAIT_REASONS)
+    expect(vendored.size).toBeGreaterThan(0)
+    for (const value of vendored) expect(browser.has(value), `browser is missing ${value}`).toBe(true)
+    for (const value of browser) expect(vendored.has(value as string), `browser has extra ${value}`).toBe(true)
+    // and through the parser: every vendored value survives, one extra does not
+    for (const waitReason of [...vendored]) expect(parseStatusData({...ACTIVE_STATUS, waitReason}).waitReason).toBe(waitReason)
+    expect(Object.hasOwn(parseStatusData({...ACTIVE_STATUS, waitReason: 'fixture-extra-reason'}), 'waitReason')).toBe(false)
   })
 })
 

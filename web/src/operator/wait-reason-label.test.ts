@@ -8,7 +8,6 @@
 import {afterEach, describe, expect, it, vi} from 'vitest'
 
 import {
-  CHECKOUT_PREPARATION_HEADLINE_LABELS,
   clearFinishedRuns,
   initOperatorStream,
   PINNED_CONTRACT_VERSION,
@@ -67,16 +66,22 @@ const OPEN_QUESTION = frame('question', {...QUESTION_PAYLOAD, settled: false})
 const SETTLED_QUESTION = frame('question', {runId: RUN_ID, requestID: 'req-q', settled: true})
 
 /** A fetch stub whose response bodies the test feeds frame by frame. Run-list requests get a running run. */
-function stubStreamFetch() {
+const RUNNING_ROW = {runId: RUN_ID, repo: 'fro-bot/agent', status: 'running', createdAt: '2026-06-26T12:00:00.000Z'}
+
+function stubStreamFetch(options: {statusFor?: (attachment: number) => number; row?: Record<string, unknown>} = {}) {
   const pushes: Array<(text: string) => void> = []
   const ends: Array<() => void> = []
+  let streamRequests = 0
   vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: unknown) => {
     if (String(input).endsWith('/runs')) {
       return new Response(
-        JSON.stringify({runs: [{runId: RUN_ID, repo: 'fro-bot/agent', status: 'running', createdAt: '2026-06-26T12:00:00.000Z'}]}),
+        JSON.stringify({runs: [options.row ?? RUNNING_ROW]}),
         {status: 200, headers: {'content-type': 'application/json'}},
       )
     }
+    streamRequests += 1
+    const status = options.statusFor?.(streamRequests) ?? 200
+    if (status !== 200) return {status, headers: {get: () => null}, body: null}
     const queue: Array<string | null> = []
     let wake: (() => void) | null = null
     pushes.push(text => {
@@ -109,6 +114,7 @@ function stubStreamFetch() {
     pushToLatest: (text: string) => pushes.at(-1)?.(text),
     endLatest: () => ends.at(-1)?.(),
     attachments: () => pushes.length,
+    streamRequests: () => streamRequests,
   }
 }
 
@@ -364,10 +370,10 @@ describe('wait-reason label precedence', () => {
     pushToLatest(READY + statusFrame({waitReason: 'awaiting-reply', checkoutPreparation: {outcome: 'refused', reason: 'detached'}}))
 
     await vi.waitFor(() => expect(labelOf(parts)).not.toBe(''))
+    expect(parts.reasonEl.textContent).toBe('Checkout refused: detached HEAD')
     expect(labelOf(parts)).not.toBe(WAIT_COPY['awaiting-reply'])
     expect(stateOf(parts)).toBe('present')
     expect(ownerOf(parts)).toBe('stream')
-    expect(CHECKOUT_PREPARATION_HEADLINE_LABELS.refused).toBeDefined()
   })
 
   it('a failed frame after a reason leaves only the failure reason', async () => {
@@ -397,16 +403,32 @@ describe('wait-reason label precedence', () => {
     expect(ownerOf(parts)).toBeUndefined()
   })
 
-  it('a reset with no snapshot clears the line', async () => {
+  it('a reset with no snapshot on a live run keeps the label showing', async () => {
     const {pushToLatest} = stubStreamFetch()
     const parts = makeCard()
     open(parts)
     pushToLatest(READY + running('awaiting-reply'))
     await vi.waitFor(() => expect(labelOf(parts)).toBe(WAIT_COPY['awaiting-reply']))
 
+    pushToLatest(frame('reset', {runId: RUN_ID, reason: 'no-snapshot'}) + OUTPUT)
+
+    await vi.waitFor(() => expect(parts.regions['run-output'].textContent).toBe('some output'))
+    expect(labelOf(parts)).toBe(WAIT_COPY['awaiting-reply'])
+    expect(stateOf(parts)).toBe('wait')
+    expect(ownerOf(parts)).toBe('stream')
+  })
+
+  it('a reset with no snapshot on a run whose summary is terminal clears the line', async () => {
+    const {pushToLatest} = stubStreamFetch()
+    const parts = makeCard()
+    open(parts, {summaryStatus: 'succeeded'})
+    pushToLatest(READY + running('awaiting-reply'))
+    await vi.waitFor(() => expect(labelOf(parts)).toBe(WAIT_COPY['awaiting-reply']))
+
     pushToLatest(frame('reset', {runId: RUN_ID, reason: 'no-snapshot'}))
 
     await vi.waitFor(() => expect(labelOf(parts)).toBe(''))
+    expect(stateOf(parts)).toBeUndefined()
     expect(ownerOf(parts)).toBeUndefined()
   })
 })
@@ -429,6 +451,21 @@ describe('wait-reason label by connection state', () => {
     await vi.waitFor(() => expect(labelOf(parts)).toBe(WAIT_COPY['awaiting-background-task']), {timeout: 3000})
     expect(stateOf(parts)).toBe('wait')
     expect(ownerOf(parts)).toBe('stream')
+  })
+
+  it('a backpressure connection clears a painted label and leaves the stream owning nothing', async () => {
+    const {pushToLatest, endLatest, streamRequests} = stubStreamFetch({statusFor: attachment => (attachment === 1 ? 200 : 429)})
+    const parts = makeCard()
+    open(parts)
+    pushToLatest(READY + running('awaiting-reply'))
+    await vi.waitFor(() => expect(labelOf(parts)).toBe(WAIT_COPY['awaiting-reply']))
+
+    pushToLatest(frame('reset', {runId: RUN_ID, reason: 'shutdown'}))
+    endLatest()
+    await vi.waitFor(() => expect(streamRequests()).toBe(2), {timeout: 3000})
+
+    await vi.waitFor(() => expect(parts.noticeEl.textContent).toContain('Stream temporarily unavailable'))
+    expectNoLabel(parts)
   })
 
   it('a contract drift clears a painted label', async () => {
@@ -515,6 +552,20 @@ describe('wait-reason label lifecycle', () => {
     expect(ownerOf(parts)).toBeUndefined()
   })
 
+  it('a new attachment drops a stream-owner marker from text that is not a wait label, and keeps the text', () => {
+    stubStreamFetch()
+    const parts = makeCard()
+    parts.reasonEl.textContent = 'No recent activity'
+    parts.reasonEl.dataset.reasonState = 'present'
+    parts.reasonEl.dataset.reasonOwner = 'stream'
+
+    open(parts)
+
+    expect(labelOf(parts)).toBe('No recent activity')
+    expect(stateOf(parts)).toBe('present')
+    expect(ownerOf(parts)).toBeUndefined()
+  })
+
   it('an attachment before its first frame, as on a freshly launched card, shows no label', () => {
     stubStreamFetch()
     const parts = makeCard()
@@ -572,8 +623,8 @@ describe('run list refresh against a stream-owned reason line', () => {
     runIndexMod?.resetRunIndexState()
   })
 
-  async function mountListCard() {
-    const net = stubStreamFetch()
+  async function mountListCard(row?: Record<string, unknown>) {
+    const net = stubStreamFetch({row})
     runIndexMod = await import('../../../public/operator-run-index.js')
     runIndexMod.resetRunIndexState()
     document.body.innerHTML = '<div data-role="run-index"><div data-role="run-index-list"></div></div>'
@@ -607,6 +658,28 @@ describe('run list refresh against a stream-owned reason line', () => {
 
     expect(reasonEl.textContent).toBe('')
     expect(reasonEl.dataset.reasonState).toBeUndefined()
+    expect(reasonEl.dataset.reasonOwner).toBeUndefined()
+  })
+
+  it('leaves a failure reason in place while the stream owns the line, and repaints the list text once the stream has closed', async () => {
+    // The list row carries a different reason than the stream frame, so a list repaint is visible.
+    const {pushToLatest, reasonEl, handle} = await mountListCard({...RUNNING_ROW, status: 'failed', failureKind: 'max-duration-timeout'})
+    expect(reasonEl.textContent).toBe('Run timed out')
+    pushToLatest(READY + statusFrame({status: 'failed', failureKind: 'inactivity-timeout'}))
+    await vi.waitFor(() => expect(reasonEl.textContent).toBe('No recent activity'))
+    expect(reasonEl.dataset.reasonState).toBe('present')
+    expect(reasonEl.dataset.reasonOwner).toBe('stream')
+
+    await (runIndexMod as RunIndexModule).refreshOperatorRunIndex()
+
+    expect(reasonEl.textContent).toBe('No recent activity')
+    expect(reasonEl.dataset.reasonOwner).toBe('stream')
+
+    handle.close()
+    await (runIndexMod as RunIndexModule).refreshOperatorRunIndex()
+
+    expect(reasonEl.textContent).toBe('Run timed out')
+    expect(reasonEl.dataset.reasonState).toBe('present')
     expect(reasonEl.dataset.reasonOwner).toBeUndefined()
   })
 

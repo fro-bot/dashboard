@@ -560,15 +560,26 @@ describe('fixture no-leak guard — wait reasons', () => {
   const KNOWN_WAIT_REASONS = new Set<string>(OPERATOR_WAIT_REASONS)
   const waitRunIdFor = (scenario: string): string => `run-fixture-index-${scenario.replaceAll('_', '-')}`
 
-  it('every waitReason literal in the fixture files is a known wire value or fixture-prefixed', () => {
-    const WAIT_REASON_LITERAL_PATTERN = /waitReason:\s*['"]([^'"]+)['"]/g
-    for (const filePath of FIXTURE_FILES) {
-      const source = readFixtureFile(filePath)
-      for (const match of source.matchAll(WAIT_REASON_LITERAL_PATTERN)) {
-        const value = match[1] ?? ''
-        expect(KNOWN_WAIT_REASONS.has(value) || value.startsWith('fixture-'), `waitReason literal "${value}" in ${filePath}`).toBe(true)
+  it('every waitReason in every scenario\'s emitted frames is a known wire value or the fixture-unknown value', () => {
+    let checked = 0
+    for (const scenario of Object.values(FIXTURE_SCENARIO_NAMES)) {
+      const sse = serializeScenarioToSse(scenario, waitRunIdFor(scenario))
+      for (const record of sse.split('\n\n')) {
+        const dataLine = record.split('\n').find(line => line.startsWith('data: '))
+        if (dataLine === undefined) continue
+        let payload: unknown
+        try {
+          payload = JSON.parse(dataLine.slice('data: '.length))
+        } catch {
+          continue
+        }
+        if (typeof payload !== 'object' || payload === null || !('waitReason' in payload)) continue
+        const value = String(payload.waitReason)
+        expect(KNOWN_WAIT_REASONS.has(value) || value === FIXTURE_UNKNOWN_WAIT_REASON, `waitReason "${value}" in ${scenario}`).toBe(true)
+        checked += 1
       }
     }
+    expect(checked).toBeGreaterThan(0)
   })
 
   it('the unknown wait reason constant is fixture-prefixed, outside the known set, and trips no forbidden pattern', () => {

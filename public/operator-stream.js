@@ -1618,17 +1618,10 @@ export function nextStreamState(current, event) {
             shouldReconnect: false,
           }
         }
-        // The run's state is unknown from here, so a stored wait reason is dropped with it; the next
-        // status frame sets it again if it still applies.
-        let runs = current.runs
-        if (runEntry?.waitReason !== undefined) {
-          const withoutWaitReason = {...runEntry}
-          delete withoutWaitReason.waitReason
-          runs = Object.assign(Object.create(null), current.runs, {[resetRunId]: withoutWaitReason})
-        }
+        // The run stays live, so its stored wait reason stays too: the gateway does not re-send an
+        // unchanged status after this reset, and the next status frame replaces or removes the reason.
         return {
           ...current,
-          runs,
           snapshotMissing: Object.assign(Object.create(null), current.snapshotMissing, {[resetRunId]: true}),
         }
       }
@@ -3665,6 +3658,24 @@ function recordedStreamSetup(runId, record) {
 }
 
 /**
+ * Release what a stream painted into the reason line it shares with the run list. Every caller drops the
+ * stream-owner marker, so the list owns the line again. The callers differ in whether the text goes too:
+ *   - `clearText: true` empties the text and `data-reason-state`: what the stream painted is gone, the
+ *     connection drifted, ended or left the live state, or an earlier attachment's wait label is stale.
+ *   - `clearText: false` keeps the text and `data-reason-state`: a preparation headline or failure reason
+ *     is something the list can repaint, so it stays on close() and when a new attachment starts.
+ * Only `clearText` is a decision; the marker is always released. The stream's own paint bookkeeping is
+ * reset by the stream's wrapper around this function (`releasePaintedReason`).
+ */
+function releaseReasonLine(reasonEl, {clearText}) {
+  if (clearText) {
+    reasonEl.textContent = ''
+    if (reasonEl.dataset) delete reasonEl.dataset.reasonState
+  }
+  if (reasonEl.dataset) delete reasonEl.dataset.reasonOwner
+}
+
+/**
  * Initialize the operator run stream for a given run ID.
  *
  * This function touches the DOM and must only be called from a browser context.
@@ -3718,11 +3729,9 @@ export function initOperatorStream(opts) {
   // The reason line is shared with the run list, and this attachment has painted nothing in it yet. A wait
   // label an earlier attachment left behind is cleared; any stream-owner marker is dropped either way.
   if (reasonEl?.dataset) {
-    if (reasonEl.dataset.reasonOwner === 'stream' && reasonEl.dataset.reasonState === 'wait') {
-      reasonEl.textContent = ''
-      delete reasonEl.dataset.reasonState
-    }
-    delete reasonEl.dataset.reasonOwner
+    releaseReasonLine(reasonEl, {
+      clearText: reasonEl.dataset.reasonOwner === 'stream' && reasonEl.dataset.reasonState === 'wait',
+    })
   }
 
   // Every stream-owned region starts each attachment empty and hidden; updateDOM alone shows one.
@@ -4064,6 +4073,18 @@ export function initOperatorStream(opts) {
   let announcedFailure = false
   let paintedPreparationHeadline = false // reasonEl currently shows a headline this stream wrote from checkoutPreparation
   let paintedWaitLabel = null // the wait-reason text this stream wrote into reasonEl, or null when it wrote none
+  let paintedFailureReason = false // reasonEl currently shows a failure or provider reason this stream wrote
+
+  // Release the reason line through releaseReasonLine and reset the paint bookkeeping with it, so a claim the
+  // stream made is always released the same way. Clearing the text also forgets a painted headline; keeping it
+  // leaves the headline flag, which still describes the text on the line.
+  const releasePaintedReason = clearText => {
+    if (!reasonEl) return
+    releaseReasonLine(reasonEl, {clearText})
+    paintedWaitLabel = null
+    paintedFailureReason = false
+    if (clearText) paintedPreparationHeadline = false
+  }
   // Latest valid startedAt from a status frame; never reset to blank. A recorded run seeds it so the first paint has it.
   let latestStartedAt = initialStartedAt
 
@@ -4589,6 +4610,7 @@ export function initOperatorStream(opts) {
           claimReasonLine()
           paintedPreparationHeadline = false
           paintedWaitLabel = null
+          paintedFailureReason = true
           const preparation = runEntry.checkoutPreparation
           failureLabelStatesPreparation = view.reasonLabel === FAILURE_REASON_LABELS['checkout-substituted'] &&
             preparation?.outcome === 'refused' && preparation.reason === 'checkout-substituted'
@@ -4600,6 +4622,7 @@ export function initOperatorStream(opts) {
           claimReasonLine()
           paintedPreparationHeadline = true
           paintedWaitLabel = null
+          paintedFailureReason = false
         } else if (waitLabel !== undefined) {
           // The text is written only when it changes: the reason can change every few seconds and the line is silent.
           if (paintedWaitLabel !== waitLabel) {
@@ -4608,16 +4631,11 @@ export function initOperatorStream(opts) {
             claimReasonLine()
             paintedPreparationHeadline = false
             paintedWaitLabel = waitLabel
+            paintedFailureReason = false
           }
-        } else if (paintedPreparationHeadline || paintedWaitLabel !== null) {
+        } else if (paintedPreparationHeadline || paintedWaitLabel !== null || paintedFailureReason) {
           // What this stream painted is gone; a reason painted at page load is left alone.
-          reasonEl.textContent = ''
-          if (reasonEl.dataset) {
-            delete reasonEl.dataset.reasonState
-            delete reasonEl.dataset.reasonOwner
-          }
-          paintedPreparationHeadline = false
-          paintedWaitLabel = null
+          releasePaintedReason(true)
         }
       } else if (!aborted) {
         const conn = state.connection
@@ -4629,21 +4647,10 @@ export function initOperatorStream(opts) {
             conn === 'submitted-unobservable' ||
             conn === 'closed')
         ) {
-          reasonEl.textContent = ''
-          if (reasonEl.dataset) {
-            delete reasonEl.dataset.reasonState
-            delete reasonEl.dataset.reasonOwner
-          }
-          paintedPreparationHeadline = false
-          paintedWaitLabel = null
+          releasePaintedReason(true)
         } else if (paintedWaitLabel !== null) {
           // Any other connection state that is not live (connecting, reconnecting, backpressure) drops the label.
-          reasonEl.textContent = ''
-          if (reasonEl.dataset) {
-            delete reasonEl.dataset.reasonState
-            delete reasonEl.dataset.reasonOwner
-          }
-          paintedWaitLabel = null
+          releasePaintedReason(true)
         }
       }
     }
@@ -5553,12 +5560,7 @@ export function initOperatorStream(opts) {
       if (reasonEl) {
         // The wait label is this stream's alone and goes with it. A headline or a failure reason stays for the
         // list to repaint, and the list owns the line again.
-        if (paintedWaitLabel !== null) {
-          reasonEl.textContent = ''
-          if (reasonEl.dataset) delete reasonEl.dataset.reasonState
-          paintedWaitLabel = null
-        }
-        if (reasonEl.dataset) delete reasonEl.dataset.reasonOwner
+        releasePaintedReason(paintedWaitLabel !== null)
       }
       state = nextStreamState(state, {type: 'stream-closed'})
     },
