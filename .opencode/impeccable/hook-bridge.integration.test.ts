@@ -164,6 +164,14 @@ describe('test runtime', () => {
   })
 })
 
+/**
+ * Timeout for a runner whose child has to start Node and write a file before
+ * the timeout fires. The runner's timeout counts from spawn, and a cold Node
+ * start can take over a second on a loaded host, so the timeout must stay out
+ * of reach of that startup for the test to be about what happens after it.
+ */
+const CHILD_STARTUP_TIMEOUT_MS = 4000
+
 describe('createSpawnRunner', () => {
   it('resolves ok for a quiet-clean child: exit 0, empty stdout, empty stderr', async () => {
     const scriptPath = fixture('process.exit(0);\n')
@@ -336,6 +344,7 @@ describe('createSpawnRunner', () => {
   })
 
   it('resolves timeout, without SIGKILL, when the child exits during the grace period', async () => {
+    const readyFile = trackedFile('sigterm-ready')
     const markerFile = trackedFile('sigterm-marker')
     const scriptPath = fixture(
       [
@@ -343,18 +352,24 @@ describe('createSpawnRunner', () => {
         // Exits cleanly shortly after SIGTERM, well inside the grace period.
         // The marker is only written if SIGKILL did not arrive first.
         `process.on('SIGTERM', () => { setTimeout(() => { writeFileSync(${JSON.stringify(markerFile)}, 'graceful'); process.exit(0); }, 100); });`,
+        // Written once the handler is registered, so a missing marker can be told
+        // apart from a timeout that fired before the child finished starting.
+        `writeFileSync(${JSON.stringify(readyFile)}, 'ready');`,
         `setInterval(() => {}, 1000);`,
       ].join('\n'),
     )
-    const runner = createSpawnRunner({ scriptPath, timeoutMs: 500, killGraceMs: 2000 })
+    const killGraceMs = 2000
+    const runner = createSpawnRunner({ scriptPath, timeoutMs: CHILD_STARTUP_TIMEOUT_MS, killGraceMs })
     const start = Date.now()
     const result = await runner(payload, { worktree: worktree() })
     const elapsedMs = Date.now() - start
 
     expect(result.kind).toBe('timeout')
+    // The child registered its handler before the timeout, so the check below is not vacuous.
+    expect(existsSync(readyFile)).toBe(true)
     expect(existsSync(markerFile)).toBe(true)
     // Resolved on the child's own exit, not after waiting out the full grace period.
-    expect(elapsedMs).toBeLessThan(500 + 2000)
+    expect(elapsedMs).toBeLessThan(CHILD_STARTUP_TIMEOUT_MS + killGraceMs)
   }, 15_000)
 
   it('escalates SIGTERM to SIGKILL after the grace period and resolves timeout with the child gone', async () => {
@@ -369,14 +384,15 @@ describe('createSpawnRunner', () => {
     )
     // Allow cold Node startup and PID-file creation under contention; this test
     // is about SIGKILL/reaping, not making startup latency part of the fixture.
-    const runner = createSpawnRunner({ scriptPath, timeoutMs: 1000, killGraceMs: 100 })
+    const killGraceMs = 100
+    const runner = createSpawnRunner({ scriptPath, timeoutMs: CHILD_STARTUP_TIMEOUT_MS, killGraceMs })
     const start = Date.now()
     const result = await runner(payload, { worktree: worktree() })
     const elapsedMs = Date.now() - start
 
     expect(result.kind).toBe('timeout')
     // Bounded: timeout + grace + slack.
-    expect(elapsedMs).toBeLessThan(2500)
+    expect(elapsedMs).toBeLessThan(CHILD_STARTUP_TIMEOUT_MS + killGraceMs + 1500)
     await expectProcessGone(readPid(pidFile))
   }, 15_000)
 
@@ -396,7 +412,7 @@ describe('createSpawnRunner', () => {
         `setInterval(() => {}, 1000);`,
       ].join('\n'),
     )
-    const runner = createSpawnRunner({ scriptPath, timeoutMs: 1000, killGraceMs: 100 })
+    const runner = createSpawnRunner({ scriptPath, timeoutMs: CHILD_STARTUP_TIMEOUT_MS, killGraceMs: 100 })
     const result = await runner(payload, { worktree: worktree() })
 
     expect(result.kind).toBe('timeout')
@@ -416,13 +432,17 @@ describe('createSpawnRunner', () => {
         `process.exit(0);`,
       ].join('\n'),
     )
-    const runner = createSpawnRunner({ scriptPath, timeoutMs: 400, killGraceMs: 100 })
+    const killGraceMs = 100
+    const runner = createSpawnRunner({ scriptPath, timeoutMs: CHILD_STARTUP_TIMEOUT_MS, killGraceMs })
     const start = Date.now()
     const result = await runner(payload, { worktree: worktree() })
     const elapsedMs = Date.now() - start
 
     expect(result.kind).toBe('timeout')
-    expect(elapsedMs).toBeLessThan(400 + 100 + 2000)
+    expect(elapsedMs).toBeLessThan(CHILD_STARTUP_TIMEOUT_MS + killGraceMs + 2000)
+    // The child wrote the pid file before it exited; the wait only absorbs file visibility lag.
+    await waitUntil(() => existsSync(grandchildPidFile))
+    expect(existsSync(grandchildPidFile)).toBe(true)
     await expectProcessGone(readPid(grandchildPidFile))
   }, 15_000)
 
@@ -441,14 +461,15 @@ describe('createSpawnRunner', () => {
         `process.exit(0);`,
       ].join('\n'),
     )
-    const runner = createSpawnRunner({ scriptPath, timeoutMs: 400, killGraceMs: 100 })
+    const killGraceMs = 100
+    const runner = createSpawnRunner({ scriptPath, timeoutMs: CHILD_STARTUP_TIMEOUT_MS, killGraceMs })
     const start = Date.now()
     const result = await runner(payload, { worktree: worktree() })
     const elapsedMs = Date.now() - start
 
     expect(result.kind).toBe('timeout')
     // Resolved by the deadline, not by waiting for the grandchild to release the pipes.
-    expect(elapsedMs).toBeLessThan(400 + 100 + 2000)
+    expect(elapsedMs).toBeLessThan(CHILD_STARTUP_TIMEOUT_MS + killGraceMs + 2000)
     // A grandchild that leaves the child's process group is outside the group kill's reach; the afterEach safety net reaps it.
     expect(isAlive(readPid(grandchildPidFile))).toBe(true)
   }, 15_000)
@@ -554,7 +575,8 @@ describe('createSpawnRunner', () => {
         `process.exit(0);`,
       ].join('\n'),
     )
-    const runner = createSpawnRunner({ scriptPath, timeoutMs: 400, killGraceMs: 100, maxOutputBytes: 64 })
+    const killGraceMs = 100
+    const runner = createSpawnRunner({ scriptPath, timeoutMs: CHILD_STARTUP_TIMEOUT_MS, killGraceMs, maxOutputBytes: 64 })
     const start = Date.now()
     const result = await runner(payload, { worktree: worktree() })
     const elapsedMs = Date.now() - start
@@ -563,7 +585,7 @@ describe('createSpawnRunner', () => {
     if (result.kind !== 'overflow') return
     expect(Buffer.byteLength(result.stdout, 'utf-8')).toBeLessThanOrEqual(64)
     // Resolved by the deadline, not by waiting for the grandchild to release the pipes.
-    expect(elapsedMs).toBeLessThan(400 + 100 + 2000)
+    expect(elapsedMs).toBeLessThan(CHILD_STARTUP_TIMEOUT_MS + killGraceMs + 2000)
     // A grandchild that leaves the child's process group is outside the group kill's reach; the afterEach safety net reaps it.
     expect(isAlive(readPid(grandchildPidFile))).toBe(true)
   }, 15_000)
@@ -601,7 +623,7 @@ describe('createSpawnRunner + createHook end-to-end', () => {
         `setInterval(() => {}, 1000);`, // stay alive
       ].join('\n'),
     )
-    const runner = createSpawnRunner({ scriptPath, timeoutMs: 1000, killGraceMs: 100 })
+    const runner = createSpawnRunner({ scriptPath, timeoutMs: CHILD_STARTUP_TIMEOUT_MS, killGraceMs: 100 })
     const hook = createHook({ runDetector: runner, worktree: worktree() })
     const output = { title: 't', output: 'ok', metadata: {} }
 
