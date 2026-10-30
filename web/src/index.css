@@ -205,13 +205,19 @@
   display: none;
 }
 
+.run-reason[data-reason-state="wait"] {
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
 .run-card .run-repo {
   grid-column: 2;
   grid-row: 1 / 3;
   align-self: center;
 }
 
-.run-card:has(.run-reason[data-reason-state="present"]) .run-repo {
+.run-card:has(.run-reason[data-reason-state="present"]) .run-repo,
+.run-card:has(.run-reason[data-reason-state="wait"]) .run-repo {
   grid-row: 1;
   align-self: end;
 }
@@ -1804,7 +1810,8 @@
     align-self: center;
   }
 
-  .run-card:has(.run-reason[data-reason-state="present"]) .run-repo {
+  .run-card:has(.run-reason[data-reason-state="present"]) .run-repo,
+  .run-card:has(.run-reason[data-reason-state="wait"]) .run-repo {
     grid-row: 2;
     align-self: center;
   }
