@@ -12,17 +12,7 @@ applies_when:
   - New contract fields carry free-form text such as branch names, paths, or git config keys
   - Upstream is contract-ready but the gateway does not yet project the new fields to SSE consumers
   - The dashboard and gateway contract pins must move in the same marcusrbrown/infra deploy
-tags:
-  [
-    operator,
-    gateway-contract,
-    contract-1-8-0,
-    fail-closed,
-    sanitization,
-    checkout-provenance,
-    checkout-preparation,
-    deploy-coordination,
-  ]
+tags: [operator, gateway-contract, contract-1-8-0, fail-closed, sanitization, checkout-provenance, checkout-preparation, deploy-coordination]
 ---
 
 # Consume a gateway operator contract bump as a full dashboard consumer (contract 1.8.0)
@@ -60,9 +50,9 @@ module cannot import server TypeScript, so `public/operator-stream.js` keeps its
 too. A parity test pins the browser literal to the server constant:
 
 ```ts
-it("browser PINNED_CONTRACT_VERSION equals vendored TypeScript OPERATOR_CONTRACT_VERSION", () => {
-  expect(PINNED_CONTRACT_VERSION).toBe(OPERATOR_CONTRACT_VERSION);
-});
+it('browser PINNED_CONTRACT_VERSION equals vendored TypeScript OPERATOR_CONTRACT_VERSION', () => {
+  expect(PINNED_CONTRACT_VERSION).toBe(OPERATOR_CONTRACT_VERSION)
+})
 ```
 
 A conformance test fails if a version literal appears in any vendored contract
@@ -85,9 +75,9 @@ extra keys through, including a JSON-parsed own `__proto__`:
 
 ```ts
 function copyHead(head: OperatorCheckoutHead): OperatorCheckoutHead {
-  return head.kind === "attached"
-    ? { kind: "attached", branch: head.branch, sha: head.sha }
-    : { kind: "detached", sha: head.sha };
+  return head.kind === 'attached'
+    ? {kind: 'attached', branch: head.branch, sha: head.sha}
+    : {kind: 'detached', sha: head.sha}
 }
 // parseOperatorCheckoutProvenance returns
 // {kind: 'observed', observation: copyObservation(v.observation), remote: copyRemote(v.remote)}
@@ -103,12 +93,12 @@ are mutually exclusive:
 
 ```js
 if (checkoutProvenance !== undefined) {
-  nextEntry.checkoutProvenance = checkoutProvenance;
-  delete nextEntry.checkoutPreparation;
+  nextEntry.checkoutProvenance = checkoutProvenance
+  delete nextEntry.checkoutPreparation
 }
 if (checkoutPreparation !== undefined) {
-  nextEntry.checkoutPreparation = checkoutPreparation;
-  delete nextEntry.checkoutProvenance;
+  nextEntry.checkoutPreparation = checkoutPreparation
+  delete nextEntry.checkoutProvenance
 }
 ```
 
@@ -171,11 +161,7 @@ dropped its reason line while the headline wasn't painted (connection not live, 
 no `reasonEl`). `updateDOM` now passes what it actually painted:
 
 ```js
-renderCheckoutDetail(
-  checkoutEl,
-  state.runs[runId],
-  paintedPreparationHeadline || failureLabelStatesPreparation,
-);
+renderCheckoutDetail(checkoutEl, state.runs[runId], paintedPreparationHeadline || failureLabelStatesPreparation)
 ```
 
 ### 7. Build ahead of the upstream gap with fixtures
@@ -265,49 +251,33 @@ collapsed card, and a terminal card must not take a non-terminal one back.
 Soft fields keep the frame:
 
 ```ts
-const data = ckBrowserStatus(
-  ckStatusPayload({
-    phase: "FAILED",
-    status: "failed",
-    failureKind: "workspace-unavailable",
-    checkoutProvenance: { kind: "fixture-bogus" },
-    checkoutPreparation: { outcome: "fixture-bogus" },
-  }),
-);
-expect(data?.failureKind).toBe("workspace-unavailable");
-expect(data?.checkoutProvenance).toBeUndefined();
-expect(data?.checkoutPreparation).toBeUndefined();
+const data = ckBrowserStatus(ckStatusPayload({
+  phase: 'FAILED', status: 'failed', failureKind: 'workspace-unavailable',
+  checkoutProvenance: {kind: 'fixture-bogus'},
+  checkoutPreparation: {outcome: 'fixture-bogus'},
+}))
+expect(data?.failureKind).toBe('workspace-unavailable')
+expect(data?.checkoutProvenance).toBeUndefined()
+expect(data?.checkoutPreparation).toBeUndefined()
 ```
 
 The browser is stricter than the server:
 
 ```ts
-const bidiOnly = "\u202E\u202D\u0007";
+const bidiOnly = '\u202E\u202D\u0007'
 const emptyBranch = ckObserved({
-  observation: ckObservation({
-    head: { kind: "attached", branch: bidiOnly, sha: CK_SHA_A },
-  }),
-});
-expect(
-  ckServerStatus(ckStatusPayload({ checkoutProvenance: emptyBranch }))
-    ?.checkoutProvenance,
-).toBeDefined();
-expect(
-  ckBrowserStatus(ckStatusPayload({ checkoutProvenance: emptyBranch }))
-    ?.checkoutProvenance,
-).toBeUndefined();
+  observation: ckObservation({head: {kind: 'attached', branch: bidiOnly, sha: CK_SHA_A}}),
+})
+expect(ckServerStatus(ckStatusPayload({checkoutProvenance: emptyBranch}))?.checkoutProvenance).toBeDefined()
+expect(ckBrowserStatus(ckStatusPayload({checkoutProvenance: emptyBranch}))?.checkoutProvenance).toBeUndefined()
 ```
 
 Every emitted class has a stylesheet rule:
 
 ```ts
-const emitted = [...js.matchAll(/\bcheckout-detail(?:__[a-z-]+)?\b/g)].map(
-  (match) => match[0],
-);
+const emitted = [...js.matchAll(/\bcheckout-detail(?:__[a-z-]+)?\b/g)].map(match => match[0])
 for (const className of emitted) {
-  expect(css, `missing CSS rule for .${className}`).toMatch(
-    new RegExp(String.raw`\.${className}(?![\w-])`),
-  );
+  expect(css, `missing CSS rule for .${className}`).toMatch(new RegExp(String.raw`\.${className}(?![\w-])`))
 }
 ```
 

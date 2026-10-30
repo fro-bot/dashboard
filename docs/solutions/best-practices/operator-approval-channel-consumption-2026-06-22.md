@@ -13,17 +13,7 @@ applies_when:
   - The client must distinguish denial, transport failure, already-settled, and session-expired outcomes
   - Gated-action strings originate from an agent and must render as inert text, not HTML
   - A read-only surface gains its first bounded mutating capability
-tags:
-  [
-    operator,
-    approval-channel,
-    sse,
-    contract-version,
-    same-origin,
-    textcontent,
-    csrf,
-    fail-closed,
-  ]
+tags: [operator, approval-channel, sse, contract-version, same-origin, textcontent, csrf, fail-closed]
 ---
 
 # Consuming the gateway operator approval channel safely in a read-only dashboard
@@ -51,26 +41,14 @@ from passive observation to an interactive decision loop.
 The approval frame is a discriminated union on `settled`:
 
 ```ts
-interface OperatorApprovalFrameOpen {
-  readonly runId: string;
-  readonly requestID: string;
-  readonly permission: string;
-  readonly command?: string;
-  readonly filepath?: string;
-  readonly settled: false;
-}
-interface OperatorApprovalFrameSettle {
-  readonly runId: string;
-  readonly requestID: string;
-  readonly settled: true;
-}
-type OperatorApprovalFrame =
-  OperatorApprovalFrameOpen | OperatorApprovalFrameSettle;
+interface OperatorApprovalFrameOpen   { readonly runId: string; readonly requestID: string; readonly permission: string; readonly command?: string; readonly filepath?: string; readonly settled: false }
+interface OperatorApprovalFrameSettle { readonly runId: string; readonly requestID: string; readonly settled: true }
+type OperatorApprovalFrame = OperatorApprovalFrameOpen | OperatorApprovalFrameSettle
 ```
 
 The frames are wire-immutable (`readonly` throughout) and discriminated on `settled`.
 
-A settle frame carries **no reason** — it does not say _why_ the gate resolved (operator
+A settle frame carries **no reason** — it does not say *why* the gate resolved (operator
 decision, deadline, sibling cascade, or run teardown all produce the same settle). So the
 consumer must not caption the dismissal; it dismisses silently and **tombstones the
 `requestID`**. The tombstone is what makes the races safe:
@@ -96,18 +74,18 @@ fed from the wire as attacker-influenceable.
 The gateway gives the client **no capability signal** — a read-only operator and an
 authorized one are indistinguishable until a decision is attempted (denials are uniform
 404s). So show the decide controls whenever a prompt is open (optimistic), and make the
-_response_ tell the truth by splitting it into distinct states:
+*response* tell the truth by splitting it into distinct states:
 
-| Outcome           | Signal                                                                                           | UI state                                                   |
-| ----------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------- |
-| Not authorized    | HTTP 404 on the decision POST                                                                    | generic "you may not have approval access"                 |
-| Transport failure | fetch threw / network                                                                            | retryable "didn't go through" — **never** read as a denial |
-| Already settled   | decision state (`already_claimed`/`unavailable`/`scope_mismatch`)                                | inline "already settled" / scope-mismatch notice           |
-| Settle failed     | decision state (`failed_to_settle`)                                                              | retryable — maps to the transport-failure path             |
-| Session expired   | **400/401/403 on the CSRF refresh that precedes the POST** (or a persistent 400 after one retry) | "reload to approve" — not a retry loop                     |
+| Outcome | Signal | UI state |
+| --- | --- | --- |
+| Not authorized | HTTP 404 on the decision POST | generic "you may not have approval access" |
+| Transport failure | fetch threw / network | retryable "didn't go through" — **never** read as a denial |
+| Already settled | decision state (`already_claimed`/`unavailable`/`scope_mismatch`) | inline "already settled" / scope-mismatch notice |
+| Settle failed | decision state (`failed_to_settle`) | retryable — maps to the transport-failure path |
+| Session expired | **400/401/403 on the CSRF refresh that precedes the POST** (or a persistent 400 after one retry) | "reload to approve" — not a retry loop |
 
 The session-expired case is the subtle one: the decision POST is preceded by a CSRF
-refresh, and a `401/403` _there_ must propagate as an HTTP/session failure, not collapse
+refresh, and a `401/403` *there* must propagate as an HTTP/session failure, not collapse
 into the retryable transport class — otherwise an expired operator loops forever on "try
 again" instead of being told to reload.
 
@@ -171,13 +149,13 @@ and `src/gateway/operator-contract/question-frame.ts`.
 `classifyQuestionDecisionResponse` reads the 200 body's `state` (`claimed`, `already_claimed`,
 `already_settled`, `failed_to_settle`). Everything else maps by class:
 
-| Response                          | Outcome                           |
-| --------------------------------- | --------------------------------- |
-| 200, known `state`                | decided (by `state`)              |
-| 200, unrecognized `state`         | failed (request-level, retryable) |
-| 401 / 403                         | session expired                   |
-| 404 (masked denial)               | cannot answer                     |
-| 429, 5xx, unreadable 200, timeout | unknown: re-list, never resubmit  |
+| Response | Outcome |
+| --- | --- |
+| 200, known `state` | decided (by `state`) |
+| 200, unrecognized `state` | failed (request-level, retryable) |
+| 401 / 403 | session expired |
+| 404 (masked denial) | cannot answer |
+| 429, 5xx, unreadable 200, timeout | unknown: re-list, never resubmit |
 
 `readQuestionBadRequest` splits the 400. A body with a `reason` is an invalid answer and is
 never retried. A body without one is the browser guard's refusal (CSRF, Origin, Fetch
