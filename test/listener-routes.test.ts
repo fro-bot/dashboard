@@ -100,6 +100,7 @@ describe('operator listener channel routes', () => {
       body: badBody,
     })
     expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({error: 'invalid request body'})
   })
 
   it('POST /ingest with malformed JSON → 400', async () => {

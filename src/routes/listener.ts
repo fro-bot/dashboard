@@ -51,7 +51,7 @@ export function buildListenerRouter(deps: ListenerRouterDeps): Hono {
 
     const parseResult = parseIngestBody(parsedJson)
     if (!parseResult.success) {
-      return c.json({error: parseResult.error.message}, 400)
+      return c.json({error: 'invalid request body'}, 400)
     }
 
     const {id, receivedAt} = deps.store.insert(parseResult.data)
