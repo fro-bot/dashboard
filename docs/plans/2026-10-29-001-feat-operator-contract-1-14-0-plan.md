@@ -323,7 +323,7 @@ The gateway caches the overlaid status, wait reason included, and emits a status
 
 **Verification:** The harness tests list the new scenarios, and each streams the frames above.
 
-- [ ] **Unit 5: Docs and browser pass**
+- [x] **Unit 5: Docs and browser pass**
 
 **Goal:** The docs describe 1.14.0 as current, and the assembled card is checked in a browser.
 
