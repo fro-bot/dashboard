@@ -131,7 +131,7 @@ on existing routes, with no field changes, and it is part of the pinned contract
 for it: the server client's `listRepos` and the browser's `listRepos` and `fetchRunIndex` already treat any
 non-2xx as a failure and never read the body. The repo picker shows its generic unavailable copy and the run
 index shows its unavailable state, so neither renders an empty list for a gateway that has no policy. Tests
-pin the server client's `listRepos` and `fetchRunIndex`. (This README carries no version literal; the conformance test enforces that.)
+pin the server client's `listRepos` and the browser's `fetchRunIndex`. (This README carries no version literal; the conformance test enforces that.)
 
 ## Omissions vs upstream
 
