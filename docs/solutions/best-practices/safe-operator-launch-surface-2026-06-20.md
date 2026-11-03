@@ -107,6 +107,15 @@ A mutating route's error responses are an information surface. Collapse them:
 - `404` → one uniform unavailable state (no cause).
 - The repo picker renders from a single normalized success shape — no
   count/ordering/timing/per-item-denial inference (denied repos are simply absent).
+- As of operator contract 1.15.0, `GET /operator/repos` and `GET /operator/runs` answer
+  `503 {error: 'redaction-policy-unavailable'}` while the gateway holds no usable redaction
+  policy, where they used to answer an empty `200`. No dashboard code reads that body. The
+  `503` is an ordinary non-2xx: the repo picker shows "Repository list unavailable." (the
+  same copy as a `500`), and the run index takes its unavailable state without an auth signal.
+  Neither path renders "No repositories configured." or the empty-runs state, so a gateway
+  with no policy is never mistaken for an empty account. Keep it that way: do not add a
+  branch that reads this body or special-cases the status. The gateway and dashboard pins
+  move together.
 
 ### 4. The browser operator-client pattern
 
