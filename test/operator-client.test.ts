@@ -1278,6 +1278,39 @@ describe('listRepos', () => {
     }
   })
 
+  // Contract 1.15.0: while the gateway has no usable redaction policy the listing answers
+  // 503 {error: 'redaction-policy-unavailable'}. That is an ordinary http error: the body is never
+  // read, so it cannot reach the result or the log.
+  it('maps 503 redaction-policy-unavailable to a typed http error without exposing the body', async () => {
+    const loggedEntries: {message: string; meta: Record<string, unknown>}[] = []
+    const capturingLogger = {
+      info: (message: string, meta?: Record<string, unknown>) => {
+        loggedEntries.push({message, meta: meta ?? {}})
+      },
+      error: (message: string, meta?: Record<string, unknown>) => {
+        loggedEntries.push({message, meta: meta ?? {}})
+      },
+      warning: (message: string, meta?: Record<string, unknown>) => {
+        loggedEntries.push({message, meta: meta ?? {}})
+      },
+      debug: (message: string, meta?: Record<string, unknown>) => {
+        loggedEntries.push({message, meta: meta ?? {}})
+      },
+    }
+    const client = createOperatorClient({
+      fetch: async () =>
+        new Response(JSON.stringify({error: 'redaction-policy-unavailable'}), {
+          status: 503,
+          headers: {'content-type': 'application/json'},
+        }),
+      createEventStream: makeEventStream([]),
+      logger: capturingLogger,
+    })
+    const result = await client.listRepos()
+    expect(result).toEqual({success: false, error: {kind: 'http', status: 503}})
+    expect(JSON.stringify(loggedEntries)).not.toContain('redaction-policy-unavailable')
+  })
+
   it('does not log repo owner or name in any log entry', async () => {
     const loggedEntries: {message: string; meta: Record<string, unknown>}[] = []
     const capturingLogger = {

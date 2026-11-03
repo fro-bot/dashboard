@@ -123,6 +123,16 @@ inlined boundary types for RunPhase/Surface/RunState).
   It is defined here so the vendored contract and the web-side duplicate
   (`web/src/push/push-types.ts`) share one canonical string set.
 
+## Listing routes can answer 503
+
+`GET /operator/repos` and `GET /operator/runs` answer `503 {error: 'redaction-policy-unavailable'}` while the
+gateway holds no usable redaction policy, where they used to answer an empty `200`. The change is a new status
+on existing routes, with no field changes, and it is part of the pinned contract. The dashboard adds no code
+for it: the server client's `listRepos` and the browser's `listRepos` and `fetchRunIndex` already treat any
+non-2xx as a failure and never read the body. The repo picker shows its generic unavailable copy and the run
+index shows its unavailable state, so neither renders an empty list for a gateway that has no policy. Tests
+pin the server client's `listRepos` and `fetchRunIndex`. (This README carries no version literal; the conformance test enforces that.)
+
 ## Omissions vs upstream
 
 The following upstream exports are omitted because they depend on upstream-only types:
