@@ -153,7 +153,7 @@ This release makes a product bet: operator control is the active surface, and mo
 - No monitoring redesign, aggregation improvement, or new monitoring route in this slice; monitoring revival is deferred to a separate product decision.
 - No backend monitoring data-layer deletion unless it is required to stop active frontend fetching or rendering.
 - No offline queueing, background sync, or optimistic replay of operator actions.
-- No push notifications for approvals; `fro-bot/dashboard#108` remains the follow-up.
+- Push notifications for approvals are covered by `docs/brainstorms/2026-07-08-operator-push-notifications-requirements.md` (`fro-bot/dashboard#108`), not this slice.
 - No new Gateway capabilities beyond current operator session, run, stream, approval, repository, and run-index contracts.
 - No dashboard-managed proxy for Gateway operator APIs.
 - No dedicated infra GitHub App hardening; `fro-bot/dashboard#112` remains separate.
@@ -163,7 +163,7 @@ This release makes a product bet: operator control is the active surface, and mo
 ## Why This Now
 
 - Operator-first routing beats preserving monitoring because the current pain blocks the active control loop: the installed app can open the wrong surface or mislabel auth/rate-limit failures as offline.
-- Push notifications remain deferred because they depend on a trustworthy foreground operator surface first.
+- Push notifications deep-link into the foreground operator surface, so that surface has to be trustworthy first.
 - Monitoring revival remains deferred because preserving a secondary frontend surface would keep the product split this slice is meant to remove.
 
 ---

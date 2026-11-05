@@ -54,6 +54,15 @@ client changes). The test suite rebuilds the client automatically via `pretest`.
 - `GET /auth/login` · `GET /auth/callback` · `POST /auth/logout` — GitHub OAuth session flow.
 - `/manifest.webmanifest`, `/sw.js` — PWA manifest and service worker.
 
+### Push notifications
+
+The operator PWA supports opt-in Web Push for approval, question and run-failed events. Notifications
+carry fixed text and a deep link to the run, and tapping one opens the approval. They have no inline
+Approve/Deny actions: the payload omits the tool and command, so a decision from the notification
+would be blind, and Safari/iOS ignores action buttons (see
+[fro-bot/agent#1917](https://github.com/fro-bot/agent/issues/1917)). Subscriptions and dispatch live
+in the Gateway; the privacy policy is served at `/privacy`.
+
 ## Configuration
 
 Access is single-operator: GitHub OAuth authenticates the request and an exact, case-sensitive
