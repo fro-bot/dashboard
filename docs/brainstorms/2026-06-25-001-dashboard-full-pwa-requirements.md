@@ -53,7 +53,7 @@ The dashboard is a PWA in name only: `web/public/manifest.webmanifest` exists an
 
 ### R6 — Opt-in push notifications; background sync out of scope
 - Web Push is supported for approval, question and run-failed events. It is opt-in only, privacy-policy-gated and minimum-data. Subscription storage and dispatch live in the Gateway (`fro-bot/agent`); the dashboard service worker handles `push` and `notificationclick`. See `docs/brainstorms/2026-07-08-operator-push-notifications-requirements.md`.
-- Notifications carry fixed text and a deep link to the run. Tapping one opens the approval. There are no inline Approve/Deny actions: the payload omits the tool and command, so an approval from the notification would be blind, and Safari/iOS ignores action buttons (`fro-bot/agent#1917`).
+- Notifications carry fixed text and a deep link to the run. Tapping one opens the run. There are no inline Approve/Deny actions: the payload omits the tool and command, so an approval from the notification would be blind, and Safari/iOS ignores action buttons (`fro-bot/agent#1917`).
 - Background sync is not supported. This PWA plan covers install, offline and update only.
 
 ### R7 — Mobile / responsive install
