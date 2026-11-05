@@ -32,7 +32,7 @@ Turn the metadata-only "PWA" into a real one: installable, instant-loading from 
 
 ### Deferred to Separate Tasks
 
-- **Push notifications / background sync** — its own follow-up plan (server-side `web-push` + VAPID + subscription store + sweeper + frequency policy + persistence decision + privacy policy). File a tracking issue. The SW is structured so a `push` listener can be added later without rework.
+- **Push notifications** — supported for approval, question and run-failed events, with fixed text and a deep link to the run; no inline actions (`fro-bot/agent#1917`). Scope and plan: `docs/plans/2026-07-08-001-feat-operator-push-notifications-dashboard-plan.md`. Background sync is not supported.
 - Any monitoring-view perf/a11y rework (virtualization, keyboard nav) — separate from the PWA effort.
 
 ## Context & Research
@@ -319,7 +319,7 @@ Browser
 - **Error propagation:** SW registration failure must not break the app — it still works as a plain SPA (`onRegisterError` logs, no crash). A cache-read failure falls back to the offline state (fail-closed).
 - **State lifecycle risks:** stale shell after a deploy (mitigated by prompt-to-refresh + `no-cache` on `/sw.js`+index); cached authed data after logout (mitigated by the purge); cache growth (ExpirationPlugin maxEntries:1); DTO-shape drift if an operator delays an update while the SW caches a new-shape response into old React — accepted as a pre-existing SPA+API limitation, bounded by the next monitoring fetch.
 - **API surface parity:** none — no new API contract; `/api/monitoring` keeps its shape AND its `no-store` header (the SW caches independent of Cache-Control).
-- **Unchanged invariants:** read-only (no writes, no push in this plan); redaction stays server-side (cache holds the already-redacted DTO); `/api/monitoring` DTO shape + `Cache-Control: no-store` (unchanged); the existing CSP `worker-src`/`manifest-src` (already SW-ready, no widening); release-path coverage (`web/**` already covers SW assets); the auth gate (preserved via SW scoping).
+- **Unchanged invariants:** read-only (no writes; push is outbound notification only); redaction stays server-side (cache holds the already-redacted DTO); `/api/monitoring` DTO shape + `Cache-Control: no-store` (unchanged); the existing CSP `worker-src`/`manifest-src` (already SW-ready, no widening); release-path coverage (`web/**` already covers SW assets); the auth gate (preserved via SW scoping).
 
 ## Risks & Dependencies
 
@@ -338,7 +338,6 @@ Browser
 ## Documentation / Operational Notes
 
 - After shipping, capture a `docs/solutions/` learning: the no-build-runtime + injectManifest + serve-SW-from-Hono pattern AND the deny-by-default SW fetch router (auth/api passthrough, navigation denylist) — this is the first PWA/SW in the repo, so the scoping precedent is load-bearing; document that the SW intentionally caches only hashed assets + `/api/monitoring`, and that the SW Cache API ignores `Cache-Control`.
-- File the push-notifications follow-up issue (deferred scope) so it's tracked.
 - Release smoke (`release.yaml`) gains a `/sw.js` + manifest probe AND an unauthenticated-`/`-not-served-from-cache probe (auth-bypass regression guard).
 
 ## Sources & References

@@ -51,10 +51,10 @@ The dashboard is a PWA in name only: `web/public/manifest.webmanifest` exists an
 - SW uses prompt-to-refresh: on a new build, present a non-intrusive "New version available — refresh" affordance; the operator chooses when to reload.
 - No silent stale-shell; no forced reload mid-session.
 
-### R6 — Opt-in push notifications / background sync — DEFERRED to a separate plan
-- Push is **deferred entirely to its own follow-up plan** (tracked separately). It carries substantial server-side infrastructure (`web-push` + VAPID keypair + a subscription store + a dead-subscription sweeper + a notification-frequency policy) and forces a persistence decision for the currently-stateless dashboard, plus a privacy-policy requirement — all of which deserve their own brainstorm/plan rather than riding along here.
-- When built, it stays opt-in only, privacy-policy-gated, minimum-data, self-hosted where feasible (the hard telemetry rule).
-- This PWA plan ships the full installable + offline + update experience without push; the SW is structured so a future push-event listener can be added without rework.
+### R6 — Opt-in push notifications; background sync out of scope
+- Web Push is supported for approval, question and run-failed events. It is opt-in only, privacy-policy-gated and minimum-data. Subscription storage and dispatch live in the Gateway (`fro-bot/agent`); the dashboard service worker handles `push` and `notificationclick`. See `docs/brainstorms/2026-07-08-operator-push-notifications-requirements.md`.
+- Notifications carry fixed text and a deep link to the run. Tapping one opens the run. There are no inline Approve/Deny actions: the payload omits the tool and command, so an approval from the notification would be blind, and Safari/iOS ignores action buttons (`fro-bot/agent#1917`).
+- Background sync is not supported. This PWA plan covers install, offline and update only.
 
 ### R7 — Mobile / responsive install
 - The installed app is usable on mobile viewports; the monitoring triage view (already responsive from the rebuild) holds up in the standalone mobile window, including the install affordance and offline/stale states.
