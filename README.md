@@ -57,7 +57,7 @@ client changes). The test suite rebuilds the client automatically via `pretest`.
 ### Push notifications
 
 The operator PWA supports opt-in Web Push for approval, question and run-failed events. Notifications
-carry fixed text and a deep link to the run, and tapping one opens the approval. They have no inline
+carry fixed text and a deep link to the run, and tapping one opens that run. They have no inline
 Approve/Deny actions: the payload omits the tool and command, so a decision from the notification
 would be blind, and Safari/iOS ignores action buttons (see
 [fro-bot/agent#1917](https://github.com/fro-bot/agent/issues/1917)). Subscriptions and dispatch live
