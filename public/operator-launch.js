@@ -358,7 +358,19 @@ export function buildLaunchClient(opts) {
             headers: {'content-type': 'application/json'},
             signal,
           })
-          if (!res.ok) return {success: false, error: {kind: 'http', status: res.status}}
+          if (!res.ok) {
+            if (res.status === 503) {
+              try {
+                const body = await res.json()
+                if (body !== null && typeof body === 'object' && body.error === 'redaction-policy-unavailable') {
+                  return {success: false, error: {kind: 'policy-unavailable'}}
+                }
+              } catch {
+                // An invalid error body remains an HTTP failure.
+              }
+            }
+            return {success: false, error: {kind: 'http', status: res.status}}
+          }
           const data = await res.json()
           if (!Array.isArray(data)) {
             return {success: false, error: {kind: 'protocol', message: 'invalid repos response'}}
@@ -468,6 +480,7 @@ let _launchListenerGeneration = -1
 let _launchStreamHandle = null
 // Idempotency flag: prevents double-init when auto-start fires before DOMContentLoaded.
 let _launchInitialized = false
+let _repoRetryTimer = null
 // In-flight submit mutex: persists across unmount/remount to prevent double-submit
 // WITHIN the same mount. Guarded by generation (see _launching/_launchingGeneration
 // below) so a submit that never reaches its `finally` (e.g. React tears the
@@ -609,9 +622,14 @@ export async function initOperatorLaunch(opts) {
   // -------------------------------------------------------------------------
 
   const pickerContainer = document.querySelector('#repo-picker-container')
+  let policyUnavailable = false
+  let pickerInFlight = false
 
-  if (pickerContainer !== null) {
+  const refreshRepos = async () => {
+    if (pickerContainer === null || pickerInFlight) return
+    pickerInFlight = true
     const reposResult = await client.listRepos()
+    pickerInFlight = false
 
     // Guard: bail if reset/replaced while awaiting listRepos.
     if (isInitStale(abortController, myGeneration)) return
@@ -621,8 +639,12 @@ export async function initOperatorLaunch(opts) {
       // Never render a generic failure message for auth/rate-limit/network/protocol failures.
       // The copy is fixed and coarse — no raw error details, status codes, or paths.
       const error = reposResult.error
+      if (policyUnavailable && error.kind !== 'policy-unavailable') return
+      policyUnavailable = error.kind === 'policy-unavailable'
       let failureCopy
-      if (error.kind === 'http') {
+      if (policyUnavailable) {
+        failureCopy = pickerContainer.dataset.policyDetail ?? ''
+      } else if (error.kind === 'http') {
         const status = error.status ?? 0
         if (status === 401 || status === 403) {
           failureCopy = 'Sign in required to load repositories.'
@@ -637,11 +659,29 @@ export async function initOperatorLaunch(opts) {
         // protocol or unknown
         failureCopy = 'Repository list unavailable.'
       }
-      pickerContainer.textContent = failureCopy
+      pickerContainer.replaceChildren()
+      const failure = document.createElement('div')
+      failure.setAttribute('role', 'alert')
+      failure.dataset.failure = policyUnavailable ? 'policy-unavailable' : 'unavailable'
+      const heading = document.createElement('h3')
+      heading.textContent = policyUnavailable ? pickerContainer.dataset.policyHeadline : 'Repository list unavailable'
+      const detail = document.createElement('p')
+      detail.textContent = failureCopy
+      const retry = document.createElement('button')
+      retry.type = 'button'
+      retry.textContent = 'Try again'
+      retry.addEventListener('click', refreshRepos)
+      failure.append(heading, detail, retry)
+      pickerContainer.append(failure)
+      if (policyUnavailable && _repoRetryTimer === null) {
+        _repoRetryTimer = setInterval(refreshRepos, 30_000)
+      }
     } else if (reposResult.data.length === 0) {
+      policyUnavailable = false
       // Successful fetch but empty list — this is the only case where "no repos" is accurate.
       pickerContainer.textContent = 'No repositories configured.'
     } else {
+      policyUnavailable = false
       // Render a <select> with the available repos
       const select = document.createElement('select')
       select.id = 'launch-repo-select'
@@ -661,7 +701,18 @@ export async function initOperatorLaunch(opts) {
       pickerContainer.textContent = ''
       pickerContainer.append(select)
     }
+    if (!policyUnavailable && _repoRetryTimer !== null) {
+      clearInterval(_repoRetryTimer)
+      _repoRetryTimer = null
+    }
+    const form = document.querySelector('#launch-form')
+    const prompt = form?.querySelector('textarea[name="prompt"]')
+    const submit = form?.querySelector('[type="submit"]')
+    if (prompt !== null && prompt !== undefined) prompt.disabled = policyUnavailable
+    if (submit !== null && submit !== undefined) submit.disabled = policyUnavailable || isPromptTooLong(prompt?.value ?? '')
   }
+  await refreshRepos()
+  if (isInitStale(abortController, myGeneration)) return
 
   // -------------------------------------------------------------------------
   // Wire launch form submit
@@ -704,7 +755,7 @@ export async function initOperatorLaunch(opts) {
     // The one place the Launch button's disabled state is computed.
     const syncPromptState = () => {
       const tooLong = isPromptTooLong(readPrompt())
-      if (submitBtn !== null) submitBtn.disabled = isInFlight() || tooLong
+      if (submitBtn !== null) submitBtn.disabled = policyUnavailable || isInFlight() || tooLong
       if (tooLong === announcedTooLong) return tooLong
       announcedTooLong = tooLong
       if (promptEl !== null) {
@@ -724,6 +775,7 @@ export async function initOperatorLaunch(opts) {
 
     launchForm.addEventListener('submit', async event => {
       event.preventDefault()
+      if (policyUnavailable) return
 
       // Mutex guard — re-entry is impossible regardless of how submit is triggered,
       // but only within the SAME mount: a lock held by a generation that is no
@@ -1050,6 +1102,10 @@ export async function initOperatorLaunch(opts) {
  * even if stale cleanup from an older init runs concurrently.
  */
 export function resetLaunchState() {
+  if (_repoRetryTimer !== null) {
+    clearInterval(_repoRetryTimer)
+    _repoRetryTimer = null
+  }
   // Capture the pre-increment generation to check listener ownership.
   const preIncrementGeneration = _launchGeneration
   // Increment generation to invalidate all pending inits.

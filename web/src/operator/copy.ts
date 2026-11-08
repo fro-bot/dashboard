@@ -13,6 +13,16 @@
 
 import type {OperatorState} from './state.ts'
 
+export type ListingFailure = 'unavailable' | 'policy-unavailable'
+
+export const LISTING_FAILURE_COPY: Record<ListingFailure, {readonly headline: string; readonly detail: string}> = {
+  unavailable: {headline: 'Recent runs unavailable', detail: 'Could not load recent runs. Try again.'},
+  'policy-unavailable': {
+    headline: 'Operator policy unavailable',
+    detail: "Listings are hidden because the gateway can't load its redaction policy. This page retries automatically.",
+  },
+}
+
 export interface OperatorStateCopy {
   readonly headline: string
   readonly detail: string

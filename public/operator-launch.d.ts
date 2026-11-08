@@ -127,7 +127,7 @@ export declare function buildLaunchClient(opts?: {
   >
   readonly listRepos: () => Promise<
     | {readonly success: true; readonly data: readonly {readonly owner: string; readonly repo: string; readonly channelName?: string}[]}
-    | {readonly success: false; readonly error: {readonly kind: string; readonly status?: number; readonly message?: string; readonly reason?: string; readonly code?: string}}
+    | {readonly success: false; readonly error: {readonly kind: 'policy-unavailable'} | {readonly kind: 'http'; readonly status: number} | {readonly kind: 'network' | 'protocol'; readonly message: string}}
   >
   readonly launchRun: (req: {
     readonly repo: string

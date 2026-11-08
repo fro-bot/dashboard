@@ -77,6 +77,7 @@ export type PromptRenderer = (text: string, context: {readonly doc: Document; re
 
 export type RunIndexResult =
   | {readonly kind: 'loaded'; readonly summaries: ParsedRunSummary[]}
+  | {readonly kind: 'policy-unavailable'}
   | {readonly kind: 'unavailable'; readonly authFailure?: boolean}
 
 export declare const RUN_INDEX_CAP: 100
@@ -160,7 +161,7 @@ export declare function refreshOperatorRunIndex(): Promise<boolean>
  * 'auth-required' (401/403, after `onAuthRequired`), 'stale' (a reset or a newer init replaced it
  * while it fetched; it rendered no result and left the loading state to the newer owner).
  */
-export type RunIndexInitOutcome = 'loaded' | 'empty' | 'unavailable' | 'auth-required' | 'stale'
+export type RunIndexInitOutcome = 'loaded' | 'empty' | 'unavailable' | 'policy-unavailable' | 'auth-required' | 'stale'
 
 export declare function initOperatorRunIndex(opts?: {
   endpointBase?: string

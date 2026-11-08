@@ -971,6 +971,20 @@
   align-self: flex-start;
 }
 
+#launch-prompt:disabled,
+#launch-form .operator-submit-btn:disabled {
+  background: var(--color-surface);
+  border-color: var(--color-border);
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+  opacity: 1;
+  box-shadow: none;
+}
+
+#launch-prompt:disabled::placeholder {
+  color: var(--color-text-muted);
+}
+
 /* ─── 8. Branded Empty & Failure States ───────────────────────────────────── */
 
 .operator-empty-state {
@@ -2352,6 +2366,29 @@
 .wiki-contract-notice[data-contract="mismatch"] h3,
 .wiki-outcome[role="alert"] h3,
 .wiki-conflict[role="alert"] h3 { color: var(--color-error); }
+
+[data-role="run-index-unavailable"][data-failure="unavailable"] [data-list-failure="policy-unavailable"],
+[data-role="run-index-unavailable"][data-failure="policy-unavailable"] [data-list-failure="unavailable"] { display: none; }
+
+.operator-list-failure,
+#repo-picker-container [data-failure] {
+  padding: var(--space-4);
+  border: 1px solid var(--color-error);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-error) 8%, var(--color-surface));
+  color: var(--color-text-muted);
+}
+.operator-list-failure h3,
+#repo-picker-container [data-failure] h3 { color: var(--color-text); font-weight: 600; }
+.operator-list-failure[data-failure="policy-unavailable"],
+#repo-picker-container [data-failure="policy-unavailable"] {
+  border-color: var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 8%, var(--color-surface));
+}
+.operator-list-failure p,
+#repo-picker-container [data-failure] p { margin: var(--space-2) 0; }
+.operator-list-failure button,
+#repo-picker-container [data-failure] button { color: var(--color-accent); cursor: pointer; text-decoration: underline; }
 .wiki-saved,
 .wiki-saved-pending,
 .wiki-saved-settled,

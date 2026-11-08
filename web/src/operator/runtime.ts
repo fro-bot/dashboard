@@ -766,6 +766,9 @@ async function defaultRuntimeLoader(opts?: {
     : document.querySelector<HTMLButtonElement>('[data-role="run-jump-dismiss"]')
   const onDismissJumpNotice = () => clearJumpNotice()
   dismissJumpNoticeButton?.addEventListener('click', onDismissJumpNotice)
+  const retryRunIndexButton = typeof document === 'undefined' ? null : document.querySelector('[data-role="run-index-retry"]')
+  const onRetryRunIndex = () => { void refreshRunList() }
+  retryRunIndexButton?.addEventListener('click', onRetryRunIndex)
 
   // Build the active-stream coordination callbacks. These are passed to run-index and
   // launch modules so the runtime seam owns the single active stream handle.
@@ -1072,7 +1075,7 @@ async function defaultRuntimeLoader(opts?: {
     } else {
       // Unavailable, stale, auth-required or already cleaned up: nothing to open it in.
       _setJumpSlot(epoch, {mode: 'refuse'})
-      jumpsRecoverable = initOutcome === 'unavailable' && !authRequired && opts?.isMounted?.() !== false
+      jumpsRecoverable = (initOutcome === 'unavailable' || initOutcome === 'policy-unavailable') && !authRequired && opts?.isMounted?.() !== false
     }
   }
 
@@ -1085,6 +1088,7 @@ async function defaultRuntimeLoader(opts?: {
     stopRefreshTimer()
     if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibilityChange)
     dismissJumpNoticeButton?.removeEventListener('click', onDismissJumpNotice)
+    retryRunIndexButton?.removeEventListener('click', onRetryRunIndex)
     _cancelPendingExpand()
     // Close the active stream handle on cleanup.
     _closeActiveStream()
