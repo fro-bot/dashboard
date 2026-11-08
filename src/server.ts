@@ -31,6 +31,7 @@ import {Hono, type Context, type MiddlewareHandler} from 'hono'
 import {getCookie, setCookie} from 'hono/cookie'
 import {secureHeaders} from 'hono/secure-headers'
 import {fetchGitHubUserLogin, makeGitHubOAuthClient} from './auth/oauth.ts'
+import {parseTrustedProxies, resolveClientKey} from './client-address.ts'
 import {createOperatorClient} from './gateway/operator-client.ts'
 import {
   readGatewayOperatorOrigin,
@@ -75,16 +76,28 @@ interface Variables {
   gatewaySession?: SessionDto
 }
 
-/** Per-IP rate limiter state */
+/** Per-client rate limiter state */
 interface RateLimitEntry {
   count: number
   windowStart: number
 }
 
-/** Simple fixed-window in-memory rate limiter */
+/**
+ * Simple fixed-window in-memory rate limiter. Keys are client accounting keys (IPv4
+ * address or IPv6 /64, see client-address.ts) and `operator:<id>` writer keys.
+ * Insertion order is window-start order (a restarted window is re-inserted), so the
+ * first key is always the oldest.
+ */
 const rateLimitMap = new Map<string, RateLimitEntry>()
 const RATE_LIMIT_WINDOW_MS = 60_000 // 1 minute
-const RATE_LIMIT_MAX = 60 // requests per window per IP
+const RATE_LIMIT_MAX = 60 // requests per window per client
+
+/**
+ * Hard ceiling on tracked keys. When a new key arrives at the ceiling the oldest key is
+ * dropped to make room: a flood of distinct clients can age out other clients' counters,
+ * but it can neither grow the map without bound nor lock a new client out.
+ */
+export const MAX_RATE_LIMIT_KEYS = 10_000
 
 /**
  * Eviction sweep counter. Every EVICT_INTERVAL calls we sweep the map for
@@ -102,6 +115,14 @@ const EVICT_STALE_AGE = 2 * RATE_LIMIT_WINDOW_MS
 export function resetRateLimitForTesting(): void {
   rateLimitMap.clear()
   rateLimitCallCount = 0
+}
+
+/**
+ * Number of tracked rate-limit keys. Tests only.
+ * @internal
+ */
+export function rateLimitKeyCountForTesting(): number {
+  return rateLimitMap.size
 }
 
 // Gateway operator-session mode: unauthenticated/invalid requests must recover through
@@ -148,6 +169,12 @@ export function consumeRateLimit(key: string, max: number, now: number = Date.no
   const entry = rateLimitMap.get(key)
 
   if (entry === undefined || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+    // Re-insert so insertion order stays window-start order.
+    rateLimitMap.delete(key)
+    if (rateLimitMap.size >= MAX_RATE_LIMIT_KEYS) {
+      const oldest = rateLimitMap.keys().next()
+      if (oldest.done !== true) rateLimitMap.delete(oldest.value)
+    }
     rateLimitMap.set(key, {count: 1, windowStart: now})
     return {allowed: true, retryAfterSeconds: 0}
   }
@@ -324,6 +351,13 @@ export interface DashboardAppConfig {
    * every wiki write is refused. Production wires this in `createDashboardServer`.
    */
   wiki?: WikiAppDeps | undefined
+  /**
+   * Trusted reverse-proxy addresses or CIDR ranges, comma separated (the raw
+   * `DASHBOARD_TRUSTED_PROXIES` value). `X-Forwarded-For` is honored for rate-limit
+   * keying only from these peers. When undefined, reads the env var; unset or blank
+   * means no proxy is trusted. A malformed value throws at construction.
+   */
+  trustedProxies?: string | undefined
 }
 
 /**
@@ -578,7 +612,10 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   })
 
   // ── Rate limiting middleware (defense-in-depth; real limiting belongs at Caddy) ──
-  // Keyed on the direct connection remote address, not X-Forwarded-For (client-spoofable).
+  // Keyed on a trusted-proxy-aware client address (see client-address.ts): behind Caddy the
+  // socket peer is always the proxy, so X-Forwarded-For is read, but only when the peer is
+  // in DASHBOARD_TRUSTED_PROXIES. Any other peer's header is ignored (client-spoofable).
+  const trustedProxies = parseTrustedProxies(opts?.trustedProxies ?? process.env.DASHBOARD_TRUSTED_PROXIES)
   app.use('*', async (c: Context, next) => {
     const path = new URL(c.req.url).pathname
     const sensitiveRoutes = ['/', '/auth/login', '/auth/callback', '/operator']
@@ -586,12 +623,13 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
 
     if (isSensitive) {
       // getConnInfo throws in test context (app.request()); fall back to 'unknown'.
-      let ip: string
+      let socketAddress: string | undefined
       try {
-        ip = getConnInfo(c).remote.address ?? 'unknown'
+        socketAddress = getConnInfo(c).remote.address
       } catch {
-        ip = 'unknown'
+        socketAddress = undefined
       }
+      const ip = resolveClientKey({socketAddress, forwardedFor: c.req.header('x-forwarded-for') ?? null}, trustedProxies)
 
       if (!checkRateLimit(ip)) {
         logger.warning('Rate limit exceeded', {ip, path: loggablePath(path)})
