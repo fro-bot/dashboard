@@ -526,7 +526,7 @@ export async function initOperatorRunIndex(opts) {
   _refreshContext = {endpointBase, fixtureSessionId, onSelectRun, onAuthRequired, onListApplied}
 
   if (result.kind === 'policy-unavailable') {
-    if (runIndexList !== null) runIndexList.replaceChildren()
+    applyPolicyUnavailable(runIndexList, onSelectRun, onListApplied)
     showRunIndexUnavailable({runIndexSection, runIndexUnavailable}, 'policy-unavailable')
     return 'policy-unavailable'
   }
@@ -612,6 +612,16 @@ function reportListApplied(onListApplied, views) {
   }
 }
 
+/** Remove untrusted listing rows, keeping only cards already owned by a live stream or pending launch. */
+function applyPolicyUnavailable(list, onSelectRun, onListApplied) {
+  if (list === null) return
+  const focused = focusedElementWithin(list)
+  diffRunIndexList(list, [], {onSelectRun, activeStreamRunId: _activeStreamRunId})
+  list.hidden = list.children.length === 0
+  reportListApplied(onListApplied, [])
+  if (focused !== null) restoreFocus(list, focused)
+}
+
 /** The unavailable treatment: the unavailable notice up, section state to match. */
 function showRunIndexUnavailable({runIndexSection, runIndexUnavailable}, failure = 'unavailable') {
   if (runIndexUnavailable !== null) runIndexUnavailable.hidden = false
@@ -660,10 +670,7 @@ async function applyRefresh() {
       const runIndexList = document.querySelector('[data-role="run-index-list"]')
       const runIndexEmpty = document.querySelector('[data-role="run-index-empty"]')
       const runIndexUnavailable = document.querySelector('[data-role="run-index-unavailable"]')
-      if (runIndexList !== null) {
-        runIndexList.replaceChildren()
-        runIndexList.hidden = true
-      }
+      applyPolicyUnavailable(runIndexList, context.onSelectRun, context.onListApplied)
       if (runIndexEmpty !== null) runIndexEmpty.hidden = true
       showRunIndexUnavailable({runIndexSection, runIndexUnavailable}, 'policy-unavailable')
       return false
