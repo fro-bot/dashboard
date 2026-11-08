@@ -22,7 +22,7 @@
  */
 
 import {useEffect, useRef, useState} from 'react'
-import {getStateActionReason, getStateDetail, getStateHeadline, getStateRecoveryHint} from '../operator/copy.ts'
+import {getStateActionReason, getStateDetail, getStateHeadline, getStateRecoveryHint, LISTING_FAILURE_COPY} from '../operator/copy.ts'
 import {clearFinishedRunCache, createOperatorRuntime} from '../operator/runtime.ts'
 import type {OperatorRuntimeHandle} from '../operator/runtime.ts'
 import {navigateToGatewaySignIn} from '../operator/sign-in-recovery.ts'
@@ -383,8 +383,20 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
             <div
               data-role="run-index-unavailable"
               hidden
-              className="operator-status-text"
-            />
+              className="operator-list-failure"
+              data-failure="unavailable"
+              role="alert"
+            >
+              <div data-list-failure="unavailable">
+                <h3>{LISTING_FAILURE_COPY.unavailable.headline}</h3>
+                <p>{LISTING_FAILURE_COPY.unavailable.detail}</p>
+              </div>
+              <div data-list-failure="policy-unavailable">
+                <h3>{LISTING_FAILURE_COPY['policy-unavailable'].headline}</h3>
+                <p>{LISTING_FAILURE_COPY['policy-unavailable'].detail}</p>
+              </div>
+              <button type="button" data-role="run-index-retry">Try again</button>
+            </div>
 
             <div
               data-role="stream-status"
@@ -477,6 +489,8 @@ export function Operator({state = 'loading', onRuntimeStateChange, fixtureMode, 
                 <div
                   id="repo-picker-container"
                   className="operator-form-group"
+                  data-policy-headline={LISTING_FAILURE_COPY['policy-unavailable'].headline}
+                  data-policy-detail={LISTING_FAILURE_COPY['policy-unavailable'].detail}
                 />
 
                 <form id="launch-form" ref={formRef} className="operator-form">

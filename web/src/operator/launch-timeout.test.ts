@@ -224,6 +224,7 @@ describe('launch request deadline', () => {
     await vi.advanceTimersByTimeAsync(launchModule.LAUNCH_FETCH_TIMEOUT_MS + 1)
     await init
 
-    expect(elements().picker.textContent).toBe(REPO_LIST_NETWORK_COPY)
+    expect(elements().picker.textContent).toContain(REPO_LIST_NETWORK_COPY)
+    expect(elements().picker.querySelector('button')?.textContent).toBe('Try again')
   })
 })

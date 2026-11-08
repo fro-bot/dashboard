@@ -368,6 +368,16 @@ async function requestRunIndex(url, signal) {
   }
 
   if (!res.ok) {
+    if (res.status === 503) {
+      try {
+        const body = await res.json()
+        if (body !== null && typeof body === 'object' && body.error === 'redaction-policy-unavailable') {
+          return {kind: 'policy-unavailable'}
+        }
+      } catch {
+        // An invalid error body is a generic failure.
+      }
+    }
     // Auth signal: 401/403 means the session has expired or is absent. Surfaced
     // separately (never as a distinct render path) so a caller can reclassify the
     // shell state to auth-required instead of resurrecting a stale ready view.
@@ -515,6 +525,12 @@ export async function initOperatorRunIndex(opts) {
   // An auth failure below clears it again — there is no session to refresh against.
   _refreshContext = {endpointBase, fixtureSessionId, onSelectRun, onAuthRequired, onListApplied}
 
+  if (result.kind === 'policy-unavailable') {
+    if (runIndexList !== null) runIndexList.replaceChildren()
+    showRunIndexUnavailable({runIndexSection, runIndexUnavailable}, 'policy-unavailable')
+    return 'policy-unavailable'
+  }
+
   if (result.kind === 'unavailable') {
     // The /operator/runs fetch itself is the auth re-classification point: a stale
     // or expired session must not resurrect a restored ready view. Report it and
@@ -597,9 +613,10 @@ function reportListApplied(onListApplied, views) {
 }
 
 /** The unavailable treatment: the unavailable notice up, section state to match. */
-function showRunIndexUnavailable({runIndexSection, runIndexUnavailable}) {
+function showRunIndexUnavailable({runIndexSection, runIndexUnavailable}, failure = 'unavailable') {
   if (runIndexUnavailable !== null) runIndexUnavailable.hidden = false
-  if (runIndexSection !== null) runIndexSection.dataset.state = 'unavailable'
+  if (runIndexSection !== null) runIndexSection.dataset.state = failure
+  if (runIndexUnavailable !== null && runIndexUnavailable.dataset !== undefined) runIndexUnavailable.dataset.failure = failure
 }
 
 /**
@@ -637,6 +654,20 @@ async function applyRefresh() {
   try {
     const result = await fetchRunIndex({endpointBase: context.endpointBase, fixtureSessionId: context.fixtureSessionId})
     if (isRunIndexInitStale(generation) || _refreshContext !== context) return false
+
+    if (result.kind === 'policy-unavailable') {
+      const runIndexSection = document.querySelector('[data-role="run-index"]')
+      const runIndexList = document.querySelector('[data-role="run-index-list"]')
+      const runIndexEmpty = document.querySelector('[data-role="run-index-empty"]')
+      const runIndexUnavailable = document.querySelector('[data-role="run-index-unavailable"]')
+      if (runIndexList !== null) {
+        runIndexList.replaceChildren()
+        runIndexList.hidden = true
+      }
+      if (runIndexEmpty !== null) runIndexEmpty.hidden = true
+      showRunIndexUnavailable({runIndexSection, runIndexUnavailable}, 'policy-unavailable')
+      return false
+    }
 
     if (result.kind === 'unavailable') {
       if (result.authFailure === true) {

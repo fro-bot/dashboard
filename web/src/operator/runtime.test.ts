@@ -1256,6 +1256,44 @@ describe('defaultRuntimeLoader — run-list refresh triggers', () => {
   }
 
   describe('interval and visibility', () => {
+    it('the next visible 30-second poll recovers a policy-unavailable run list', async () => {
+      const runIndex = await import('../../../public/operator-run-index.js')
+      document.body.innerHTML = '<section data-role="run-index"><div data-role="run-index-loading"></div><div data-role="run-index-list"></div><div data-role="run-index-empty" hidden></div><div data-role="run-index-unavailable" hidden></div></section>'
+      const run = {runId: 'run-poll', repo: 'owner/repo', status: 'running', createdAt: '2026-06-26T12:00:00.000Z'}
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({error: 'redaction-policy-unavailable'}), {status: 503}))
+        .mockResolvedValueOnce(new Response(JSON.stringify({runs: [run]}), {status: 200})))
+      vi.doMock('/static/operator-run-index.js?manual=1', () => runIndex)
+      vi.doMock('/static/operator-launch.js?manual=1', () => ({initOperatorLaunch: vi.fn(), resetLaunchState: vi.fn()}))
+      vi.doMock('/static/operator-stream.js?manual=1', () => ({
+        initOperatorStream: vi.fn(), bootstrapOperatorStreams: vi.fn(), resetBootstrapState: vi.fn(),
+        takeUsableFinishedRun: vi.fn(), pruneFinishedRuns: vi.fn(), clearFinishedRuns: vi.fn(), resetOutputView: vi.fn(),
+      }))
+      const runtime = createOperatorRuntime({container: makeContainer(), onStateChange: vi.fn()})
+      for (let attempt = 0; attempt < 200 && document.querySelector('[data-role="run-index"]')?.getAttribute('data-state') !== 'policy-unavailable'; attempt++) {
+        await new Promise(resolve => realSetTimeout(resolve, 5))
+      }
+      expect(document.querySelector('[data-role="run-index"]')?.getAttribute('data-state')).toBe('policy-unavailable')
+      await new Promise(resolve => realSetTimeout(resolve, 5))
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(document.querySelector('[data-role="run-index"]')?.getAttribute('data-state')).toBe('loaded')
+      expect(document.querySelector('[data-role="run-index-list"]')?.textContent).toContain('owner/repo')
+      runtime.cleanup()
+      vi.unstubAllGlobals()
+    })
+
+    it('the run listing retry button requests a refresh and is unwired on cleanup', async () => {
+      const button = document.createElement('button')
+      button.dataset.role = 'run-index-retry'
+      document.body.append(button)
+      const {runtime, refreshOperatorRunIndex} = await mountLoader()
+      button.click()
+      expect(refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+      runtime.cleanup()
+      button.click()
+      expect(refreshOperatorRunIndex).toHaveBeenCalledTimes(1)
+    })
+
     it('does not refresh at mount (init just fetched), then refreshes every 30 seconds while visible', async () => {
       const {runtime, refreshOperatorRunIndex} = await mountLoader()
       expect(refreshOperatorRunIndex).not.toHaveBeenCalled()

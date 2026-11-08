@@ -641,16 +641,14 @@ describe('fetchRunIndex — error paths collapse to neutral unavailable', () => 
     expect(result.kind).toBe('unavailable')
   })
 
-  // Contract 1.15.0: GET /operator/runs answers 503 {error: 'redaction-policy-unavailable'} while the
-  // gateway has no usable redaction policy. It is a plain non-auth failure: unavailable, no auth signal.
-  it('503 redaction-policy-unavailable collapses to unavailable without an auth signal', async () => {
+  it('503 redaction-policy-unavailable is distinct from other failures', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: false,
       status: 503,
       json: async () => ({error: 'redaction-policy-unavailable'}),
     }))
     const result = await fetchRunIndex({endpointBase: '/operator'})
-    expect(result).toEqual({kind: 'unavailable', authFailure: false})
+    expect(result).toEqual({kind: 'policy-unavailable'})
   })
 
   it('network error collapses to unavailable', async () => {
