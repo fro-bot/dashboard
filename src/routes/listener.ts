@@ -6,8 +6,8 @@
  * and `/ack-all` sit behind the operator session (server.ts auth middleware).
  */
 import type {ListenerStore} from '../listener/store.ts'
-import {Buffer} from 'node:buffer'
 import {Hono} from 'hono'
+import {readBoundedBody} from '../bounded-body.ts'
 import {parseIngestBody} from '../listener/contract.ts'
 import {verifyIngestSignature} from '../listener/ingest-auth.ts'
 
@@ -26,10 +26,12 @@ export function buildListenerRouter(deps: ListenerRouterDeps): Hono {
       return c.notFound()
     }
 
-    const rawBody = await c.req.text()
-    if (Buffer.byteLength(rawBody, 'utf8') > MAX_INGEST_BODY_BYTES) {
+    // Bounded read: the stream is cancelled at the cap instead of being buffered whole.
+    const body = await readBoundedBody(c.req.raw, MAX_INGEST_BODY_BYTES)
+    if (!body.ok) {
       return c.json({error: 'payload too large'}, 413)
     }
+    const rawBody = body.text
 
     const authResult = verifyIngestSignature({
       key: deps.ingestKey,
