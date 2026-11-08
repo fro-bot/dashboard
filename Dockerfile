@@ -42,6 +42,12 @@ RUN bun install --production --frozen-lockfile --ignore-scripts
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d
 
+# The pinned base still ships zlib1g 1.3.1-1+b1 (CVE-2026-85091, CVE-2026-76844). Remove this once a node digest
+# with 1:1.3.dfsg+really1.3.1-1+deb13u1 or later lands.
+RUN apt-get update \
+    && apt-get install --only-upgrade -y --no-install-recommends zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Copy only the production dependency tree. Package manifests and package-manager
