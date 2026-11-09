@@ -25,7 +25,7 @@
  * - Status labels are rendered from a local map, never from the raw wire string.
  */
 
-import {formatRelativeTime, normalizeIsoTimestamp} from './operator-time.js'
+import {formatRelativeTime, normalizeIsoTimestamp, runCardAriaLabel} from './operator-time.js'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -4483,6 +4483,15 @@ export function initOperatorStream(opts) {
   if (toolsEl) buildOutputTools()
   outputViewRepainters.add(repaintForOutputView)
 
+  /** The run list skips this card while the stream is attached, so the stream keeps its accessible name current. */
+  function paintCardAriaLabel(statusLabel, reasonLabel) {
+    if (statusLabel === '' || typeof statusEl.closest !== 'function') return
+    const cardEl = statusEl.closest('[data-run-id]')
+    if (cardEl === null || cardEl === undefined) return
+    const next = runCardAriaLabel(statusLabel, reasonLabel)
+    if (cardEl.getAttribute('aria-label') !== next) cardEl.setAttribute('aria-label', next)
+  }
+
   function updateDOM() {
     // Late-frame guard: after close(), no write of any kind (notice, status,
     // output, coalesced hint, approvals, or badge) may reach the DOM. A late
@@ -4571,6 +4580,7 @@ export function initOperatorStream(opts) {
         // Update status class for styling — use allowlisted status value (no whitespace)
         statusEl.className = statusEl.className.replaceAll(/\bstatus-\S+/g, '')
         statusEl.classList.add(`status-${effectiveStatus.replaceAll('_', '-')}`)
+        paintCardAriaLabel(label, runEntry.reasonLabel)
       } else if (!aborted) {
         const conn = state.connection
         const runIsTerminal = runEntry !== undefined && runEntry.terminal === true
@@ -4586,6 +4596,7 @@ export function initOperatorStream(opts) {
           statusEl.className = `${statusEl.className.replaceAll(/\bstatus-\S+/g, '')} status-unavailable`
             .replaceAll(/\s+/g, ' ')
             .trim()
+          paintCardAriaLabel(statusEl.textContent, undefined)
         }
       }
     }

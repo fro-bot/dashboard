@@ -8,7 +8,7 @@
  * - credentials:'include', redirect:'error' on all fetch calls.
  */
 
-import {formatRelativeTime, LAUNCH_TIME_SOURCE, MAX_TIMESTAMP_LENGTH} from './operator-time.js'
+import {formatRelativeTime, LAUNCH_TIME_SOURCE, MAX_TIMESTAMP_LENGTH, runCardAriaLabel} from './operator-time.js'
 
 // Re-exported so existing importers of the run index keep working.
 export {formatRelativeTime}
@@ -946,10 +946,7 @@ function updateCardInPlace(card, view) {
   adoptLaunchSeededTime(card, view)
   if (!TERMINAL_RUN_STATUSES.has(view.status) && cardShowsTerminalStatus(card)) return
 
-  card.setAttribute(
-    'aria-label',
-    `Run, status: ${view.statusLabel}${view.reasonLabel === undefined ? '' : `, reason: ${view.reasonLabel}`}`,
-  )
+  card.setAttribute('aria-label', runCardAriaLabel(view.statusLabel, view.reasonLabel))
 
   if (typeof card.querySelector === 'function') {
     const statusEl = card.querySelector('[data-role="run-status"]')
@@ -1057,10 +1054,7 @@ function renderRunCard(view, onSelectRun) {
   card.className = 'run-card'
   card.tabIndex = 0
   card.setAttribute('role', 'button')
-  card.setAttribute(
-    'aria-label',
-    `Run, status: ${view.statusLabel}${view.reasonLabel === undefined ? '' : `, reason: ${view.reasonLabel}`}`,
-  )
+  card.setAttribute('aria-label', runCardAriaLabel(view.statusLabel, view.reasonLabel))
   card.dataset.testid = 'run-card'
   card.dataset.runId = view.runId
 

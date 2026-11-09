@@ -15046,3 +15046,92 @@ describe('operator-stream.js — output painting sinks', () => {
     expect(src).not.toMatch(/(?:innerHTML|outerHTML|insertAdjacentHTML|document\.write)\s*(?:=|\()/)
   })
 })
+
+/**
+ * A card whose badge is `statusEl` and whose aria-label the list renderer last wrote. The stream is the
+ * sole writer of the badge while it is attached, so it must write the label too. `closest` is the only
+ * DOM lookup the stream makes from the badge to find the card.
+ */
+function cardWithListLabel(label: string) {
+  const card = makeFakeEl('div')
+  card.dataset.runId = 'run-aria'
+  card.setAttribute('aria-label', label)
+  const statusEl = makeFakeEl('span')
+  card.append(statusEl)
+  Object.assign(statusEl, {closest: (selector: string) => (selector === '[data-run-id]' ? card : null)})
+  return {card, statusEl}
+}
+
+const ariaStatusFrame = (status: string, extra: Record<string, unknown> = {}) =>
+  `event: status\ndata: ${JSON.stringify(ckStatusPayload({runId: 'run-aria', status, phase: status === 'succeeded' ? 'COMPLETED' : 'EXECUTING', ...extra}))}\n\n`
+
+describe("operator-stream.js — the card's accessible status follows its badge", () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    clearFinishedRuns()
+    fcStubDocument()
+  })
+  afterEach(() => {
+    for (const handle of fcHandles.splice(0)) handle.close()
+    clearFinishedRuns()
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('a stream-driven terminal change from waiting-for-approval to succeeded updates the aria-label with the badge', async () => {
+    const {card, statusEl} = cardWithListLabel('Run, status: Waiting for approval')
+    const h = await fcOpen('run-aria', {elements: {statusEl}})
+
+    await h.push(ariaStatusFrame('waiting_for_approval'))
+    expect(statusEl.textContent).toBe('Waiting for approval')
+    expect(card.attributes['aria-label']).toBe('Run, status: Waiting for approval')
+
+    await h.push(ariaStatusFrame('succeeded'))
+    expect(statusEl.textContent).toBe('Succeeded')
+    expect(card.attributes['aria-label']).toBe('Run, status: Succeeded')
+  })
+
+  it('a stream-driven non-terminal change updates the aria-label with the badge', async () => {
+    const {card, statusEl} = cardWithListLabel('Run, status: Waiting for approval')
+    const h = await fcOpen('run-aria', {elements: {statusEl}})
+
+    await h.push(ariaStatusFrame('waiting_for_approval'))
+    await h.push(ariaStatusFrame('running'))
+
+    expect(statusEl.textContent).toBe('Running')
+    expect(card.attributes['aria-label']).toBe('Run, status: Running')
+  })
+
+  it('a failed run carries its failure reason in the aria-label, as the list renderer words it', async () => {
+    const {card, statusEl} = cardWithListLabel('Run, status: Running')
+    const h = await fcOpen('run-aria', {elements: {statusEl}})
+
+    await h.push(ariaStatusFrame('failed', {phase: 'FAILED', failureKind: 'session-error'}))
+
+    expect(statusEl.textContent).toBe('Failed')
+    expect(card.attributes['aria-label']).toBe(`Run, status: Failed, reason: ${FAILURE_REASON_LABELS['session-error']}`)
+  })
+
+  it('the Unavailable badge from a stream that ends early reaches the aria-label too', async () => {
+    const {card, statusEl} = cardWithListLabel('Run, status: Running')
+    const h = await fcOpen('run-aria', {elements: {statusEl}})
+
+    await h.push(ariaStatusFrame('running'))
+    expect(card.attributes['aria-label']).toBe('Run, status: Running')
+    await h.end()
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS * 2 ** RETRY_MAX_COUNT)
+
+    expect(statusEl.textContent).toBe('Unavailable')
+    expect(card.attributes['aria-label']).toBe('Run, status: Unavailable')
+  })
+
+  it('a badge outside any card leaves nothing to label and does not throw', async () => {
+    const statusEl = makeFakeEl('span')
+    const h = await fcOpen('run-aria', {elements: {statusEl}})
+
+    await h.push(ariaStatusFrame('succeeded'))
+
+    expect(statusEl.textContent).toBe('Succeeded')
+  })
+})
