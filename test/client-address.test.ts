@@ -7,12 +7,20 @@
  */
 import {Buffer} from 'node:buffer'
 import {beforeEach, describe, expect, it} from 'vitest'
-import {parseTrustedProxies, resolveClientKey} from '../src/client-address.ts'
+import {
+  MAX_FORWARDED_FOR_BYTES,
+  MAX_FORWARDED_FOR_ENTRIES,
+  parseTrustedProxies,
+  resolveClientKey,
+} from '../src/client-address.ts'
 import {
   buildDashboardApp,
   checkRateLimit,
+  consumeOperatorRateLimit,
   consumeRateLimit,
+  MAX_OPERATOR_RATE_LIMIT_KEYS,
   MAX_RATE_LIMIT_KEYS,
+  operatorRateLimitKeyCountForTesting,
   rateLimitKeyCountForTesting,
   resetRateLimitForTesting,
 } from '../src/server.ts'
@@ -72,13 +80,36 @@ describe('resolveClientKey', () => {
     expect(chained).toBe(resolveClientKey({socketAddress: '172.18.0.2', forwardedFor: '198.51.100.7'}, viaProxy))
   })
 
-  it.each([null, '', '  ', 'garbage', '198.51.100.7, garbage', '172.18.0.9', 'x,'.repeat(40), `1.2.3.4${' '.repeat(5000)}`])(
-    'falls back to the proxy socket key for an absent or unusable header (%j)',
-    forwardedFor => {
-      const fallback = resolveClientKey({socketAddress: '172.18.0.2', forwardedFor: null}, viaProxy)
-      expect(resolveClientKey({socketAddress: '172.18.0.2', forwardedFor}, viaProxy)).toBe(fallback)
-    },
-  )
+  // Every unusable header from a trusted peer degrades to the proxy's own bucket: the limiter
+  // gets coarser, it never fails open and never reads a client-supplied entry.
+  const oversizedByBytes = `198.51.100.7${' '.repeat(MAX_FORWARDED_FOR_BYTES)}`
+  const overEntryLimit = Array.from({length: MAX_FORWARDED_FOR_ENTRIES + 1}, () => '198.51.100.7').join(',')
+  const atEntryLimit = Array.from({length: MAX_FORWARDED_FOR_ENTRIES}, () => '198.51.100.7').join(',')
+  it.each([
+    ['missing header', null],
+    ['empty header', ''],
+    ['blank header', '   '],
+    ['header over the byte limit', oversizedByBytes],
+    ['more entries than the entry limit', overEntryLimit],
+    ['malformed entry at the end', '198.51.100.7, garbage'],
+    ['malformed entry at the start', 'garbage, 198.51.100.7'],
+    ['malformed entry in the middle', '198.51.100.7, garbage, 198.51.100.8'],
+    ['empty entry in the chain', '198.51.100.7,,198.51.100.8'],
+    ['trailing comma', '198.51.100.7,'],
+    ['chain of only trusted proxies', '172.18.0.9, 172.18.0.10'],
+    ['single trusted proxy', '172.18.0.9'],
+  ])('falls back to the proxy socket key for %s', (_name, forwardedFor) => {
+    const fallback = resolveClientKey({socketAddress: '172.18.0.2', forwardedFor: null}, viaProxy)
+    expect(resolveClientKey({socketAddress: '172.18.0.2', forwardedFor}, viaProxy)).toBe(fallback)
+    expect(fallback).not.toBe('unknown')
+  })
+
+  it('still resolves a chain exactly at the entry limit', () => {
+    expect(Buffer.byteLength(atEntryLimit, 'utf8')).toBeLessThanOrEqual(MAX_FORWARDED_FOR_BYTES)
+    expect(resolveClientKey({socketAddress: '172.18.0.2', forwardedFor: atEntryLimit}, viaProxy)).toBe(
+      resolveClientKey({socketAddress: '198.51.100.7', forwardedFor: null}, direct),
+    )
+  })
 
   it("returns 'unknown' when there is no socket address", () => {
     expect(resolveClientKey({socketAddress: undefined, forwardedFor: '198.51.100.7'}, viaProxy)).toBe('unknown')
@@ -154,6 +185,42 @@ describe('rate-limit map bound', () => {
     const now = Date.now()
     for (let i = 0; i < 60; i++) expect(checkRateLimit('steady', now)).toBe(true)
     expect(checkRateLimit('steady', now)).toBe(false)
+  })
+})
+
+describe('operator write limiter isolation', () => {
+  beforeEach(() => {
+    resetRateLimitForTesting()
+  })
+
+  it('keeps an operator write counter intact when anonymous clients churn past the cap', () => {
+    const now = Date.now()
+    for (let i = 0; i < 3; i++) consumeOperatorRateLimit('operator:1', 3, now)
+    expect(consumeOperatorRateLimit('operator:1', 3, now).allowed).toBe(false)
+
+    for (let i = 0; i < MAX_RATE_LIMIT_KEYS * 2; i++) consumeRateLimit(`ipv4:198.51.${i >> 8}.${i & 255}`, 60, now)
+    expect(rateLimitKeyCountForTesting()).toBeLessThanOrEqual(MAX_RATE_LIMIT_KEYS)
+
+    // The operator is still limited: its counter was not evicted.
+    expect(consumeOperatorRateLimit('operator:1', 3, now).allowed).toBe(false)
+  })
+
+  it('does not let operator keys consume the anonymous map', () => {
+    const now = Date.now()
+    for (let i = 0; i < 50; i++) consumeOperatorRateLimit(`operator:${i}`, 10, now)
+    expect(rateLimitKeyCountForTesting()).toBe(0)
+  })
+
+  it('bounds its own map and evicts the oldest operator key when full', () => {
+    const now = Date.now()
+    for (let i = 0; i < 3; i++) consumeOperatorRateLimit('operator:first', 3, now)
+    expect(consumeOperatorRateLimit('operator:first', 3, now).allowed).toBe(false)
+    for (let i = 0; i < MAX_OPERATOR_RATE_LIMIT_KEYS + 50; i++) {
+      expect(consumeOperatorRateLimit(`operator:filler-${i}`, 3, now).allowed).toBe(true)
+    }
+    expect(operatorRateLimitKeyCountForTesting()).toBeLessThanOrEqual(MAX_OPERATOR_RATE_LIMIT_KEYS)
+    // Oldest dropped to make room, so it starts a fresh window rather than the new key being refused.
+    expect(consumeOperatorRateLimit('operator:first', 3, now).allowed).toBe(true)
   })
 })
 

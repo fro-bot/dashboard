@@ -14,6 +14,10 @@ from any other peer a client can forge it.
 
 ## Configuration
 
+Precondition: the proxy must overwrite, not append to, any client-supplied `X-Forwarded-For`. Caddy's bare
+`reverse_proxy` does this only while no `trusted_proxies` is set; adding `trusted_proxies` to the Caddyfile
+changes that behavior and means this code must be revisited before the change ships.
+
 `DASHBOARD_TRUSTED_PROXIES` is a comma-separated list of proxy addresses or CIDR ranges, for example
 `172.18.0.0/16`. Entries are validated at startup; a malformed value stops the server. `/0` prefixes and
 unspecified addresses are refused because they would trust every peer.
@@ -35,8 +39,10 @@ IPv4 clients are keyed per address. IPv6 clients are keyed per /64, so one route
 buckets by varying its low bits. IPv4-mapped IPv6 addresses count as IPv4. The key is for accounting only;
 do not use it for a trust decision.
 
-The limiter holds at most 10,000 keys. When a new key arrives at the limit the oldest key is dropped; a flood
+The anonymous limiter holds at most 10,000 keys. When a new key arrives at the limit the oldest key is dropped; a flood
 of distinct clients can age out other counters but cannot grow the map or lock a new client out.
+Wiki write limits (`operator:<id>` keys, authenticated sessions only) live in a separate map capped at 256 keys,
+so that churn cannot evict an operator's counter.
 
 ## Related
 

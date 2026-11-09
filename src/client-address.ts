@@ -14,8 +14,8 @@
 import {Buffer} from 'node:buffer'
 import {BlockList, isIPv4, isIPv6} from 'node:net'
 
-const MAX_FORWARDED_FOR_BYTES = 4096
-const MAX_FORWARDED_FOR_ENTRIES = 32
+export const MAX_FORWARDED_FOR_BYTES = 4096
+export const MAX_FORWARDED_FOR_ENTRIES = 32
 const UNKNOWN_CLIENT_KEY = 'unknown'
 const TRUSTED_PROXIES_VARIABLE = 'DASHBOARD_TRUSTED_PROXIES'
 

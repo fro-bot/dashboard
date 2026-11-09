@@ -82,47 +82,109 @@ interface RateLimitEntry {
   windowStart: number
 }
 
-/**
- * Simple fixed-window in-memory rate limiter. Keys are client accounting keys (IPv4
- * address or IPv6 /64, see client-address.ts) and `operator:<id>` writer keys.
- * Insertion order is window-start order (a restarted window is re-inserted), so the
- * first key is always the oldest.
- */
-const rateLimitMap = new Map<string, RateLimitEntry>()
 const RATE_LIMIT_WINDOW_MS = 60_000 // 1 minute
 const RATE_LIMIT_MAX = 60 // requests per window per client
+const EVICT_INTERVAL = 500 // sweep every 500 calls
+const EVICT_STALE_AGE = 2 * RATE_LIMIT_WINDOW_MS
 
 /**
- * Hard ceiling on tracked keys. When a new key arrives at the ceiling the oldest key is
- * dropped to make room: a flood of distinct clients can age out other clients' counters,
- * but it can neither grow the map without bound nor lock a new client out.
+ * Hard ceiling on anonymous client keys. When a new key arrives at the ceiling the oldest
+ * key is dropped to make room: a flood of distinct clients can age out other clients'
+ * counters, but it can neither grow the map without bound nor lock a new client out.
  */
 export const MAX_RATE_LIMIT_KEYS = 10_000
 
 /**
- * Eviction sweep counter. Every EVICT_INTERVAL calls we sweep the map for
- * entries older than 2× the window. This is cheap, non-blocking, and avoids
- * unbounded memory growth without a module-level setInterval.
+ * Ceiling on operator write keys. These come only from authenticated sessions (one operator
+ * today), so a few hundred covers any realistic set of writers with room to spare. The cap
+ * only exists so a bug or a compromised session minting identities cannot grow the map.
  */
-let rateLimitCallCount = 0
-const EVICT_INTERVAL = 500 // sweep every 500 calls
-const EVICT_STALE_AGE = 2 * RATE_LIMIT_WINDOW_MS
+export const MAX_OPERATOR_RATE_LIMIT_KEYS = 256
+
+interface WindowLimiter {
+  consume: (key: string, max: number, now: number) => RateLimitDecision
+  size: () => number
+  clear: () => void
+}
+
+/**
+ * Fixed-window in-memory limiter with a hard key bound. Insertion order is window-start
+ * order (a restarted window is re-inserted), so the first key is always the oldest.
+ * Every EVICT_INTERVAL calls it sweeps entries older than 2x the window, which avoids
+ * unbounded growth without a module-level setInterval.
+ */
+function createWindowLimiter(maxKeys: number): WindowLimiter {
+  const entries = new Map<string, RateLimitEntry>()
+  let callCount = 0
+
+  return {
+    consume(key, max, now) {
+      callCount++
+      if (callCount >= EVICT_INTERVAL) {
+        callCount = 0
+        for (const [staleKey, entry] of entries) {
+          if (now - entry.windowStart > EVICT_STALE_AGE) entries.delete(staleKey)
+        }
+      }
+
+      const entry = entries.get(key)
+      if (entry === undefined || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+        // Re-insert so insertion order stays window-start order.
+        entries.delete(key)
+        if (entries.size >= maxKeys) {
+          const oldest = entries.keys().next()
+          if (oldest.done !== true) entries.delete(oldest.value)
+        }
+        entries.set(key, {count: 1, windowStart: now})
+        return {allowed: true, retryAfterSeconds: 0}
+      }
+
+      entry.count++
+      if (entry.count > max) {
+        const remainingMs = entry.windowStart + RATE_LIMIT_WINDOW_MS - now
+        return {allowed: false, retryAfterSeconds: Math.max(1, Math.ceil(remainingMs / 1000))}
+      }
+      return {allowed: true, retryAfterSeconds: 0}
+    },
+    size: () => entries.size,
+    clear() {
+      entries.clear()
+      callCount = 0
+    },
+  }
+}
+
+/** Anonymous per-client keys (IPv4 address or IPv6 /64, see client-address.ts). */
+const clientLimiter = createWindowLimiter(MAX_RATE_LIMIT_KEYS)
+/**
+ * `operator:<id>` writer keys, in their own map so unauthenticated traffic churning client
+ * keys can never evict an operator's counter.
+ */
+const operatorLimiter = createWindowLimiter(MAX_OPERATOR_RATE_LIMIT_KEYS)
 
 /**
  * Reset the rate limiter state. Tests only — prevents bleed between test cases.
  * @internal
  */
 export function resetRateLimitForTesting(): void {
-  rateLimitMap.clear()
-  rateLimitCallCount = 0
+  clientLimiter.clear()
+  operatorLimiter.clear()
 }
 
 /**
- * Number of tracked rate-limit keys. Tests only.
+ * Number of tracked anonymous rate-limit keys. Tests only.
  * @internal
  */
 export function rateLimitKeyCountForTesting(): number {
-  return rateLimitMap.size
+  return clientLimiter.size()
+}
+
+/**
+ * Number of tracked operator write keys. Tests only.
+ * @internal
+ */
+export function operatorRateLimitKeyCountForTesting(): number {
+  return operatorLimiter.size()
 }
 
 // Gateway operator-session mode: unauthenticated/invalid requests must recover through
@@ -137,14 +199,6 @@ export function rateLimitKeyCountForTesting(): number {
 // on / as intended. return_to=/ is NOT on the Gateway allowlist.
 const GATEWAY_LOGIN_REDIRECT = '/operator/auth/github/start?return_to=/operator'
 
-function sweepRateLimitMap(now: number): void {
-  for (const [key, entry] of rateLimitMap) {
-    if (now - entry.windowStart > EVICT_STALE_AGE) {
-      rateLimitMap.delete(key)
-    }
-  }
-}
-
 /** Per-operator ceiling for wiki writes, lower than the per-IP ceiling. */
 export const WIKI_WRITE_RATE_LIMIT_MAX = 10
 
@@ -155,36 +209,19 @@ export interface RateLimitDecision {
 }
 
 /**
- * Fixed-window check for `key` against `max` requests per window. Client IPs and
- * `operator:<id>` writer keys share the map but never collide. Accepts an
- * optional `now` for testability.
+ * Fixed-window check for an anonymous client `key` against `max` requests per window,
+ * in the capped client map. Accepts an optional `now` for testability.
  */
 export function consumeRateLimit(key: string, max: number, now: number = Date.now()): RateLimitDecision {
-  rateLimitCallCount++
-  if (rateLimitCallCount >= EVICT_INTERVAL) {
-    rateLimitCallCount = 0
-    sweepRateLimitMap(now)
-  }
+  return clientLimiter.consume(key, max, now)
+}
 
-  const entry = rateLimitMap.get(key)
-
-  if (entry === undefined || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
-    // Re-insert so insertion order stays window-start order.
-    rateLimitMap.delete(key)
-    if (rateLimitMap.size >= MAX_RATE_LIMIT_KEYS) {
-      const oldest = rateLimitMap.keys().next()
-      if (oldest.done !== true) rateLimitMap.delete(oldest.value)
-    }
-    rateLimitMap.set(key, {count: 1, windowStart: now})
-    return {allowed: true, retryAfterSeconds: 0}
-  }
-
-  entry.count++
-  if (entry.count > max) {
-    const remainingMs = entry.windowStart + RATE_LIMIT_WINDOW_MS - now
-    return {allowed: false, retryAfterSeconds: Math.max(1, Math.ceil(remainingMs / 1000))}
-  }
-  return {allowed: true, retryAfterSeconds: 0}
+/**
+ * Fixed-window check for an authenticated `operator:<id>` writer key, in the operator map
+ * that anonymous traffic cannot reach. Accepts an optional `now` for testability.
+ */
+export function consumeOperatorRateLimit(key: string, max: number, now: number = Date.now()): RateLimitDecision {
+  return operatorLimiter.consume(key, max, now)
 }
 
 /**
@@ -854,7 +891,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   }
   app.route(
     '/api/wiki',
-    buildWikiRouter({...wikiDeps, rateLimit: key => consumeRateLimit(key, WIKI_WRITE_RATE_LIMIT_MAX)}),
+    buildWikiRouter({...wikiDeps, rateLimit: key => consumeOperatorRateLimit(key, WIKI_WRITE_RATE_LIMIT_MAX)}),
   )
 
   // ── Operator listener channel ───────────────────────────────────────────────
