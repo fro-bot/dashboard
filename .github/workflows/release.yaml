@@ -115,7 +115,9 @@ jobs:
   release:
     name: Release
     needs: [guard]
-    if: needs.guard.outputs.should-release == 'true'
+    # The ref check repeats what the guard decides in shell, so the job that mints the
+    # publication token never depends on that script alone to stay off non-main refs.
+    if: needs.guard.outputs.should-release == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -370,12 +372,18 @@ jobs:
           version: v0.76.1
 
       # Mint the publication token only after all third-party actions have completed.
+      # Scoped to this repository and to contents:write, which covers every use below:
+      # creating and deleting the tag ref, and creating, viewing, editing and deleting the
+      # GitHub Release. The App installation is broader; this narrows the minted token.
       - name: 🤖 Get App token for publication
         id: app-token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           app-id: ${{ secrets.APPLICATION_ID }}
           private-key: ${{ secrets.APPLICATION_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
 
       - name: 🏷️ Create release tag
         id: calver

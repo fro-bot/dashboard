@@ -132,6 +132,75 @@ describe('operator listener channel routes', () => {
     expect(res.status).toBe(413)
   })
 
+  it('POST /ingest oversized stream with no declared length → 413 without reading past the cap', async () => {
+    const app = await buildTestApp({listenerStore: store, listenerIngestKey: INGEST_KEY})
+    const chunk = new Uint8Array(4096).fill(0x78)
+    const chunkCount = 1000
+    let pulled = 0
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulled >= chunkCount) {
+          controller.close()
+          return
+        }
+        pulled += 1
+        controller.enqueue(chunk)
+      },
+    })
+
+    const res = await app.request('/api/listener/ingest', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-listener-timestamp': String(Math.floor(Date.now() / 1000)),
+        'x-listener-signature': 'sha256=00',
+      },
+      body: stream,
+      duplex: 'half',
+    })
+
+    expect(res.status).toBe(413)
+    // 16384-byte cap / 4096-byte chunks: the fifth chunk crosses the cap. A small read-ahead
+    // from the stream queue is fine; buffering the whole body is not.
+    expect(pulled).toBeLessThan(chunkCount / 10)
+  })
+
+  it('POST /ingest oversized body with a declared length → 413 before any read', async () => {
+    const app = await buildTestApp({listenerStore: store, listenerIngestKey: INGEST_KEY})
+    const res = await app.request('/api/listener/ingest', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': '1000000',
+        'x-listener-timestamp': String(Math.floor(Date.now() / 1000)),
+        'x-listener-signature': 'sha256=00',
+      },
+      body: 'x',
+    })
+    expect(res.status).toBe(413)
+  })
+
+  it('POST /ingest body exactly at the cap is still read and verified', async () => {
+    const app = await buildTestApp({listenerStore: store, listenerIngestKey: INGEST_KEY})
+    const base = JSON.stringify({
+      source: 'infra',
+      kind: 'deploy-health',
+      severity: 'warning',
+      title: 'x',
+      body: '',
+      createdAt: '2026-07-11T12:00:00Z',
+    })
+    const atCap = base.replace('"body":""', `"body":"${'y'.repeat(16384 - base.length)}"`)
+    expect(Buffer.byteLength(atCap, 'utf8')).toBe(16384)
+    const res = await app.request('/api/listener/ingest', {
+      method: 'POST',
+      headers: ingestHeaders(atCap),
+      body: atCap,
+    })
+    expect(res.status).not.toBe(413)
+    expect(res.status).not.toBe(401)
+  })
+
   it('GET /api/listener/messages WITHOUT a session cookie → denied', async () => {
     const app = await buildTestApp({listenerStore: store, listenerIngestKey: INGEST_KEY})
     const res = await app.request('/api/listener/messages')

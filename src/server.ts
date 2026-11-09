@@ -31,6 +31,7 @@ import {Hono, type Context, type MiddlewareHandler} from 'hono'
 import {getCookie, setCookie} from 'hono/cookie'
 import {secureHeaders} from 'hono/secure-headers'
 import {fetchGitHubUserLogin, makeGitHubOAuthClient} from './auth/oauth.ts'
+import {parseTrustedProxies, resolveClientKey} from './client-address.ts'
 import {createOperatorClient} from './gateway/operator-client.ts'
 import {
   readGatewayOperatorOrigin,
@@ -75,33 +76,115 @@ interface Variables {
   gatewaySession?: SessionDto
 }
 
-/** Per-IP rate limiter state */
+/** Per-client rate limiter state */
 interface RateLimitEntry {
   count: number
   windowStart: number
 }
 
-/** Simple fixed-window in-memory rate limiter */
-const rateLimitMap = new Map<string, RateLimitEntry>()
 const RATE_LIMIT_WINDOW_MS = 60_000 // 1 minute
-const RATE_LIMIT_MAX = 60 // requests per window per IP
-
-/**
- * Eviction sweep counter. Every EVICT_INTERVAL calls we sweep the map for
- * entries older than 2× the window. This is cheap, non-blocking, and avoids
- * unbounded memory growth without a module-level setInterval.
- */
-let rateLimitCallCount = 0
+const RATE_LIMIT_MAX = 60 // requests per window per client
 const EVICT_INTERVAL = 500 // sweep every 500 calls
 const EVICT_STALE_AGE = 2 * RATE_LIMIT_WINDOW_MS
+
+/**
+ * Hard ceiling on anonymous client keys. When a new key arrives at the ceiling the oldest
+ * key is dropped to make room: a flood of distinct clients can age out other clients'
+ * counters, but it can neither grow the map without bound nor lock a new client out.
+ */
+export const MAX_RATE_LIMIT_KEYS = 10_000
+
+/**
+ * Ceiling on operator write keys. These come only from authenticated sessions (one operator
+ * today), so a few hundred covers any realistic set of writers with room to spare. The cap
+ * only exists so a bug or a compromised session minting identities cannot grow the map.
+ */
+export const MAX_OPERATOR_RATE_LIMIT_KEYS = 256
+
+interface WindowLimiter {
+  consume: (key: string, max: number, now: number) => RateLimitDecision
+  size: () => number
+  clear: () => void
+}
+
+/**
+ * Fixed-window in-memory limiter with a hard key bound. Insertion order is window-start
+ * order (a restarted window is re-inserted), so the first key is always the oldest.
+ * Every EVICT_INTERVAL calls it sweeps entries older than 2x the window, which avoids
+ * unbounded growth without a module-level setInterval.
+ */
+function createWindowLimiter(maxKeys: number): WindowLimiter {
+  const entries = new Map<string, RateLimitEntry>()
+  let callCount = 0
+
+  return {
+    consume(key, max, now) {
+      callCount++
+      if (callCount >= EVICT_INTERVAL) {
+        callCount = 0
+        for (const [staleKey, entry] of entries) {
+          if (now - entry.windowStart > EVICT_STALE_AGE) entries.delete(staleKey)
+        }
+      }
+
+      const entry = entries.get(key)
+      if (entry === undefined || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+        // Re-insert so insertion order stays window-start order.
+        entries.delete(key)
+        if (entries.size >= maxKeys) {
+          const oldest = entries.keys().next()
+          if (oldest.done !== true) entries.delete(oldest.value)
+        }
+        entries.set(key, {count: 1, windowStart: now})
+        return {allowed: true, retryAfterSeconds: 0}
+      }
+
+      entry.count++
+      if (entry.count > max) {
+        const remainingMs = entry.windowStart + RATE_LIMIT_WINDOW_MS - now
+        return {allowed: false, retryAfterSeconds: Math.max(1, Math.ceil(remainingMs / 1000))}
+      }
+      return {allowed: true, retryAfterSeconds: 0}
+    },
+    size: () => entries.size,
+    clear() {
+      entries.clear()
+      callCount = 0
+    },
+  }
+}
+
+/** Anonymous per-client keys (IPv4 address or IPv6 /64, see client-address.ts). */
+const clientLimiter = createWindowLimiter(MAX_RATE_LIMIT_KEYS)
+/**
+ * `operator:<id>` writer keys, in their own map so unauthenticated traffic churning client
+ * keys can never evict an operator's counter.
+ */
+const operatorLimiter = createWindowLimiter(MAX_OPERATOR_RATE_LIMIT_KEYS)
 
 /**
  * Reset the rate limiter state. Tests only — prevents bleed between test cases.
  * @internal
  */
 export function resetRateLimitForTesting(): void {
-  rateLimitMap.clear()
-  rateLimitCallCount = 0
+  clientLimiter.clear()
+  operatorLimiter.clear()
+}
+
+/**
+ * Number of tracked anonymous rate-limit keys. Tests only.
+ * @internal
+ */
+export function rateLimitKeyCountForTesting(): number {
+  return clientLimiter.size()
+}
+
+/**
+ * Number of tracked operator write keys. Tests only.
+ * @internal
+ */
+export function operatorRateLimitKeyCountForTesting(): number {
+  return operatorLimiter.size()
 }
 
 // Gateway operator-session mode: unauthenticated/invalid requests must recover through
@@ -116,14 +199,6 @@ export function resetRateLimitForTesting(): void {
 // on / as intended. return_to=/ is NOT on the Gateway allowlist.
 const GATEWAY_LOGIN_REDIRECT = '/operator/auth/github/start?return_to=/operator'
 
-function sweepRateLimitMap(now: number): void {
-  for (const [key, entry] of rateLimitMap) {
-    if (now - entry.windowStart > EVICT_STALE_AGE) {
-      rateLimitMap.delete(key)
-    }
-  }
-}
-
 /** Per-operator ceiling for wiki writes, lower than the per-IP ceiling. */
 export const WIKI_WRITE_RATE_LIMIT_MAX = 10
 
@@ -134,30 +209,19 @@ export interface RateLimitDecision {
 }
 
 /**
- * Fixed-window check for `key` against `max` requests per window. Client IPs and
- * `operator:<id>` writer keys share the map but never collide. Accepts an
- * optional `now` for testability.
+ * Fixed-window check for an anonymous client `key` against `max` requests per window,
+ * in the capped client map. Accepts an optional `now` for testability.
  */
 export function consumeRateLimit(key: string, max: number, now: number = Date.now()): RateLimitDecision {
-  rateLimitCallCount++
-  if (rateLimitCallCount >= EVICT_INTERVAL) {
-    rateLimitCallCount = 0
-    sweepRateLimitMap(now)
-  }
+  return clientLimiter.consume(key, max, now)
+}
 
-  const entry = rateLimitMap.get(key)
-
-  if (entry === undefined || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
-    rateLimitMap.set(key, {count: 1, windowStart: now})
-    return {allowed: true, retryAfterSeconds: 0}
-  }
-
-  entry.count++
-  if (entry.count > max) {
-    const remainingMs = entry.windowStart + RATE_LIMIT_WINDOW_MS - now
-    return {allowed: false, retryAfterSeconds: Math.max(1, Math.ceil(remainingMs / 1000))}
-  }
-  return {allowed: true, retryAfterSeconds: 0}
+/**
+ * Fixed-window check for an authenticated `operator:<id>` writer key, in the operator map
+ * that anonymous traffic cannot reach. Accepts an optional `now` for testability.
+ */
+export function consumeOperatorRateLimit(key: string, max: number, now: number = Date.now()): RateLimitDecision {
+  return operatorLimiter.consume(key, max, now)
 }
 
 /**
@@ -324,6 +388,13 @@ export interface DashboardAppConfig {
    * every wiki write is refused. Production wires this in `createDashboardServer`.
    */
   wiki?: WikiAppDeps | undefined
+  /**
+   * Trusted reverse-proxy addresses or CIDR ranges, comma separated (the raw
+   * `DASHBOARD_TRUSTED_PROXIES` value). `X-Forwarded-For` is honored for rate-limit
+   * keying only from these peers. When undefined, reads the env var; unset or blank
+   * means no proxy is trusted. A malformed value throws at construction.
+   */
+  trustedProxies?: string | undefined
 }
 
 /**
@@ -578,7 +649,10 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   })
 
   // ── Rate limiting middleware (defense-in-depth; real limiting belongs at Caddy) ──
-  // Keyed on the direct connection remote address, not X-Forwarded-For (client-spoofable).
+  // Keyed on a trusted-proxy-aware client address (see client-address.ts): behind Caddy the
+  // socket peer is always the proxy, so X-Forwarded-For is read, but only when the peer is
+  // in DASHBOARD_TRUSTED_PROXIES. Any other peer's header is ignored (client-spoofable).
+  const trustedProxies = parseTrustedProxies(opts?.trustedProxies ?? process.env.DASHBOARD_TRUSTED_PROXIES)
   app.use('*', async (c: Context, next) => {
     const path = new URL(c.req.url).pathname
     const sensitiveRoutes = ['/', '/auth/login', '/auth/callback', '/operator']
@@ -586,12 +660,13 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
 
     if (isSensitive) {
       // getConnInfo throws in test context (app.request()); fall back to 'unknown'.
-      let ip: string
+      let socketAddress: string | undefined
       try {
-        ip = getConnInfo(c).remote.address ?? 'unknown'
+        socketAddress = getConnInfo(c).remote.address
       } catch {
-        ip = 'unknown'
+        socketAddress = undefined
       }
+      const ip = resolveClientKey({socketAddress, forwardedFor: c.req.header('x-forwarded-for') ?? null}, trustedProxies)
 
       if (!checkRateLimit(ip)) {
         logger.warning('Rate limit exceeded', {ip, path: loggablePath(path)})
@@ -816,7 +891,7 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
   }
   app.route(
     '/api/wiki',
-    buildWikiRouter({...wikiDeps, rateLimit: key => consumeRateLimit(key, WIKI_WRITE_RATE_LIMIT_MAX)}),
+    buildWikiRouter({...wikiDeps, rateLimit: key => consumeOperatorRateLimit(key, WIKI_WRITE_RATE_LIMIT_MAX)}),
   )
 
   // ── Operator listener channel ───────────────────────────────────────────────
