@@ -1,11 +1,18 @@
 /**
  * Tests for the shared time helpers in public/operator-time.js: the relative-time formatter, the ISO
- * timestamp normalizer, and the constants other modules share (timestamp cap, launch time marker).
+ * timestamp normalizer, the run-card aria-label builder, and the constants other modules share
+ * (timestamp cap, launch time marker).
  */
 import {readFileSync} from 'node:fs'
 import {describe, expect, it} from 'vitest'
 import * as runIndex from '../public/operator-run-index.js'
-import {formatRelativeTime, LAUNCH_TIME_SOURCE, MAX_TIMESTAMP_LENGTH, normalizeIsoTimestamp} from '../public/operator-time.js'
+import {
+  formatRelativeTime,
+  LAUNCH_TIME_SOURCE,
+  MAX_TIMESTAMP_LENGTH,
+  normalizeIsoTimestamp,
+  runCardAriaLabel,
+} from '../public/operator-time.js'
 
 const NOW = Date.parse('2026-06-15T12:00:00.000Z')
 const SECOND = 1000
@@ -149,5 +156,12 @@ describe('shared constants', () => {
 
   it('the runtime seam selects the same marker value (it cannot import the public module)', () => {
     expect(source('web/src/operator/runtime.ts')).toContain(`[data-role="run-updated-at"][data-time-source="${LAUNCH_TIME_SOURCE}"]`)
+  })
+})
+
+describe('runCardAriaLabel', () => {
+  it('words a run card as its status, with the reason only when there is one', () => {
+    expect(runCardAriaLabel('Succeeded', undefined)).toBe('Run, status: Succeeded')
+    expect(runCardAriaLabel('Failed', 'Session error')).toBe('Run, status: Failed, reason: Session error')
   })
 })

@@ -1,5 +1,5 @@
 /**
- * Shared relative-time helpers for the operator browser modules.
+ * Shared helpers for the operator browser modules: relative time, and the run card's accessible label.
  * Pure: no DOM, no I/O, no module state.
  */
 
@@ -41,4 +41,9 @@ export function normalizeIsoTimestamp(value) {
   if (trimmed === '' || trimmed.length > MAX_TIMESTAMP_LENGTH) return undefined
   const time = Date.parse(trimmed)
   return Number.isFinite(time) ? new Date(time).toISOString() : undefined
+}
+
+/** A run card's accessible name, shared by the run list and the stream so it matches the badge. */
+export function runCardAriaLabel(statusLabel, reasonLabel) {
+  return `Run, status: ${statusLabel}${reasonLabel === undefined ? '' : `, reason: ${reasonLabel}`}`
 }
