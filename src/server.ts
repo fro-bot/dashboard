@@ -669,7 +669,9 @@ async function buildDashboardApp(opts?: DashboardAppConfig): Promise<Hono<{Varia
       const ip = resolveClientKey({socketAddress, forwardedFor: c.req.header('x-forwarded-for') ?? null}, trustedProxies)
 
       if (!checkRateLimit(ip)) {
-        logger.warning('Rate limit exceeded', {ip, path: loggablePath(path)})
+        // Keep client addresses in the short-lived limiter only, never in persistent logs.
+        const family = ip.startsWith('ipv4:') ? 'ipv4' : ip.startsWith('ipv6/64:') ? 'ipv6' : 'unknown'
+        logger.warning('Rate limit exceeded', {family, path: loggablePath(path)})
         return c.text('Too Many Requests', 429)
       }
     }
