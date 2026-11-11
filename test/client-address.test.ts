@@ -6,7 +6,7 @@
  * the middleware wiring through buildDashboardApp().
  */
 import {Buffer} from 'node:buffer'
-import {beforeEach, describe, expect, it} from 'vitest'
+import {beforeEach, describe, expect, it, vi} from 'vitest'
 import {
   MAX_FORWARDED_FOR_BYTES,
   MAX_FORWARDED_FOR_ENTRIES,
@@ -240,6 +240,26 @@ async function hit(
 describe('rate-limit middleware client keying', () => {
   beforeEach(() => {
     resetRateLimitForTesting()
+  })
+
+  it.each([
+    ['198.51.100.7', '172.18.0.2', 'ipv4'],
+    ['2001:db8:1:2::7', '172.18.0.2', 'ipv6'],
+    ['garbage', 'garbage', 'unknown'],
+  ])('logs only the path and address family when throttling %s', async (client, socket, family) => {
+    const app = await buildDashboardApp({operatorLogin: 'octocat', cookieKey: TEST_KEY, trustedProxies: '172.18.0.0/16'})
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const headers = {'x-forwarded-for': client}
+      for (let i = 0; i < 60; i++) expect(await hit(app, socket, headers)).toBe(200)
+      expect(warn).not.toHaveBeenCalled()
+      expect(await hit(app, socket, headers)).toBe(429)
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        `[warning] Rate limit exceeded ${JSON.stringify({family, path: '/api/healthz'})}`,
+      )
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('gives each forwarded client its own bucket behind a trusted proxy', async () => {
