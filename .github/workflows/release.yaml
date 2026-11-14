@@ -330,7 +330,7 @@ jobs:
           severity: HIGH,CRITICAL
           limit-severities-for-sarif: true
           exit-code: '0'
-          version: v0.76.1
+          version: v0.76.2
 
       - name: 📦 Upload Trivy SARIF artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -369,7 +369,7 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: '1'
-          version: v0.76.1
+          version: v0.76.2
 
       # Mint the publication token only after all third-party actions have completed.
       # Scoped to this repository and to contents:write, which covers every use below:
