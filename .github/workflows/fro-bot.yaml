@@ -293,12 +293,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          # Review-path triggers withhold credentials from the agent; don't leave one in the workspace.
-          # Schedule/dispatch keep it because branch-pr delivery pushes with it.
-          persist-credentials: >-
-            ${{
-            !contains(fromJSON('["pull_request", "pull_request_review_comment", "issue_comment", "issues"]'), github.event_name)
-            }}
+          # The agent never gets the checkout credential; with isolate-agent it pushes through the
+          # Action's gh-backed credential helper.
+          persist-credentials: false
           # Always check out the default/workflow ref — never PR-head code. On
           # issue_comment the fork guard cannot see PR fork status (the event has
           # no github.event.pull_request), so checking out refs/pull/<n>/head would
@@ -311,7 +308,7 @@ jobs:
 
       - name: Run Fro Bot
         id: fro-bot-agent
-        uses: fro-bot/agent@95b0fbf4e39ff2d1c8431050c51260de7bbd34ed # v0.144.1
+        uses: fro-bot/agent@4e394905b7eafda2d7424816eb7846d3f09c40df # v0.144.2
         env:
           OPENCODE_PROMPT_ARTIFACT: 'true'
           TASK_PROMPT: >-
@@ -322,6 +319,7 @@ jobs:
               || ''
             }}
         with:
+          isolate-agent: 'true'
           github-token: ${{ secrets.FRO_BOT_PAT }}
           # Scheduled runs need branch-pr; this workflow has no caller-side PR step.
           # Scope it to those triggers so other events stay on auto.
