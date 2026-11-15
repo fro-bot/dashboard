@@ -2,9 +2,9 @@
  * Pins the trust gates in .github/workflows/fro-bot.yaml.
  *
  * The workflow runs an agent with a write-capable token. Anyone can open or edit an issue, so
- * issue-triggered runs must be limited to trusted authors, and every review-path trigger must
- * withhold the checkout credential from the workspace. These tests keep a later edit from
- * dropping either guard.
+ * issue-triggered runs must be limited to trusted authors, the checkout must never persist its
+ * credential in the workspace, and the agent step must run isolated. These tests keep a later
+ * edit from dropping any guard.
  */
 import {readFileSync} from 'node:fs'
 import {resolve} from 'node:path'
@@ -34,9 +34,6 @@ function squash(value: string): string {
   return value.replaceAll(/\s+/gu, ' ').trim()
 }
 
-// Triggers that deliver through a caller-side push and therefore keep the credential.
-const CREDENTIAL_KEEPING_TRIGGERS = new Set(['schedule', 'workflow_dispatch'])
-
 function clauseFor(condition: string, event: string, nextEvent: string): string {
   const start = condition.indexOf(`github.event_name == '${event}'`)
   const end = condition.indexOf(`github.event_name == '${nextEvent}'`, start)
@@ -63,25 +60,28 @@ describe('fro-bot workflow — issues trust gate', () => {
 
 describe('fro-bot workflow — checkout credential', () => {
   const checkout = job.steps.find(step => step.uses?.startsWith('actions/checkout@'))
-  const expression = squash(String(checkout?.with?.['persist-credentials'] ?? ''))
-  const listMatch = /fromJSON\('(?<list>\[[^\]]*\])'\)/u.exec(expression)
 
-  it('negates a fixed list of event names', () => {
-    expect(expression).toMatch(/^\$\{\{ !contains\(fromJSON\('\[.*\]'\), github\.event_name\) \}\}$/u)
-    expect(listMatch?.groups?.list).toBeDefined()
+  it('never persists the checkout credential, using a literal rather than an expression', () => {
+    // A literal boolean applies to every trigger; an expression could silently exempt one.
+    expect(checkout?.with?.['persist-credentials']).toBe(false)
   })
 
-  it('withholds the credential on every declared trigger except schedule and dispatch', () => {
-    const withheld = JSON.parse(listMatch?.groups?.list ?? '[]') as string[]
-    const reviewPathTriggers = Object.keys(workflow.on).filter(trigger => !CREDENTIAL_KEEPING_TRIGGERS.has(trigger))
-    expect(reviewPathTriggers).toContain('pull_request_review_comment')
-    for (const trigger of reviewPathTriggers) {
-      expect(withheld, `persist-credentials list is missing ${trigger}`).toContain(trigger)
+  it('declares the review-path and delivery triggers the literal covers', () => {
+    const triggers = Object.keys(workflow.on)
+    for (const trigger of ['pull_request_review_comment', 'issue_comment', 'schedule', 'workflow_dispatch']) {
+      expect(triggers, `workflow does not declare ${trigger}`).toContain(trigger)
     }
   })
+})
 
-  it('keeps the credential for schedule and dispatch runs, which deliver by pushing', () => {
-    const withheld = JSON.parse(listMatch?.groups?.list ?? '[]') as string[]
-    for (const trigger of CREDENTIAL_KEEPING_TRIGGERS) expect(withheld).not.toContain(trigger)
+describe('fro-bot workflow — agent isolation', () => {
+  const agent = job.steps.find(step => step.uses?.startsWith('fro-bot/agent@'))
+
+  it('enables isolate-agent on the agent step', () => {
+    expect(agent?.with?.['isolate-agent']).toBe('true')
+  })
+
+  it('still passes the explicit token to the agent step', () => {
+    expect(squash(String(agent?.with?.['github-token'] ?? ''))).toMatch(/^\$\{\{ secrets\.FRO_BOT_PAT \}\}$/u)
   })
 })
