@@ -7,13 +7,13 @@
       "dependencies": {
         "@bfra.me/es": "0.1.0",
         "@fro.bot/wiki-write-core": "0.8.0",
-        "@hono/node-server": "^2.0.0",
+        "@hono/node-server": "^2.1.6",
         "@octokit/auth-app": "8.3.1",
         "@octokit/core": "7.0.8",
         "@octokit/graphql": "9.0.5",
         "@octokit/plugin-retry": "8.1.1",
         "@octokit/plugin-throttling": "11.0.5",
-        "hono": "^4.7.11",
+        "hono": "^4.13.16",
         "yaml": "2.9.1",
       },
       "devDependencies": {
@@ -330,7 +330,7 @@
 
     "@fro.bot/wiki-write-core": ["@fro.bot/wiki-write-core@0.8.0", "", { "dependencies": { "@octokit/rest": "^22.0.1", "yaml": "^2.8.3" } }, "sha512-2cCNsu1mAriR9vqb0Bn6HWYH6OgakOJ9lhRAfOtL6RbQ3T86XmVhDB+I7gYoahYguhAfGfKGj16XqJMEo0xc0Q=="],
 
-    "@hono/node-server": ["@hono/node-server@2.1.5", "", { "peerDependencies": { "hono": "^4 || ^5.0.0-0" } }, "sha512-MgP/I06GdvsilDspMk/qmRzpk8LOUStP6jFAbSRi40W09DhoyUn+Mj7eyKICPqeYKybOjVFLVIAQzvu1bfIa7Q=="],
+    "@hono/node-server": ["@hono/node-server@2.1.6", "", { "peerDependencies": { "hono": "^4 || ^5.0.0-0" } }, "sha512-p/KH9MnfNcsm3sR6x4lNgm5j+QN4Et8srKredl9DZfXiyZ1UQ3aQ2YVpFLbqktYN5JI+DB+VZFKM2PqE5hLKjQ=="],
 
     "@humanfs/core": ["@humanfs/core@0.19.2", "", { "dependencies": { "@humanfs/types": "^0.15.0" } }, "sha512-UhXNm+CFMWcbChXywFwkmhqjs3PRCmcSa/hfBgLIb7oQ5HNb1wS0icWsGtSAUNgefHeI+eBrA8I1fxmbHsGdvA=="],
 
@@ -1026,7 +1026,7 @@
 
     "hasown": ["hasown@2.0.4", "", { "dependencies": { "function-bind": "^1.1.2" } }, "sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A=="],
 
-    "hono": ["hono@4.13.13", "", {}, "sha512-CQ46U0ZkAGmbT/4UxdzzGJpacP2IeKgY4a5/tOI9AABbpOMfK739wfDXmv1usCk+3RkKj1hQy4/fjhiwa2xlrA=="],
+    "hono": ["hono@4.13.16", "", {}, "sha512-AOLOEhvrV+iH92xXCnFr/5+3KjPKcI3xP63XJtX5spAnkznPdHijlIsUTpi7/9EhWqrTCekw5c5zh1K+YsVw7A=="],
 
     "hookified": ["hookified@1.15.1", "", {}, "sha512-MvG/clsADq1GPM2KGo2nyfaWVyn9naPiXrqIe4jYjXNZQt238kWyOGrsyc/DmRAQ+Re6yeo6yX/yoNCG5KAEVg=="],
 
