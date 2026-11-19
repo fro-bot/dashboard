@@ -61,7 +61,7 @@
  */
 
 import {spawnSync} from 'node:child_process'
-import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
+import {mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 import process from 'node:process'
@@ -922,6 +922,15 @@ describe('should-release — first-push empty base ({}) triggers release when ru
 // ---------------------------------------------------------------------------
 
 describe('should-release — missing required flags produce exit 2', () => {
+  it('reports a usage error when invoked through a symlink', () => {
+    const link = join(tmpDir, 'guard.ts')
+    symlinkSync(SCRIPT, link)
+    const result = spawnSync(process.execPath, [link], {encoding: 'utf8'})
+    expect(result.status).toBe(2)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toContain('Missing required flag: --changed-files')
+  })
+
   it('exits 2 when --changed-files is omitted', () => {
     const base = writePkg(tmpDir, 'base.json', BASE_PKG)
     const head = writePkg(tmpDir, 'head.json', BASE_PKG)

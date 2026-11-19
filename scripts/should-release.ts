@@ -36,8 +36,10 @@
 //   - no enums, namespaces, parameter properties, TS import aliases, decorators, `any`
 //   - stdlib only
 
-import {readFileSync} from 'node:fs'
+import {readFileSync, realpathSync} from 'node:fs'
+import {resolve} from 'node:path'
 import process from 'node:process'
+import {fileURLToPath} from 'node:url'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -314,7 +316,7 @@ function runtimeFieldsChanged(base: PkgJson, head: PkgJson): boolean {
 // Main decision logic
 // ---------------------------------------------------------------------------
 
-function decide(
+export function decide(
   changedFiles: string[],
   base: PkgJson,
   head: PkgJson,
@@ -388,7 +390,16 @@ function decide(
 // main logic in a try/catch and re-exit with code 2 on unexpected errors so
 // the workflow's `if [ "$EXIT" -eq 1 ]` branch is never taken for crashes.
 
-try {
+function isDirectEntry(): boolean {
+  if (process.argv[1] === undefined) return false
+  try {
+    return realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
+
+if (isDirectEntry()) try {
   const parsed = parseArgs(process.argv)
 
   if ('error' in parsed) {
