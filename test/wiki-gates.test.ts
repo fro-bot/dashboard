@@ -257,8 +257,10 @@ describe('runWikiGates', () => {
     expect(!result.ok && result.findings.map(finding => finding.kind)).toContain('broken-markdown-link')
   })
 
-  it('rejects a broken wikilink as a generic rejection, because the core error carries no findings', () => {
-    expect(run(`${ALPHA_BODY}\nSee [[no-such-page]].\n`)).toEqual({ok: false, findings: []})
+  it('reports a findings-less invalid wikilink without exposing its target', () => {
+    expect(run(`${ALPHA_BODY}\nSee [[no-such-page]].\n`)).toEqual({ok: false, findings: [
+      {kind: 'INVALID_WIKILINK', path: 'knowledge/wiki', message: 'A wiki link points to a page that does not exist.'},
+    ]})
   })
 
   it('keeps the node_id of a repo page, so its corrections still resolve', () => {
@@ -304,10 +306,31 @@ describe('runWikiGates', () => {
     )
   })
 
-  it('turns a gate error with no findings into a generic rejection', () => {
+  it('reports a findings-less frontmatter error', () => {
     const result = run('', {pageContent: 'no frontmatter at all\n'})
 
-    expect(result).toEqual({ok: false, findings: []})
+    expect(result).toEqual({ok: false, findings: [
+      {kind: 'INVALID_FRONTMATTER', path: 'knowledge/wiki', message: 'A wiki page has invalid frontmatter.'},
+    ]})
+  })
+
+  it.each([
+    ['invalid frontmatter', 'no frontmatter\n', 'INVALID_FRONTMATTER', 'A wiki page has invalid frontmatter.'],
+    ['invalid wikilink', `${wikiFiles()[BETA]}\nSee [[missing-private-target]].\n`, 'INVALID_WIKILINK', 'A wiki link points to a page that does not exist.'],
+  ])('rejects an edit when an unrelated page has %s without attributing it to the edited page', (_label, otherPage, kind, message) => {
+    const result = run(ALPHA_BODY, {files: wikiFiles({[BETA]: otherPage})})
+    expect(result).toEqual({ok: false, findings: [{kind, path: 'knowledge/wiki', message}]})
+    expect(JSON.stringify(result)).not.toContain(BETA)
+    expect(JSON.stringify(result)).not.toContain('missing-private-target')
+  })
+
+  it('reports the actual core archive refusal with a safe finding', () => {
+    const archived = (wikiFiles()[ALPHA] ?? '').replace('node_id: R_alpha', 'node_id: R_alpha\narchived: "2026-01-01"')
+      .replace('# acme/alpha\n', '# acme/alpha\n\nThis repository is archived and no longer surveyed; its page is kept for reference.\n')
+    const result = run(ALPHA_BODY, {files: wikiFiles({[ALPHA]: archived}), pageContent: reconstructFrontmatter(archived, ALPHA_BODY)})
+    expect(result).toEqual({ok: false, findings: [{
+      kind: 'ARCHIVE_NOTICE_MISSING', path: ALPHA, message: "An archived repository's page must keep its archive notice.",
+    }]})
   })
 
   it('turns a non-ingest throw into a generic rejection', () => {
@@ -346,5 +369,16 @@ describe('boundFindings', () => {
     expect(boundFindings([{kind: 'brand-new-kind', path: ALPHA, message: 'x'}], {texts: [], knownIds: new Set()})[0]?.message).toBe(
       'The submitted content was refused by a check.',
     )
+  })
+
+  it('uses fixed archive copy and handles inherited keys as unknown', () => {
+    const bounded = boundFindings([
+      {kind: 'ARCHIVE_NOTICE_MISSING', path: ALPHA, message: 'secret'},
+      {kind: 'toString', path: ALPHA, message: 'secret'},
+    ], {texts: [], knownIds: new Set()})
+    expect(bounded.map(item => item.message)).toEqual([
+      "An archived repository's page must keep its archive notice.",
+      'The submitted content was refused by a check.',
+    ])
   })
 })

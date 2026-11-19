@@ -199,7 +199,9 @@ function describeSaveError(error: SaveError | TransportError, persisted: boolean
       return display({
         kind: 'rejected',
         headline: OUTCOME_COPY.rejectedHeadline,
-        detail: REJECT_DETAIL[error.reason],
+        detail: error.reason === 'gate' && error.findings.length === 0
+          ? 'The wiki checks refused this change. Nothing was saved. Your draft is kept.'
+          : REJECT_DETAIL[error.reason],
         draft: 'kept',
         findings: error.findings,
       })

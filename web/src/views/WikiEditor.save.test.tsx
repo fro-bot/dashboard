@@ -384,6 +384,26 @@ describe('save — rejected', () => {
     expect(outcome()).toHaveTextContent(/no changes/iu)
     expect(screen.queryByTestId('wiki-findings')).toBeNull()
   })
+
+  it.each([
+    ['empty', [], 'The wiki checks refused this change. Nothing was saved. Your draft is kept.'],
+    ['archive', [{kind: 'ARCHIVE_NOTICE_MISSING', path: 'knowledge/wiki/repos/acme--alpha.md', message: "An archived repository's page must keep its archive notice."}], "An archived repository's page must keep its archive notice."],
+  ])('renders a real parsed 422 gate rejection with %s findings and retains the draft', async (_label, wireFindings, copy) => {
+    saveSpy.mockRestore()
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({state: 'rejected', reason: 'gate', findings: wireFindings}),
+      {status: 422, headers: {'Content-Type': 'application/json'}},
+    ))
+    await renderPage()
+    await editAndSave()
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    expect(outcome()).toHaveAttribute('data-outcome', 'rejected')
+    expect(outcome()).toHaveTextContent('The change was rejected')
+    expect(outcome()).toHaveTextContent(copy)
+    expect(textbox().value).toBe(EDITED)
+    expect(records()[0]?.draftText).toBe(EDITED)
+    expect(records()[0]?.pending).toBeNull()
+  })
 })
 
 describe('save — conflict', () => {

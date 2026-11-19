@@ -178,8 +178,8 @@ function toFinding(finding: {kind: string; path: string; message: string; target
  * A repo page keeps its existing `node_id`; the build never migrates or deletes.
  * On success `files` holds the page, the appended log, the rebuilt index, and
  * the corrections file when it changed. A gate error that carries findings
- * becomes a rejection with those findings; any other throw is a generic
- * rejection with none.
+ * becomes a rejection with those findings, or a safe finding for its code when
+ * none are supplied; any other throw is a generic rejection with none.
  */
 export function runWikiGates(input: GateInput): GateResult {
   try {
@@ -208,7 +208,16 @@ export function runWikiGates(input: GateInput): GateResult {
     const findings = [...blocking, ...lint.deterministicFindings, ...rendering].map(toFinding)
     return findings.length === 0 ? {ok: true, files} : {ok: false, findings}
   } catch (error) {
-    if (error instanceof WikiIngestError) return {ok: false, findings: error.findings.map(toFinding)}
+    if (error instanceof WikiIngestError) {
+      const findings = error.findings.length > 0
+        ? error.findings.map(toFinding)
+        : [{
+            kind: error.code,
+            path: error.code === 'ARCHIVE_NOTICE_MISSING' ? input.pagePath : 'knowledge/wiki',
+            message: findingMessage(error.code),
+          }]
+      return {ok: false, findings}
+    }
     return {ok: false, findings: []}
   }
 }
@@ -220,6 +229,10 @@ export function runWikiGates(input: GateInput): GateResult {
 const GENERIC_MESSAGE = 'The submitted content was refused by a check.'
 
 const FINDING_MESSAGES: Readonly<Record<string, string>> = {
+  ARCHIVE_NOTICE_MISSING: "An archived repository's page must keep its archive notice.",
+  INVALID_FRONTMATTER: 'A wiki page has invalid frontmatter.',
+  INVALID_PAGE_PATH: 'A wiki page path is not valid.',
+  INVALID_WIKILINK: 'A wiki link points to a page that does not exist.',
   'broken-wikilink': 'A wiki link points to a page that does not exist.',
   'broken-markdown-link': 'A link points to a page that does not exist.',
   'unsafe-html': 'The page contains HTML that is not allowed.',
@@ -230,6 +243,10 @@ const FINDING_MESSAGES: Readonly<Record<string, string>> = {
   'invalid-frontmatter': 'The page frontmatter is not valid.',
   'orphan-page': 'The page is not linked from anywhere.',
   'index-drift': 'The page index does not match the pages.',
+}
+
+function findingMessage(kind: string): string {
+  return Object.hasOwn(FINDING_MESSAGES, kind) ? FINDING_MESSAGES[kind] ?? GENERIC_MESSAGE : GENERIC_MESSAGE
 }
 
 export interface FindingSubmission {
@@ -255,7 +272,7 @@ export function boundFindings(findings: readonly GateFinding[], submission: Find
     return {
       kind: finding.kind,
       path: finding.path,
-      message: FINDING_MESSAGES[finding.kind] ?? GENERIC_MESSAGE,
+      message: findingMessage(finding.kind),
       ...(keep ? {target} : {}),
     }
   })
