@@ -744,6 +744,20 @@ describe('save: guards', () => {
 // ---------------------------------------------------------------------------
 
 describe('save: gates and request checks', () => {
+  it('refuses removal of an archive notice with bounded detail and no writes or dispatch', async () => {
+    const archived = (wikiFiles()[ALPHA] ?? '').replace('node_id: R_alpha', 'node_id: R_alpha\narchived: "2026-01-01"')
+      .replace('# acme/alpha\n', '# acme/alpha\n\nThis repository is archived and no longer surveyed; its page is kept for reference.\n')
+    const h = setup({files: wikiFiles({[ALPHA]: archived})})
+    const result = await h.operation.save(request(h, {body: ALPHA_BODY}), CONTEXT)
+    expect(result).toMatchObject({state: 'rejected', reason: 'gate', findings: [{
+      kind: 'ARCHIVE_NOTICE_MISSING', path: ALPHA, message: "An archived repository's page must keep its archive notice.",
+    }]})
+    expect(h.repo.count('createBlob')).toBe(0)
+    expect(h.repo.count('createTree')).toBe(0)
+    nothingCommitted(h)
+    expect(h.dispatch).not.toHaveBeenCalled()
+  })
+
   it('rejects a rendering-policy violation with findings and commits nothing', async () => {
     const h = setup()
 
