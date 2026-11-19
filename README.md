@@ -78,7 +78,7 @@ The dashboard holds GitHub write authority scoped to the single operator
 (`DASHBOARD_OPERATOR_ID`): outside the dev fixture harness, a write runs only for a gateway
 session whose `operatorId` equals it.
 That authority comes through a separate Fro Bot App credential (`DASHBOARD_FRO_BOT_APP_ID` /
-`DASHBOARD_FRO_BOT_APP_KEY(_FILE)`) — the same App `release.yaml` uses via `APPLICATION_ID`,
+`DASHBOARD_FRO_BOT_APP_KEY(_FILE)`) — the same App the release workflow uses via `APPLICATION_ID`,
 distinct from the read-only Agent App behind `DASHBOARD_GITHUB_APP_*`. It mints installation
 tokens on demand with `contents: write` for `fro-bot/.github` only. Commits go to the `data`
 branch and are limited to wiki pages, `knowledge/log.md`, `knowledge/index.md` and
@@ -108,6 +108,9 @@ bun run test        # build client, then run tests (not a bare `bun test`)
 
 `Dockerfile` builds the client in a builder stage and runs `node src/server.ts` against a
 production-only dependency install.
+
+See the [release runbook](docs/runbooks/dashboard-releases.md) for batch approval,
+the release hold, and recovery.
 
 ---
 

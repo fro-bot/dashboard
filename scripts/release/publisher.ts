@@ -24,13 +24,16 @@
  * (stable `reason` only), 2 unusable invocation/input (nothing was run).
  */
 import type {Artifacts, ArtifactTarget, Build, Evidence, Identity, Known, Obs, Outcome, PublicationPorts, Records, ReleaseRecord} from './publication.ts'
+import type {ReceiptBot, ReceiptIdentity} from './release-receipt.ts'
 
 import {execFile} from 'node:child_process'
 import {readFileSync} from 'node:fs'
 import {resolve} from 'node:path'
 import process from 'node:process'
 import {fileURLToPath} from 'node:url'
+import {createGitHubApi} from './github-release-api.ts'
 import {reconcilePublication} from './publication.ts'
+import {readReleaseReceipt, uploadReleaseReceipt} from './release-receipt.ts'
 
 export interface CommandResult {status: number; stdout: string; stderr: string}
 export type Runner = (command: 'gh' | 'docker', args: readonly string[]) => Promise<CommandResult>
@@ -95,7 +98,7 @@ export function parseReleaseBody(repo: string, body: string): Identity | null {
   return {version, source, digest, notes: text.slice(0, at)}
 }
 
-interface ReleaseRead {id: number; tag: string; draft: boolean; identity: Identity | null}
+interface ReleaseRead {id: number; tag: string; draft: boolean; identity: Identity | null; author: unknown}
 
 const unknown = (reason: (typeof UNKNOWN_REASONS)[number]) => ({state: 'unknown', reason}) as const
 const parseJson = (text: string): unknown => {
@@ -109,10 +112,16 @@ const parseJson = (text: string): unknown => {
 function toRelease(repo: string, value: unknown): ReleaseRead | null {
   if (!isObject(value) || !positive(value.id) || typeof value.tag_name !== 'string' || typeof value.draft !== 'boolean') return null
   if (value.body !== null && typeof value.body !== 'string') return null
-  return {id: value.id, tag: value.tag_name, draft: value.draft, identity: parseReleaseBody(repo, value.body ?? '')}
+  return {id: value.id, tag: value.tag_name, draft: value.draft, identity: parseReleaseBody(repo, value.body ?? ''), author: value.author}
 }
 
-export function createPublicationPorts(input: PublishInput, run: Runner): PublicationPorts {
+export interface ReceiptDeps {
+  bot: ReceiptBot
+  read: (expected: ReceiptIdentity, bot: ReceiptBot) => Promise<Obs<ReceiptIdentity>>
+  upload: (expected: ReceiptIdentity) => Promise<void>
+}
+
+export function createPublicationPorts(input: PublishInput, run: Runner, receipt?: ReceiptDeps): PublicationPorts {
   const {repo, source} = input
   const ref = image(repo)
   const notes = normalize(input.notes)
@@ -188,19 +197,27 @@ export function createPublicationPorts(input: PublishInput, run: Runner): Public
   }
 
   /** The one draft for `version`, re-read by release id, that matches the authorized tuple. */
-  async function authorizedDraft(version: string): Promise<number> {
+  async function authorizedRelease(version: string, draft: boolean): Promise<ReceiptIdentity> {
     const list = await readReleases()
     if (list.state !== 'present') return refuse()
     const matching = list.value.filter(r => r.tag === version)
     const [listed] = matching
-    if (matching.length !== 1 || listed === undefined || !listed.draft) return refuse()
-    const same = (r: ReleaseRead) => r.tag === version && r.identity?.version === version && r.identity.source === source && r.identity.notes === notes && authorized(version, r.identity.digest)
+    if (matching.length !== 1 || listed === undefined || listed.draft !== draft) return refuse()
+    const same = (r: ReleaseRead) => receipt !== undefined && isObject(r.author) && r.author.id === receipt.bot.id && r.author.login === receipt.bot.login && r.author.type === 'Bot' &&
+      positive(receipt.bot.id) && r.tag === version && r.identity?.version === version && r.identity.source === source && r.identity.notes === notes && authorized(version, r.identity.digest)
     if (!same(listed)) return refuse()
     const result = await send('gh', ['api', `repos/${repo}/releases/${listed.id}`])
     const fresh = result !== null && result.status === 0 ? toRelease(repo, parseJson(result.stdout)) : null
-    if (fresh === null || fresh.id !== listed.id || !fresh.draft || !same(fresh) || fresh.identity?.digest !== listed.identity?.digest) return refuse()
-    return listed.id
+    if (fresh === null || fresh.id !== listed.id || fresh.draft !== draft || !same(fresh) || fresh.identity?.digest !== listed.identity?.digest || fresh.identity === null) return refuse()
+    return {repo, releaseId: listed.id, version, source, digest: fresh.identity.digest}
   }
+
+  const receiptMatches = async (expected: ReceiptIdentity) => {
+    if (!receipt || !positive(receipt.bot.id) || !/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?\[bot\]$/u.test(receipt.bot.login)) return false
+    const observed = await receipt.read(expected, receipt.bot)
+    return observed.state === 'present' && Object.keys(expected).every(key => observed.value[key as keyof ReceiptIdentity] === expected[key as keyof ReceiptIdentity])
+  }
+  let receiptFailed = false
 
   const write = async (command: 'gh' | 'docker', args: readonly string[]) => {
     const result = await send(command, args)
@@ -209,7 +226,14 @@ export function createPublicationPorts(input: PublishInput, run: Runner): Public
 
   return {
     async observeRecords(): Promise<Records> {
+      if (receiptFailed) return refuse()
       const list = await readReleases()
+      if (list.state === 'present') {
+        for (const release of list.value.filter(r => !r.draft && r.identity?.source === source)) {
+          const expected = await authorizedRelease(release.tag, false)
+          if (!(await receiptMatches(expected))) return refuse()
+        }
+      }
       // `verified` stays false: a body that parses proves syntax, not a gated or settled publication.
       // Any other-batch record is therefore unresolved until the U4 controller supplies proved state.
       const releases: Known<ReleaseRecord[]> = list.state === 'present' ? {state: 'present', value: list.value.map(r => ({tag: r.tag, draft: r.draft, verified: false, identity: r.identity}))} : list
@@ -250,11 +274,30 @@ export function createPublicationPorts(input: PublishInput, run: Runner): Public
         case 'publish-release': {
           // Refuse on gate proof before any read; the draft's own digest is re-checked after listing.
           if (!CALVER.test(action.version) || !passing().some(e => e.version === action.version)) return refuse()
-          const id = await authorizedDraft(action.version)
-          return write('gh', ['api', '--method', 'PATCH', `repos/${repo}/releases/${id}`, '-F', 'draft=false'])
+          const expected = await authorizedRelease(action.version, true)
+          try {
+            if (!receipt || !positive(receipt.bot.id) || !/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?\[bot\]$/u.test(receipt.bot.login)) return refuse()
+            const observed = await receipt.read(expected, receipt.bot)
+            if (observed.state === 'absent') {
+              await receipt.upload(expected)
+              if (!(await receiptMatches(expected))) return refuse()
+            } else if (observed.state !== 'present' || !Object.keys(expected).every(key => observed.value[key as keyof ReceiptIdentity] === expected[key as keyof ReceiptIdentity])) return refuse()
+            const fresh = await authorizedRelease(action.version, true)
+            if (JSON.stringify(fresh) !== JSON.stringify(expected)) return refuse()
+          } catch {
+            receiptFailed = true
+            return refuse()
+          }
+          return write('gh', ['api', '--method', 'PATCH', `repos/${repo}/releases/${expected.releaseId}`, '-F', 'draft=false'])
         }
         case 'set-latest':
           if (!DIGEST.test(action.digest) || !authorized(null, action.digest)) return refuse()
+          {
+            const versions = passing().filter(e => e.digest === action.digest).map(e => e.version)
+            if (new Set(versions).size !== 1 || versions[0] === undefined) return refuse()
+            const expected = await authorizedRelease(versions[0], false)
+            if (expected.digest !== action.digest || !(await receiptMatches(expected))) return refuse()
+          }
           return write('docker', ['buildx', 'imagetools', 'create', '--tag', `${ref}:latest`, `${ref}@${action.digest}`])
         case 'allocate':
           // Allocation is a workflow/controller duty, never an adapter write.
@@ -267,9 +310,9 @@ export function createPublicationPorts(input: PublishInput, run: Runner): Public
 // Only stable identifiers leave this module: planner details can echo remote tag names.
 const safeDetail = (detail: string | undefined) => (detail === undefined ? {} : {detail: /^[\w.:-]{1,64}$/u.test(detail) ? detail : 'redacted'})
 
-export async function publishRelease(input: PublishInput, run: Runner, attempt: number): Promise<PublishOutcome> {
+export async function publishRelease(input: PublishInput, run: Runner, attempt: number, receipt?: ReceiptDeps): Promise<PublishOutcome> {
   if (!positive(attempt)) return {kind: 'stop', reason: 'attempt-unverified'}
-  const outcome = await reconcilePublication(createPublicationPorts(input, run), {attempt})
+  const outcome = await reconcilePublication(createPublicationPorts(input, run, receipt), {attempt})
   if (outcome.kind === 'complete') return outcome
   if (outcome.kind === 'handoff') return {kind: 'stop', reason: 'handoff-refused', detail: outcome.action.kind}
   if (outcome.reason === 'write-unconfirmed' && outcome.detail === 'allocate') return {kind: 'stop', reason: 'allocate-refused'}
@@ -320,6 +363,7 @@ export interface CliDeps {
   run: Runner
   readFile: (path: string) => string
   write: (text: string) => void
+  receipt?: (repo: string, token: string, slug: string) => Promise<ReceiptDeps | null>
 }
 
 export async function runPublisherCli(argv: readonly string[], env: Record<string, string | undefined>, deps: CliDeps): Promise<number> {
@@ -337,7 +381,15 @@ export async function runPublisherCli(argv: readonly string[], env: Record<strin
     parsed = null
   }
   if (parsed === null || (env.GITHUB_REPOSITORY !== undefined && env.GITHUB_REPOSITORY !== parsed.repo)) return usage('invalid-input')
-  const outcome = await publishRelease(parsed, deps.run, attempt)
+  let receipt: ReceiptDeps | null = null
+  try {
+    if (env.GH_TOKEN !== undefined && env.GH_TOKEN !== '' && env.RELEASE_APP_SLUG !== undefined && env.RELEASE_APP_SLUG !== '' && deps.receipt !== undefined) receipt = await deps.receipt(parsed.repo, env.GH_TOKEN, env.RELEASE_APP_SLUG)
+  } catch { /* Refuse without exposing remote errors. */ }
+  if (receipt === null) {
+    deps.write(`${JSON.stringify({kind: 'stop', reason: 'receipt-identity-unverified'})}\n`)
+    return 1
+  }
+  const outcome = await publishRelease(parsed, deps.run, attempt, receipt)
   if (outcome.kind === 'complete') {
     const {version, source, digest} = outcome.identity
     deps.write(`${JSON.stringify({kind: 'complete', version, source, digest, deploy: outcome.deploy})}\n`)
@@ -376,5 +428,10 @@ if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === resolve(
     run: execRunner,
     readFile: path => readFileSync(path, 'utf8'),
     write: text => process.stdout.write(text),
+    receipt: async (repo, token, slug) => {
+      const api = createGitHubApi({repo, readToken: token, writeToken: token})
+      const bot = await api.botUser(slug)
+      return bot === null ? null : {bot, read: async (expected, author) => readReleaseReceipt(api, expected, author), upload: async expected => uploadReleaseReceipt(api, expected)}
+    },
   })
 }

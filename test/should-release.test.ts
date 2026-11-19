@@ -24,7 +24,9 @@
  * - web/** Vitest test files (*.test.{ts,tsx,js,mjs}) alone => no release
  * - bare `web` path changed => release
  * - Dockerfile change => release
- * - release workflow change => release
+ * - legacy release workflow path change => release (historical batch intervals)
+ * - held workflow push spec: main, no path filter
+ * - generated batch notes alone => no release
  * - tsconfig change => release
  * - custom tsconfig.ci.json change => release
  * - nested path with tsconfig basename => no release (root-level only)
@@ -61,12 +63,13 @@
  */
 
 import {spawnSync} from 'node:child_process'
-import {mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs'
+import {existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 import process from 'node:process'
 
 import {afterEach, beforeEach, describe, expect, it} from 'vitest'
+import {parse} from 'yaml'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -258,36 +261,28 @@ describe('should-release — public/** changes trigger release', () => {
   })
 })
 
-function readPathsFilter(): string {
-  const workflow = readFileSync(resolve(process.cwd(), '.github/workflows/release.yaml'), 'utf8')
-  const start = workflow.indexOf('    paths:')
-  const end = workflow.indexOf('  workflow_dispatch:')
-  expect(start).toBeGreaterThanOrEqual(0)
-  expect(end).toBeGreaterThan(start)
-  return workflow.slice(start, end)
-}
+describe('should-release — held workflow push spec', () => {
+  // The classifier decides per main merge. An outer on.push.paths filter would discard an eligible
+  // merge before it ran, so the held controller must wake on every push to main and nothing else.
+  it('wakes on every push to main, with no path filter', () => {
+    const workflow = parse(readFileSync(resolve(process.cwd(), '.github/workflows/held-release.yaml'), 'utf8')) as {on: {push: Record<string, unknown>}}
+    expect(workflow.on.push).toEqual({branches: ['main']})
+  })
 
-describe('should-release — workflow path filter parity', () => {
-  // GitHub Actions filters on.push.paths BEFORE the guard script runs, so any
-  // directory that the guard treats as a hard-release path must also appear in
-  // the release workflow's paths filter — otherwise the workflow never starts and
-  // the guard never executes. This pins the two in sync to prevent drift.
+  it('has no legacy release workflow whose path filter could drift from the classifier', () => {
+    expect(existsSync(resolve(process.cwd(), '.github/workflows/release.yaml'))).toBe(false)
+  })
+})
 
-  it('release.yaml on.push.paths includes every directory-glob hard-release path', () => {
-    const filter = readPathsFilter()
-    for (const dir of ['src/**', 'web/**', 'public/**']) {
-      expect(filter).toContain(`'${dir}'`)
+describe('should-release — generated batch notes', () => {
+  it('does not release for the notes file alone, whether added, changed or missing', () => {
+    const base = writePkg(tmpDir, 'base.json', BASE_PKG)
+    const head = writePkg(tmpDir, 'head.json', BASE_PKG)
+    for (const changed of ['docs/releases/batch.md', 'docs/releases/batch.md\ndocs/runbooks/dashboard-releases.md']) {
+      const {exitCode, stdout} = runGuard(changed, base, head)
+      expect(exitCode, changed).toBe(1)
+      expect(stdout, changed).toMatch(/^skip:/)
     }
-  })
-
-  it('release.yaml on.push.paths includes the Bun lockfile and config', () => {
-    const filter = readPathsFilter()
-    expect(filter).toMatch(/^\s+- bun\.lock$/m)
-    expect(filter).toMatch(/^\s+- bunfig\.toml$/m)
-  })
-
-  it('release.yaml on.push.paths does not list the pnpm lockfile', () => {
-    expect(readPathsFilter()).not.toContain('pnpm-lock.yaml')
   })
 })
 

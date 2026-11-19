@@ -63,12 +63,12 @@ curl -s -H "Authorization: Bearer $token" \
 Renovate already keeps this pin current, so a match is the expected result.
 
 **3. Understand that reporting and enforcement are separate steps.**
-`.github/workflows/release.yaml` runs Trivy twice, deliberately:
+The release workflow runs Trivy twice:
 
 | Step | Configuration | Effect |
 | --- | --- | --- |
-| Reporting (~lines 297-308) | `exit-code: '0'`, no `ignore-unfixed` | Uploads every HIGH/CRITICAL to code scanning. This is what produces the alerts, and it is a visibility channel by design. |
-| Enforcement (~lines 338-347) | `ignore-unfixed: true`, `exit-code: '1'` | Fails the release only on *fixable* HIGH/CRITICAL. |
+| Reporting | `exit-code: '0'`, no `ignore-unfixed` | Uploads every HIGH/CRITICAL to code scanning. This is what produces the alerts, and it is a visibility channel by design. |
+| Enforcement | `ignore-unfixed: true`, `exit-code: '1'` | Fails the release only on *fixable* HIGH/CRITICAL. |
 
 An open alert is therefore not a blocked release. Confirm this rather than
 assume it: releases `2026.08.31` through `2026.08.34` all built and shipped with
@@ -78,10 +78,9 @@ The gate passes today only because no remaining finding has a fix. It fails
 again, by design, when Debian ships one. That is the control working, not a
 reason to weaken it.
 
-A green Release run is not evidence the image is clean. When the release guard
-skips a run (for example a devDependency-only change), no image is built or
-scanned. Read the enforcement step's result, or confirm an image was built,
-before drawing a conclusion.
+A green release workflow run is not evidence the image is clean. A run that only
+prepares a batch or skips publication can pass without building or scanning an
+image. Check the enforcement step for the published digest.
 
 **4. Assess reachability before considering a swap.** The deployed container
 runs `read_only: true`, `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`,

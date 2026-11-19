@@ -118,6 +118,9 @@ The current release guard classifies individual pushes to `main`. A qualifying p
 - KTD3. **Head-pinned squash with a post-merge source proof.** Verify the candidate from trusted `main` code. The approval path uses the maintainer's last live review state just before merge: current, non-dismissed, and on that head. The scheduled path uses the final live hold read and a single authorization per slot. The merge API compares the head, not the base, review, or hold. A revocation after the final read is not atomic with merge. Require strict rules and CodeQL with no bypass, then verify the squash's parent and tree before publishing. If either differs from the selected candidate, stop and reconcile even if the squash landed. Do not treat commit text or the merge actor alone as authorization.
 - KTD4. **One trusted controller for selection and publication.** Carry the existing publisher into the new controller rather than use a publish-on-close handoff. A read-only PR review workflow only wakes the controller through the default-branch `workflow_run` trigger. The controller uses neither the wake run's artifacts, caches, nor executable code; it reads live GitHub state. Direct routes are `main` push for preparation, `schedule` for the scheduled decision, and a maintainer-only `main` dispatch for reconsidering an existing approval or recovering an authorized squash. Serialize these routes under one release concurrency group. Prefer GitHub's native pending queue if workflow tooling supports it; re-read state rather than trust event delivery or order.
 - KTD5. **Keep decision evidence separate from release identity.** Record the PR, head, base, tree, live review or window, and workflow run and attempt in a controller-owned Actions artifact before requesting the squash. Put its artifact ID in one `Fro-Release-Authorization` trailer. Fetch the commit and its PR associations by GitHub's reported merge SHA; the trailer, parent, and tree must all come from that commit. Verify the artifact's repository, workflow, trusted revision, run and attempt independently of its contents. For gated images, the trusted run records both gate results against the exact source and digest. Recovery also verifies the merge actor and digest. A draft GitHub Release records the selected CalVer, squash, gated digest and reviewed notes before public version writes. It is not authorization or gate evidence. Verify the CalVer and SHA aliases, publish the draft, then verify `latest`. A public release with incomplete `latest` still blocks new batches and deploy requests. Resume the same digest only with matching evidence and no newer verified publication. Do not delete a release, allocate a second tag, or move `latest` backwards to clear a conflict.
+
+  Before publishing, attach `release-proof.json` to the draft with the existing App. Verify the uploader, the file digest, and the repository, release ID, version, source, and image digest in the file. Later batches use it only with the published release, independent merge facts, first-parent history, Git tag, and matching image aliases. The file does not authorize merges or recovery of an unfinished release.
+
 - KTD6. **Stage cutover and start held.** Use the existing App confirmed by the maintainer, with repository-scoped mints limited to the task. Retire the legacy publisher and run an owner-approved preparation-only rehearsal on this repo. Keep merge, image and release writes, and infra dispatch disabled independently of the hold. Record the actual required check names, providers, results and checked revision for the generated candidate. Verify non-bypass enforcement on the first separately authorized held release. If authority or check delivery changes, stop rather than substitute a broad personal token or manufactured checks.
 
 ## Technical Design
@@ -150,7 +153,7 @@ flowchart TB
 ### Deferred to Implementation
 
 - **Permission and check confirmation:** Reuse the installed App without changing grants or rules. Mint only the permissions needed for repository preparation, PRs and merge. Verify that the real generated PR receives its checks without extra approval in the separately authorized rehearsal. No state-changing probe or grant change is implicit in the App preflight.
-- **Workflow integration:** Verify native queue support, actual App-created PR event delivery, and the repository's Actions evidence retention during implementation. A missing or expired record blocks automatic recovery; the runbook directs the maintainer to reconcile the specific PR, Git tag, image and release or, if safe to supersede, reauthorize the unpublished changes on a fresh PR.
+- **Workflow integration:** Verify App-created PR event delivery and the proof file's real upload and readback during cutover. The release controller reconciles current state under one concurrency group. A missing or expired Actions record blocks recovery of an unfinished release. The runbook directs the maintainer to reconcile the PR, Git tag, image, and release before retrying.
 
 ## Implementation Units
 
@@ -171,7 +174,7 @@ flowchart TB
 ### U2. Authorize and verify the exact squash
 
 - [x] Add and test local candidate, review, schedule, and squash-proof rules.
-- [ ] Wire and verify GitHub observations and the squash request in U4.
+- [x] Wire GitHub observations and the squash request. Verify live behavior in the cutover rehearsal.
 
 **Requirements:** R2–R6; F2, AE2, AE3. **Dependencies:** U1 App feasibility and deterministic candidate validation.
 
@@ -200,7 +203,8 @@ flowchart TB
 
 ### U4. Replace the old trigger and cut over held
 
-- [ ] Connect preparation, review, schedule, and recovery without a direct publish path.
+- [x] Connect preparation, review, schedule, and recovery without a direct publish path.
+- [ ] Rehearse the cutover with publication disabled, then verify the first held release and separate infra request.
 
 **Requirements:** R1–R8; F1, F2, AE1–AE5. **Dependencies:** U1–U3 and separate maintainer approval for the live cutover and rehearsal.
 

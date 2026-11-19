@@ -1,22 +1,42 @@
 ---
-# Held release publisher. INACTIVE: a reusable workflow with no trigger of its own. The
-# hard-disabled `controller` job is its only authority; every other job needs its success.
-# U4 replaces only the controller's authorization and observations, setting these outputs from
-# live, independently verified state (never from an event, input or artifact name):
-#   source              the proved squash SHA, the only source ever built or published
-#   version             the allocated or recovered CalVer
-#   action              `build` (fresh candidate) or `gate` (re-gate a known candidate digest)
-#   predecessor-*       the verified release this batch advances from (`-version`, `-digest`)
-#   original-*          for `gate`: candidate `-digest`, `-run-id`, `-attempt`, and `-verified`,
-#                       `true` only once the controller has authenticated that attempt
+# Held release controller and publisher. Starts disabled (HELD_RELEASE_ACTIVE); an owner
+# prepare-only dispatch may prepare the pending PR but never authorizes or publishes. Triggers only
+# wake it: it ignores the triggering run's ref, content and artifacts and reads live state at its
+# own workflow revision. Controller outputs come only from `emit`, for one verified source:
+#   source, version, action (`build` | `gate`), predecessor-version, predecessor-digest,
+#   recovery (`true` for an owner recovery of an existing authorization, else `false`),
+#   original-digest/-run-id/-attempt/-verified (for `gate`; `-verified` is `true` only once the
+#   CLI has authenticated that original attempt). All are empty when nothing is eligible.
 # Release notes are read from `docs/releases/batch.md` at `source` in the trusted checkout.
 name: Held Release
 
 on:
-  workflow_call:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 15 * * 0'
+    - cron: '0 15 * * 3'
+  workflow_run:
+    workflows: [Held Release Review]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      prepare-only:
+        description: Prepare the pending release PR only; never authorize or publish.
+        type: boolean
+        default: false
+
+# Trusted startup baseline, checked in; not a repository variable.
+env:
+  HELD_RELEASE_ACTIVE: 'false'
 
 permissions:
   contents: read
+
+# One lock for controller and publisher. Pending runs are re-read from live state, never trusted.
+concurrency:
+  group: held-release
+  cancel-in-progress: false
 
 defaults:
   run:
@@ -25,33 +45,228 @@ defaults:
 jobs:
   controller:
     name: Release source controller
-    # actionlint rejects a bare constant, so the always-false term is joined to a runtime value.
-    if: ${{ false && github.run_id != '' }}
+    if: ${{ github.repository == 'fro-bot/dashboard' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     permissions:
       contents: read
+      actions: read
+      checks: read
+      statuses: read
+      pull-requests: read
+      issues: read
+      packages: read
     outputs:
-      source: ${{ steps.prove.outputs.source }}
-      version: ${{ steps.prove.outputs.version }}
-      action: ${{ steps.prove.outputs.action }}
-      predecessor-version: ${{ steps.prove.outputs.predecessor-version }}
-      predecessor-digest: ${{ steps.prove.outputs.predecessor-digest }}
-      original-digest: ${{ steps.prove.outputs.original-digest }}
-      original-run-id: ${{ steps.prove.outputs.original-run-id }}
-      original-attempt: ${{ steps.prove.outputs.original-attempt }}
-      original-verified: ${{ steps.prove.outputs.original-verified }}
+      source: ${{ steps.emit.outputs.source }}
+      version: ${{ steps.emit.outputs.version }}
+      action: ${{ steps.emit.outputs.action }}
+      predecessor-version: ${{ steps.emit.outputs.predecessor-version }}
+      predecessor-digest: ${{ steps.emit.outputs.predecessor-digest }}
+      recovery: ${{ steps.emit.outputs.recovery }}
+      original-digest: ${{ steps.emit.outputs.original-digest }}
+      original-run-id: ${{ steps.emit.outputs.original-run-id }}
+      original-attempt: ${{ steps.emit.outputs.original-attempt }}
+      original-verified: ${{ steps.emit.outputs.original-verified }}
     steps:
-      - name: ⛔ Controller is not wired
-        id: prove
+      - name: ⤵ Checkout the trusted workflow revision
+        id: trusted
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Before any credential exists: this repository, the main ref, and HEAD exactly the workflow SHA.
+      - name: 🔎 Confirm the trusted revision
+        id: trusted-head
+        env:
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
         run: |
-          echo "::error title=Release controller not wired::Held release authorization is not implemented; refusing to publish." >&2
-          exit 1
+          fail() {
+            echo "::error title=Controller refused::$1" >&2
+            exit 1
+          }
+          [ "$REPOSITORY" = fro-bot/dashboard ] || fail "wrong repository"
+          [ "$REF" = refs/heads/main ] || fail "not the main ref"
+          [ "$WORKFLOW_REF" = "fro-bot/dashboard/.github/workflows/held-release.yaml@refs/heads/main" ] || fail "not the main workflow"
+          [[ "$WORKFLOW_SHA" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || fail "the workflow SHA is blank or malformed"
+          [ "$(git rev-parse HEAD)" = "$WORKFLOW_SHA" ] || fail "the checkout is not the trusted workflow revision"
+
+      # Credentials are issued only to an active run or an explicit prepare-only dispatch. A dispatch
+      # needs the fixed owner and a first attempt, read from the runner's own environment; anything
+      # else gets no token and no authorization. The CLI checks the owner again before any App write.
+      - name: 🚦 Decide the run mode
+        id: mode
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PREPARE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.prepare-only == true }}
+        run: |
+          OWNER_ID=831617
+          active=false
+          prepare=false
+          [ "$HELD_RELEASE_ACTIVE" = true ] && active=true
+          [ "$EVENT_NAME" = workflow_dispatch ] && [ "$PREPARE_ONLY" = true ] && prepare=true
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            if [ "${GITHUB_ACTOR_ID:-}" != "$OWNER_ID" ] || [ "${GITHUB_RUN_ATTEMPT:-}" != 1 ]; then
+              active=false
+              prepare=false
+            fi
+          fi
+          release=false
+          credentials=false
+          [ "$active" = true ] && [ "$prepare" = false ] && release=true
+          if [ "$active" = true ] || [ "$prepare" = true ]; then credentials=true; fi
+          {
+            echo "release=$release"
+            echo "credentials=$credentials"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 🟢 Set up Node.js
+        id: node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+
+      # Minted after every third-party step but the upload, for this repository only (both owner
+      # and repositories omitted), and only with the writes the controller needs.
+      - name: 🤖 Get App token for the controller
+        id: app-token
+        if: ${{ steps.mode.outputs.credentials == 'true' }}
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          app-id: ${{ secrets.APPLICATION_ID }}
+          private-key: ${{ secrets.APPLICATION_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # Phase one: observe live state, prepare the PR, or write $RUNNER_TEMP/release-authorization.json
+      # and set `authorize=true`. An owner recovery sets the source outputs here instead.
+      - name: 🔍 Inspect release state
+        id: inspect
+        env:
+          RELEASE_READ_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_APP_ID: ${{ steps.app-token.outcome == 'success' && secrets.APPLICATION_ID || '' }}
+          RELEASE_APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          RELEASE_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          RELEASE_WORKFLOW_REF: ${{ github.workflow_ref }}
+          RELEASE_PREPARE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.prepare-only == true }}
+          RELEASE_ACTOR_ID: ${{ github.actor_id }}
+        run: |
+          node scripts/release/run-controller.ts inspect
+
+      # The authorization is sealed in an immutable, attempt-named artifact before any merge.
+      - name: 📦 Upload the authorization
+        id: upload
+        if: ${{ steps.mode.outputs.release == 'true' && steps.inspect.outputs.authorize == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-authorization-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-authorization.json
+          if-no-files-found: error
+
+      # Phase two: re-observe, merge once, and prove the squash. Needs the uploaded artifact's ID.
+      - name: 🔀 Finish the authorized squash
+        id: finish
+        if: ${{ steps.mode.outputs.release == 'true' && steps.inspect.outputs.authorize == 'true' && steps.upload.outcome == 'success' }}
+        env:
+          RELEASE_READ_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_APP_ID: ${{ steps.app-token.outcome == 'success' && secrets.APPLICATION_ID || '' }}
+          RELEASE_APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          RELEASE_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          RELEASE_WORKFLOW_REF: ${{ github.workflow_ref }}
+          RELEASE_PREPARE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.prepare-only == true }}
+          RELEASE_ACTOR_ID: ${{ github.actor_id }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        run: |
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]{0,14}$ ]] || { echo "::error title=Finish refused::The artifact ID is malformed." >&2; exit 1; }
+          node scripts/release/run-controller.ts finish "$ARTIFACT_ID"
+
+      # The only writer of the controller outputs: exactly one path (fresh finish or owner recovery
+      # inspect) may supply a source, and only in an active run. Nothing is emitted otherwise.
+      - name: 📤 Emit the verified source
+        id: emit
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE: ${{ steps.mode.outputs.release }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+          INSPECT_OUTPUTS: ${{ toJSON(steps.inspect.outputs) }}
+          FINISH_OUTPUTS: ${{ toJSON(steps.finish.outputs) }}
+        run: |
+          fail() {
+            echo "::error title=Controller output refused::$1" >&2
+            exit 1
+          }
+          pick() { jq -r --arg k "$2" '.[$k] // ""' <<< "$1"; }
+          [ "$RELEASE" = true ] || exit 0
+          authorize="$(pick "$INSPECT_OUTPUTS" authorize)"
+          inspect_source="$(pick "$INSPECT_OUTPUTS" source)"
+          finish_source="$(pick "$FINISH_OUTPUTS" source)"
+          if [ "$authorize" = true ]; then
+            [ -z "$inspect_source" ] || fail "inspect and finish both supplied a source"
+            [ "$UPLOAD_OUTCOME" = success ] || exit 0
+            [ -n "$finish_source" ] || exit 0
+            out="$FINISH_OUTPUTS"
+            expected_recovery=false
+          else
+            jq -e 'length == 0' <<< "$FINISH_OUTPUTS" > /dev/null || fail "finish ran without an authorization upload"
+            [ -n "$inspect_source" ] || exit 0
+            [ "$EVENT_NAME" = workflow_dispatch ] || fail "a recovery source needs the owner dispatch"
+            out="$INSPECT_OUTPUTS"
+            expected_recovery=true
+          fi
+          sha_re='^([0-9a-f]{40}|[0-9a-f]{64})$'
+          digest_re='^sha256:[0-9a-f]{64}$'
+          version_re='^[0-9]{4}\.[0-9]{2}\.[0-9]+$'
+          run_re='^[1-9][0-9]{0,14}$'
+          int_re='^[1-9][0-9]{0,8}$'
+          source="$(pick "$out" source)"
+          version="$(pick "$out" version)"
+          action="$(pick "$out" action)"
+          predecessor_version="$(pick "$out" predecessor-version)"
+          predecessor_digest="$(pick "$out" predecessor-digest)"
+          recovery="$(pick "$out" recovery)"
+          original_digest="$(pick "$out" original-digest)"
+          original_run_id="$(pick "$out" original-run-id)"
+          original_attempt="$(pick "$out" original-attempt)"
+          original_verified="$(pick "$out" original-verified)"
+          [[ "$source" =~ $sha_re ]] || fail "the source is not a commit SHA"
+          [[ "$version" =~ $version_re ]] || fail "the version is not a CalVer"
+          [[ "$predecessor_version" =~ $version_re && "$predecessor_digest" =~ $digest_re ]] || fail "the predecessor is malformed"
+          [ "$recovery" = "$expected_recovery" ] || fail "the recovery flag does not match the path taken"
+          case "$action" in
+            build)
+              [ -z "$original_digest$original_run_id$original_attempt$original_verified" ] || fail "a new build carries original evidence"
+              ;;
+            gate)
+              [ "$original_verified" = true ] || fail "the original attempt is not verified"
+              [[ "$original_digest" =~ $digest_re && "$original_run_id" =~ $run_re && "$original_attempt" =~ $int_re ]] || fail "the original attempt is malformed"
+              ;;
+            *)
+              fail "no build or gate planned"
+              ;;
+          esac
+          {
+            echo "source=$source"
+            echo "version=$version"
+            echo "action=$action"
+            echo "predecessor-version=$predecessor_version"
+            echo "predecessor-digest=$predecessor_digest"
+            echo "recovery=$recovery"
+            echo "original-digest=$original_digest"
+            echo "original-run-id=$original_run_id"
+            echo "original-attempt=$original_attempt"
+            echo "original-verified=$original_verified"
+          } >> "$GITHUB_OUTPUT"
 
   build:
     name: Build candidate image
     needs: [controller]
-    if: ${{ needs.controller.result == 'success' && needs.controller.outputs.action == 'build' }}
+    if: ${{ needs.controller.result == 'success' && needs.controller.outputs.source != '' && needs.controller.outputs.action == 'build' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -146,7 +361,7 @@ jobs:
   candidate:
     name: Resolve candidate
     needs: [controller, build]
-    if: ${{ !cancelled() && needs.controller.result == 'success' && (needs.build.result == 'success' || (needs.build.result == 'skipped' && needs.controller.outputs.action == 'gate')) }}
+    if: ${{ !cancelled() && needs.controller.result == 'success' && needs.controller.outputs.source != '' && (needs.build.result == 'success' || (needs.build.result == 'skipped' && needs.controller.outputs.action == 'gate')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
@@ -680,6 +895,7 @@ jobs:
         id: publish
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           INPUT_PATH: ${{ steps.input.outputs.path }}
         run: |
           result="$RUNNER_TEMP/publish-result.json"
@@ -726,7 +942,7 @@ jobs:
   dispatch-deploy:
     name: Dispatch infra deploy
     needs: [controller, publish]
-    if: ${{ !cancelled() && needs.controller.result == 'success' && needs.publish.result == 'success' && needs.publish.outputs.deploy == 'eligible' && github.run_attempt == '1' }}
+    if: ${{ !cancelled() && needs.controller.result == 'success' && needs.publish.result == 'success' && needs.publish.outputs.deploy == 'eligible' && needs.controller.outputs.recovery == 'false' && github.run_attempt == '1' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # The release is already published; nothing here may redden it. `deploy-report` states the outcome.
@@ -792,7 +1008,7 @@ jobs:
   deploy-report:
     name: Report deploy request
     needs: [controller, publish, dispatch-deploy]
-    if: ${{ always() && needs.controller.result == 'success' }}
+    if: ${{ always() && needs.controller.result == 'success' && needs.controller.outputs.source != '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
@@ -806,6 +1022,7 @@ jobs:
           DIGEST: ${{ needs.publish.outputs.digest }}
           DISPATCH_RESULT: ${{ needs.dispatch-deploy.result }}
           DISPATCH_STATE: ${{ needs.dispatch-deploy.outputs.state }}
+          RECOVERY: ${{ needs.controller.outputs.recovery }}
         run: |
           {
             echo "### Deploy request"
@@ -819,6 +1036,8 @@ jobs:
             unknown="Delivery is UNKNOWN. Do not resend automatically; look for a deploy-dashboard run in marcusrbrown/infra for this version and digest, and request one there only if none exists."
             not_delivered="The request was NOT delivered. Request the deploy in marcusrbrown/infra for this version and digest."
             not_requested="Deploy not requested by this run. Look in marcusrbrown/infra and request one there if none exists."
+            # A recovery source never offers a deploy request automatically.
+            if [ "$RECOVERY" != false ] && [ "$DEPLOY" = eligible ]; then DEPLOY=not-fresh; fi
             case "$DEPLOY" in
               eligible)
                 if [ "$DISPATCH_RESULT" = skipped ]; then

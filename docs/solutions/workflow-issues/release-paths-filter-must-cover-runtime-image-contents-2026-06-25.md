@@ -22,61 +22,39 @@ related:
 
 A runtime fix (PR #102) changed `public/operator-stream.js` — the operator browser client baked into the production image by `Dockerfile`'s `COPY public/ ./public/`. The merge was green. **No release was produced.** The fix sat unshipped on `main` until an unrelated `public/`/release-config change later carried it out in release `2026.06.46`.
 
-The release is gated by **two independent filters**, and both listed `src/**` and `web/**` but not `public/**`:
+At the time, two independent filters both listed `src/**` and `web/**` but not `public/**`:
 
-1. **GitHub Actions `on.push.paths`** in `.github/workflows/release.yaml` — evaluated by the runner *before any job starts*. If the push touches no listed path, the workflow never starts.
-2. **`isHardReleasePath()`** in `scripts/should-release.ts` — an in-workflow guard that re-checks the changed files.
+1. The workflow's `on.push.paths` filter determined whether the workflow ran at all.
+2. `isHardReleasePath()` in `scripts/should-release.ts` classified the changed files when it ran.
 
 A path filter that is too narrow cannot be rescued by an in-workflow guard: the guard never runs.
 
 The same stale-artifact failure can hide behind `package.json`: the Docker builder installs root
-`devDependencies` before running `pnpm build:web`, so classification must follow artifact effect,
+`devDependencies` before running `bun run build:web`, so classification must follow artifact effect,
 not the dependency section name.
 
 ## Guidance
 
-### 1. The release trigger is the full release contract
+### 1. Classify every merge against the image inputs
 
 A release is needed for any change that can alter the shipped image or the decision to produce it—not
 only a Dockerfile `COPY` input. The current contract includes:
 
 - shipped source and static inputs: `src/**`, `web/**`, and `public/**`;
-- image and build inputs: the `Dockerfile`, root `package.json`, `pnpm-lock.yaml`, and root `tsconfig.json`;
+- image and build inputs: the `Dockerfile`, root `package.json`, `bun.lock`, `bunfig.toml`, and root TypeScript configuration;
 - release controls: the release workflow, release guard, and release-tag script.
 
 These are categories, not a claim that every literal path is independently release-worthy; keep
 the trigger set aligned with the actual build and release behavior.
 
-### 2. When two gates exist, the outer gate is the bottleneck and must be the superset
+### 2. Leave the workflow wake-up unfiltered
 
-- **Outer gate:** `on.push.paths` — a miss means the workflow never starts (silent skip).
-- **Inner gate:** `isHardReleasePath()` — only runs if the outer gate passed.
+The held-release workflow wakes on every push to `main`. Batch discovery walks first-parent
+commits since the last published source and uses `scripts/should-release.ts` on each interval.
+Even a merge that does not change the image can invalidate a pending release approval by moving
+the base. Do not add an outer path filter to this wake-up.
 
-Whatever the inner gate treats as a hard-release path must be a subset of the outer gate's `paths:`. Edit the two together; treat a mismatch as a bug.
-
-### 3. Pin the two gates with a parity test so drift becomes a failing test
-
-```ts
-describe('should-release — workflow path filter parity', () => {
-  // GitHub Actions filters on.push.paths BEFORE the guard runs, so any directory
-  // the guard treats as a hard-release path must also appear in the workflow's
-  // paths filter — otherwise the workflow never starts and the guard never runs.
-  it('release.yaml on.push.paths includes every directory-glob hard-release path', () => {
-    const workflow = readFileSync(
-      resolve(process.cwd(), '.github/workflows/release.yaml'),
-      'utf8',
-    )
-    for (const dir of ['src/**', 'web/**', 'public/**']) {
-      expect(workflow).toContain(`'${dir}'`)
-    }
-  })
-})
-```
-
-The test array is the source of truth for the directory-glob subset only. Package and lockfile
-classification has separate behavior tests; the parity array does not define those cases.
-
-### 4. Classify devDependencies by artifact effect, not by section name
+### 3. Classify devDependencies by artifact effect, not by section name
 
 The shipped classifier in `scripts/should-release.ts` is deliberately fail-open:
 
@@ -104,13 +82,12 @@ change the installed graph.
 ## When to Apply
 
 - The `Dockerfile` gains a `COPY` for a new runtime-affecting directory the image bakes in.
-- `isHardReleasePath()` is modified — update the parity test in the same commit.
-- `release.yaml`'s `on.push.paths` is touched.
-- A new trigger path is needed: add it to the parity-test array first, then to both gates.
+- `isHardReleasePath()` is modified — test the classifier against the changed image inputs.
+- The release workflow's `on.push` trigger is touched — keep the `main` wake-up free of path filters.
 - A root `package.json` devDependency used by the browser build changes — classify it explicitly,
   and fail open unless it is proven tooling-only.
 
-Treat any of these as a "release contract" change. A PR that touches only one gate without the parity test should fail review.
+Treat any of these as a release contract change.
 
 ## Verification
 

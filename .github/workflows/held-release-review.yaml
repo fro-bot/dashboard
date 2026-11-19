@@ -1,0 +1,20 @@
+---
+# Wake-only signal for Held Release. It holds no context beyond the event, and the controller
+# ignores everything about this run; it re-reads live GitHub state.
+name: Held Release Review
+
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+jobs:
+  signal:
+    name: Signal a review change
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    permissions: {}
+    steps:
+      - name: 🔔 Signal
+        run: echo "Review state changed; Held Release re-reads it."

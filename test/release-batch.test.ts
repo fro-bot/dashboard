@@ -20,7 +20,7 @@ function commit(subject: string, changes: Record<string, string>): string {
     writeFileSync(join(dir, path), contents)
   }
   git('add', '--all')
-  git('commit', '--quiet', '-m', subject)
+  git('commit', '--no-gpg-sign', '--quiet', '-m', subject)
   return git('rev-parse', 'HEAD')
 }
 
@@ -79,7 +79,7 @@ describe('release batch discovery', () => {
 
   it('counts both a qualifying change and its revert', () => {
     const change = commit('feature', {'src/a.ts': 'hello'})
-    git('revert', '--no-edit', change)
+    git('revert', '--no-gpg-sign', '--no-edit', change)
     const notes = discover()?.notes
     expect(notes).toContain('feature')
     expect(notes).toContain('Revert')
@@ -91,7 +91,7 @@ describe('release batch discovery', () => {
     const side = commit('side', {'src/side.ts': 'side'})
     git('checkout', '--quiet', 'main')
     commit('main', {'README.md': 'main'})
-    git('merge', '--quiet', '--no-ff', 'side', '-m', 'merge side')
+    git('merge', '--no-gpg-sign', '--quiet', '--no-ff', 'side', '-m', 'merge side')
     expect(() => discover(side)).toThrow('Baseline is not on first-parent history')
     git('checkout', '--quiet', '--orphan', 'unrelated')
     git('rm', '-rf', '--quiet', '.')

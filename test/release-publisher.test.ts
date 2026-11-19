@@ -1,8 +1,15 @@
 import type {Build, Evidence, Identity} from '../scripts/release/publication.ts'
-import type {CommandResult, PublishInput, Runner} from '../scripts/release/publisher.ts'
+import type {CommandResult, PublishInput, ReceiptDeps, Runner} from '../scripts/release/publisher.ts'
 
 import {describe, expect, it} from 'vitest'
-import {createExecRunner, createPublicationPorts, parsePublishInput, parseReleaseBody, publishRelease, renderReleaseBody, runPublisherCli} from '../scripts/release/publisher.ts'
+import {createExecRunner, parsePublishInput, parseReleaseBody, runPublisherCli as realCli, createPublicationPorts as realPorts, publishRelease as realPublish, renderReleaseBody} from '../scripts/release/publisher.ts'
+
+const validReceipt: ReceiptDeps = {bot: {id: 42, login: 'release-app[bot]'}, read: async expected => ({state: 'present', value: expected}), upload: async () => {
+  throw new Error('unexpected upload')
+}}
+const createPublicationPorts = (input: PublishInput, run: Runner, receipt: ReceiptDeps = validReceipt) => realPorts(input, run, receipt)
+const publishRelease = async (input: PublishInput, run: Runner, attempt: number, receipt: ReceiptDeps = validReceipt) => realPublish(input, run, attempt, receipt)
+const runPublisherCli: typeof realCli = async (argv, env, deps) => realCli(argv, {...env, GH_TOKEN: 'test', RELEASE_APP_SLUG: 'release-app'}, {...deps, receipt: async () => validReceipt})
 
 const REPO = 'fro-bot/dashboard'
 const IMAGE = 'ghcr.io/fro-bot/dashboard'
@@ -33,7 +40,7 @@ const fail = (stderr: string): CommandResult => ({status: 1, stdout: '', stderr}
 const NOT_FOUND = fail('gh: Not Found (HTTP 404)')
 const AMBIGUOUS = fail(`gh: Internal Server Error (HTTP 500) Authorization: token ${SECRET}`)
 
-interface Release {id: number; tag: string; draft: boolean; body: string}
+interface Release {id: number; tag: string; draft: boolean; body: string; author: unknown}
 type Op = 'create-draft' | 'create-tag' | 'publish' | `alias:${string}`
 
 /** In-memory GitHub + registry that answers only the exact fixed commands the adapter may issue. */
@@ -54,13 +61,13 @@ class World {
   inspectFailure = new Map<string, string>()
 
   draft(body = renderReleaseBody(REPO, IDENTITY), tag = VERSION): Release {
-    const release = {id: this.nextId++, tag, draft: true, body}
+    const release = {id: this.nextId++, tag, draft: true, body, author: {...validReceipt.bot, type: 'Bot'}}
     this.releases.set(release.id, release)
     return release
   }
 
   private json(release: Release) {
-    return {id: release.id, tag_name: release.tag, draft: release.draft, body: release.body, target_commitish: SOURCE}
+    return {id: release.id, tag_name: release.tag, draft: release.draft, body: release.body, author: release.author, target_commitish: SOURCE}
   }
 
   private write(op: Op, apply: () => CommandResult): CommandResult {
@@ -375,6 +382,194 @@ describe('createPublicationPorts: no write outside the authorized tuple', () => 
   })
 })
 
+describe('release receipt publication boundary', () => {
+  const foreignAuthors = [
+    ['different id', {id: 43, login: 'release-app[bot]', type: 'Bot'}],
+    ['different login', {id: 42, login: 'other[bot]', type: 'Bot'}],
+    ['non-bot type', {id: 42, login: 'release-app[bot]', type: 'User'}],
+    ['missing author', null],
+  ] as const
+
+  it.each(foreignAuthors)('refuses a draft with %s before uploading or publishing', async (_label, author) => {
+    const world = new World()
+    world.draft().author = author
+    let uploads = 0
+    const receipt: ReceiptDeps = {...validReceipt, read: async () => ({state: 'absent'}), upload: async () => {
+      uploads++
+    }}
+    await expect(createPublicationPorts(input(), world.run, receipt).apply({kind: 'publish-release', version: VERSION})).rejects.toThrow()
+    expect(uploads).toBe(0)
+    expect(world.writes).toEqual([])
+  })
+
+  it.each(foreignAuthors)('refuses a fresh-by-id draft with %s before uploading', async (_label, author) => {
+    const world = new World()
+    const release = world.draft()
+    let uploads = 0
+    const receipt: ReceiptDeps = {...validReceipt, read: async () => ({state: 'absent'}), upload: async () => {
+      uploads++
+    }}
+    const run: Runner = async (command, args) => args.length === 2 && args.at(-1) === `repos/${REPO}/releases/${release.id}`
+      ? ok(JSON.stringify({id: release.id, tag_name: VERSION, draft: true, body: release.body, author}))
+      : world.run(command, args)
+    await expect(createPublicationPorts(input(), run, receipt).apply({kind: 'publish-release', version: VERSION})).rejects.toThrow()
+    expect(uploads).toBe(0)
+    expect(world.writes).toEqual([])
+  })
+
+  it.each(foreignAuthors)('does not advance or complete a public release with %s', async (_label, author) => {
+    for (const latest of [PREDECESSOR.digest, DIGEST]) {
+      const world = new World()
+      const release = world.draft()
+      release.draft = false
+      release.author = author
+      world.refs.set(VERSION, SOURCE)
+      for (const name of [VERSION, SHA_ALIAS]) world.images.set(name, DIGEST)
+      world.images.set('latest', latest)
+      expect((await publishRelease(input(), world.run, 1)).kind).toBe('stop')
+      expect(world.writes).toEqual([])
+    }
+  })
+
+  it('refuses a public release whose fresh-by-id author differs from its listed author', async () => {
+    const world = new World()
+    const release = world.draft()
+    release.draft = false
+    world.refs.set(VERSION, SOURCE)
+    for (const name of [VERSION, SHA_ALIAS, 'latest']) world.images.set(name, DIGEST)
+    const run: Runner = async (command, args) => args.length === 2 && args.at(-1) === `repos/${REPO}/releases/${release.id}`
+      ? ok(JSON.stringify({id: release.id, tag_name: VERSION, draft: false, body: release.body, author: {id: 43, login: 'release-app[bot]', type: 'Bot'}}))
+      : world.run(command, args)
+    expect((await publishRelease(input(), run, 1)).kind).toBe('stop')
+    expect(world.writes).toEqual([])
+  })
+
+  it('does not require the App as author of unrelated historical releases', async () => {
+    const world = new World()
+    const old = world.draft(renderReleaseBody(REPO, {...IDENTITY, version: PREDECESSOR.version, source: 'd'.repeat(40), digest: PREDECESSOR.digest}), PREDECESSOR.version)
+    old.draft = false
+    old.author = null
+    expect(await publishRelease(input(), world.run, 1)).toMatchObject({kind: 'complete'})
+  })
+
+  it('never publishes a draft when the receipt cannot be observed', async () => {
+    const world = new World()
+    world.draft()
+    const receipt = {
+      bot: {id: 42, login: 'release-app[bot]'},
+      read: async () => ({state: 'unknown' as const, reason: 'read-failed' as const}),
+      upload: async () => { throw new Error('must not upload') },
+    }
+    await expect(createPublicationPorts(input(), world.run, receipt).apply({kind: 'publish-release', version: VERSION})).rejects.toThrow()
+    expect(world.writes).toEqual([])
+  })
+
+  it('uploads exactly once, reads back, and only then publishes and advances latest', async () => {
+    const world = new World()
+    const events: string[] = []
+    let uploaded = false
+    const receipt: ReceiptDeps = {
+      bot: validReceipt.bot,
+      read: async expected => {
+        events.push('read')
+        return uploaded ? {state: 'present', value: expected} : {state: 'absent'}
+      },
+      upload: async () => {
+        events.push('upload')
+        uploaded = true
+      },
+    }
+    const run: Runner = async (command, args) => {
+      if (args.includes('PATCH')) events.push('publish')
+      if (command === 'docker' && args.includes(`${IMAGE}:latest`) && args.includes('create')) events.push('latest')
+      return world.run(command, args)
+    }
+    expect(await publishRelease(input(), run, 1, receipt)).toMatchObject({kind: 'complete', deploy: 'eligible'})
+    expect(events.slice(0, 4)).toEqual(['read', 'upload', 'read', 'publish'])
+    expect(events.filter(event => event === 'upload')).toHaveLength(1)
+    expect(events.indexOf('latest')).toBeGreaterThan(events.indexOf('publish'))
+  })
+
+  it.each(['unknown', 'mismatch', 'readback', 'upload-error', 'bad-bot'] as const)('stops without publishing on %s', async mode => {
+    const world = new World()
+    let reads = 0
+    let uploads = 0
+    const receipt: ReceiptDeps = {
+      bot: mode === 'bad-bot' ? {id: 0, login: 'wrong'} : validReceipt.bot,
+      read: async expected => {
+        reads++
+        if (mode === 'unknown') return {state: 'unknown', reason: 'read-failed'}
+        if (mode === 'mismatch') return {state: 'present', value: {...expected, digest: PREDECESSOR.digest}}
+        return {state: 'absent'}
+      },
+      upload: async () => {
+        uploads++
+        if (mode === 'upload-error') throw new Error(SECRET)
+      },
+    }
+    const outcome = await publishRelease(input(), world.run, 1, receipt)
+    expect(outcome.kind).toBe('stop')
+    expect(world.writes).not.toContain('publish')
+    expect(world.writes).not.toContain('alias:latest')
+    expect(uploads).toBeLessThanOrEqual(1)
+    expect(reads).toBeLessThanOrEqual(2)
+    expect(JSON.stringify(outcome)).not.toContain(SECRET)
+  })
+
+  it.each(['absent', 'unknown', 'mismatch'] as const)('never repairs or accepts a public release with %s proof', async state => {
+    for (const latest of [PREDECESSOR.digest, DIGEST]) {
+      const world = new World()
+      world.draft().draft = false
+      world.refs.set(VERSION, SOURCE)
+      for (const name of [VERSION, SHA_ALIAS]) world.images.set(name, DIGEST)
+      world.images.set('latest', latest)
+      let uploads = 0
+      const receipt: ReceiptDeps = {
+        bot: validReceipt.bot,
+        read: async expected => state === 'absent' ? {state: 'absent'} : state === 'unknown' ? {state: 'unknown', reason: 'read-failed'} : {state: 'present', value: {...expected, releaseId: expected.releaseId + 1}},
+        upload: async () => { uploads++ },
+      }
+      expect((await publishRelease(input(), world.run, 1, receipt)).kind).toBe('stop')
+      expect(world.writes).toEqual([])
+      expect(uploads).toBe(0)
+    }
+  })
+
+  it('does not patch if the draft becomes unreadable after receipt readback', async () => {
+    const world = new World()
+    const release = world.draft()
+    let uploaded = false
+    const receipt: ReceiptDeps = {
+      bot: validReceipt.bot,
+      read: async expected => {
+        if (!uploaded) return {state: 'absent'}
+        world.unreadable.add(`release:${release.id}`)
+        return {state: 'present', value: expected}
+      },
+      upload: async () => { uploaded = true },
+    }
+    const ports = createPublicationPorts(input(), world.run, receipt)
+    await expect(ports.apply({kind: 'publish-release', version: VERSION})).rejects.toThrow()
+    expect(world.writes).toEqual([])
+  })
+
+  it('refuses CLI publication without independently resolved App identity', async () => {
+    for (const slug of ['', 'wrong-app']) {
+      const world = new World()
+      const out: string[] = []
+      const status = await realCli(['input.json'], {GITHUB_RUN_ATTEMPT: '1', GH_TOKEN: 'test', RELEASE_APP_SLUG: slug}, {
+        run: world.run,
+        readFile: () => JSON.stringify(input()),
+        write: text => out.push(text),
+        receipt: async () => null,
+      })
+      expect(status).toBe(1)
+      expect(JSON.parse(out.join(''))).toEqual({kind: 'stop', reason: 'receipt-identity-unverified'})
+      expect(world.calls).toEqual([])
+    }
+  })
+})
+
 describe('parsePublishInput', () => {
   const valid = () => JSON.parse(JSON.stringify(input())) as Record<string, unknown>
 
@@ -629,6 +824,7 @@ describe('contradictory gate evidence cannot authorize a write', () => {
 
   it('leaves another digest of the same version and source authorized', async () => {
     const world = new World()
+    world.draft(renderReleaseBody(REPO, {...IDENTITY, digest: OTHER_DIGEST})).draft = false
     const clean = {...EVIDENCE, runId: 102, digest: OTHER_DIGEST}
     const ports = withEvidence(world, [EVIDENCE, siblings[0][1], clean])
     await expect(ports.apply({kind: 'set-latest', digest: DIGEST})).rejects.toThrow()
@@ -639,6 +835,7 @@ describe('contradictory gate evidence cannot authorize a write', () => {
 
   it('is not contradicted by a failure for another version or source', async () => {
     const world = new World()
+    world.draft().draft = false
     const elsewhere = [{...EVIDENCE, runId: 103, version: '2026.11.9', smoke: 'fail'}, {...EVIDENCE, runId: 104, source: 'c'.repeat(40), smoke: 'fail'}] as Evidence[]
     await withEvidence(world, [EVIDENCE, ...elsewhere]).apply({kind: 'set-latest', digest: DIGEST})
     expect(world.writes).toEqual(['alias:latest'])

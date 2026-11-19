@@ -1,17 +1,17 @@
 /**
- * Pins the token scoping and ref gating in .github/workflows/release.yaml, and the inactive
- * wiring, credential boundaries and gate evidence in .github/workflows/held-release.yaml.
+ * Pins the trusted controller and publisher in .github/workflows/held-release.yaml and the
+ * wake-only signal in held-release-review.yaml, and that no other workflow can release.
  *
  * The publication token is minted from a GitHub App whose installation is broader than the
- * release needs, so the mint-time `permission-*` and `repositories` inputs are the only thing
- * that narrows it. These tests keep that narrowing from being dropped by a later edit.
+ * release needs, so the mint-time `permission-*` inputs, and the omitted `owner` and
+ * `repositories`, are the only thing that narrows it. These tests keep that from being dropped.
  *
  * The held workflow's shell steps are executed here with fake `gh`/`node` binaries, so the
  * wrong-source, no-input, attempt and readback outcomes are behavior, not string matches.
  */
 /* eslint-disable no-template-curly-in-string -- GitHub Actions expressions are literal strings under test */
 import {spawnSync} from 'node:child_process'
-import {chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
+import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 import process from 'node:process'
@@ -19,67 +19,8 @@ import {afterEach, describe, expect, it} from 'vitest'
 import {parse} from 'yaml'
 import {parsePublishInput} from '../scripts/release/publisher.ts'
 
-interface Step {
-  readonly id?: string
-  readonly uses?: string
-  readonly with?: Record<string, unknown>
-}
-
-interface Job {
-  readonly if?: string
-  readonly steps: readonly Step[]
-}
-
-const workflow = parse(readFileSync(resolve(process.cwd(), '.github/workflows/release.yaml'), 'utf8')) as {
-  readonly jobs: Record<string, Job>
-}
-
-function mintStep(job: string, id: string): Step {
-  const step = workflow.jobs[job]?.steps.find(candidate => candidate.id === id)
-  if (step === undefined) throw new Error(`step ${id} not found in job ${job}`)
-  return step
-}
-
-function permissionInputs(step: Step): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(step.with ?? {}).filter(([name]) => name.startsWith('permission-')))
-}
-
-describe('release workflow — publication token', () => {
-  const step = mintStep('release', 'app-token')
-
-  it('is minted with a pinned create-github-app-token', () => {
-    expect(step.uses).toMatch(/^actions\/create-github-app-token@[0-9a-f]{40}\b/u)
-  })
-
-  it('requests contents:write and nothing else', () => {
-    // Uses: git ref create/delete, release create/view/edit/delete.
-    expect(permissionInputs(step)).toEqual({'permission-contents': 'write'})
-  })
-
-  it('is limited to this repository by name', () => {
-    expect(step.with?.owner).toMatch(/github\.repository_owner/u)
-    expect(step.with?.repositories).toMatch(/github\.event\.repository\.name/u)
-  })
-})
-
-describe('release workflow — infra dispatch token', () => {
-  it('stays limited to the infra repository with actions:write only', () => {
-    const step = mintStep('dispatch-deploy', 'dispatch-token')
-    expect(permissionInputs(step)).toEqual({'permission-actions': 'write'})
-    expect(step.with?.repositories).toBe('infra')
-  })
-})
-
-describe('release workflow — ref gate', () => {
-  it('the release job runs only on main, independent of the guard script', () => {
-    const condition = workflow.jobs.release?.if ?? ''
-    expect(condition).toContain("needs.guard.outputs.should-release == 'true'")
-    expect(condition).toContain("github.ref == 'refs/heads/main'")
-  })
-})
-
 // ---------------------------------------------------------------------------------------------
-// held-release.yaml: inactive reusable workflow. No trigger, hard-disabled controller placeholder.
+// held-release.yaml: trusted controller and publisher, disabled by a static startup baseline.
 // ---------------------------------------------------------------------------------------------
 
 interface HeldStep {
@@ -104,12 +45,16 @@ interface HeldJob {
 
 interface HeldWorkflow {
   readonly on: Record<string, unknown>
+  readonly env?: Record<string, string>
+  readonly concurrency?: Record<string, unknown>
   readonly permissions: Record<string, string>
   readonly jobs: Record<string, HeldJob>
 }
 
 const heldText = readFileSync(resolve(process.cwd(), '.github/workflows/held-release.yaml'), 'utf8')
 const held = parse(heldText) as HeldWorkflow
+const reviewText = readFileSync(resolve(process.cwd(), '.github/workflows/held-release-review.yaml'), 'utf8')
+const review = parse(reviewText) as {name: string; on: Record<string, unknown>; permissions: unknown; jobs: Record<string, {permissions?: unknown; steps: {uses?: string; run?: string; env?: unknown; with?: unknown}[]}>}
 
 const SOURCE = 'a'.repeat(40)
 const OTHER = 'b'.repeat(40)
@@ -144,17 +89,65 @@ function closure(name: string, seen = new Set<string>()): Set<string> {
   return seen
 }
 
-describe('held release workflow — inactive wiring', () => {
-  it('is a reusable workflow with no trigger of its own and no inputs', () => {
-    expect(Object.keys(held.on)).toEqual(['workflow_call'])
-    const call = held.on.workflow_call as Record<string, unknown> | null
-    expect(Object.keys(call ?? {})).toEqual([])
+describe('release workflows — only the held workflow can release', () => {
+  const dir = resolve(process.cwd(), '.github/workflows')
+  const files = readdirSync(dir).filter(name => /\.ya?ml$/u.test(name)).sort()
+  const read = (name: string) => readFileSync(join(dir, name), 'utf8')
+
+  it('has retired the unconditional legacy release workflow', () => {
+    expect(existsSync(join(dir, 'release.yaml'))).toBe(false)
+    expect(existsSync(join(dir, 'release.yml'))).toBe(false)
+    expect(files).toContain('held-release.yaml')
+    expect(files).toContain('held-release-review.yaml')
+    // No remaining workflow is named Release, so nothing can wake on it or re-run it by name.
+    for (const name of files) expect(parse(read(name)) as {name?: string}, name).not.toMatchObject({name: 'Release'})
+  })
+
+  it('leaves image publication, release writes and infra dispatch to the held workflow alone', () => {
+    for (const name of files.filter(file => file !== 'held-release.yaml')) {
+      expect(read(name), name).not.toMatch(/deploy-dashboard|docker\/build-push-action|gh release|git\/refs|imagetools|permission-contents: write|packages: write/u)
+    }
+  })
+
+  it('wakes only the held workflow from other workflows, and offers it no pull-request route', () => {
+    for (const name of files) {
+      const on = (parse(read(name)) as {on?: Record<string, {workflows?: string[]} | null>}).on ?? {}
+      if (name !== 'held-release.yaml') expect(on.workflow_run?.workflows ?? [], name).not.toContain('Held Release')
+    }
+    expect(Object.keys(held.on)).not.toEqual(expect.arrayContaining(['pull_request']))
+    expect(heldText).not.toMatch(/pull_request_target|\bfork\b/u)
+  })
+})
+
+describe('held release workflow — triggers and startup', () => {
+  it('has only the trusted default-branch triggers, none with source, version or window authority', () => {
+    expect(Object.keys(held.on).sort()).toEqual(['push', 'schedule', 'workflow_dispatch', 'workflow_run'])
+    // The push spec itself (main, no path filter) is pinned with the classifier in should-release.test.ts.
+    expect(Object.keys(held.on.push as object)).toEqual(['branches'])
+    // Two separate strings, so a slot is identifiable from the cron that fired and never from a rerun date.
+    expect(held.on.schedule).toEqual([{cron: '0 15 * * 0'}, {cron: '0 15 * * 3'}])
+    expect(held.on.workflow_run).toEqual({workflows: [review.name], types: ['completed']})
+    expect(held.on.workflow_dispatch).toEqual({inputs: {'prepare-only': {description: expect.any(String) as string, type: 'boolean', default: false}}})
     expect(held.permissions).toEqual({contents: 'read'})
   })
 
+  it('is not a reusable workflow and takes no inherited secrets', () => {
+    expect(heldText).not.toMatch(/workflow_call|secrets: inherit|\bqueue\b/u)
+    expect(JSON.stringify(held.on)).not.toContain('workflow_call')
+  })
+
+  it('starts disabled from a checked-in constant, not from a repository variable', () => {
+    expect(held.env).toEqual({HELD_RELEASE_ACTIVE: 'false'})
+    expect(heldText).not.toMatch(/\bvars\./u)
+  })
+
+  it('serializes the controller and the publisher under one group without cancelling', () => {
+    expect(held.concurrency).toEqual({group: 'held-release', 'cancel-in-progress': false})
+    for (const [name, job] of Object.entries(held.jobs)) expect(JSON.stringify(job), name).not.toContain('concurrency')
+  })
+
   it('states only the controller output contract and gives no caller advice', () => {
-    expect(heldText).not.toMatch(/secrets: inherit/u)
-    expect(heldText).not.toMatch(/outputs\.notes|steps\.prove\.outputs\.notes/u)
+    expect(heldText).not.toMatch(/outputs\.notes|steps\.prove\.outputs/u)
     const header = heldText.slice(0, heldText.indexOf('\nname: Held Release'))
     expect(header.split('\n').length).toBeLessThanOrEqual(16)
   })
@@ -163,25 +156,117 @@ describe('held release workflow — inactive wiring', () => {
     expect(heldText).not.toMatch(/#\d/u)
   })
 
-  it('takes no source, version, window or approval from the event or any input', () => {
-    expect(heldText).not.toMatch(/\binputs\./u)
-    expect(heldText).not.toMatch(/github\.(?:sha|ref(?:_name)?|head_ref|base_ref|event\.(?:inputs|client_payload|pull_request|workflow_run|head_commit|before|after|schedule))/u)
+  it('takes no source, version, window or approval from the event or any input but the rehearsal flag', () => {
+    expect(heldText.replaceAll('inputs.prepare-only', '')).not.toMatch(/\binputs\./u)
+    expect(heldText).not.toMatch(/github\.(?:sha|ref_name|head_ref|base_ref|event\.(?:inputs|client_payload|pull_request|review|workflow_run|head_commit|before|after|schedule))/u)
+    // Only the controller reads the ref, to refuse anything but main.
+    for (const name of downstream) expect(JSON.stringify(heldJob(name)), name).not.toMatch(/github\.ref\b/u)
   })
 
-  it('hard-disables the controller and fails closed if it ever runs', () => {
+  it('ignores everything the triggering run carried', () => {
+    expect(heldText).not.toMatch(/download-artifact|actions\/cache|workflow_run\./u)
+  })
+})
+
+describe('held release workflow — review signal', () => {
+  it('only wakes the controller: no checkout, artifact, cache, secret or write context', () => {
+    expect(review.name).toBe('Held Release Review')
+    expect(Object.keys(review.on)).toEqual(['pull_request_review'])
+    expect(review.on.pull_request_review).toEqual({types: ['submitted', 'dismissed']})
+    expect(review.permissions).toEqual({})
+    expect(Object.keys(review.jobs)).toHaveLength(1)
+    for (const job of Object.values(review.jobs)) {
+      expect(job.permissions).toEqual({})
+      for (const step of job.steps) {
+        expect(step.uses).toBeUndefined()
+        expect(step.env).toBeUndefined()
+        expect(step.with).toBeUndefined()
+        expect(step.run).not.toMatch(/\$|`/u)
+      }
+    }
+    expect(reviewText).not.toMatch(/\$\{\{|secrets|checkout|artifact|cache|token|workflow_dispatch/iu)
+  })
+})
+
+describe('held release workflow — controller', () => {
+  const ids = () => heldJob('controller').steps.map(step => step.id)
+
+  it('runs only for this repository on main, with read access and nothing more', () => {
     const controller = heldJob('controller')
-    // Constant-false short circuit; actionlint rejects a bare `false`, and nothing may weaken this term.
-    expect(condition(controller)).toMatch(/^false && /u)
-    expect(controller.permissions).toEqual({contents: 'read'})
-    expect(controller.steps).toHaveLength(1)
-    const [step] = controller.steps
-    expect(step?.uses).toBeUndefined()
-    expect(step?.run).toMatch(/\bexit 1\b/u)
-    expect(secretsIn(controller)).toEqual([])
+    expect(condition(controller)).toBe("github.repository == 'fro-bot/dashboard' && github.ref == 'refs/heads/main'")
+    expect(controller.permissions).toEqual({contents: 'read', actions: 'read', checks: 'read', statuses: 'read', 'pull-requests': 'read', issues: 'read', packages: 'read'})
+    expect(ids()).toEqual(['trusted', 'trusted-head', 'mode', 'node', 'app-token', 'inspect', 'upload', 'finish', 'emit'])
+  })
+
+  it('checks out the exact trusted workflow revision with full history, without credentials', () => {
+    expect(heldStep('controller', 'trusted').uses).toMatch(/^actions\/checkout@[0-9a-f]{40}\b/u)
+    expect(heldStep('controller', 'trusted').with).toEqual({ref: '${{ github.workflow_sha }}', 'fetch-depth': 0, 'persist-credentials': false})
+    expect(heldStep('controller', 'trusted-head').env).toEqual({
+      WORKFLOW_SHA: '${{ github.workflow_sha }}', REPOSITORY: '${{ github.repository }}', REF: '${{ github.ref }}', WORKFLOW_REF: '${{ github.workflow_ref }}',
+    })
+    expect(ids().indexOf('trusted-head')).toBe(ids().indexOf('trusted') + 1)
+    expect(ids().indexOf('trusted-head')).toBeLessThan(ids().indexOf('app-token'))
+    expect(heldStep('controller', 'node').with).toEqual(heldStep('publish', 'node').with)
+    expect(heldStep('controller', 'node').uses).toBe(heldStep('publish', 'node').uses)
+  })
+
+  it('mints the controller token last, current repository only, contents and pull-requests write only', () => {
+    const mint = heldStep('controller', 'app-token')
+    expect(mint.uses).toMatch(/^actions\/create-github-app-token@[0-9a-f]{40}\b/u)
+    expect(mint.if).toBe("${{ steps.mode.outputs.credentials == 'true' }}")
+    expect(mint.with).toEqual({'app-id': '${{ secrets.APPLICATION_ID }}', 'private-key': '${{ secrets.APPLICATION_PRIVATE_KEY }}', 'permission-contents': 'write', 'permission-pull-requests': 'write'})
+    expect(ids().indexOf('app-token')).toBeGreaterThan(ids().indexOf('node'))
+    expect(ids().indexOf('app-token')).toBeLessThan(ids().indexOf('inspect'))
+  })
+
+  it('hands the CLI only named context and holds each credential in the CLI steps alone', () => {
+    const common = {
+      RELEASE_READ_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
+      RELEASE_APP_TOKEN: '${{ steps.app-token.outputs.token }}',
+      RELEASE_APP_ID: "${{ steps.app-token.outcome == 'success' && secrets.APPLICATION_ID || '' }}",
+      RELEASE_APP_SLUG: '${{ steps.app-token.outputs.app-slug }}',
+      RELEASE_WORKFLOW_SHA: '${{ github.workflow_sha }}',
+      RELEASE_WORKFLOW_REF: '${{ github.workflow_ref }}',
+      RELEASE_PREPARE_ONLY: "${{ github.event_name == 'workflow_dispatch' && inputs.prepare-only == true }}",
+      RELEASE_ACTOR_ID: '${{ github.actor_id }}',
+    }
+    expect(heldStep('controller', 'inspect').env).toEqual(common)
+    expect(heldStep('controller', 'finish').env).toEqual({...common, ARTIFACT_ID: '${{ steps.upload.outputs.artifact-id }}'})
+    const holders = heldJob('controller').steps.filter(step => /secrets\.GITHUB_TOKEN|app-token\.outputs\.token/u.test(JSON.stringify(step)))
+    expect(holders.map(step => step.id)).toEqual(['inspect', 'finish'])
+    expect(heldStep('controller', 'inspect').run).toBe('node scripts/release/run-controller.ts inspect\n')
+  })
+
+  it('uploads one immutable authorization artifact, only for an active run that asked for it', () => {
+    const upload = heldStep('controller', 'upload')
+    expect(upload.uses).toBe(heldStep('build', 'stage').uses)
+    expect(upload.if).toBe("${{ steps.mode.outputs.release == 'true' && steps.inspect.outputs.authorize == 'true' }}")
+    expect(upload.with).toEqual({
+      name: 'release-authorization-${{ github.run_id }}-${{ github.run_attempt }}',
+      path: '${{ runner.temp }}/release-authorization.json',
+      'if-no-files-found': 'error',
+    })
+  })
+
+  it('finishes only after a successful upload in an active run, with a bounded artifact id', () => {
+    const finish = heldStep('controller', 'finish')
+    expect(finish.if).toBe("${{ steps.mode.outputs.release == 'true' && steps.inspect.outputs.authorize == 'true' && steps.upload.outcome == 'success' }}")
+    expect(finish.run).toContain('node scripts/release/run-controller.ts finish "$ARTIFACT_ID"')
+    expect(finish.run).not.toContain('${{')
+  })
+
+  it('exposes the verified source contract only through the exclusive emit step', () => {
+    const controller = heldJob('controller')
     expect(Object.keys(controller.outputs ?? {}).sort()).toEqual([
-      'action', 'original-attempt', 'original-digest', 'original-run-id', 'original-verified', 'predecessor-digest', 'predecessor-version', 'source', 'version',
+      'action', 'original-attempt', 'original-digest', 'original-run-id', 'original-verified', 'predecessor-digest', 'predecessor-version', 'recovery', 'source', 'version',
     ])
-    for (const expression of Object.values(controller.outputs ?? {})) expect(expression).toMatch(/^\$\{\{ steps\.prove\.outputs\.[\w-]+ \}\}$/u)
+    for (const [name, expression] of Object.entries(controller.outputs ?? {})) expect(expression, name).toBe(`\${{ steps.emit.outputs.${name} }}`)
+    expect(heldStep('controller', 'emit').env).toMatchObject({
+      INSPECT_OUTPUTS: '${{ toJSON(steps.inspect.outputs) }}',
+      FINISH_OUTPUTS: '${{ toJSON(steps.finish.outputs) }}',
+      UPLOAD_OUTCOME: '${{ steps.upload.outcome }}',
+      RELEASE: '${{ steps.mode.outputs.release }}',
+    })
   })
 
   it('makes every other job need the controller directly and require its success', () => {
@@ -212,7 +297,7 @@ describe('held release workflow — inactive wiring', () => {
     expect(candidate).toContain("needs.build.result == 'success'")
     expect(candidate).toContain("(needs.build.result == 'skipped' && needs.controller.outputs.action == 'gate')")
     for (const name of bypassing.filter(dep => dep !== 'candidate')) expect(condition(heldJob(name)), name).not.toContain('skipped')
-    expect(condition(heldJob('deploy-report'))).toBe("always() && needs.controller.result == 'success'")
+    expect(condition(heldJob('deploy-report'))).toBe("always() && needs.controller.result == 'success' && needs.controller.outputs.source != ''")
   })
 
   it('has no write-bearing job reachable without the controller', () => {
@@ -232,6 +317,130 @@ describe('held release workflow — inactive wiring', () => {
     expect(needsOf(heldJob('publish')).sort()).toEqual(['candidate', 'controller', 'seal', 'smoke', 'trivy'])
     expect(condition(heldJob('publish'))).toContain("needs.seal.result == 'success'")
     expect(needsOf(heldJob('dispatch-deploy')).sort()).toEqual(['controller', 'publish'])
+  })
+})
+
+describe('held release workflow — controller (behavior)', () => {
+  const trustedHead = () => heldStep('controller', 'trusted-head')
+  const mode = () => heldStep('controller', 'mode')
+  const emit = () => heldStep('controller', 'emit')
+  const WF = 'fro-bot/dashboard/.github/workflows/held-release.yaml@refs/heads/main'
+
+  it('accepts only this repository, the main ref and workflow, and the exact checked-out revision', () => {
+    const r = makeRepo([NOTES, '## Later\n'])
+    const [first, second] = r.shas
+    const env = {WORKFLOW_SHA: second ?? '', REPOSITORY: 'fro-bot/dashboard', REF: 'refs/heads/main', WORKFLOW_REF: WF}
+    expect(runStep(trustedHead, env, {}, r.path).status).toBe(0)
+    for (const bad of [
+      {WORKFLOW_SHA: first ?? ''}, {WORKFLOW_SHA: ''}, {WORKFLOW_SHA: 'main'}, {WORKFLOW_SHA: 'A'.repeat(40)}, {REPOSITORY: 'someone/dashboard'},
+      {REF: 'refs/heads/feature'}, {REF: 'refs/pull/1/merge'}, {WORKFLOW_REF: WF.replace('refs/heads/main', 'refs/heads/feature')}, {WORKFLOW_REF: WF.replace('held-release', 'other')},
+    ]) {
+      expect(runStep(trustedHead, {...env, ...bad}, {}, r.path).status, JSON.stringify(bad)).not.toBe(0)
+    }
+  })
+
+  const OWNER = '831617'
+  const dispatch = (active: string, prepare: string, who = OWNER, attempt = '1') => ({HELD_RELEASE_ACTIVE: active, EVENT_NAME: 'workflow_dispatch', PREPARE_ONLY: prepare, GITHUB_ACTOR_ID: who, GITHUB_RUN_ATTEMPT: attempt})
+  const other = (active: string, event: string, attempt = '1') => ({HELD_RELEASE_ACTIVE: active, EVENT_NAME: event, PREPARE_ONLY: 'false', GITHUB_ACTOR_ID: '49699333', GITHUB_RUN_ATTEMPT: attempt})
+  const none = {release: 'false', credentials: 'false'}
+
+  it.each([
+    ['the checked-in baseline on a push', other('false', 'push'), none],
+    ['the baseline on a schedule', other('false', 'schedule'), none],
+    ['the baseline on a plain owner dispatch', dispatch('false', 'false'), none],
+    ['the baseline on an owner prepare-only dispatch', dispatch('false', 'true'), {release: 'false', credentials: 'true'}],
+    ['an active push', other('true', 'push'), {release: 'true', credentials: 'true'}],
+    ['an active review wake-up', other('true', 'workflow_run'), {release: 'true', credentials: 'true'}],
+    ['an active schedule rerun, whoever triggered it', other('true', 'schedule', '3'), {release: 'true', credentials: 'true'}],
+    ['an active owner dispatch', dispatch('true', 'false'), {release: 'true', credentials: 'true'}],
+    ['an active owner prepare-only dispatch', dispatch('true', 'true'), {release: 'false', credentials: 'true'}],
+    ['a prepare flag on another event', {...other('false', 'schedule'), PREPARE_ONLY: 'true'}, none],
+    ['an unrecognized activation value', other('yes', 'push'), none],
+  ])('decides the mode for %s', (_name, env, expected) => {
+    const ran = runStep(mode, env)
+    expect(ran.status).toBe(0)
+    expect(ran.outputs).toEqual(expected)
+  })
+
+  it.each([
+    ['a non-owner', {who: '49699333'}],
+    ['an unset actor', {who: ''}],
+    ['a lookalike actor ID', {who: '8316170'}],
+    ['an attempt after the first', {attempt: '2'}],
+    ['an unset attempt', {attempt: ''}],
+    ['a non-numeric attempt', {attempt: '1x'}],
+    ['a non-owner on a later attempt', {who: '49699333', attempt: '2'}],
+  ])('lets %s neither mint a token nor authorize, in every dispatch mode', (_name, {who, attempt}: {who?: string; attempt?: string}) => {
+    for (const [active, prepare] of [['false', 'true'], ['true', 'true'], ['true', 'false'], ['false', 'false']] as const) {
+      const ran = runStep(mode, dispatch(active, prepare, who ?? OWNER, attempt ?? '1'))
+      expect(ran.status, `${active}/${prepare}`).toBe(0)
+      expect(ran.outputs, `${active}/${prepare}`).toEqual(none)
+    }
+  })
+
+  it('fixes the owner and takes the actor and attempt from the runner, not from an input', () => {
+    const step = heldStep('controller', 'mode')
+    expect(step.run).toContain('OWNER_ID=831617')
+    expect(step.env).toEqual({EVENT_NAME: '${{ github.event_name }}', PREPARE_ONLY: "${{ github.event_name == 'workflow_dispatch' && inputs.prepare-only == true }}"})
+    expect(step.run).toContain('${GITHUB_ACTOR_ID:-}')
+    expect(step.run).toContain('${GITHUB_RUN_ATTEMPT:-}')
+  })
+
+  const fresh = {source: SOURCE, version: VERSION, action: 'build', 'predecessor-version': PREDECESSOR.version, 'predecessor-digest': PREDECESSOR.digest, recovery: 'false'}
+  const recovered = {...fresh, recovery: 'true'}
+  const gate = {action: 'gate', 'original-digest': DIGEST, 'original-run-id': '12345600321', 'original-attempt': '2', 'original-verified': 'true'}
+  const emitEnv = (o: {inspect?: Record<string, string>; finish?: Record<string, string>; release?: string; upload?: string; event?: string}) => ({
+    EVENT_NAME: o.event ?? 'push', RELEASE: o.release ?? 'true', UPLOAD_OUTCOME: o.upload ?? 'skipped',
+    INSPECT_OUTPUTS: JSON.stringify(o.inspect ?? {}), FINISH_OUTPUTS: JSON.stringify(o.finish ?? {}),
+  })
+
+  it('emits the fresh source only from finish, after an upload', () => {
+    const ran = runStep(emit, emitEnv({inspect: {authorize: 'true'}, finish: fresh, upload: 'success'}))
+    expect(ran.status).toBe(0)
+    expect(ran.outputs).toEqual({...fresh, 'original-digest': '', 'original-run-id': '', 'original-attempt': '', 'original-verified': ''})
+  })
+
+  it('emits a fresh gate source with its verified original attempt', () => {
+    const ran = runStep(emit, emitEnv({inspect: {authorize: 'true'}, finish: {...fresh, ...gate}, upload: 'success'}))
+    expect(ran.status).toBe(0)
+    expect(ran.outputs).toMatchObject({action: 'gate', recovery: 'false', 'original-digest': DIGEST, 'original-run-id': '12345600321', 'original-attempt': '2', 'original-verified': 'true'})
+  })
+
+  it('emits an owner recovery source only from inspect, on a dispatch', () => {
+    const ran = runStep(emit, emitEnv({inspect: {...recovered, ...gate}, event: 'workflow_dispatch'}))
+    expect(ran.status).toBe(0)
+    expect(ran.outputs).toMatchObject({source: SOURCE, recovery: 'true', action: 'gate'})
+  })
+
+  it.each([
+    ['a disabled run that somehow reports a source', {release: 'false', inspect: fresh}],
+    ['a run that prepared a PR', {inspect: {prepared: 'true'}}],
+    ['a skipped decision', {inspect: {skip: 'hold'}}],
+    ['an authorization whose upload failed', {inspect: {authorize: 'true'}, finish: fresh, upload: 'failure'}],
+    ['an authorization whose finish found no squash', {inspect: {authorize: 'true'}, upload: 'success'}],
+  ])('emits nothing, and succeeds, for %s', (_name, o) => {
+    const ran = runStep(emit, emitEnv(o))
+    expect(ran.status).toBe(0)
+    expect(ran.outputs).toEqual({})
+  })
+
+  it.each([
+    ['both paths supplying a source', {inspect: {authorize: 'true', ...fresh}, finish: fresh, upload: 'success'}],
+    ['finish output without an authorization', {inspect: {}, finish: fresh}],
+    ['a recovery source from a non-dispatch event', {inspect: recovered, event: 'schedule'}],
+    ['a recovery source flagged fresh', {inspect: fresh, event: 'workflow_dispatch'}],
+    ['a fresh source flagged recovery', {inspect: {authorize: 'true'}, finish: recovered, upload: 'success'}],
+    ['a source that is not a commit SHA', {inspect: {authorize: 'true'}, finish: {...fresh, source: 'main'}, upload: 'success'}],
+    ['a version that is not a CalVer', {inspect: {authorize: 'true'}, finish: {...fresh, version: 'latest'}, upload: 'success'}],
+    ['no predecessor', {inspect: {authorize: 'true'}, finish: {...fresh, 'predecessor-digest': ''}, upload: 'success'}],
+    ['no planned action', {inspect: {authorize: 'true'}, finish: {...fresh, action: ''}, upload: 'success'}],
+    ['a build that carries original evidence', {inspect: {authorize: 'true'}, finish: {...fresh, 'original-digest': DIGEST}, upload: 'success'}],
+    ['a gate whose original attempt is unverified', {inspect: {authorize: 'true'}, finish: {...fresh, ...gate, 'original-verified': 'false'}, upload: 'success'}],
+    ['a gate with an overflowing original run ID', {inspect: {authorize: 'true'}, finish: {...fresh, ...gate, 'original-run-id': '1000000000000000'}, upload: 'success'}],
+  ])('refuses %s and emits nothing', (_name, o) => {
+    const ran = runStep(emit, emitEnv(o))
+    expect(ran.status).not.toBe(0)
+    expect(ran.outputs).toEqual({})
   })
 })
 
@@ -304,7 +513,7 @@ describe('held release workflow — candidate build and gates', () => {
 describe('held release workflow — credential boundaries', () => {
   it('grants each job only its own permissions', () => {
     const expected: Record<string, Record<string, string>> = {
-      controller: {contents: 'read'},
+      controller: {contents: 'read', actions: 'read', checks: 'read', statuses: 'read', 'pull-requests': 'read', issues: 'read', packages: 'read'},
       build: {contents: 'read', packages: 'write'},
       candidate: {},
       smoke: {packages: 'read'},
@@ -320,7 +529,7 @@ describe('held release workflow — credential boundaries', () => {
 
   it('reaches each secret from one job only; build and gate jobs never see an App credential', () => {
     expect(Object.fromEntries(Object.keys(held.jobs).map(name => [name, secretsIn(heldJob(name))]))).toEqual({
-      controller: [],
+      controller: ['APPLICATION_ID', 'APPLICATION_PRIVATE_KEY', 'GITHUB_TOKEN'],
       build: ['GITHUB_TOKEN'],
       candidate: [],
       smoke: ['GITHUB_TOKEN'],
@@ -346,6 +555,7 @@ describe('held release workflow — credential boundaries', () => {
     expect(publish.steps.slice(at + 1).filter(step => step.uses !== undefined)).toEqual([])
     expect(publish.steps.filter(step => step.env?.GH_TOKEN !== undefined).map(step => step.id)).toEqual(['publish'])
     expect(heldStep('publish', 'publish').env?.GH_TOKEN).toBe('${{ steps.app-token.outputs.token }}')
+    expect(heldStep('publish', 'publish').env?.RELEASE_APP_SLUG).toBe('${{ steps.app-token.outputs.app-slug }}')
     expect(publish.steps[at + 1]?.id).toBe('publish')
   })
 
@@ -399,6 +609,8 @@ describe('held release workflow — infra dispatch', () => {
     expect(condition(job)).toContain("needs.publish.result == 'success'")
     expect(condition(job)).toContain("needs.publish.outputs.deploy == 'eligible'")
     expect(condition(job)).toContain("github.run_attempt == '1'")
+    // A recovery source never offers a deploy request automatically.
+    expect(condition(job)).toContain("needs.controller.outputs.recovery == 'false'")
   })
 
   it('keeps the scoped infra token and the exact payload, with no retry', () => {
@@ -818,7 +1030,7 @@ describe('held release workflow — dispatch and report (behavior)', () => {
   })
 
   const report = () => heldStep('deploy-report', 'report')
-  const reportEnv = (overrides: Record<string, string>) => ({PUBLISH_RESULT: 'success', DEPLOY: 'eligible', VERSION, DIGEST, DISPATCH_RESULT: 'success', DISPATCH_STATE: 'accepted', ...overrides})
+  const reportEnv = (overrides: Record<string, string>) => ({RECOVERY: 'false', PUBLISH_RESULT: 'success', DEPLOY: 'eligible', VERSION, DIGEST, DISPATCH_RESULT: 'success', DISPATCH_STATE: 'accepted', ...overrides})
 
   it.each([
     ['accepted', {}, 'accepted'],
@@ -838,6 +1050,15 @@ describe('held release workflow — dispatch and report (behavior)', () => {
     expect(ran.summary).toContain(expected)
     expect(ran.summary).toContain(VERSION)
     expect(ran.summary).toContain(DIGEST)
+  })
+
+  it('never reports an eligible deploy as requested for a recovery source', () => {
+    const ran = runStep(report, reportEnv({RECOVERY: 'true', DEPLOY: 'eligible', DISPATCH_RESULT: 'skipped', DISPATCH_STATE: ''}))
+    expect(ran.status).toBe(0)
+    expect(ran.summary).toContain('Deploy not requested')
+    expect(ran.summary).not.toContain('accepted')
+    const unrecognized = runStep(report, reportEnv({RECOVERY: '', DEPLOY: 'eligible', DISPATCH_RESULT: 'skipped', DISPATCH_STATE: ''}))
+    expect(unrecognized.summary).toContain('Deploy not requested')
   })
 
   it('reports an unresolved publication with no deploy request and no identity claim', () => {
