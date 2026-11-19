@@ -15,6 +15,7 @@ import {parse} from 'yaml'
 interface Step {
   readonly uses?: string
   readonly with?: Record<string, unknown>
+  readonly env?: Record<string, string>
 }
 
 interface Job {
@@ -24,6 +25,7 @@ interface Job {
 
 const workflow = parse(readFileSync(resolve(process.cwd(), '.github/workflows/fro-bot.yaml'), 'utf8')) as {
   readonly on: Record<string, unknown>
+  readonly env: Record<string, string>
   readonly jobs: Record<string, Job>
 }
 
@@ -83,5 +85,49 @@ describe('fro-bot workflow — agent isolation', () => {
 
   it('still passes the explicit token to the agent step', () => {
     expect(squash(String(agent?.with?.['github-token'] ?? ''))).toMatch(/^\$\{\{ secrets\.FRO_BOT_PAT \}\}$/u)
+  })
+})
+
+describe('fro-bot workflow — daily report', () => {
+  const prompt = squash(workflow.env.SCHEDULE_PROMPT ?? '')
+  const agent = job.steps.find(step => step.uses?.startsWith('fro-bot/agent@'))
+
+  it('publishes substantive findings for all six categories without report-only PRs', () => {
+    for (const section of ['Errored PRs', 'Security', 'Code Quality', 'Workflow Integrity', 'Progressive Improvement', 'Cross-Project Intelligence']) {
+      expect(prompt).toContain(`### ${section}`)
+    }
+    expect(prompt).toMatch(/substantive.+findings.+next steps/iu)
+    expect(prompt).toMatch(/no actual scoped fix.+(?:branches|branch).+commits.+PRs/iu)
+    expect(prompt).toMatch(/do not write reports (?:into|to) docs\/reports/iu)
+    expect(prompt).not.toMatch(/links only/iu)
+  })
+
+  it('fails closed when identifying reports and safely migrates legacy reports', () => {
+    expect(prompt).toContain('<!-- fro-bot-daily-report-v1 -->')
+    expect(prompt).toContain('fro-bot-run-summary')
+    expect(prompt).toMatch(/paginated/iu)
+    expect(prompt).toMatch(/exclude (?:pull requests|PRs)/iu)
+    expect(prompt).toMatch(/exact title.+any state/iu)
+    expect(prompt).toMatch(/(?:failed|fails).+(?:partial|unparseable).+no report mutations/iu)
+    expect(prompt).toMatch(/verified Fro Bot authorship/iu)
+    expect(prompt).toMatch(/read back.+before closing/iu)
+    expect(prompt).toMatch(/do not reopen/iu)
+  })
+
+  it('publishes only confirmed-public cross-repo information and distinguishes unavailable checks', () => {
+    expect(prompt).toMatch(/visibility.+PUBLIC/iu)
+    expect(prompt).toMatch(/omit.+identifying details.+(?:nonpublic|unknown)/iu)
+    expect(prompt).toMatch(/(?:unavailable|failed).+never.+(?:clean|✅)/iu)
+  })
+
+  it('preserves manual prompt precedence and branch-pr delivery for fixes', () => {
+    const taskPrompt = squash(agent?.env?.TASK_PROMPT ?? '')
+    const outputMode = squash(String(agent?.with?.['output-mode'] ?? ''))
+    const expectedTaskPrompt = `\${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.prompt) || ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && env.SCHEDULE_PROMPT) || (github.event_name == 'pull_request' && env.PR_REVIEW_PROMPT) || '' }}`
+    const expectedOutputMode = `\${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'branch-pr' || 'auto' }}`
+    expect(taskPrompt).toBe(expectedTaskPrompt)
+    expect(outputMode).toBe(expectedOutputMode)
+
+    expect(prompt).toMatch(/real (?:code|scoped).+remediation/iu)
   })
 })

@@ -225,28 +225,69 @@ env:
     safe fix, any constraints or "do not retry" warnings, and how to verify.
     Put these under "Needs Human Attention" in the report.
 
-    OUTPUT — ONE PERPETUAL SUMMARY ISSUE
-    Maintain exactly one daily report. Create an issue titled
-    "Daily Fro Bot Report — YYYY-MM-DD (UTC)" for today (use today's UTC date).
-    Before or after creating it, CLOSE every older open issue whose title starts
-    with "Daily Fro Bot Report —" (and any earlier "Daily Maintenance Report" or
-    "Daily Autohealing Report" variants), leaving a one-line closing comment that
-    links the newest report. There must be exactly one open daily report when the
-    run finishes.
+    REPORT-ONLY DELIVERY
+    The action uses branch-pr for real code/config remediation, which remains
+    allowed under the boundaries above. Override branch-pr for report-only work:
+    if there is no actual scoped fix, do not create or stage tracking files,
+    evidence-only artifacts, branches, commits, or PRs just to satisfy branch-pr.
+    Do not write reports into docs/reports. The issue itself carries the report;
+    links may point to evidence or real fix PRs, never serve as the report carrier.
 
-    The issue body MUST use this structure (write "None" for empty sections,
-    links only — no full content duplication; write "data unavailable" for
-    inaccessible sources):
+    PUBLIC-ONLY REPORT RULE
+    This public issue and all published comments or tracking issues must not leak
+    nonpublic repository information. Before naming or linking any cross-repo
+    source, verify its visibility during this run with
+    `gh repo view <owner/repo> --json visibility`; only PUBLIC is public. Omit
+    identifying details for nonpublic or unknown sources, including errors, and
+    omit revealing counts. Publish a multi-repo finding only if every source is
+    confirmed public. This rule overrides instructions to identify sources.
+
+    OUTPUT — ONE DAILY SUMMARY ISSUE
+    Use `date -u +%Y-%m-%d` and the exact title
+    "Daily Fro Bot Report — YYYY-MM-DD (UTC)". The first body line is the stable
+    marker `<!-- fro-bot-daily-report-v1 -->`.
+
+    Before any report mutation, use paginated issue API reads to obtain all open
+    issues and today's exact title in any state; exclude pull requests (entries
+    with a `pull_request` key). For example, paginate
+    `repos/{owner}/{repo}/issues?state=all&per_page=100` and filter locally by
+    exact title and state. Read and parse every page completely. Verify the Fro Bot
+    account identity and each candidate's author from GitHub, not title alone.
+    A failed or partial or unparseable lookup, ambiguous identity, or ambiguous
+    duplicate candidates means no report mutations; report the uncertainty and
+    never infer absence from a failed lookup.
+
+    A proven report requires verified Fro Bot authorship, the exact canonical
+    dated title, and the marker. For migration, also accept a Fro Bot-authored
+    issue with that exact canonical title and existing `fro-bot-run-summary`
+    metadata where present, or a legacy canonical daily issue without the new
+    marker; verify its identity and report purpose from its body before treating
+    it as a legacy report. If that evidence is ambiguous, make no report
+    mutations. Never close unrelated title lookalikes or hard-code an issue ID.
+
+    If today's proven report exists, update its body instead of creating another;
+    do not reopen it if closed. Otherwise create today's report. Read back and
+    verify today's issue, title, author, marker and URL before closing any proven
+    older open reports, each with a closing comment linking today's issue. If
+    creation, update or readback fails, do not close older reports. A closed
+    today's report stays closed; do not create a replacement.
+
+    Include substantive concise findings and actionable next steps from all six
+    categories inline in the issue. Write "None" only for verified-empty sections;
+    write "data unavailable" with a reason for failed or inaccessible checks.
+    Unavailable or failed checks are never represented as clean or ✅. Use ❔ for
+    could-not-check, and ✅ only when all required sources were checked and clean.
+    The issue body MUST use this structure:
     ## Daily Fro Bot Report — YYYY-MM-DD (UTC)
     ### Run Summary
     | Category | Status | Notes |
     | --- | --- | --- |
-    | Errored PRs | ✅/⚠️/❌ | ... |
-    | Security | ✅/⚠️/❌ | ... |
-    | Code Quality | ✅/⚠️/❌ | ... |
-    | Workflow Integrity | ✅/⚠️/❌ | ... |
-    | Progressive Improvement | ✅/⚠️/❌ | ... |
-    | Cross-Project Intelligence | ✅/⚠️/❌ | ... |
+    | Errored PRs | ✅/⚠️/❌/❔ | ... |
+    | Security | ✅/⚠️/❌/❔ | ... |
+    | Code Quality | ✅/⚠️/❌/❔ | ... |
+    | Workflow Integrity | ✅/⚠️/❌/❔ | ... |
+    | Progressive Improvement | ✅/⚠️/❌/❔ | ... |
+    | Cross-Project Intelligence | ✅/⚠️/❌/❔ | ... |
     ### Errored PRs
     ### Security
     ### Code Quality
