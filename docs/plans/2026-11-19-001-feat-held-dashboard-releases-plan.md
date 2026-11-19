@@ -185,13 +185,14 @@ flowchart TB
 
 ### U3. Publish and recover one source
 
-- [ ] Bind the current image-gated publisher to an authorized squash, and reconcile interrupted attempts.
+- [x] Build the inactive image-gated publisher and test recovery against local fixtures.
+- [ ] Verify the publisher's live observations and exact-source handoff during U4.
 
 **Requirements:** R2, R6–R8; F2, AE4, AE5. **Dependencies:** U2 source proof.
 
-**Files:** Carry the publisher from `.github/workflows/release.yaml` into `.github/workflows/held-release.yaml`. Add `scripts/release/publication.ts` and `test/release-publication.test.ts`. Extend `test/release-workflow.test.ts`. Reuse `scripts/compute-release-tag.ts`, its existing tests, and `Dockerfile`.
+**Files:** Carry the publisher from `.github/workflows/release.yaml` into `.github/workflows/held-release.yaml`. Add `scripts/release/publication.ts` for decisions and `scripts/release/publisher.ts` for GitHub and registry reads and writes, with focused tests for each. Extend `test/release-workflow.test.ts`. Reuse `scripts/compute-release-tag.ts`, its existing tests, and `Dockerfile`.
 
-**Approach:** Carry the selected squash SHA through checkout, image build, tag, notes, and release evidence. Preserve exact-digest smoke and enforced Trivy. Build and gate jobs do not get merge, publication App, or infra dispatch credentials. Keep the existing GHCR scope, mint the publication token after third-party steps, and preserve the isolated infra dispatch job and environment. Validate controller and gate evidence before trusting a draft or its aliases. Retry that identity across UTC month rollover. A failed or interrupted dispatch does not undo verified publication. Report confirmed failure or unknown delivery separately and provide the version and digest for manual reconciliation in infra. Do not enable the new publisher until U4 verifies the rehearsal.
+**Approach:** Carry the selected squash SHA through checkout, image build, tag, notes, and release evidence. Read the notes from that commit without checking it out in the publishing job. Preserve exact-digest smoke and enforced Trivy. Build and gate jobs do not get merge, publication App, or infra dispatch credentials. Keep the existing GHCR scope, mint the repository-scoped publication token after verifying the trusted checkout, and preserve the isolated infra dispatch job and environment. Validate controller and gate evidence before trusting a draft or its aliases. Retry that identity across UTC month rollover. If public artifacts exist but the matching release record is missing, stop rather than reconstruct it. A failed or interrupted dispatch does not undo verified publication. Report confirmed failure or unknown delivery separately and provide the version and digest for manual reconciliation in infra. Do not enable the new publisher until U4 verifies the rehearsal.
 
 **Patterns and tests:** Extend the existing publisher and its token-scope tests. Cover interruption or lost success after each artifact write, including the candidate image, draft, tag, each alias, public release, and `latest`. Cover expired or mismatched gate evidence, month rollover, `main` advancing while publication is unresolved, and stale retry after a newer release. Stop just before and just after dispatch; neither an unverified send nor an unknown response should trigger an automatic repeat. Candidate digests do not create public release artifacts or requests before the gates pass.
 

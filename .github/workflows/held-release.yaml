@@ -1,0 +1,839 @@
+---
+# Held release publisher. INACTIVE: a reusable workflow with no trigger of its own. The
+# hard-disabled `controller` job is its only authority; every other job needs its success.
+# U4 replaces only the controller's authorization and observations, setting these outputs from
+# live, independently verified state (never from an event, input or artifact name):
+#   source              the proved squash SHA, the only source ever built or published
+#   version             the allocated or recovered CalVer
+#   action              `build` (fresh candidate) or `gate` (re-gate a known candidate digest)
+#   predecessor-*       the verified release this batch advances from (`-version`, `-digest`)
+#   original-*          for `gate`: candidate `-digest`, `-run-id`, `-attempt`, and `-verified`,
+#                       `true` only once the controller has authenticated that attempt
+# Release notes are read from `docs/releases/batch.md` at `source` in the trusted checkout.
+name: Held Release
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash -Eeuo pipefail {0}
+
+jobs:
+  controller:
+    name: Release source controller
+    # actionlint rejects a bare constant, so the always-false term is joined to a runtime value.
+    if: ${{ false && github.run_id != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      source: ${{ steps.prove.outputs.source }}
+      version: ${{ steps.prove.outputs.version }}
+      action: ${{ steps.prove.outputs.action }}
+      predecessor-version: ${{ steps.prove.outputs.predecessor-version }}
+      predecessor-digest: ${{ steps.prove.outputs.predecessor-digest }}
+      original-digest: ${{ steps.prove.outputs.original-digest }}
+      original-run-id: ${{ steps.prove.outputs.original-run-id }}
+      original-attempt: ${{ steps.prove.outputs.original-attempt }}
+      original-verified: ${{ steps.prove.outputs.original-verified }}
+    steps:
+      - name: ⛔ Controller is not wired
+        id: prove
+        run: |
+          echo "::error title=Release controller not wired::Held release authorization is not implemented; refusing to publish." >&2
+          exit 1
+
+  build:
+    name: Build candidate image
+    needs: [controller]
+    if: ${{ needs.controller.result == 'success' && needs.controller.outputs.action == 'build' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
+      version: ${{ steps.basis.outputs.version }}
+      source: ${{ steps.head.outputs.source }}
+      run-id: ${{ github.run_id }}
+      attempt: ${{ github.run_attempt }}
+    steps:
+      - name: 🔎 Validate controller basis
+        id: basis
+        env:
+          SOURCE: ${{ needs.controller.outputs.source }}
+          VERSION: ${{ needs.controller.outputs.version }}
+        run: |
+          if [[ ! "$SOURCE" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || [[ ! "$VERSION" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]+$ ]]; then
+            echo "::error title=Build refused::Controller source or version is malformed." >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: ⤵ Checkout the proved source
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.controller.outputs.source }}
+          persist-credentials: false
+
+      - name: 🔎 Confirm the checked-out commit
+        id: head
+        env:
+          SOURCE: ${{ needs.controller.outputs.source }}
+        run: |
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [ "$HEAD_SHA" != "$SOURCE" ]; then
+            echo "::error title=Build refused::Checked-out commit is not the proved source." >&2
+            exit 1
+          fi
+          echo "source=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+      # GHCR only accepts GITHUB_TOKEN (same-repo packages) or a classic PAT, not an App token.
+      - name: 🔑 Log in to GHCR
+        id: ghcr
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🔧 Set up Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: 🧾 Record the attempt-bound allocation
+        id: allocation
+        env:
+          SOURCE: ${{ steps.head.outputs.source }}
+          VERSION: ${{ steps.basis.outputs.version }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          jq -n --argjson runId "$RUN_ID" --argjson attempt "$RUN_ATTEMPT" --arg version "$VERSION" --arg source "$SOURCE" \
+            --arg tag "ci-${RUN_ID}-${RUN_ATTEMPT}" \
+            '{runId: $runId, attempt: $attempt, version: $version, source: $source, tag: $tag}' > "$RUNNER_TEMP/release-allocation.json"
+
+      # Durable allocation evidence exists before the unique candidate tag is pushed.
+      - name: 📦 Stage the allocation
+        id: stage
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-allocation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-allocation.json
+          if-no-files-found: error
+
+      - name: 🏗️ Build and push candidate image
+        id: image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ghcr.io/${{ github.repository }}:ci-${{ github.run_id }}-${{ github.run_attempt }}
+          build-args: |
+            DASHBOARD_VERSION=${{ needs.controller.outputs.version }}
+
+  # Resolves exactly one candidate (this run's build, or a controller-verified recovered digest) and
+  # checks it against the proved source and version. Allowed past a skipped build only for `gate`.
+  candidate:
+    name: Resolve candidate
+    needs: [controller, build]
+    if: ${{ !cancelled() && needs.controller.result == 'success' && (needs.build.result == 'success' || (needs.build.result == 'skipped' && needs.controller.outputs.action == 'gate')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      digest: ${{ steps.resolve.outputs.digest }}
+      version: ${{ steps.resolve.outputs.version }}
+      source: ${{ steps.resolve.outputs.source }}
+      run-id: ${{ steps.resolve.outputs.run-id }}
+      attempt: ${{ steps.resolve.outputs.attempt }}
+      origin: ${{ steps.resolve.outputs.origin }}
+    steps:
+      - name: 🔎 Resolve the candidate
+        id: resolve
+        env:
+          ACTION: ${{ needs.controller.outputs.action }}
+          CTRL_SOURCE: ${{ needs.controller.outputs.source }}
+          CTRL_VERSION: ${{ needs.controller.outputs.version }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          BUILD_DIGEST: ${{ needs.build.outputs.digest }}
+          BUILD_VERSION: ${{ needs.build.outputs.version }}
+          BUILD_SOURCE: ${{ needs.build.outputs.source }}
+          BUILD_RUN_ID: ${{ needs.build.outputs.run-id }}
+          BUILD_ATTEMPT: ${{ needs.build.outputs.attempt }}
+          ORIG_DIGEST: ${{ needs.controller.outputs.original-digest }}
+          ORIG_RUN_ID: ${{ needs.controller.outputs.original-run-id }}
+          ORIG_ATTEMPT: ${{ needs.controller.outputs.original-attempt }}
+          ORIG_VERIFIED: ${{ needs.controller.outputs.original-verified }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          sha_re='^([0-9a-f]{40}|[0-9a-f]{64})$'
+          digest_re='^sha256:[0-9a-f]{64}$'
+          version_re='^[0-9]{4}\.[0-9]{2}\.[0-9]+$'
+          int_re='^[1-9][0-9]{0,8}$'
+          # Run IDs are already 11 digits; 15 is the most that stays exact as a JavaScript number.
+          run_re='^[1-9][0-9]{0,14}$'
+          fail() {
+            echo "::error title=Candidate basis rejected::$1" >&2
+            exit 1
+          }
+          [[ "$CTRL_SOURCE" =~ $sha_re ]] || fail "controller source is not a full commit SHA"
+          [[ "$CTRL_VERSION" =~ $version_re ]] || fail "controller version is not a CalVer"
+          [[ "$RUN_ID" =~ $run_re && "$RUN_ATTEMPT" =~ $int_re ]] || fail "run identity is malformed"
+          case "$ACTION" in
+            build)
+              [ "$BUILD_RESULT" = success ] || fail "candidate build did not succeed"
+              [ "$BUILD_SOURCE" = "$CTRL_SOURCE" ] || fail "candidate source differs from the proved source"
+              [ "$BUILD_VERSION" = "$CTRL_VERSION" ] || fail "candidate version differs from the allocated version"
+              [[ "$BUILD_DIGEST" =~ $digest_re ]] || fail "candidate digest is malformed"
+              [[ "$BUILD_RUN_ID" =~ $run_re ]] || fail "candidate run ID is malformed"
+              [ "$BUILD_RUN_ID" = "$RUN_ID" ] || fail "candidate was not built by this run"
+              [[ "$BUILD_ATTEMPT" =~ $int_re ]] && [ "$BUILD_ATTEMPT" -le "$RUN_ATTEMPT" ] || fail "candidate attempt is invalid"
+              origin=build digest="$BUILD_DIGEST" run_id="$BUILD_RUN_ID" attempt="$BUILD_ATTEMPT"
+              ;;
+            gate)
+              [ "$BUILD_RESULT" = skipped ] || fail "a recovered candidate must not be rebuilt"
+              [ "$ORIG_VERIFIED" = true ] || fail "original candidate provenance is not verified by the controller"
+              [[ "$ORIG_DIGEST" =~ $digest_re ]] || fail "recovered digest is malformed"
+              [[ "$ORIG_RUN_ID" =~ $run_re && "$ORIG_ATTEMPT" =~ $int_re ]] || fail "original run identity is malformed"
+              # Attempts are ordered only within one run; a new run may re-gate another run's later attempt.
+              if [ "$ORIG_RUN_ID" = "$RUN_ID" ] && [ "$ORIG_ATTEMPT" -gt "$RUN_ATTEMPT" ]; then fail "original attempt is later than this attempt"; fi
+              origin=recovered digest="$ORIG_DIGEST" run_id="$ORIG_RUN_ID" attempt="$ORIG_ATTEMPT"
+              ;;
+            *)
+              fail "controller planned no build or gate"
+              ;;
+          esac
+          {
+            echo "digest=$digest"
+            echo "version=$CTRL_VERSION"
+            echo "source=$CTRL_SOURCE"
+            echo "run-id=$run_id"
+            echo "attempt=$attempt"
+            echo "origin=$origin"
+          } >> "$GITHUB_OUTPUT"
+
+  smoke:
+    name: Smoke-test candidate image
+    needs: [controller, candidate]
+    if: ${{ !cancelled() && needs.controller.result == 'success' && needs.candidate.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      packages: read
+    steps:
+      - name: 🔑 Log in to GHCR
+        id: ghcr
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🧪 Smoke-test candidate image by digest
+        id: smoke
+        env:
+          REPOSITORY: ${{ github.repository }}
+          DIGEST: ${{ needs.candidate.outputs.digest }}
+        run: |
+          IMG="ghcr.io/${REPOSITORY}@${DIGEST}"
+          docker network create smoke-net
+          COOKIE_KEY=$(openssl rand -hex 32)
+          docker run -d --name dashboard-smoke --network smoke-net \
+            -e DASHBOARD_COOKIE_KEY="$COOKIE_KEY" -e DASHBOARD_OPERATOR_LOGIN=smoke-test \
+            -p 127.0.0.1:8080:3000 "$IMG"
+          # poll host-published port (catches 127.0.0.1 bind regression)
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/api/healthz >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          # sibling-container reachability: run a throwaway container on the same smoke-net
+          # network hitting the service by container name — mimics Caddy -> app over docker
+          # network (catches a 127.0.0.1-only bind that passes the host-port poll but would
+          # cause 502s from a reverse proxy reaching the app by service name).
+          sib=0
+          if docker run --rm --network smoke-net "$IMG" node -e \
+              "fetch('http://dashboard-smoke:3000/api/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" \
+              >/dev/null 2>&1; then sib=1; fi
+          if [ "$ok" != 1 ] || [ "$sib" != 1 ]; then
+            echo "SMOKE FAILED (host_port_ok=$ok sibling_ok=$sib)"
+            docker logs dashboard-smoke || true
+            exit 1
+          fi
+          # Verify the SPA web/dist/ was built into the image and is served.
+          # /manifest.webmanifest is a public (pre-auth) path — no cookie needed.
+          spa=0
+          if curl -fsS http://127.0.0.1:8080/manifest.webmanifest >/dev/null 2>&1; then spa=1; fi
+          if [ "$spa" != 1 ]; then
+            echo "SMOKE FAILED: SPA manifest not served (web/dist/ missing from image?)"
+            docker logs dashboard-smoke || true
+            exit 1
+          fi
+          # Verify CSP header is present and contains the pinned script-src 'self' directive.
+          csp_ok=0
+          CSP_HEADER=$(curl -fsS -I http://127.0.0.1:8080/api/healthz 2>/dev/null | tr -d '\r' | grep -i '^content-security-policy:' || true)
+          if echo "$CSP_HEADER" | grep -q "script-src 'self'"; then csp_ok=1; fi
+          if [ "$csp_ok" != 1 ]; then
+            echo "SMOKE FAILED: CSP header missing or script-src 'self' not present"
+            echo "CSP header: $CSP_HEADER"
+            docker logs dashboard-smoke || true
+            exit 1
+          fi
+          runtime_uid=$(docker run --rm "$IMG" node -p 'process.getuid()')
+          runtime_env=$(docker run --rm "$IMG" node -p 'process.env.NODE_ENV')
+          if [ "$runtime_uid" != 1000 ]; then
+            echo "SMOKE FAILED: runtime UID is $runtime_uid, expected 1000"
+            exit 1
+          fi
+          if [ "$runtime_env" != production ]; then
+            echo "SMOKE FAILED: NODE_ENV is '$runtime_env', expected production"
+            exit 1
+          fi
+
+          if ! docker run --rm --entrypoint sh "$IMG" -ec '
+            for tool in npm npx pnpm pnpx corepack yarn yarnpkg bun bunx; do
+              if command -v "$tool" >/dev/null 2>&1; then
+                echo "package-manager command is present: $tool" >&2
+                exit 1
+              fi
+            done
+          '; then
+            echo "SMOKE FAILED: package-manager command is present"
+            exit 1
+          fi
+
+          if ! docker run --rm --user 0 --entrypoint sh "$IMG" -ec '
+            for path in \
+              /usr/local/bin/npm \
+              /usr/local/bin/npx \
+              /usr/local/bin/pnpm \
+              /usr/local/bin/pnpx \
+              /usr/local/bin/corepack \
+              /usr/local/bin/yarn \
+              /usr/local/bin/yarnpkg \
+              /usr/local/bin/bun \
+              /usr/local/bin/bunx \
+              /usr/local/lib/node_modules/npm \
+              /usr/local/lib/node_modules/corepack \
+              /root/.cache \
+              /root/.npm \
+              /root/.local/share/pnpm \
+              /root/.bun \
+              /usr/local/share/.cache; do
+              if [ -e "$path" ] || [ -L "$path" ]; then
+                echo "package-manager filesystem path is present: $path" >&2
+                exit 1
+              fi
+            done
+          '; then
+            echo "SMOKE FAILED: package-manager filesystem residue is present"
+            exit 1
+          fi
+
+          echo "smoke OK (healthz=$ok sibling=$sib spa_manifest=$spa csp=$csp_ok uid=$runtime_uid node_env=$runtime_env package_managers=absent)"
+
+      - name: 🧹 Cleanup smoke containers
+        if: always()
+        run: |
+          if ! docker info >/dev/null 2>&1; then
+            echo "Smoke cleanup failed: Docker daemon is unavailable" >&2
+            exit 1
+          fi
+
+          cleanup_failed=0
+          if docker container inspect dashboard-smoke >/dev/null 2>&1; then
+            if ! docker rm -f dashboard-smoke; then
+              cleanup_failed=1
+            fi
+          else
+            echo "Smoke container already absent."
+          fi
+
+          if docker network inspect smoke-net >/dev/null 2>&1; then
+            if ! docker network rm smoke-net; then
+              cleanup_failed=1
+            fi
+          else
+            echo "Smoke network already absent."
+          fi
+
+          if [ "$cleanup_failed" -ne 0 ]; then
+            echo "Smoke cleanup failed; refusing to continue." >&2
+            exit 1
+          fi
+          echo "Smoke cleanup complete."
+
+  trivy:
+    name: Scan candidate image
+    needs: [controller, candidate]
+    if: ${{ !cancelled() && needs.controller.result == 'success' && needs.candidate.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    steps:
+      - name: 🔑 Log in to GHCR
+        id: ghcr
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🔢 Normalize image digest
+        id: digest
+        env:
+          DIGEST: ${{ needs.candidate.outputs.digest }}
+        run: |
+          if [[ "$DIGEST" != sha256:* ]]; then
+            echo "Invalid image digest: $DIGEST" >&2
+            exit 1
+          fi
+          NORMALIZED="${DIGEST#sha256:}"
+          if [[ ! "$NORMALIZED" =~ ^[a-f0-9]{64}$ ]]; then
+            echo "Invalid image digest: $DIGEST" >&2
+            exit 1
+          fi
+          echo "normalized=$NORMALIZED" >> "$GITHUB_OUTPUT"
+
+      - name: 🔍 Generate Trivy SARIF report
+        id: report
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ghcr.io/${{ github.repository }}@${{ needs.candidate.outputs.digest }}
+          format: sarif
+          output: trivy-results-${{ steps.digest.outputs.normalized }}.sarif
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          limit-severities-for-sarif: true
+          exit-code: '0'
+          version: v0.76.1
+
+      - name: 📦 Upload Trivy SARIF artifact
+        id: artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trivy-sarif-${{ steps.digest.outputs.normalized }}
+          path: trivy-results-${{ steps.digest.outputs.normalized }}.sarif
+          retention-days: 5
+
+      - name: 🛡️ Upload Trivy results to code scanning
+        id: sarif
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4
+        with:
+          sarif_file: trivy-results-${{ steps.digest.outputs.normalized }}.sarif
+          category: trivy/release-image
+
+      - name: 📝 Summarize Trivy report
+        id: summary
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}@${{ needs.candidate.outputs.digest }}
+          ARTIFACT: trivy-sarif-${{ steps.digest.outputs.normalized }}
+          CATEGORY: trivy/release-image
+        run: |
+          {
+            echo "### Release image security"
+            echo
+            echo "- Digest: \`$IMAGE\`"
+            echo "- SARIF artifact: \`$ARTIFACT\`"
+            echo "- Code scanning category: \`$CATEGORY\`"
+            echo "- Report severity: HIGH,CRITICAL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 🚦 Enforce fixed HIGH/CRITICAL vulnerabilities
+        id: enforce
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ghcr.io/${{ github.repository }}@${{ needs.candidate.outputs.digest }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          version: v0.76.1
+
+  # Gate evidence for exactly one version, source and digest, written only when both gates passed.
+  # `candidate` run/attempt name the run that built the image; this run only gated it.
+  seal:
+    name: Seal gate evidence
+    needs: [controller, candidate, smoke, trivy]
+    if: ${{ !cancelled() && needs.controller.result == 'success' && needs.candidate.result == 'success' && needs.smoke.result == 'success' && needs.trivy.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      sealed: ${{ steps.record.outputs.sealed }}
+      version: ${{ steps.record.outputs.version }}
+      source: ${{ steps.record.outputs.source }}
+      digest: ${{ steps.record.outputs.digest }}
+      run-id: ${{ steps.record.outputs.run-id }}
+      attempt: ${{ steps.record.outputs.attempt }}
+    steps:
+      - name: 🔏 Record gate evidence
+        id: record
+        env:
+          VERSION: ${{ needs.candidate.outputs.version }}
+          SOURCE: ${{ needs.candidate.outputs.source }}
+          DIGEST: ${{ needs.candidate.outputs.digest }}
+          CANDIDATE_RUN_ID: ${{ needs.candidate.outputs.run-id }}
+          CANDIDATE_ATTEMPT: ${{ needs.candidate.outputs.attempt }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+          TRIVY_RESULT: ${{ needs.trivy.result }}
+          GATE_RUN_ID: ${{ github.run_id }}
+          GATE_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          fail() {
+            echo "::error title=Seal refused::$1" >&2
+            exit 1
+          }
+          run_re='^[1-9][0-9]{0,14}$'
+          int_re='^[1-9][0-9]{0,8}$'
+          [ "$SMOKE_RESULT" = success ] && [ "$TRIVY_RESULT" = success ] || fail "Both gates must have passed."
+          [[ "$CANDIDATE_RUN_ID" =~ $run_re && "$GATE_RUN_ID" =~ $run_re ]] || fail "Run ID is malformed."
+          [[ "$CANDIDATE_ATTEMPT" =~ $int_re && "$GATE_ATTEMPT" =~ $int_re ]] || fail "Attempt is malformed."
+          jq -n --arg version "$VERSION" --arg source "$SOURCE" --arg digest "$DIGEST" \
+            --argjson candidateRun "$CANDIDATE_RUN_ID" --argjson candidateAttempt "$CANDIDATE_ATTEMPT" \
+            --argjson gateRun "$GATE_RUN_ID" --argjson gateAttempt "$GATE_ATTEMPT" \
+            '{version: $version, source: $source, digest: $digest,
+              candidate: {runId: $candidateRun, attempt: $candidateAttempt},
+              gate: {runId: $gateRun, attempt: $gateAttempt},
+              smoke: "pass", trivy: {enforced: true, result: "pass"}}' > "$RUNNER_TEMP/release-gate.json"
+          {
+            echo "sealed=true"
+            echo "version=$VERSION"
+            echo "source=$SOURCE"
+            echo "digest=$DIGEST"
+            echo "run-id=$CANDIDATE_RUN_ID"
+            echo "attempt=$CANDIDATE_ATTEMPT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 📦 Upload gate evidence
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-gate.json
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [controller, candidate, smoke, trivy, seal]
+    if: ${{ !cancelled() && needs.controller.result == 'success' && needs.candidate.result == 'success' && needs.smoke.result == 'success' && needs.trivy.result == 'success' && needs.seal.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      version: ${{ steps.result.outputs.version }}
+      digest: ${{ steps.result.outputs.digest }}
+      deploy: ${{ steps.result.outputs.deploy }}
+    steps:
+      # The helper runs from the trusted workflow revision; candidate source is never checked out here.
+      - name: ⤵ Checkout the trusted workflow revision
+        id: trusted
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # No default-branch or stale fallback may pass: HEAD must be exactly the workflow SHA.
+      - name: 🔎 Confirm the trusted revision
+        id: trusted-head
+        env:
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          if [[ ! "$WORKFLOW_SHA" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+            echo "::error title=Publication refused::The workflow SHA is blank or malformed." >&2
+            exit 1
+          fi
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [ "$HEAD_SHA" != "$WORKFLOW_SHA" ]; then
+            echo "::error title=Publication refused::The checkout is not the trusted workflow revision." >&2
+            exit 1
+          fi
+
+      - name: 🟢 Set up Node.js
+        id: node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+
+      - name: 🔑 Log in to GHCR
+        id: ghcr
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🔧 Set up Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: 🔎 Verify the same-run basis and write the publisher input
+        id: input
+        env:
+          REPOSITORY: ${{ github.repository }}
+          CTRL_SOURCE: ${{ needs.controller.outputs.source }}
+          CTRL_VERSION: ${{ needs.controller.outputs.version }}
+          PREDECESSOR_VERSION: ${{ needs.controller.outputs.predecessor-version }}
+          PREDECESSOR_DIGEST: ${{ needs.controller.outputs.predecessor-digest }}
+          CANDIDATE_SOURCE: ${{ needs.candidate.outputs.source }}
+          CANDIDATE_VERSION: ${{ needs.candidate.outputs.version }}
+          CANDIDATE_DIGEST: ${{ needs.candidate.outputs.digest }}
+          CANDIDATE_RUN_ID: ${{ needs.candidate.outputs.run-id }}
+          CANDIDATE_ATTEMPT: ${{ needs.candidate.outputs.attempt }}
+          CANDIDATE_ORIGIN: ${{ needs.candidate.outputs.origin }}
+          SEALED: ${{ needs.seal.outputs.sealed }}
+          SEAL_SOURCE: ${{ needs.seal.outputs.source }}
+          SEAL_VERSION: ${{ needs.seal.outputs.version }}
+          SEAL_DIGEST: ${{ needs.seal.outputs.digest }}
+          SEAL_RUN_ID: ${{ needs.seal.outputs.run-id }}
+          SEAL_ATTEMPT: ${{ needs.seal.outputs.attempt }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+          TRIVY_RESULT: ${{ needs.trivy.result }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          sha_re='^([0-9a-f]{40}|[0-9a-f]{64})$'
+          digest_re='^sha256:[0-9a-f]{64}$'
+          version_re='^[0-9]{4}\.[0-9]{2}\.[0-9]+$'
+          int_re='^[1-9][0-9]{0,8}$'
+          # Run IDs are already 11 digits; 15 is the most that stays exact as a JavaScript number.
+          run_re='^[1-9][0-9]{0,14}$'
+          repo_re='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+          fail() {
+            echo "::error title=Publication refused::$1" >&2
+            exit 1
+          }
+          [[ "$REPOSITORY" =~ $repo_re ]] || fail "repository is malformed"
+          [[ "$CTRL_SOURCE" =~ $sha_re ]] || fail "no proved source"
+          [[ "$CTRL_VERSION" =~ $version_re ]] || fail "no allocated version"
+          [[ "$PREDECESSOR_VERSION" =~ $version_re && "$PREDECESSOR_DIGEST" =~ $digest_re ]] || fail "no verified predecessor"
+          [[ "$CANDIDATE_DIGEST" =~ $digest_re ]] || fail "candidate digest is malformed"
+          [[ "$CANDIDATE_RUN_ID" =~ $run_re && "$CANDIDATE_ATTEMPT" =~ $int_re ]] || fail "candidate run identity is malformed"
+          [[ "$RUN_ID" =~ $run_re && "$RUN_ATTEMPT" =~ $int_re ]] || fail "workflow run identity is malformed"
+          [ "${GITHUB_RUN_ID:-}" = "$RUN_ID" ] || fail "runner run differs from the workflow run"
+          [ "${GITHUB_RUN_ATTEMPT:-}" = "$RUN_ATTEMPT" ] || fail "runner attempt differs from the workflow attempt"
+          # A new build is always this run's. Attempts are ordered only within one run: a new run may
+          # re-gate another run's later attempt.
+          case "$CANDIDATE_ORIGIN" in
+            build) [ "$CANDIDATE_RUN_ID" = "$RUN_ID" ] || fail "a new build is not from this run" ;;
+            recovered) ;;
+            *) fail "candidate origin is unknown" ;;
+          esac
+          if [ "$CANDIDATE_RUN_ID" = "$RUN_ID" ] && [ "$CANDIDATE_ATTEMPT" -gt "$RUN_ATTEMPT" ]; then fail "candidate attempt is later than this attempt"; fi
+          [ "$CANDIDATE_SOURCE" = "$CTRL_SOURCE" ] || fail "candidate source differs from the proved source"
+          [ "$CANDIDATE_VERSION" = "$CTRL_VERSION" ] || fail "candidate version differs from the allocated version"
+          [ "$SEALED" = true ] || fail "gate evidence is not sealed"
+          [ "$SMOKE_RESULT" = success ] && [ "$TRIVY_RESULT" = success ] || fail "a gate did not pass"
+          [ "$SEAL_SOURCE" = "$CTRL_SOURCE" ] && [ "$SEAL_VERSION" = "$CTRL_VERSION" ] || fail "sealed evidence is for another source or version"
+          [ "$SEAL_DIGEST" = "$CANDIDATE_DIGEST" ] || fail "sealed evidence is for another digest"
+          [ "$SEAL_RUN_ID" = "$CANDIDATE_RUN_ID" ] && [ "$SEAL_ATTEMPT" = "$CANDIDATE_ATTEMPT" ] || fail "sealed evidence is for another candidate run"
+          umask 077
+          # Notes are data read from the proved commit in the trusted history; no squash code is run.
+          notes="$RUNNER_TEMP/release-notes.md"
+          git cat-file -e "$CTRL_SOURCE^{commit}" 2> /dev/null || fail "the proved source is not in the trusted history"
+          git show "$CTRL_SOURCE:docs/releases/batch.md" > "$notes" 2> /dev/null || fail "no release notes at the proved source"
+          grep -q '[^[:space:]]' "$notes" || fail "release notes are empty"
+          input="$RUNNER_TEMP/publish-input.json"
+          jq -n --arg repo "$REPOSITORY" --arg source "$CTRL_SOURCE" --rawfile notes "$notes" \
+            --arg predecessorVersion "$PREDECESSOR_VERSION" --arg predecessorDigest "$PREDECESSOR_DIGEST" \
+            --arg version "$CTRL_VERSION" --arg digest "$CANDIDATE_DIGEST" \
+            --argjson runId "$CANDIDATE_RUN_ID" --argjson attempt "$CANDIDATE_ATTEMPT" \
+            '{repo: $repo, source: $source, notes: $notes,
+              predecessor: {version: $predecessorVersion, digest: $predecessorDigest},
+              builds: {state: "present", value: [{runId: $runId, attempt: $attempt, version: $version, source: $source, digest: $digest, verified: true}]},
+              evidence: {state: "present", value: [{runId: $runId, attempt: $attempt, version: $version, source: $source, digest: $digest, verified: true, smoke: "pass", trivy: {enforced: true, result: "pass"}}]}}' > "$input"
+          echo "path=$input" >> "$GITHUB_OUTPUT"
+
+      # Minted only after every third-party step has run, with contents:write only (tag ref, draft and
+      # public release). Omitting both owner and repositories scopes the token to this repository;
+      # an explicit owner with no repositories would widen it to the whole installation.
+      - name: 🤖 Get App token for publication
+        id: app-token
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          app-id: ${{ secrets.APPLICATION_ID }}
+          private-key: ${{ secrets.APPLICATION_PRIVATE_KEY }}
+          permission-contents: write
+
+      # One invocation: the publisher offers a deploy only to a fresh, original attempt that created
+      # the draft, so a second invocation in the same attempt would forfeit that.
+      - name: 🚀 Publish the release
+        id: publish
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          INPUT_PATH: ${{ steps.input.outputs.path }}
+        run: |
+          result="$RUNNER_TEMP/publish-result.json"
+          rc=0
+          node scripts/release/publisher.ts "$INPUT_PATH" > "$result" || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            reason="$(jq -r '.reason // empty' "$result" 2>/dev/null || true)"
+            if [[ ! "$reason" =~ ^[a-z0-9-]{1,64}$ ]]; then reason=unknown; fi
+            # shellcheck disable=SC2016 # backticks are literal Markdown
+            printf '### Publication stopped\n\n- Reason: `%s`\n- Nothing is deleted or re-allocated; reconcile before retrying.\n' "$reason" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=Publication stopped::$reason" >&2
+            exit 1
+          fi
+
+      - name: ✅ Read back the verified publication
+        id: result
+        env:
+          EXPECT_VERSION: ${{ needs.candidate.outputs.version }}
+          EXPECT_SOURCE: ${{ needs.candidate.outputs.source }}
+          EXPECT_DIGEST: ${{ needs.candidate.outputs.digest }}
+        run: |
+          result="$RUNNER_TEMP/publish-result.json"
+          if ! jq -e --arg v "$EXPECT_VERSION" --arg s "$EXPECT_SOURCE" --arg d "$EXPECT_DIGEST" \
+            '(keys | sort) == ["deploy", "digest", "kind", "source", "version"]
+              and .kind == "complete" and .version == $v and .source == $s and .digest == $d
+              and (.deploy | IN("eligible", "delivered", "not-delivered", "uncertain", "unreadable", "not-fresh"))' \
+            "$result" > /dev/null 2>&1; then
+            echo "::error title=Publication unverified::The publisher result does not match the verified identity." >&2
+            exit 1
+          fi
+          {
+            echo "version=$EXPECT_VERSION"
+            echo "digest=$EXPECT_DIGEST"
+            echo "deploy=$(jq -r '.deploy' "$result")"
+          } >> "$GITHUB_OUTPUT"
+
+  # Dispatch the gated infra deploy for the version just published. Offered only to a fresh original
+  # attempt and never repeated. The infra workflow still validates the version, verifies the digest
+  # and waits on its approval gate; this dispatch only reaches that gate.
+  #
+  # Auth: a short-lived token from the key created only for this dashboard-to-infra dispatch, scoped
+  # to marcusrbrown/infra and actions:write. The secret is environment-scoped to
+  # `release`; mint-time scoping narrows the token, not a key-leak blast radius.
+  dispatch-deploy:
+    name: Dispatch infra deploy
+    needs: [controller, publish]
+    if: ${{ !cancelled() && needs.controller.result == 'success' && needs.publish.result == 'success' && needs.publish.outputs.deploy == 'eligible' && github.run_attempt == '1' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The release is already published; nothing here may redden it. `deploy-report` states the outcome.
+    continue-on-error: true
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      state: ${{ steps.send.outputs.state || steps.mint-failed.outputs.state || steps.validate.outputs.state }}
+    steps:
+      - name: 🔎 Validate the published version and digest
+        id: validate
+        env:
+          VERSION: ${{ needs.publish.outputs.version }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          if [[ ! "$VERSION" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]+$ ]] || [[ ! "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "state=not-sent" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Deploy dispatch skipped::Published version or digest is malformed; no request was sent." >&2
+            exit 1
+          fi
+
+      - name: 🤖 Mint the infra-dispatch token
+        id: dispatch-token
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          app-id: ${{ secrets.INFRA_DISPATCH_APP_ID }}
+          private-key: ${{ secrets.INFRA_DISPATCH_APP_PRIVATE_KEY }}
+          owner: marcusrbrown
+          repositories: infra
+          permission-actions: write
+
+      - name: 🛑 Record that no request was sent
+        id: mint-failed
+        if: ${{ failure() && steps.dispatch-token.outcome == 'failure' }}
+        run: echo "state=not-sent" >> "$GITHUB_OUTPUT"
+
+      # The only send. A 4xx is a confirmed rejection; anything else is unknown delivery.
+      - name: 🚀 Dispatch infra deploy-dashboard
+        id: send
+        env:
+          GH_TOKEN: ${{ steps.dispatch-token.outputs.token }}
+          VERSION: ${{ needs.publish.outputs.version }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          echo "state=uncertain" >> "$GITHUB_OUTPUT"
+          errors="$(mktemp)"
+          if gh workflow run deploy-dashboard.yaml --repo marcusrbrown/infra --ref main -f version="$VERSION" -f digest="$DIGEST" 2> "$errors"; then
+            echo "state=accepted" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if grep -Eq 'HTTP 4[0-9]{2}' "$errors"; then
+            echo "state=rejected" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Deploy dispatch rejected::GitHub rejected the request for $VERSION. The image is published; request the deploy in infra." >&2
+          else
+            echo "state=uncertain" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Deploy dispatch unconfirmed::Delivery of the request for $VERSION is not confirmed. The image is published; check infra before sending another." >&2
+          fi
+          exit 1
+
+  # States deploy delivery on every run, whether or not publication or dispatch succeeded. It sends
+  # nothing and holds no credential.
+  deploy-report:
+    name: Report deploy request
+    needs: [controller, publish, dispatch-deploy]
+    if: ${{ always() && needs.controller.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: 📝 Report the deploy request state
+        id: report
+        env:
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          DEPLOY: ${{ needs.publish.outputs.deploy }}
+          VERSION: ${{ needs.publish.outputs.version }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          DISPATCH_RESULT: ${{ needs.dispatch-deploy.result }}
+          DISPATCH_STATE: ${{ needs.dispatch-deploy.outputs.state }}
+        run: |
+          {
+            echo "### Deploy request"
+            echo
+            if [ "$PUBLISH_RESULT" != success ]; then
+              echo "Publication did not complete. No deploy was requested by this run; reconcile the release first."
+              exit 0
+            fi
+            # shellcheck disable=SC2016 # backticks are literal Markdown
+            printf -- '- Version: `%s`\n- Digest: `%s`\n\n' "$VERSION" "$DIGEST"
+            unknown="Delivery is UNKNOWN. Do not resend automatically; look for a deploy-dashboard run in marcusrbrown/infra for this version and digest, and request one there only if none exists."
+            not_delivered="The request was NOT delivered. Request the deploy in marcusrbrown/infra for this version and digest."
+            not_requested="Deploy not requested by this run. Look in marcusrbrown/infra and request one there if none exists."
+            case "$DEPLOY" in
+              eligible)
+                if [ "$DISPATCH_RESULT" = skipped ]; then
+                  echo "$not_requested"
+                else
+                  case "$DISPATCH_STATE" in
+                    accepted) echo "The request was accepted by GitHub; it now waits for approval in infra." ;;
+                    rejected | not-sent) echo "$not_delivered" ;;
+                    *) echo "$unknown" ;;
+                  esac
+                fi
+                ;;
+              delivered) echo "An earlier request was accepted by GitHub; it waits for approval in infra." ;;
+              not-delivered) echo "An earlier request was NOT delivered. Request the deploy in marcusrbrown/infra for this version and digest." ;;
+              not-fresh) echo "$not_requested" ;;
+              *) echo "$unknown" ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"
