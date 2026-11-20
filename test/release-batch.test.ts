@@ -3,7 +3,7 @@ import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {dirname, join} from 'node:path'
 
-import {afterEach, beforeEach, describe, expect, it} from 'vitest'
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 
 import {renderReleaseBatch} from '../scripts/release-batch.ts'
 
@@ -53,6 +53,21 @@ describe('release batch', () => {
     const head = commit('generated', {'docs/releases/batch.md': 'notes'})
     expect(await render(base, head)).toBeNull()
     expect(await render(head, head)).toBeNull()
+  })
+
+  it('classifies changes without passing release credentials to the child process', () => {
+    const base = commit('baseline', {'package.json': '{}'})
+    const head = commit('Update server', {'src/index.ts': 'content'})
+    const probe = join(repo, 'check-env.cjs')
+    writeFileSync(probe, 'if ("GH_TOKEN" in process.env || "RELEASE_APP_TOKEN" in process.env) { console.error("Release credentials inherited"); process.exit(42) }')
+    vi.stubEnv('NODE_OPTIONS', `--require ${JSON.stringify(probe)}`)
+    vi.stubEnv('GH_TOKEN', 'test-token')
+    vi.stubEnv('RELEASE_APP_TOKEN', 'test-app-token')
+    try {
+      expect(renderReleaseBatch(repo, base, head)).toContain('Update server')
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 
   it('renders a merge subject and its own ref, not its side-parent ref', async () => {

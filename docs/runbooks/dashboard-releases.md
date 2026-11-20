@@ -16,7 +16,7 @@ The Release workflow publishes the exact squash commit from the pending pull req
 
 ## Recover a failed release
 
-If publication stops, open the Release run for the squash commit. Compare its commit, Git tag, GitHub Release, and image digest before you retry. A tag alone does not prove that publication finished. Do not rerun a completed release.
+The Release workflow cannot be started manually. If publication stops, open the Release run for the squash commit. Compare its commit, Git tag, GitHub Release, and image digest before you retry. A tag alone does not prove that publication finished. Do not rerun a completed release.
 
 If the guard reports no associated pull request, make sure that GitHub now links the squash to the merged PR. If the publisher was skipped and no release exists for that squash, rerun the workflow for that commit.
 

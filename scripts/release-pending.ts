@@ -185,7 +185,7 @@ export function runPending(mode: 'prepare' | 'review' | 'schedule', env: NodeJS.
     run('git', ['diff', '--no-renames', '--name-only', main, pr.head.sha]).trim() !== 'docs/releases/batch.md') throw new Error('Pending head is not a notes-only child of main')
   const checks = JSON.parse(run('gh', ['pr', 'checks', String(pr.number), '--repo', repo, '--required', '--json', 'state'])) as {state: string}[]
   if (!Array.isArray(checks)) throw new Error('Invalid required checks')
-  if (checks.some(check => !['SUCCESS', 'SKIPPED', 'NEUTRAL'].includes(check.state))) return 'Required checks are not green.'
+  if (checks.length === 0 || checks.some(check => !['SUCCESS', 'SKIPPED', 'NEUTRAL'].includes(check.state))) return 'Required checks are not green.'
   const current = api(`pulls/${pr.number}`) as Pull
   if (!identity(current) || current.number !== pr.number || current.state !== 'open' || current.head.sha !== pr.head.sha || !Array.isArray(current.labels)) throw new Error('Pending PR changed during preflight')
   const held = current.labels.some(label => label.name === 'release-hold')

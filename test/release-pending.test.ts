@@ -98,6 +98,7 @@ describe('review transport', () => {
     let unsettled = false
     let refSha = sha
     let mismatch = false
+    let checks = [{state: 'SUCCESS'}]
     const run = (cmd: string, args: string[], write = false): string => {
       calls.push({cmd, args, write})
       if (cmd === 'docker') return `sha256:${(mismatch && args[3]?.endsWith(':latest') ? 'd' : 'c').repeat(64)}\n`
@@ -111,7 +112,7 @@ describe('review transport', () => {
         throw new Error(`Unexpected git: ${args.join(' ')}`)
       }
       if (write) return JSON.stringify({merged: true})
-      if (args[0] === 'pr') return JSON.stringify([{state: 'SUCCESS'}])
+      if (args[0] === 'pr') return JSON.stringify(checks)
       const path = args.find(arg => arg.startsWith('repos/')) ?? ''
       if (path.includes('/pulls?')) return JSON.stringify([[pr, ...(ambiguous ? [{...pr, number: 43}] : []), ...(unsettled ? [{...pr, number: 44, state: 'closed', merged_at: '2026-11-18T15:00:00Z', merge_commit_sha: sha}] : [])]])
       if (path.endsWith('/pulls/42')) return JSON.stringify(pr)
@@ -131,6 +132,13 @@ describe('review transport', () => {
     const writes = calls.filter(call => call.write)
     expect(writes).toEqual([{cmd: 'gh', args: mergeArguments('fro-bot/dashboard', 42, sha), write: true}])
     expect(calls.at(-2)?.args.join(' ')).toContain('/reviews?')
+    for (const result of [[], [{state: 'PENDING'}], [{state: 'FAILURE'}]]) {
+      checks = result
+      calls.length = 0
+      expect(runPending('review', env, run)).toBe('Required checks are not green.')
+      expect(calls.some(call => call.write)).toBe(false)
+    }
+    checks = [{state: 'SUCCESS'}]
     calls.length = 0
     pr.labels = []
     expect(runPending('review', env, run)).toMatch(/hold.*unproven/i)

@@ -6,7 +6,9 @@ import process from 'node:process'
 
 /** Render release-eligible first-parent changes without consulting the worktree. */
 export function renderReleaseBatch(repoDir: string, baseline: string, main: string): string | null {
-  const env = {...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_NO_LAZY_FETCH: '1'}
+  const env: NodeJS.ProcessEnv = {...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_NO_LAZY_FETCH: '1'}
+  delete env.GH_TOKEN
+  delete env.RELEASE_APP_TOKEN
   const git = (...args: string[]) => execFileSync('git', ['-C', repoDir, ...args], {encoding: 'utf8', env, stdio: 'pipe'})
   const format = git('rev-parse', '--show-object-format').trim()
   const length = format === 'sha1' ? 40 : format === 'sha256' ? 64 : 0
