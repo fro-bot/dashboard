@@ -548,9 +548,17 @@ export interface UnsubscribeDeps {
  * cleanup (dead-sub detection, session revocation, privacy delete). The
  * endpoint is NEVER persisted solely to work around this.
  */
-export async function unsubscribeOptOut(deps: UnsubscribeDeps): Promise<{readonly gatewayUnsubscribeCalled: boolean}> {
+export async function unsubscribeOptOut(deps: UnsubscribeDeps): Promise<
+  | {readonly gatewayUnsubscribeCalled: boolean; readonly localReadFailed?: never}
+  | {readonly gatewayUnsubscribeCalled: false; readonly localReadFailed: true}
+> {
   const mintKey = deps.mintIdempotencyKey ?? mintIdempotencyKey
-  const subscription = await deps.getLocalSubscription().catch(() => null)
+  let subscription: MinimalPushSubscription | null
+  try {
+    subscription = await deps.getLocalSubscription()
+  } catch {
+    return {gatewayUnsubscribeCalled: false, localReadFailed: true}
+  }
 
   if (subscription === null) {
     // Endpointless case — nothing to unsubscribe locally or remotely.
@@ -628,7 +636,12 @@ export async function runReconcileSweep(
   const minIntervalMs = deps.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS
 
   const permission = getPermission()
-  const localSubscription = await deps.getLocalSubscription().catch(() => null)
+  let localSubscription: MinimalPushSubscription | null
+  try {
+    localSubscription = await deps.getLocalSubscription()
+  } catch {
+    return {skipped: true, action: undefined, uiState: undefined, nextCache: cache}
+  }
   const subscriptionPresent = localSubscription !== null
 
   // cache.handoffState === undefined means no sweep has run yet — always run the

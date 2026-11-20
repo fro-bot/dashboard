@@ -1,5 +1,5 @@
 import {render, screen, fireEvent, act, waitFor} from '@testing-library/react'
-import {beforeEach, describe, expect, it, vi} from 'vitest'
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {getNotificationPermission, getPushSupport} from '../push/capability.ts'
 import {endpointHash} from '../push/endpoint-hash.ts'
 import {
@@ -9,6 +9,7 @@ import {
   subscribeOptIn,
   unsubscribeOptOut,
 } from '../push/subscribe.ts'
+import type {ReconcileSweepCache} from '../push/subscribe.ts'
 import {Notifications} from './Notifications.tsx'
 
 vi.mock('../push/capability.ts', () => ({
@@ -207,6 +208,8 @@ describe('Notifications Component', () => {
       uiState: 'denied',
       nextCache: {} as any,
     })
+    // The real helper always resolves an object; the view now reads its discriminator.
+    vi.mocked(unsubscribeOptOut).mockResolvedValue({gatewayUnsubscribeCalled: true})
 
     try {
       await act(async () => {
@@ -741,6 +744,7 @@ describe('Notifications Component', () => {
 
     Object.defineProperty(navigator, 'serviceWorker', {
       writable: true,
+      configurable: true,
       value: {
         controller: mockController,
         ready: Promise.resolve({}),
@@ -764,6 +768,244 @@ describe('Notifications Component', () => {
         body: 'operator.approval_needed.body',
         data: {type: 'approval', route: '/'},
       },
+    })
+  })
+
+  // A rejected browser getSubscription() reaches the view as `localReadFailed: true`, an inconclusive read.
+  describe('browser subscription read failure', () => {
+    const DISABLE_FAILED = 'Couldn’t turn off notifications. Try again.'
+    const SUBSCRIBED_ANNOUNCEMENT =
+      'Alerts Active: Monitoring pending approvals and failed run outcomes for this device.'
+    const readFailed = {gatewayUnsubscribeCalled: false, localReadFailed: true} as const
+    const cacheAt = (lastActionAt: number): ReconcileSweepCache => ({
+      permission: 'granted',
+      subscriptionPresent: true,
+      handoffState: undefined,
+      lastActionAt,
+    })
+    const cacheA = cacheAt(1)
+    const cacheB = cacheAt(2)
+    const cacheC = cacheAt(3)
+    const cacheD = cacheAt(4)
+
+    let originalSw: PropertyDescriptor | undefined
+    let messageHandler: ((event: {data: unknown}) => void) | undefined
+    let getSubscription: ReturnType<typeof vi.fn>
+
+    beforeEach(() => {
+      addMetaTag()
+      messageHandler = undefined
+      getSubscription = vi.fn()
+      originalSw = Object.getOwnPropertyDescriptor(globalThis.navigator, 'serviceWorker')
+      Object.defineProperty(globalThis.navigator, 'serviceWorker', {
+        value: {
+          ready: Promise.resolve({pushManager: {getSubscription}}),
+          addEventListener: (type: string, handler: (event: {data: unknown}) => void) => {
+            if (type === 'message') messageHandler = handler
+          },
+          removeEventListener: () => undefined,
+        },
+        configurable: true,
+      })
+    })
+
+    afterEach(() => {
+      if (originalSw) {
+        Object.defineProperty(globalThis.navigator, 'serviceWorker', originalSw)
+      } else {
+        Reflect.deleteProperty(globalThis.navigator, 'serviceWorker')
+      }
+    })
+
+    const renderSubscribed = async () => {
+      vi.mocked(runReconcileSweep).mockResolvedValue({
+        skipped: false,
+        action: undefined,
+        uiState: 'subscribed',
+        nextCache: cacheA,
+      })
+      await act(async () => {
+        render(<Notifications />)
+      })
+      expect(screen.getByTestId('notifications-cta')).toHaveTextContent('Disable notifications')
+    }
+
+    const triggerSweep = async () => {
+      await act(async () => {
+        messageHandler?.({data: {type: 'PUSH_SUBSCRIPTION_CHANGE'}})
+      })
+    }
+
+    const clickCta = async () => {
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('notifications-cta'))
+      })
+    }
+
+    it('explicit Disable read failure keeps the Disable control with fixed copy and no false opt-out', async () => {
+      vi.mocked(unsubscribeOptOut).mockResolvedValue(readFailed)
+      await renderSubscribed()
+
+      // Lose focus first so a missing refocus on failure is observable.
+      screen.getByTestId('notifications-cta').blur()
+      await clickCta()
+
+      expect(unsubscribeOptOut).toHaveBeenCalledTimes(1)
+      expect(getSubscription).not.toHaveBeenCalled()
+      const cta = screen.getByTestId('notifications-cta')
+      expect(cta).toHaveTextContent('Disable notifications')
+      expect(cta).toBeEnabled()
+      expect(document.activeElement).toBe(cta)
+      expect(screen.getByTestId('notifications-headline')).toHaveTextContent('Alerts Active')
+      expect(screen.getByTestId('notifications-recovery')).toHaveTextContent(DISABLE_FAILED)
+      expect(screen.getByTestId('notifications-status-announcer')).toHaveTextContent(
+        `Alerts Active: ${DISABLE_FAILED}`,
+      )
+    })
+
+    it('retrying Disable after a rejected browser read does the real local and gateway unsubscribe', async () => {
+      const actual = await vi.importActual<typeof import('../push/subscribe.ts')>('../push/subscribe.ts')
+      vi.mocked(unsubscribeOptOut)
+        .mockImplementationOnce(actual.unsubscribeOptOut)
+        .mockImplementationOnce(actual.unsubscribeOptOut)
+
+      let releaseCsrf: (result: {success: true; data: string}) => void = () => undefined
+      const refreshCsrf = vi.fn(
+        () =>
+          new Promise<{success: true; data: string}>(resolve => {
+            releaseCsrf = resolve
+          }),
+      )
+      const unsubscribePush = vi.fn().mockResolvedValue({success: true, data: undefined})
+      vi.mocked(buildPushClient).mockReturnValueOnce(
+        {refreshCsrf, unsubscribePush} as unknown as ReturnType<typeof buildPushClient>,
+      )
+      const unsubscribeLocal = vi.fn().mockResolvedValue(true)
+      const subscription = {
+        endpoint: 'https://push.example.test/synthetic',
+        toJSON: () => ({}),
+        unsubscribe: unsubscribeLocal,
+      }
+      getSubscription.mockRejectedValueOnce(new Error('read failed')).mockResolvedValueOnce(subscription)
+      await renderSubscribed()
+
+      await clickCta()
+      expect(getSubscription).toHaveBeenCalledTimes(1)
+      expect(unsubscribeLocal).not.toHaveBeenCalled()
+      expect(refreshCsrf).not.toHaveBeenCalled()
+      expect(unsubscribePush).not.toHaveBeenCalled()
+      expect(screen.getByTestId('notifications-cta')).toHaveTextContent('Disable notifications')
+      expect(screen.getByTestId('notifications-recovery')).toHaveTextContent(DISABLE_FAILED)
+
+      await clickCta()
+      expect(getSubscription).toHaveBeenCalledTimes(2)
+      expect(unsubscribeLocal).toHaveBeenCalledTimes(1)
+      expect(screen.queryByTestId('notifications-recovery')).toBeNull()
+      expect(screen.getByTestId('notifications-cta')).toHaveTextContent('Processing…')
+
+      await act(async () => {
+        releaseCsrf({success: true, data: 'csrf'})
+      })
+
+      expect(unsubscribePush).toHaveBeenCalledTimes(1)
+      expect(unsubscribePush).toHaveBeenCalledWith(subscription.endpoint, 'csrf', expect.any(String))
+      expect(screen.getByTestId('notifications-cta')).toHaveTextContent('Enable notifications')
+      expect(screen.queryByTestId('notifications-recovery')).toBeNull()
+      expect(screen.getByTestId('notifications-status-announcer')).not.toHaveTextContent(DISABLE_FAILED)
+    })
+
+    it('does not resurface a stale Disable failure after leaving and re-entering subscribed', async () => {
+      vi.mocked(unsubscribeOptOut).mockResolvedValue(readFailed)
+      await renderSubscribed()
+      await clickCta()
+      expect(screen.getByTestId('notifications-recovery')).toHaveTextContent(DISABLE_FAILED)
+
+      vi.mocked(runReconcileSweep).mockResolvedValueOnce({
+        skipped: false,
+        action: undefined,
+        uiState: 'denied',
+        nextCache: cacheB,
+      })
+      await triggerSweep()
+      expect(screen.getByTestId('notifications-headline')).toHaveTextContent('Alerts Blocked')
+      expect(screen.getByTestId('notifications-recovery')).not.toHaveTextContent(DISABLE_FAILED)
+      expect(screen.getByTestId('notifications-status-announcer')).not.toHaveTextContent(DISABLE_FAILED)
+
+      await triggerSweep()
+      expect(screen.getByTestId('notifications-headline')).toHaveTextContent('Alerts Active')
+      expect(screen.queryByTestId('notifications-recovery')).toBeNull()
+      expect(screen.getByTestId('notifications-status-announcer')).toHaveTextContent(SUBSCRIBED_ANNOUNCEMENT)
+    })
+
+    const cleanupActions = ['cleanup', 'cleanup-and-unsubscribe'] as const
+    for (const action of cleanupActions) {
+      it(`${action}: a failed second read paints nothing, keeps the cache retryable, and the retry cleans up`, async () => {
+        vi.mocked(unsubscribeOptOut)
+          .mockResolvedValueOnce(readFailed)
+          .mockResolvedValueOnce({gatewayUnsubscribeCalled: true})
+        await renderSubscribed()
+
+        vi.mocked(runReconcileSweep)
+          .mockResolvedValueOnce({skipped: false, action, uiState: 'denied', nextCache: cacheB})
+          .mockResolvedValueOnce({skipped: false, action, uiState: 'denied', nextCache: cacheC})
+
+        await triggerSweep()
+        expect(unsubscribeOptOut).toHaveBeenCalledTimes(1)
+        expect(screen.getByTestId('notifications-headline')).toHaveTextContent('Alerts Active')
+        expect(screen.getByTestId('notifications-cta')).toHaveTextContent('Disable notifications')
+        expect(screen.queryByTestId('notifications-recovery')).toBeNull()
+        expect(screen.getByTestId('notifications-status-announcer')).toHaveTextContent(SUBSCRIBED_ANNOUNCEMENT)
+
+        await triggerSweep()
+        // The failed sweep must not have committed cacheB, or this retry would be suppressed.
+        const sweepCalls = vi.mocked(runReconcileSweep).mock.calls
+        expect(sweepCalls[2]?.[1]).toBe(cacheA)
+        expect(unsubscribeOptOut).toHaveBeenCalledTimes(2)
+        expect(screen.getByTestId('notifications-headline')).toHaveTextContent('Alerts Blocked')
+      })
+    }
+
+    it('overlapping failed cleanups leave the cache retryable and a later sweep applies from the last good cache', async () => {
+      const pending: Array<(result: typeof readFailed) => void> = []
+      vi.mocked(unsubscribeOptOut).mockImplementation(
+        () =>
+          new Promise(resolve => {
+            pending.push(resolve)
+          }),
+      )
+      await renderSubscribed()
+
+      vi.mocked(runReconcileSweep)
+        .mockResolvedValueOnce({skipped: false, action: 'cleanup', uiState: 'denied', nextCache: cacheB})
+        .mockResolvedValueOnce({skipped: false, action: 'cleanup-and-unsubscribe', uiState: 'denied', nextCache: cacheC})
+
+      // Two triggers before either cleanup settles: both sweeps launch from cacheA.
+      await act(async () => {
+        messageHandler?.({data: {type: 'PUSH_SUBSCRIPTION_CHANGE'}})
+        messageHandler?.({data: {type: 'PUSH_SUBSCRIPTION_CHANGE'}})
+      })
+      await act(async () => {
+        for (const resolve of pending) resolve(readFailed)
+      })
+      expect(screen.getByTestId('notifications-headline')).toHaveTextContent('Alerts Active')
+
+      vi.mocked(unsubscribeOptOut).mockResolvedValueOnce({gatewayUnsubscribeCalled: true})
+      vi.mocked(runReconcileSweep).mockResolvedValueOnce({
+        skipped: false,
+        action: 'cleanup',
+        uiState: 'denied',
+        nextCache: cacheD,
+      })
+      await triggerSweep()
+      // Neither failed cleanup may have left its tentative cache behind.
+      expect(vi.mocked(runReconcileSweep).mock.calls[3]?.[1]).toBe(cacheA)
+      expect(screen.getByTestId('notifications-headline')).toHaveTextContent('Alerts Blocked')
+
+      await triggerSweep()
+      expect(vi.mocked(runReconcileSweep).mock.calls[4]?.[1]).toBe(cacheD)
+      // One cleanup for the overlapping pair plus the successful retry.
+      expect(unsubscribeOptOut).toHaveBeenCalledTimes(2)
+      vi.mocked(unsubscribeOptOut).mockReset()
     })
   })
 })

@@ -92,6 +92,9 @@ const COPY: Record<NotificationUiState, NotificationStateCopy> = {
   },
 }
 
+// Shown when an explicit Disable can't read the browser subscription; it makes no claim about the subscription's state.
+export const DISABLE_FAILED_HINT = 'Couldn’t turn off notifications. Try again.'
+
 export function getNotificationCopy(state: NotificationUiState): NotificationStateCopy {
   return COPY[state]
 }

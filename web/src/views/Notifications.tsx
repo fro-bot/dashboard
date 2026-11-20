@@ -10,7 +10,7 @@ import {
 } from '../push/subscribe.ts'
 import type {MinimalServiceWorkerRegistration, ReconcileSweepCache} from '../push/subscribe.ts'
 import {buildPushClient} from '../push/subscribe.ts'
-import {getNotificationCopy} from './notifications-copy.ts'
+import {DISABLE_FAILED_HINT, getNotificationCopy} from './notifications-copy.ts'
 import type {NotificationUiState} from './notifications-copy.ts'
 
 const DISMISS_SETTINGS_KEY = 'fro-bot-notifications-dismissed'
@@ -51,6 +51,8 @@ export function Notifications({
   const [metaEnabled] = useState<boolean>(readPushEnabledMeta)
   const [currentUiState, setCurrentUiState] = useState<NotificationUiState>('not-requested')
   const [inFlight, setInFlight] = useState(false)
+  // Set when an explicit Disable could not read the browser subscription.
+  const [disableFailed, setDisableFailed] = useState(false)
   const [isCardDismissed, setIsCardDismissed] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false
     return window.localStorage.getItem(DISMISS_SETTINGS_KEY) === '1'
@@ -79,6 +81,7 @@ export function Notifications({
 
   const enableInFlightRef = useRef(false)
   const disableInFlightRef = useRef(false)
+  const cleanupInFlightRef = useRef(false)
   const sweepDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Run pure sweep and execute reconcile actions
@@ -94,18 +97,21 @@ export function Notifications({
       return
     }
 
+    const launchCache = cacheRef.current
     const result = await runReconcileSweep(
       {
         getLocalSubscription: () =>
           navigator.serviceWorker.ready.then((r) => r.pushManager.getSubscription()),
         pushClient,
       },
-      cacheRef.current,
+      launchCache,
     )
 
     if (result.skipped) return
 
-    cacheRef.current = result.nextCache
+    // Cleanup results are committed only after a conclusive read (below), so a failed cleanup never suppresses a retry.
+    const isCleanup = result.action === 'cleanup' || result.action === 'cleanup-and-unsubscribe'
+    if (!isCleanup) cacheRef.current = result.nextCache
 
     if (result.action && result.action !== 'none') {
       try {
@@ -139,31 +145,34 @@ export function Notifications({
           } else if (outcome.kind === 'sw-not-ready') {
             setCurrentUiState('sw-not-ready')
           }
-        } else if (result.action === 'cleanup') {
-          // Must notify the Gateway with the endpoint — captured by
-          // unsubscribeOptOut BEFORE local unsubscribe() — or the Gateway
-          // record is orphaned. The next sweep then sees no local
-          // subscription and re-registers, minting a new endpoint per focus
-          // cycle (the incident this fixes). Same helper cleanup-and-
-          // unsubscribe already uses below.
-          await unsubscribeOptOut({
-            getLocalSubscription: () =>
-              navigator.serviceWorker.ready.then((r) => r.pushManager.getSubscription()),
-            pushClient,
-          })
-          // Honor the state reconcile derived — `cleanup` fires for
-          // push_disabled (→ unsupported), denied-without-subscription
-          // (→ denied), and granted-but-drifted (→ not-requested). Hardcoding
-          // one of them mislabels the other two (e.g. a blocked browser showing
-          // "Unsupported" instead of "Blocked").
-          setCurrentUiState(result.uiState ?? 'not-requested')
-        } else if (result.action === 'cleanup-and-unsubscribe') {
-          await unsubscribeOptOut({
-            getLocalSubscription: () =>
-              navigator.serviceWorker.ready.then((r) => r.pushManager.getSubscription()),
-            pushClient,
-          })
-          setCurrentUiState(result.uiState ?? 'not-requested')
+        } else if (isCleanup) {
+          // One cleanup at a time: an overlapping sweep would repeat the same Gateway unsubscribe.
+          if (cleanupInFlightRef.current) return
+          cleanupInFlightRef.current = true
+          try {
+            // Must notify the Gateway with the endpoint — captured by
+            // unsubscribeOptOut BEFORE local unsubscribe() — or the Gateway
+            // record is orphaned. The next sweep then sees no local
+            // subscription and re-registers, minting a new endpoint per focus
+            // cycle (the incident this fixes).
+            const cleanup = await unsubscribeOptOut({
+              getLocalSubscription: () =>
+                navigator.serviceWorker.ready.then((r) => r.pushManager.getSubscription()),
+              pushClient,
+            })
+            // An unreadable subscription is inconclusive: commit nothing so the next sweep retries.
+            if (cleanup.localReadFailed === true) return
+            // Skip the commit if another sweep has committed since this one launched.
+            if (cacheRef.current === launchCache) cacheRef.current = result.nextCache
+            // Honor the state reconcile derived — `cleanup` fires for
+            // push_disabled (→ unsupported), denied-without-subscription
+            // (→ denied), and granted-but-drifted (→ not-requested). Hardcoding
+            // one of them mislabels the other two (e.g. a blocked browser showing
+            // "Unsupported" instead of "Blocked").
+            setCurrentUiState(result.uiState ?? 'not-requested')
+          } finally {
+            cleanupInFlightRef.current = false
+          }
         }
       } catch {
         setCurrentUiState('subscribe-failed')
@@ -262,13 +271,20 @@ export function Notifications({
     } else if (headlineRef.current) {
       headlineRef.current.focus()
     }
-  }, [currentUiState])
+  }, [currentUiState, disableFailed])
+
+  // Clear the failure when the card leaves 'subscribed' so it cannot resurface later.
+  if (disableFailed && currentUiState !== 'subscribed') {
+    setDisableFailed(false)
+  }
 
   if (!metaEnabled || isCardDismissed) {
     return null
   }
 
   const copy = getNotificationCopy(currentUiState)
+  const showDisableFailed = disableFailed && currentUiState === 'subscribed'
+  const recoveryText = showDisableFailed ? DISABLE_FAILED_HINT : copy.recoveryHint
 
   const handleEnable = async () => {
     if (enableInFlightRef.current) return
@@ -303,12 +319,18 @@ export function Notifications({
     if (disableInFlightRef.current) return
     disableInFlightRef.current = true
     setInFlight(true)
+    setDisableFailed(false)
     try {
-      await unsubscribeOptOut({
+      const outcome = await unsubscribeOptOut({
         getLocalSubscription: () =>
           navigator.serviceWorker.ready.then((r) => r.pushManager.getSubscription()),
         pushClient,
       })
+      if (outcome.localReadFailed === true) {
+        // Inconclusive read: stay 'subscribed' so Disable remains available to retry.
+        setDisableFailed(true)
+        return
+      }
       setCurrentUiState('not-requested')
     } finally {
       setInFlight(false)
@@ -380,12 +402,12 @@ export function Notifications({
           </ol>
         )}
 
-        {copy.recoveryHint.length > 0 && (
+        {recoveryText.length > 0 && (
           <p
             data-testid="notifications-recovery"
             className="text-label font-mono text-highlight uppercase tracking-label"
           >
-            {copy.recoveryHint}
+            {recoveryText}
           </p>
         )}
 
@@ -423,7 +445,7 @@ export function Notifications({
             data-testid="notifications-status-announcer"
             className="sr-only"
           >
-            {inFlight ? 'Updating push subscription…' : `${copy.headline}: ${copy.detail}`}
+            {inFlight ? 'Updating push subscription…' : `${copy.headline}: ${showDisableFailed ? DISABLE_FAILED_HINT : copy.detail}`}
           </div>
 
           {/* DEV-gated synthetic push button */}
