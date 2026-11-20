@@ -186,7 +186,16 @@ export function runPending(mode: 'prepare' | 'review' | 'schedule', env: NodeJS.
     }
     if (!identity(pr) || !Number.isSafeInteger(pr.number) || pr.number <= 0) throw new Error('Unexpected created PR; reconcile manually')
     let current = api(`pulls/${pr.number}`) as Pull
-    if (!identity(current) || current.state !== 'open' || current.number !== pr.number || current.head.sha !== head || !Array.isArray(current.labels)) throw new Error('Pending PR readback mismatch')
+    const number = pr.number
+    const validReadback = (p: Pull) => identity(p) && p.state === 'open' && p.number === number && Array.isArray(p.labels)
+    // GitHub's PR head may briefly lag the successfully pushed branch ref.
+    if (existing && !unchanged && old !== head) {
+      for (let attempt = 0; attempt < 4 && validReadback(current) && current.head.sha === old; attempt++) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000)
+        current = api(`pulls/${pr.number}`) as Pull
+      }
+    }
+    if (!validReadback(current) || current.head.sha !== head) throw new Error('Pending PR readback mismatch')
     if (existing && (current.title !== title || current.body !== body)) {
       run('gh', ['api', '--method', 'PATCH', `repos/${repo}/pulls/${pr.number}`, '-f', `title=${title}`, '-f', `body=${body}`], true)
     }
