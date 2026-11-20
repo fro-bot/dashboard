@@ -1,6 +1,6 @@
 # Dashboard releases
 
-Releasable changes on `main` collect in one `release/pending` pull request. Its notes show the changes ready to ship. An ordinary merge does not publish an image.
+Releasable changes on `main` collect in one `release/pending` pull request. The title shows the next release version, and the body lists the changes ready to ship. An ordinary merge does not publish an image.
 
 ## Release a batch
 
@@ -21,6 +21,8 @@ The Release workflow cannot be started manually. If publication stops, open the 
 If the guard reports no associated pull request, make sure that GitHub now links the squash to the merged PR. If the publisher was skipped and no release exists for that squash, rerun the workflow for that commit.
 
 If the image is published but the deployment request fails, request deployment in infra. Use the version and digest from the GitHub Release. Do not republish the image.
+
+If Release Pending reports `Unknown merged predecessor merger`, check the merge history of `release/pending` against the last published release. Identify who merged each newer pull request before retrying. Do not merge another batch while the merger is unknown.
 
 ## First batch
 

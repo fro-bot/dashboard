@@ -22,16 +22,22 @@ it('prepares a held PR and reuses its unchanged head', () => {
   let open = false
   let held = false
   let committed = false
-  let notes = 'notes\n'
+  let notes = '# Release changes\n\n- Fix release\n'
   let unrelated = false
   let predecessor = 'human'
+  let version = '2026.11.2'
+  let title = ''
+  let body = ''
   const commands: string[] = []
-  const pr = () => ({number: 42, state: 'open', merged_at: null, user: {id: 109017866, login: 'fro-bot[bot]'}, head: {sha, ref: 'release/pending', repo: {full_name: 'fro-bot/dashboard'}}, base: {ref: 'main', repo: {full_name: 'fro-bot/dashboard'}}, labels: held ? [{name: 'release-hold'}] : []})
+  const writes: string[][] = []
+  const pr = () => ({number: 42, state: 'open', merged_at: null, title, body, user: {id: 109017866, login: 'fro-bot[bot]'}, head: {sha, ref: 'release/pending', repo: {full_name: 'fro-bot/dashboard'}}, base: {ref: 'main', repo: {full_name: 'fro-bot/dashboard'}}, labels: held ? [{name: 'release-hold'}] : []})
   const prior = (number: number, mergeSha: string, mergedAt: string) => ({...pr(), number, state: 'closed', merged_at: mergedAt, merge_commit_sha: mergeSha, labels: []})
   const human = () => prior(873, sha, '2026-11-18T15:00:00Z')
   const app = () => prior(872, main, '2026-11-17T15:00:00Z')
   const run = (cmd: string, args: string[], write = false): string => {
     commands.push(`${cmd} ${args.join(' ')}`)
+    if (write) writes.push([cmd, ...args])
+    if (cmd === 'node' && args[0] === 'scripts/compute-release-tag.ts') return `${version}\n`
     if (cmd === 'docker') return `sha256:${'c'.repeat(64)}\n`
     if (cmd === 'git') {
       if (args[0] === 'rev-parse' && args[1]?.startsWith('refs/tags/')) return main
@@ -40,7 +46,7 @@ it('prepares a held PR and reuses its unchanged head', () => {
       if (args[0] === 'ls-remote') return ref ? `${ref}\trefs/heads/release/pending\n` : ''
       if (args[0] === 'remote') return 'https://github.com/fro-bot/dashboard.git'
       if (args[0] === 'rev-list') return `${sha} ${main}`
-      if (args[0] === 'show') return args[1] === '-s' ? '109017866+fro-bot[bot]@users.noreply.github.com\n' : 'notes\n'
+      if (args[0] === 'show') return args[1] === '-s' ? '109017866+fro-bot[bot]@users.noreply.github.com\n' : '# Release changes\n\n- Fix release\n'
       if (args[0] === 'diff') return unrelated ? 'other.txt' : 'docs/releases/batch.md'
       if (args[0] === 'status') return ''
       if (args.includes('commit')) {
@@ -57,6 +63,13 @@ it('prepares a held PR and reuses its unchanged head', () => {
     const path = args.find(arg => arg.startsWith('repos/')) ?? ''
     if (write && path.endsWith('/pulls')) {
       open = true
+      title = args.find(arg => arg.startsWith('title='))?.slice(6) ?? ''
+      body = args.find(arg => arg.startsWith('body='))?.slice(5) ?? ''
+      return JSON.stringify(pr())
+    }
+    if (write && path.endsWith('/pulls/42')) {
+      title = args.find(arg => arg.startsWith('title='))?.slice(6) ?? ''
+      body = args.find(arg => arg.startsWith('body='))?.slice(5) ?? ''
       return JSON.stringify(pr())
     }
     if (write && path.endsWith('/issues/42/labels')) {
@@ -87,15 +100,31 @@ it('prepares a held PR and reuses its unchanged head', () => {
   expect(files).toEqual([])
   expect(commands.some(line => line.startsWith('git push') || line.includes('--method POST'))).toBe(false)
   predecessor = 'human'
+  notes = ''
+  expect(prepare()).toMatch(/no release notes/i)
+  expect(commands.some(line => line.startsWith('node '))).toBe(false)
+  notes = '# Release changes\n\n- Fix release\n'
+  version = 'not-calver'
+  expect(() => prepare()).toThrow(/calver/i)
+  expect(writes).toEqual([])
+  expect(files).toEqual([])
+  version = '2026.11.2'
   expect(prepare()).toMatch(/prepared/i)
   expect(held).toBe(true)
-  expect(files).toEqual(['notes\n'])
-  expect(commands).toContain('gh api --method POST repos/fro-bot/dashboard/pulls -f title=chore: prepare release notes -f head=release/pending -f base=main -f body=Generated release notes.\n\n**Approve to release:** When the required checks pass, submit an **Approve** review. The App merges the pull request and starts Release. Do not click **Merge**.')
+  expect(files).toEqual(['# Release changes\n\n- Fix release\n'])
+  const instruction = '**Approve to release:** When the required checks pass, submit an **Approve** review. The App merges the pull request and starts Release. Do not click **Merge**.'
+  expect.soft(writes).toContainEqual(['gh', 'api', '--method', 'POST', 'repos/fro-bot/dashboard/pulls', '-f', 'title=chore: release 2026.11.2', '-f', 'head=release/pending', '-f', 'base=main', '-f', `body=Release 2026.11.2.\n\n${notes}\n${instruction}`])
   expect(commands.some(line => line.includes('--force-with-lease=refs/heads/release/pending:'))).toBe(true)
   commands.length = 0
   committed = false
+  version = '2026.12.0'
+  writes.length = 0
   expect(prepare()).toMatch(/up.to.date/i)
   expect(commands.some(line => line.startsWith('git push'))).toBe(false)
+  expect.soft(writes).toEqual([['gh', 'api', '--method', 'PATCH', 'repos/fro-bot/dashboard/pulls/42', '-f', 'title=chore: release 2026.12.0', '-f', `body=Release 2026.12.0.\n\n${notes}\n${instruction}`]])
+  writes.length = 0
+  expect(prepare()).toMatch(/up.to.date/i)
+  expect(writes).toEqual([])
   commands.length = 0
   notes = 'updated notes\n'
   expect(prepare()).toMatch(/prepared/i)

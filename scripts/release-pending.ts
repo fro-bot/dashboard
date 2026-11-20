@@ -51,6 +51,8 @@ export function mergeArguments(repo: string, number: number, sha: string): strin
 interface Pull {
   number: number
   state: string
+  title: string
+  body: string | null
   merged_at: string | null
   merge_commit_sha: string | null
   merged?: boolean
@@ -135,7 +137,11 @@ export function runPending(mode: 'prepare' | 'review' | 'schedule', env: NodeJS.
     if (run('git', ['rev-parse', '--is-shallow-repository']).trim() !== 'false') throw new Error('Full Git history required')
     if (run('git', ['rev-parse', 'HEAD']).trim() !== main) return 'Main checkout is stale; preparation skipped.'
     const notes = render(process.cwd(), source, main)
-    if (notes === null) return 'No release notes to prepare.'
+    if (notes === null || notes.length === 0) return 'No release notes to prepare.'
+    const version = run('node', ['scripts/compute-release-tag.ts']).trim()
+    if (!/^\d{4}\.(?:0[1-9]|1[0-2])\.(?:0|[1-9]\d*)$/.test(version)) throw new Error('Invalid next release CalVer')
+    const title = `chore: release ${version}`
+    const body = `Release ${version}.\n\n${notes}\n**Approve to release:** When the required checks pass, submit an **Approve** review. The App merges the pull request and starts Release. Do not click **Merge**.`
     const remote = run('git', ['remote', 'get-url', 'origin']).trim()
     if (remote !== 'https://github.com/fro-bot/dashboard' && remote !== 'https://github.com/fro-bot/dashboard.git') throw new Error('Unexpected origin; reconcile manually')
     const ref = 'refs/heads/release/pending'
@@ -176,11 +182,14 @@ export function runPending(mode: 'prepare' | 'review' | 'schedule', env: NodeJS.
     }
     let pr = existing
     if (!pr) {
-      pr = JSON.parse(run('gh', ['api', '--method', 'POST', `repos/${repo}/pulls`, '-f', 'title=chore: prepare release notes', '-f', 'head=release/pending', '-f', 'base=main', '-f', 'body=Generated release notes.\n\n**Approve to release:** When the required checks pass, submit an **Approve** review. The App merges the pull request and starts Release. Do not click **Merge**.'], true)) as Pull
+      pr = JSON.parse(run('gh', ['api', '--method', 'POST', `repos/${repo}/pulls`, '-f', `title=${title}`, '-f', 'head=release/pending', '-f', 'base=main', '-f', `body=${body}`], true)) as Pull
     }
     if (!identity(pr) || !Number.isSafeInteger(pr.number) || pr.number <= 0) throw new Error('Unexpected created PR; reconcile manually')
     let current = api(`pulls/${pr.number}`) as Pull
     if (!identity(current) || current.state !== 'open' || current.number !== pr.number || current.head.sha !== head || !Array.isArray(current.labels)) throw new Error('Pending PR readback mismatch')
+    if (existing && (current.title !== title || current.body !== body)) {
+      run('gh', ['api', '--method', 'PATCH', `repos/${repo}/pulls/${pr.number}`, '-f', `title=${title}`, '-f', `body=${body}`], true)
+    }
     const requiredHold = !previousUnheld
     if (requiredHold && !current.labels.some(label => label.name === 'release-hold')) {
       const events = pages(api(`issues/${pr.number}/events?per_page=100`, true)) as (HoldEvent & {label?: {name: string}})[]
@@ -230,6 +239,11 @@ if (import.meta.main) {
     const run: Runner = (command, args, write = false) => {
       const env = {...process.env}
       delete env.RELEASE_APP_TOKEN
+      if (command === 'node') {
+        delete env.GH_TOKEN
+        delete env.GITHUB_TOKEN
+        delete env.CALVER_MONTH
+      }
       if (command === 'git' && args.includes('commit')) {
         env.GIT_AUTHOR_NAME = 'fro-bot[bot]'
         env.GIT_COMMITTER_NAME = 'fro-bot[bot]'
