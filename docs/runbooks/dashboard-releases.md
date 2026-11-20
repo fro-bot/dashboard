@@ -4,7 +4,7 @@ Releasable changes on `main` collect in one `release/pending` pull request. Its 
 
 ## Release a batch
 
-Approve the pending pull request after its required checks pass. The approval applies to that commit only. If the branch changes, review and approve it again.
+Submit an **Approve** review after the pending pull request's required checks pass. Let the App merge the pull request; do not merge it yourself. The approval applies to that commit only. If the branch changes, review and approve it again.
 
 If you approved while checks were still running, run Release Pending on `main` in `review` mode after they pass. This mode only rechecks the current approval.
 

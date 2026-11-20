@@ -53,6 +53,8 @@ interface Pull {
   state: string
   merged_at: string | null
   merge_commit_sha: string | null
+  merged?: boolean
+  merged_by?: {type: string; id: number; login: string} | null
   user: {id: number; login: string}
   head: {sha: string; ref: string; repo: {full_name: string}}
   base: {ref: string; repo: {full_name: string}}
@@ -85,7 +87,26 @@ export function runPending(mode: 'prepare' | 'review' | 'schedule', env: NodeJS.
   if (merged.some(p => !Number.isFinite(Date.parse(p.merged_at ?? '')) || !objectId.test(p.merge_commit_sha ?? '') || !Array.isArray(p.labels))) throw new Error('Invalid merged predecessor')
   merged.sort((a, b) => Date.parse(b.merged_at ?? '') - Date.parse(a.merged_at ?? ''))
   if (merged.length > 1 && merged[0]?.merged_at === merged[1]?.merged_at) throw new Error('Ambiguous merged predecessor')
-  const previous = merged[0]
+  let previous: Pull | undefined
+  let newestHuman = false
+  for (const row of merged) {
+    const detail = api(`pulls/${row.number}`) as Pull
+    if (!identity(detail) || detail.number !== row.number || detail.state !== 'closed' || detail.merged !== true ||
+      detail.merge_commit_sha !== row.merge_commit_sha || detail.merged_at !== row.merged_at || !Array.isArray(detail.labels)) {
+      throw new Error('Invalid merged predecessor detail')
+    }
+    const merger = detail.merged_by
+    if (merger?.type === 'Bot' && merger.id === 109017866 && merger.login === 'fro-bot[bot]') {
+      previous = detail
+      break
+    }
+    if (merger?.type !== 'User' || !Number.isSafeInteger(merger.id) || merger.id <= 0 || merger.id === 109017866 ||
+      typeof merger.login !== 'string' || !/^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i.test(merger.login)) {
+      throw new Error('Unknown merged predecessor merger')
+    }
+    if (row === merged[0]) newestHuman = true
+  }
+  const previousUnheld = !newestHuman && previous !== undefined && !previous.labels.some(label => label.name === 'release-hold')
 
   if (mode === 'schedule') {
     if (env.GITHUB_EVENT_NAME !== 'schedule' || env.GITHUB_RUN_ATTEMPT !== '1' || !/^\d+$/.test(env.GITHUB_RUN_ID ?? '')) return 'Not a first scheduled attempt.'
@@ -95,7 +116,7 @@ export function runPending(mode: 'prepare' | 'review' | 'schedule', env: NodeJS.
     if (workflowRun.event !== 'schedule' || !Number.isFinite(created.getTime()) || ![0, 3].includes(created.getUTCDay()) ||
       created.getUTCHours() !== 15 || now.getUTCHours() !== 15 || created.toISOString().slice(0, 10) !== now.toISOString().slice(0, 10)) return 'Scheduled run is outside its UTC slot.'
     const slot = `${created.toISOString().slice(0, 10)}T15:00:00Z`
-    if (!scheduleAttemptAllowed(env.GITHUB_RUN_ATTEMPT, slot, previous?.merged_at ?? null)) return 'Release already merged in this slot.'
+    if (!scheduleAttemptAllowed(env.GITHUB_RUN_ATTEMPT, slot, merged[0]?.merged_at ?? null)) return 'Release already merged in this slot.'
   }
 
   const release = api('releases/latest') as {tag_name: string; body: string}
@@ -155,12 +176,12 @@ export function runPending(mode: 'prepare' | 'review' | 'schedule', env: NodeJS.
     }
     let pr = existing
     if (!pr) {
-      pr = JSON.parse(run('gh', ['api', '--method', 'POST', `repos/${repo}/pulls`, '-f', 'title=chore: prepare release notes', '-f', 'head=release/pending', '-f', 'base=main', '-f', 'body=Generated release notes.'], true)) as Pull
+      pr = JSON.parse(run('gh', ['api', '--method', 'POST', `repos/${repo}/pulls`, '-f', 'title=chore: prepare release notes', '-f', 'head=release/pending', '-f', 'base=main', '-f', 'body=Generated release notes.\n\n**Approve to release:** When the required checks pass, submit an **Approve** review. The App merges the pull request and starts Release. Do not click **Merge**.'], true)) as Pull
     }
     if (!identity(pr) || !Number.isSafeInteger(pr.number) || pr.number <= 0) throw new Error('Unexpected created PR; reconcile manually')
     let current = api(`pulls/${pr.number}`) as Pull
     if (!identity(current) || current.state !== 'open' || current.number !== pr.number || current.head.sha !== head || !Array.isArray(current.labels)) throw new Error('Pending PR readback mismatch')
-    const requiredHold = previous === undefined || previous.labels.some(label => label.name === 'release-hold')
+    const requiredHold = !previousUnheld
     if (requiredHold && !current.labels.some(label => label.name === 'release-hold')) {
       const events = pages(api(`issues/${pr.number}/events?per_page=100`, true)) as (HoldEvent & {label?: {name: string}})[]
       const last = events.findLast(event => event.label?.name === 'release-hold')
@@ -189,7 +210,7 @@ export function runPending(mode: 'prepare' | 'review' | 'schedule', env: NodeJS.
   const current = api(`pulls/${pr.number}`) as Pull
   if (!identity(current) || current.number !== pr.number || current.state !== 'open' || current.head.sha !== pr.head.sha || !Array.isArray(current.labels)) throw new Error('Pending PR changed during preflight')
   const held = current.labels.some(label => label.name === 'release-hold')
-  const decision: Decision = {head: pr.head.sha, held, previousUnheld: previous !== undefined && !previous.labels.some(label => label.name === 'release-hold'), holdEvents: [], reviews: []}
+  const decision: Decision = {head: pr.head.sha, held, previousUnheld, holdEvents: [], reviews: []}
   if (!held) {
     const events = pages(api(`issues/${pr.number}/events?per_page=100`, true)) as (HoldEvent & {label?: {name: string}})[]
     decision.holdEvents = events.filter(event => event.label?.name === 'release-hold')

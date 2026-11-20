@@ -24,8 +24,12 @@ it('prepares a held PR and reuses its unchanged head', () => {
   let committed = false
   let notes = 'notes\n'
   let unrelated = false
+  let predecessor = 'human'
   const commands: string[] = []
   const pr = () => ({number: 42, state: 'open', merged_at: null, user: {id: 109017866, login: 'fro-bot[bot]'}, head: {sha, ref: 'release/pending', repo: {full_name: 'fro-bot/dashboard'}}, base: {ref: 'main', repo: {full_name: 'fro-bot/dashboard'}}, labels: held ? [{name: 'release-hold'}] : []})
+  const prior = (number: number, mergeSha: string, mergedAt: string) => ({...pr(), number, state: 'closed', merged_at: mergedAt, merge_commit_sha: mergeSha, labels: []})
+  const human = () => prior(873, sha, '2026-11-18T15:00:00Z')
+  const app = () => prior(872, main, '2026-11-17T15:00:00Z')
   const run = (cmd: string, args: string[], write = false): string => {
     commands.push(`${cmd} ${args.join(' ')}`)
     if (cmd === 'docker') return `sha256:${'c'.repeat(64)}\n`
@@ -59,8 +63,10 @@ it('prepares a held PR and reuses its unchanged head', () => {
       held = true
       return JSON.stringify([{name: 'release-hold'}])
     }
-    if (path.includes('/pulls?')) return JSON.stringify([open ? [pr()] : []])
+    if (path.includes('/pulls?')) return JSON.stringify([[...(open ? [pr()] : []), human(), app()]])
     if (path.endsWith('/pulls/42')) return JSON.stringify(pr())
+    if (path.endsWith('/pulls/873')) return JSON.stringify({...human(), merged: true, merge_commit_sha: predecessor === 'mismatch' ? main : sha, merged_by: predecessor === 'missing' ? null : predecessor === 'app' ? {type: 'Bot', id: 109017866, login: 'fro-bot[bot]'} : predecessor === 'other-bot' ? {type: 'Bot', id: 123, login: 'other[bot]'} : {type: 'User', id: 831617, login: 'marcusrbrown'}})
+    if (path.endsWith('/pulls/872')) return JSON.stringify({...app(), merged: true, merged_by: {type: 'Bot', id: 109017866, login: 'fro-bot[bot]'}})
     if (path.endsWith('/git/ref/heads/main')) return JSON.stringify({object: {sha: main}})
     if (path.endsWith('/releases/latest')) return JSON.stringify({tag_name: '2026.11.1', body: `Source: ${main}\nDigest: ghcr.io/fro-bot/dashboard@sha256:${'c'.repeat(64)}`})
     if (path.includes('/issues/42/events?')) return JSON.stringify([[]])
@@ -69,9 +75,22 @@ it('prepares a held PR and reuses its unchanged head', () => {
   const env = {GITHUB_REPOSITORY: 'fro-bot/dashboard'}
   const files: string[] = []
   const prepare = () => runPending('prepare', env, run, () => notes, text => files.push(text))
+  predecessor = 'app'
+  expect(prepare()).toMatch(/publication.*not settled/i)
+  expect(files).toEqual([])
+  predecessor = 'missing'
+  expect(() => prepare()).toThrow(/predecessor|merger/i)
+  predecessor = 'other-bot'
+  expect(() => prepare()).toThrow(/predecessor|merger/i)
+  predecessor = 'mismatch'
+  expect(() => prepare()).toThrow(/predecessor/i)
+  expect(files).toEqual([])
+  expect(commands.some(line => line.startsWith('git push') || line.includes('--method POST'))).toBe(false)
+  predecessor = 'human'
   expect(prepare()).toMatch(/prepared/i)
   expect(held).toBe(true)
   expect(files).toEqual(['notes\n'])
+  expect(commands).toContain('gh api --method POST repos/fro-bot/dashboard/pulls -f title=chore: prepare release notes -f head=release/pending -f base=main -f body=Generated release notes.\n\n**Approve to release:** When the required checks pass, submit an **Approve** review. The App merges the pull request and starts Release. Do not click **Merge**.')
   expect(commands.some(line => line.includes('--force-with-lease=refs/heads/release/pending:'))).toBe(true)
   commands.length = 0
   committed = false
@@ -116,6 +135,7 @@ describe('review transport', () => {
       const path = args.find(arg => arg.startsWith('repos/')) ?? ''
       if (path.includes('/pulls?')) return JSON.stringify([[pr, ...(ambiguous ? [{...pr, number: 43}] : []), ...(unsettled ? [{...pr, number: 44, state: 'closed', merged_at: '2026-11-18T15:00:00Z', merge_commit_sha: sha}] : [])]])
       if (path.endsWith('/pulls/42')) return JSON.stringify(pr)
+      if (path.endsWith('/pulls/44')) return JSON.stringify({...pr, number: 44, state: 'closed', merged: true, merged_at: '2026-11-18T15:00:00Z', merge_commit_sha: sha, merged_by: {type: 'Bot', id: 109017866, login: 'fro-bot[bot]'}})
       if (path.endsWith('/git/ref/heads/main')) return JSON.stringify({object: {sha: main}})
       if (path.endsWith('/git/ref/heads/release/pending')) return JSON.stringify({object: {sha: refSha}})
       if (path.endsWith('/releases/latest')) return JSON.stringify({tag_name: '2026.11.1', body: `Source: ${main}\nDigest: ghcr.io/fro-bot/dashboard@sha256:${'c'.repeat(64)}`})
