@@ -8,6 +8,7 @@
  */
 import {readdirSync, readFileSync, statSync} from 'node:fs'
 import {join, relative} from 'node:path'
+import ts from 'typescript'
 import {describe, expect, it} from 'vitest'
 
 const WEB_SRC_ROOT = join(import.meta.dirname, '..')
@@ -28,22 +29,67 @@ function walk(dir: string): string[] {
   return files
 }
 
-const IMPORT_SPECIFIER_RE = /(?:from|import)\s*['"]([^'"]+)['"]/g
+function findViolations(files: readonly {path: string; source: string}[]): string[] {
+  const violations: string[] = []
+  for (const file of files) {
+    const sourceFile = ts.createSourceFile(file.path, file.source, ts.ScriptTarget.Latest, true,
+      file.path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
+    function visit(node: ts.Node): void {
+      const moduleSpecifier = ts.isImportDeclaration(node) || ts.isExportDeclaration(node)
+        ? node.moduleSpecifier
+        : ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword
+          ? node.arguments[0]
+          : undefined
+      // Computed specifiers are outside this scan's scope.
+      if (moduleSpecifier && ts.isStringLiteralLike(moduleSpecifier)) {
+        const specifier = moduleSpecifier.text
+        if (/(^|\/)src\//.test(specifier) && specifier.startsWith('.')) {
+          violations.push(`${file.path} -> ${specifier}`)
+        }
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(sourceFile)
+  }
+  return violations
+}
 
 describe('web/src must not import from the server tree', () => {
   it('contains no import specifier resolving into src/', () => {
-    const violations: string[] = []
-    for (const filePath of walk(WEB_SRC_ROOT)) {
-      if (filePath === SELF_PATH) continue
-      const content = readFileSync(filePath, 'utf8')
-      for (const match of content.matchAll(IMPORT_SPECIFIER_RE)) {
-        const specifier = match[1]
-        if (specifier === undefined) continue
-        if (/(^|\/)src\//.test(specifier) && specifier.startsWith('.')) {
-          violations.push(`${relative(WEB_SRC_ROOT, filePath)} -> ${specifier}`)
-        }
-      }
-    }
-    expect(violations).toEqual([])
+    const files = walk(WEB_SRC_ROOT)
+      .filter(path => path !== SELF_PATH)
+      .map(path => ({path: relative(WEB_SRC_ROOT, path), source: readFileSync(path, 'utf8')}))
+    expect(files.length).toBeGreaterThan(30)
+    expect(findViolations(files)).toEqual([])
+  })
+
+  it('detects literal dynamic imports alongside static and side-effect imports', () => {
+    const serverPath = ['..', '..', '..', 'src', 'example.ts'].join('/')
+    const source = `import {x} from '${serverPath}'\nimport '${serverPath}'\nconst x = import('${serverPath}')\nconst y = import ( "${serverPath}" )`
+    expect(findViolations([{path: 'example.ts', source}])).toEqual(
+      Array.from({length: 4}, () => `example.ts -> ${serverPath}`),
+    )
+  })
+
+  it('allows a web-local dynamic import', () => {
+    expect(findViolations([{path: 'example.ts', source: "const x = import('./local.ts')"}])).toEqual([])
+  })
+
+  it('detects a literal dynamic import with an inline comment in TSX', () => {
+    const serverPath = ['..', '..', '..', 'src', 'example.ts'].join('/')
+    const source = `const view = <div>{import(/* explanation */ '${serverPath}')}</div>`
+    expect(findViolations([{path: 'example.tsx', source}])).toEqual([`example.tsx -> ${serverPath}`])
+  })
+
+  it('ignores import examples in comments and ordinary strings', () => {
+    const serverPath = ['..', '..', '..', 'src', 'example.ts'].join('/')
+    const source = `// import '${serverPath}'\n/* export {x} from '${serverPath}' */\nconst example = "import '${serverPath}'"`
+    expect(findViolations([{path: 'example.ts', source}])).toEqual([])
+  })
+
+  it('detects re-exports and permits computed dynamic imports', () => {
+    const serverPath = ['..', '..', '..', 'src', 'example.ts'].join('/')
+    const source = `export {x} from '${serverPath}'\nconst path = '${serverPath}'\nimport(path)`
+    expect(findViolations([{path: 'example.ts', source}])).toEqual([`example.ts -> ${serverPath}`])
   })
 })

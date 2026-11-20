@@ -10,6 +10,7 @@
 import {readFileSync} from 'node:fs'
 import {resolve} from 'node:path'
 import process from 'node:process'
+import ts from 'typescript'
 import {describe, expect, it} from 'vitest'
 import {OPERATOR_LAUNCH_PROMPT_MAX_LENGTH} from '../src/gateway/operator-contract/launch-prompt.ts'
 import {OPERATOR_PROVIDER_FAILURE_REASONS} from '../src/gateway/operator-contract/provider-failure-reason.ts'
@@ -104,36 +105,46 @@ function readFixtureFile(relativePath: string): string {
 }
 
 function stripComments(source: string): string {
-  let stripped = source.replaceAll(/\/\/[^\n]*/g, '')
-  stripped = stripped.replaceAll(/\/\*[\s\S]*?\*\//g, '')
-  return stripped
+  const file = ts.createSourceFile('fixture.ts', source, ts.ScriptTarget.Latest, true)
+  const protectedRanges: [number, number][] = []
+  function visit(node: ts.Node): void {
+    if (ts.isStringLiteralLike(node) || node.kind === ts.SyntaxKind.RegularExpressionLiteral ||
+      node.kind === ts.SyntaxKind.TemplateHead || node.kind === ts.SyntaxKind.TemplateMiddle ||
+      node.kind === ts.SyntaxKind.TemplateTail) {
+      protectedRanges.push([node.getStart(file), node.getEnd()])
+      return
+    }
+    for (const child of node.getChildren(file)) visit(child)
+  }
+  visit(file)
+
+  // Mask literals only while locating comments; retain their original text in the scan.
+  const masked = source.split('')
+  for (const [start, end] of protectedRanges) {
+    for (let i = start; i < end; i++) if (masked[i] !== '\n' && masked[i] !== '\r') masked[i] = ' '
+  }
+  const result = source.split('')
+  for (const match of masked.join('').matchAll(/\/\/[^\n\r]*|\/\*[\s\S]*?\*\//g)) {
+    for (let i = match.index; i < match.index + match[0].length; i++) {
+      if (result[i] !== '\n' && result[i] !== '\r') result[i] = ' '
+    }
+  }
+  return result.join('')
+}
+
+function forbiddenMatches(source: string, pattern: RegExp): string[] {
+  const matches = stripComments(source).match(pattern) ?? []
+  return matches.filter(match => !ALLOWED_PATTERNS.some(allowed => allowed.test(match)))
 }
 
 describe('fixture no-leak guard — forbidden patterns', () => {
   for (const filePath of FIXTURE_FILES) {
     describe(`${filePath}`, () => {
-      let source: string
-      let strippedSource: string
-
-      try {
-        source = readFixtureFile(filePath)
-        strippedSource = stripComments(source)
-      } catch {
-        // File doesn't exist yet — tests will fail with a clear message
-        source = ''
-        strippedSource = ''
-      }
+      const source = readFixtureFile(filePath)
 
       for (const [label, pattern] of FORBIDDEN_PATTERNS) {
         it(`must not contain ${label}`, () => {
-          const matches = strippedSource.match(pattern)
-          if (matches !== null) {
-            // Check if any match is covered by an allowed pattern
-            const uncoveredMatches = matches.filter(match =>
-              !ALLOWED_PATTERNS.some(allowed => allowed.test(match)),
-            )
-            expect(uncoveredMatches).toHaveLength(0)
-          }
+          expect(forbiddenMatches(source, pattern)).toHaveLength(0)
         })
       }
     })
@@ -205,6 +216,33 @@ describe('fixture no-leak guard — synthetic identifier prefixes', () => {
 })
 
 describe('fixture no-leak guard — explicit bad-fixture rejection', () => {
+  it.each([
+    ['private URL', 'const url = "https://synthetic.internal/path"'],
+    ['high-entropy hex secret', `const url = "https://example.invalid/"; const marker = "${'ab'.repeat(20)}"`],
+    ['high-entropy hex secret', `const text = \`literal /* ${'ab'.repeat(20)} */\``],
+  ])('detects %s through the fixture guard', (label, source) => {
+    const pattern = FORBIDDEN_PATTERNS.find(([name]) => name === label)?.[1]
+    if (pattern === undefined) throw new Error(`Missing forbidden pattern: ${label}`)
+    expect(forbiddenMatches(source, pattern).length).toBeGreaterThan(0)
+  })
+
+  it('ignores actual comments while preserving safe quoted comment markers', () => {
+    const marker = 'ab'.repeat(20)
+    const source = `const safe = "https://example.invalid/ /* safe */" // ${marker}\n/* ${marker} */ const value = 'fixture-safe'`
+    const stripped = stripComments(source)
+    expect(stripped).toContain('https://example.invalid/ /* safe */')
+    expect(stripped).not.toContain(marker)
+    for (const [, pattern] of FORBIDDEN_PATTERNS) expect(forbiddenMatches(source, pattern)).toHaveLength(0)
+  })
+
+  it('allows an explicitly fixture-prefixed match through the same guard', () => {
+    const pattern = FORBIDDEN_PATTERNS.find(([label]) => label === 'bearer token')?.[1]
+    if (pattern === undefined) throw new Error('Missing forbidden pattern: bearer token')
+    const source = 'const placeholder = "Bearer fixture-operator"'
+    expect(stripComments(source)).toMatch(pattern)
+    expect(forbiddenMatches(source, pattern)).toHaveLength(0)
+  })
+
   it('a fixture string containing a bearer token fails the guard', () => {
     const badFixture = 'const token = "Bearer ghp_abc123def456ghi789jkl012mno345pqr678"'
     const bearerPattern = FORBIDDEN_PATTERNS.find(([label]) => label === 'bearer token')

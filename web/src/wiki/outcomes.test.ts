@@ -59,6 +59,13 @@ describe('describeSaveResult — the outcome contract', () => {
     expect(display.detail).toMatch(/no changes|nothing to save/iu)
   })
 
+  it('a gate rejection without findings does not ask to fix invisible findings', () => {
+    const display = describeFailure({kind: 'rejected', reason: 'gate', findings: []})
+    expect(display.headline).toBe('The change was rejected')
+    expect(display.detail).toBe('The wiki checks refused this change. Nothing was saved. Your draft is kept.')
+    expect(display.draft).toBe('kept')
+  })
+
   it('Conflict, page kind: names the kind, keeps the draft, offers overwrite', () => {
     const display = describeFailure({kind: 'conflict', conflict: {kind: 'page', currentBlobSha: 'blob-2'}})
     expect(display.kind).toBe('conflict-page')

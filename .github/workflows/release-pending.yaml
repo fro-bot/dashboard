@@ -1,0 +1,102 @@
+---
+name: Release Pending
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 15 * * 0,3'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Prepare pending release or recheck existing approval
+        required: true
+        type: choice
+        options: [prepare, review]
+  workflow_run:
+    workflows: [Release Pending Review, Release]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  route:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    outputs:
+      mode: ${{ steps.route.outputs.mode }}
+    steps:
+      - id: route
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          ACTOR_ID: ${{ github.actor_id }}
+          ATTEMPT: ${{ github.run_attempt }}
+          INPUT_MODE: ${{ inputs.mode }}
+          WAKE_NAME: ${{ github.event.workflow_run.name }}
+          WAKE_PATH: ${{ github.event.workflow_run.path }}
+          WAKE_EVENT: ${{ github.event.workflow_run.event }}
+          WAKE_RESULT: ${{ github.event.workflow_run.conclusion }}
+          WAKE_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          WAKE_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          WAKE_ACTOR_ID: ${{ github.event.workflow_run.actor.id }}
+          WAKE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          REPO: ${{ github.repository }}
+        run: |
+          mode=''
+          if [[ "$REF" == refs/heads/main ]]; then
+            case "$EVENT" in
+              push) mode=prepare ;;
+              schedule) mode=schedule ;;
+              workflow_dispatch)
+                if [[ "$ACTOR_ID" == 831617 && "$ATTEMPT" == 1 && ( "$INPUT_MODE" == prepare || "$INPUT_MODE" == review ) ]]; then
+                  mode="$INPUT_MODE"
+                fi ;;
+              workflow_run)
+                if [[ "$WAKE_RESULT" == success && "$WAKE_REPO" == "$REPO" ]]; then
+                  if [[ "$WAKE_NAME" == 'Release Pending Review' && "$WAKE_PATH" == '.github/workflows/release-pending-review.yaml' && "$WAKE_EVENT" == pull_request_review && "$WAKE_BRANCH" == release/pending && "$WAKE_ACTOR_ID" == 831617 && "$WAKE_ATTEMPT" == 1 ]]; then
+                    mode=review
+                  elif [[ "$WAKE_NAME" == Release && "$WAKE_PATH" == '.github/workflows/release.yaml' && "$WAKE_EVENT" == push && "$WAKE_BRANCH" == main ]]; then
+                    mode=prepare
+                  fi
+                fi ;;
+            esac
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+  execute:
+    needs: route
+    if: needs.route.outputs.mode != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency:
+      group: release-pending-${{ needs.route.outputs.mode == 'prepare' && 'prepare' || 'merge' }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: read
+      statuses: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+      - id: app-token
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          app-id: ${{ secrets.APPLICATION_ID }}
+          private-key: ${{ secrets.APPLICATION_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Run pending release operation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          MODE: ${{ needs.route.outputs.mode }}
+        run: node scripts/release-pending.ts "$MODE"
