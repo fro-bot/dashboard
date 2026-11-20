@@ -5,18 +5,7 @@ on:
   push:
     branches: [main]
     paths:
-      - Dockerfile
-      - package.json
-      - bun.lock
-      - bunfig.toml
-      - 'tsconfig*.json'
-      - 'src/**'
-      - 'web/**'
-      - 'public/**'
-      - .github/workflows/release.yaml
-      - scripts/should-release.ts
-      - scripts/compute-release-tag.ts
-  workflow_dispatch:
+      - docs/releases/batch.md
 
 concurrency:
   group: release-${{ github.ref }}
@@ -34,82 +23,59 @@ jobs:
     name: Release guard
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       should-release: ${{ steps.check.outputs.should-release }}
 
     steps:
-      - name: ⤵ Checkout (with history for push range)
-        if: github.event_name == 'push'
+      - name: ⤵ Checkout event commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: 🟢 Set up Node.js
-        if: github.event_name == 'push'
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
-        with:
-          node-version: '24'
-
       - name: 🔍 Evaluate release gate
         id: check
         env:
-          GITHUB_REF_NAME_FOR_LOG: ${{ github.ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # workflow_dispatch: only release when triggered from main.
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-              echo "Manual dispatch on main: releasing."
-              echo "should-release=true" >> "$GITHUB_OUTPUT"
-            else
-              printf 'Manual dispatch on non-main ref (%s): skipping release.\n' "$GITHUB_REF_NAME_FOR_LOG"
-              echo "should-release=false" >> "$GITHUB_OUTPUT"
-            fi
-            exit 0
-          fi
+          skip() { echo "$1"; echo 'should-release=false' >> "$GITHUB_OUTPUT"; exit 0; }
+          fail() { echo "::error::$1" >&2; exit 1; }
+          [ "$EVENT_NAME" = push ] && [ "$EVENT_REF" = refs/heads/main ] || skip 'Not a push to main.'
+          [[ "$EVENT_SHA" =~ ^[0-9a-f]{40}$ ]] || fail 'Invalid event SHA.'
+          [ "$(git rev-parse HEAD)" = "$EVENT_SHA" ] || fail 'Checkout does not match event SHA.'
+          parents=$(git rev-list --parents -n 1 "$EVENT_SHA") || fail 'Cannot read event commit.'
+          read -r -a commits <<< "$parents"
+          [ "${#commits[@]}" -eq 2 ] || skip 'Event commit is not single-parent.'
+          changed=$(git diff --no-renames --name-only "${commits[1]}" "$EVENT_SHA") || fail 'Cannot inspect event commit changes.'
+          [ "$changed" = 'docs/releases/batch.md' ] || skip 'Event commit is not notes-only.'
 
-          # Collect all changed files across the entire pushed range.
-          # github.event.before is the SHA before the push; github.sha is the tip.
-          BEFORE="${{ github.event.before }}"
-          AFTER="${{ github.sha }}"
-          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            # First push to branch — all tracked files at HEAD are "new".
-            echo "First push to branch — listing all tracked files as changed."
-            CHANGED=$(git ls-files)
+          # Association is only a starting point: fetch the actual PR for merged_by.
+          associations=$(gh api --paginate --slurp "repos/$REPOSITORY/commits/$EVENT_SHA/pulls?per_page=100") || fail 'PR association API failed; rerun the guard.'
+          count=$(jq -er 'if type == "array" and all(.[]; type == "array") then [ .[][] ] | length else error("invalid association response") end' <<< "$associations") || fail 'Invalid PR association response.'
+          [ "$count" -ne 0 ] || skip '::warning::No PR association yet; release skipped. Investigate and rerun the guard if appropriate.'
+          [ "$count" -eq 1 ] || fail 'Ambiguous PR associations; investigate before rerunning.'
+          number=$(jq -er '.[0][0].number | select(type == "number" and . > 0 and floor == .)' <<< "$associations") || fail 'Invalid associated PR number.'
+          pr=$(gh api "repos/$REPOSITORY/pulls/$number") || fail 'PR detail API failed; rerun the guard.'
+          jq -e 'type == "object" and (.number | type == "number") and (.merged | type == "boolean")' <<< "$pr" >/dev/null || fail 'Invalid PR detail response.'
+          if jq -e --arg repo "$REPOSITORY" --arg sha "$EVENT_SHA" --argjson number "$number" '
+            def app: .login == "fro-bot[bot]" and .type == "Bot" and .id == 109017866;
+            .number == $number and .state == "closed" and .merged == true and .merge_commit_sha == $sha
+            and .head.ref == "release/pending" and .head.repo.full_name == $repo
+            and .base.ref == "main" and .base.repo.full_name == $repo
+            and (.user | app) and (.merged_by | app)
+          ' <<< "$pr" >/dev/null; then
+            echo 'Verified release batch squash.'
+            echo 'should-release=true' >> "$GITHUB_OUTPUT"
           else
-            CHANGED=$(git diff --name-only "$BEFORE" "$AFTER")
-          fi
-          echo "Changed files:"
-          echo "$CHANGED"
-
-          # Extract base package.json from the before commit
-          BASE_PKG=$(mktemp)
-          trap 'rm -f "$BASE_PKG"' EXIT
-          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            # No parent commit — use an empty object as base
-            echo '{}' > "$BASE_PKG"
-          else
-            if ! git show "${BEFORE}:package.json" > "$BASE_PKG" 2>/dev/null; then
-              # package.json didn't exist in the before commit — use empty object
-              echo '{}' > "$BASE_PKG"
-            fi
-          fi
-
-          # Run the guard script
-          if node scripts/should-release.ts \
-              --changed-files "$CHANGED" \
-              --base-pkg "$BASE_PKG" \
-              --head-pkg package.json; then
-            echo "should-release=true" >> "$GITHUB_OUTPUT"
-          else
-            EXIT=$?
-            if [ "$EXIT" -eq 1 ]; then
-              echo "should-release=false" >> "$GITHUB_OUTPUT"
-            else
-              echo "Guard script error (exit $EXIT)" >&2
-              exit "$EXIT"
-            fi
+            skip 'Associated PR does not satisfy release requirements.'
           fi
 
   release:
