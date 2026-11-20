@@ -201,6 +201,7 @@ export function buildPushClient(opts?: BuildPushClientOptions): PushClient {
     async subscribePush(subscriptionJson, csrfToken, idempotencyKey, signal) {
       if (csrfToken.trim() === '') return err({kind: 'validation'})
       if (idempotencyKey.trim() === '') return err({kind: 'validation'})
+      if (signal?.aborted) return err({kind: 'network'})
 
       const post = (token: string): Promise<Response> =>
         browserFetch(withFixtureSessionId(`${endpointBase}/subscriptions`), {
@@ -224,7 +225,7 @@ export function buildPushClient(opts?: BuildPushClientOptions): PushClient {
         const retryCsrfResult = await this.refreshCsrf()
         if (!retryCsrfResult.success) return retryCsrfResult
 
-        if (signal?.aborted === true) return err({kind: 'network'})
+        if (signal?.aborted) return err({kind: 'network'})
 
         const retryRes = await post(retryCsrfResult.data)
         if (retryRes.ok) return ok(undefined)
@@ -385,6 +386,14 @@ export async function subscribeOptIn(deps: SubscribeDeps): Promise<SubscribeOutc
 
   if (deps.signal?.aborted) return {kind: 'aborted'}
 
+  // A rejected read cannot establish ownership; keep normal opt-in behavior,
+  // but leave any subsequently acquired subscription alone on abort.
+  const absentBeforeSubscribe = await registration.pushManager.getSubscription().then(
+    existing => existing === null,
+    () => false,
+  )
+  if (deps.signal?.aborted) return {kind: 'aborted'}
+
   let subscription: MinimalPushSubscription
   try {
     subscription = await registration.pushManager.subscribe({
@@ -392,19 +401,20 @@ export async function subscribeOptIn(deps: SubscribeDeps): Promise<SubscribeOutc
       applicationServerKey: urlB64ToUint8Array(vapidKey.publicKey),
     })
   } catch {
-    return {kind: 'subscribe-failed'}
+    return {kind: deps.signal?.aborted ? 'aborted' : 'subscribe-failed'}
   }
 
-  if (deps.signal?.aborted) return {kind: 'aborted'}
+  const abort = async (): Promise<SubscribeOutcome> => {
+    if (absentBeforeSubscribe) await subscription.unsubscribe().catch(() => false)
+    return {kind: 'aborted'}
+  }
+  if (deps.signal?.aborted) return abort()
 
   const csrfResult = await deps.pushClient.refreshCsrf()
+  if (deps.signal?.aborted) return abort()
   if (!csrfResult.success) {
     await subscription.unsubscribe().catch(() => false)
     return {kind: 'subscribe-failed'}
-  }
-
-  if (deps.signal?.aborted) {
-    return {kind: 'aborted'}
   }
 
   const postResult = await deps.pushClient.subscribePush(
@@ -414,7 +424,7 @@ export async function subscribeOptIn(deps: SubscribeDeps): Promise<SubscribeOutc
     deps.signal,
   )
 
-  if (deps.signal?.aborted) return {kind: 'aborted'}
+  if (deps.signal?.aborted) return abort()
 
   if (!postResult.success) {
     await subscription.unsubscribe().catch(() => false)
@@ -455,17 +465,28 @@ export async function resubscribeStaleKey(deps: SubscribeDeps): Promise<Subscrib
   if (deps.signal?.aborted) return {kind: 'aborted'}
 
   const vapidResult = await deps.pushClient.getVapidKey()
+  if (deps.signal?.aborted) return {kind: 'aborted'}
   if (!vapidResult.success) return {kind: 'subscribe-failed'}
   if (vapidResult.data.pushDisabled) return {kind: 'unsupported'}
   const vapidKey = vapidResult.data.vapidKey
   if (vapidKey === undefined) return {kind: 'subscribe-failed'}
 
   const existing = await registration.pushManager.getSubscription()
+  if (deps.signal?.aborted) return {kind: 'aborted'}
   if (existing !== null) {
     await existing.unsubscribe().catch(() => false)
   }
 
   if (deps.signal?.aborted) return {kind: 'aborted'}
+
+  let absentBeforeSubscribe = existing === null
+  if (existing !== null) {
+    absentBeforeSubscribe = await registration.pushManager.getSubscription().then(
+      current => current === null,
+      () => false,
+    )
+    if (deps.signal?.aborted) return {kind: 'aborted'}
+  }
 
   let subscription: MinimalPushSubscription
   try {
@@ -475,36 +496,44 @@ export async function resubscribeStaleKey(deps: SubscribeDeps): Promise<Subscrib
     })
   } catch {
     if (deps.signal?.aborted) return {kind: 'aborted'}
+    absentBeforeSubscribe = await registration.pushManager.getSubscription().then(
+      current => current === null,
+      () => false,
+    )
+    if (deps.signal?.aborted) return {kind: 'aborted'}
     try {
       subscription = await registration.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlB64ToUint8Array(vapidKey.publicKey),
       })
     } catch {
-      return {kind: 'subscribe-failed'}
+      return {kind: deps.signal?.aborted ? 'aborted' : 'subscribe-failed'}
     }
   }
 
-  if (deps.signal?.aborted) return {kind: 'aborted'}
+  const abort = async (): Promise<SubscribeOutcome> => {
+    if (absentBeforeSubscribe) await subscription.unsubscribe().catch(() => false)
+    return {kind: 'aborted'}
+  }
+  if (deps.signal?.aborted) return abort()
 
   const csrfResult = await deps.pushClient.refreshCsrf()
+  if (deps.signal?.aborted) return abort()
   if (!csrfResult.success) {
     await subscription.unsubscribe().catch(() => false)
     return {kind: 'subscribe-failed'}
   }
 
-  if (deps.signal?.aborted) return {kind: 'aborted'}
-
   const idempotencyKey = mintKey()
   const postResult = await deps.pushClient.subscribePush(subscription.toJSON(), csrfResult.data, idempotencyKey, deps.signal)
 
+  if (deps.signal?.aborted) return abort()
   if (!postResult.success) {
-    if (deps.signal?.aborted) return {kind: 'aborted'}
-
     const csrfShaped = postResult.error.kind === 'http' && postResult.error.status === 400
     let retryCsrfToken = csrfResult.data
     if (csrfShaped) {
       const retryCsrfResult = await deps.pushClient.refreshCsrf()
+      if (deps.signal?.aborted) return abort()
       if (!retryCsrfResult.success) {
         await subscription.unsubscribe().catch(() => false)
         return {kind: 'subscribe-failed'}
@@ -512,7 +541,7 @@ export async function resubscribeStaleKey(deps: SubscribeDeps): Promise<Subscrib
       retryCsrfToken = retryCsrfResult.data
     }
 
-    if (deps.signal?.aborted) return {kind: 'aborted'}
+    if (deps.signal?.aborted) return abort()
 
     const retryPostResult = await deps.pushClient.subscribePush(
       subscription.toJSON(),
@@ -521,7 +550,7 @@ export async function resubscribeStaleKey(deps: SubscribeDeps): Promise<Subscrib
       deps.signal,
     )
 
-    if (deps.signal?.aborted) return {kind: 'aborted'}
+    if (deps.signal?.aborted) return abort()
 
     if (!retryPostResult.success) {
       await subscription.unsubscribe().catch(() => false)
