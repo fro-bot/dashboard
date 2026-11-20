@@ -1,0 +1,196 @@
+import {describe, expect, it} from 'vitest'
+
+import {baselineFromRelease, canRelease, mergeArguments, runPending, scheduleAttemptAllowed} from '../scripts/release-pending.ts'
+
+const sha = 'a'.repeat(40)
+const other = 'b'.repeat(40)
+
+describe('release baseline', () => {
+  const release = {tag_name: '2026.11.1', body: `Source: ${sha}\nDigest: ghcr.io/fro-bot/dashboard@sha256:${'c'.repeat(64)}`}
+
+  it('requires matching tag and complete metadata', () => {
+    expect(baselineFromRelease(release, sha)).toEqual({source: sha, digest: `sha256:${'c'.repeat(64)}`})
+    expect(() => baselineFromRelease(release, other)).toThrow()
+    expect(() => baselineFromRelease({...release, body: `Source: ${sha}`}, sha)).toThrow()
+    expect(() => baselineFromRelease({...release, body: `${release.body}\nSource: ${sha}`}, sha)).toThrow()
+  })
+})
+
+it('prepares a held PR and reuses its unchanged head', () => {
+  const main = 'b'.repeat(40)
+  let ref = ''
+  let open = false
+  let held = false
+  let committed = false
+  let notes = 'notes\n'
+  let unrelated = false
+  const commands: string[] = []
+  const pr = () => ({number: 42, state: 'open', merged_at: null, user: {id: 109017866, login: 'fro-bot[bot]'}, head: {sha, ref: 'release/pending', repo: {full_name: 'fro-bot/dashboard'}}, base: {ref: 'main', repo: {full_name: 'fro-bot/dashboard'}}, labels: held ? [{name: 'release-hold'}] : []})
+  const run = (cmd: string, args: string[], write = false): string => {
+    commands.push(`${cmd} ${args.join(' ')}`)
+    if (cmd === 'docker') return `sha256:${'c'.repeat(64)}\n`
+    if (cmd === 'git') {
+      if (args[0] === 'rev-parse' && args[1]?.startsWith('refs/tags/')) return main
+      if (args[0] === 'rev-parse' && args[1] === '--is-shallow-repository') return 'false'
+      if (args[0] === 'rev-parse' && args[1] === 'HEAD') return committed ? sha : main
+      if (args[0] === 'ls-remote') return ref ? `${ref}\trefs/heads/release/pending\n` : ''
+      if (args[0] === 'remote') return 'https://github.com/fro-bot/dashboard.git'
+      if (args[0] === 'rev-list') return `${sha} ${main}`
+      if (args[0] === 'show') return args[1] === '-s' ? '109017866+fro-bot[bot]@users.noreply.github.com\n' : 'notes\n'
+      if (args[0] === 'diff') return unrelated ? 'other.txt' : 'docs/releases/batch.md'
+      if (args[0] === 'status') return ''
+      if (args.includes('commit')) {
+        committed = true
+        return ''
+      }
+      if (args[0] === 'add') return ''
+      if (args[0] === 'push') {
+        ref = sha
+        return ''
+      }
+      throw new Error(`Unexpected git: ${args.join(' ')}`)
+    }
+    const path = args.find(arg => arg.startsWith('repos/')) ?? ''
+    if (write && path.endsWith('/pulls')) {
+      open = true
+      return JSON.stringify(pr())
+    }
+    if (write && path.endsWith('/issues/42/labels')) {
+      held = true
+      return JSON.stringify([{name: 'release-hold'}])
+    }
+    if (path.includes('/pulls?')) return JSON.stringify([open ? [pr()] : []])
+    if (path.endsWith('/pulls/42')) return JSON.stringify(pr())
+    if (path.endsWith('/git/ref/heads/main')) return JSON.stringify({object: {sha: main}})
+    if (path.endsWith('/releases/latest')) return JSON.stringify({tag_name: '2026.11.1', body: `Source: ${main}\nDigest: ghcr.io/fro-bot/dashboard@sha256:${'c'.repeat(64)}`})
+    if (path.includes('/issues/42/events?')) return JSON.stringify([[]])
+    throw new Error(`Unexpected gh: ${args.join(' ')}`)
+  }
+  const env = {GITHUB_REPOSITORY: 'fro-bot/dashboard'}
+  const files: string[] = []
+  const prepare = () => runPending('prepare', env, run, () => notes, text => files.push(text))
+  expect(prepare()).toMatch(/prepared/i)
+  expect(held).toBe(true)
+  expect(files).toEqual(['notes\n'])
+  expect(commands.some(line => line.includes('--force-with-lease=refs/heads/release/pending:'))).toBe(true)
+  commands.length = 0
+  committed = false
+  expect(prepare()).toMatch(/up.to.date/i)
+  expect(commands.some(line => line.startsWith('git push'))).toBe(false)
+  commands.length = 0
+  notes = 'updated notes\n'
+  expect(prepare()).toMatch(/prepared/i)
+  expect(commands.some(line => line.includes(`--force-with-lease=refs/heads/release/pending:${sha}`))).toBe(true)
+  expect(commands.some(line => line.includes('--method POST repos/fro-bot/dashboard/pulls'))).toBe(false)
+  committed = false
+  unrelated = true
+  commands.length = 0
+  expect(() => prepare()).toThrow(/unknown|reconcile/i)
+  expect(commands.some(line => line.startsWith('git push'))).toBe(false)
+})
+
+describe('review transport', () => {
+  it('rechecks an exact-head approval before one pinned App merge and refuses ambiguous PRs', () => {
+    const main = 'b'.repeat(40)
+    const pr = {number: 42, state: 'open', merged_at: null, user: {id: 109017866, login: 'fro-bot[bot]'}, head: {sha, ref: 'release/pending', repo: {full_name: 'fro-bot/dashboard'}}, base: {ref: 'main', repo: {full_name: 'fro-bot/dashboard'}}, labels: [{name: 'release-hold'}]}
+    const calls: {cmd: string; args: string[]; write: boolean}[] = []
+    let ambiguous = false
+    let unsettled = false
+    let refSha = sha
+    let mismatch = false
+    const run = (cmd: string, args: string[], write = false): string => {
+      calls.push({cmd, args, write})
+      if (cmd === 'docker') return `sha256:${(mismatch && args[3]?.endsWith(':latest') ? 'd' : 'c').repeat(64)}\n`
+      if (cmd === 'git') {
+        if (args[0] === 'rev-parse' && args[1]?.startsWith('refs/tags/')) return main
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return main
+        if (args[0] === 'rev-parse' && args[1] === '--is-shallow-repository') return 'false'
+        if (args[0] === 'rev-list') return `${sha} ${main}`
+        if (args[0] === 'diff') return 'docs/releases/batch.md'
+        if (args[0] === 'cat-file') return ''
+        throw new Error(`Unexpected git: ${args.join(' ')}`)
+      }
+      if (write) return JSON.stringify({merged: true})
+      if (args[0] === 'pr') return JSON.stringify([{state: 'SUCCESS'}])
+      const path = args.find(arg => arg.startsWith('repos/')) ?? ''
+      if (path.includes('/pulls?')) return JSON.stringify([[pr, ...(ambiguous ? [{...pr, number: 43}] : []), ...(unsettled ? [{...pr, number: 44, state: 'closed', merged_at: '2026-11-18T15:00:00Z', merge_commit_sha: sha}] : [])]])
+      if (path.endsWith('/pulls/42')) return JSON.stringify(pr)
+      if (path.endsWith('/git/ref/heads/main')) return JSON.stringify({object: {sha: main}})
+      if (path.endsWith('/git/ref/heads/release/pending')) return JSON.stringify({object: {sha: refSha}})
+      if (path.endsWith('/releases/latest')) return JSON.stringify({tag_name: '2026.11.1', body: `Source: ${main}\nDigest: ghcr.io/fro-bot/dashboard@sha256:${'c'.repeat(64)}`})
+      if (path.endsWith('/pulls/42/reviews?per_page=100')) return JSON.stringify([[{user: {id: 831617}, state: 'APPROVED', commit_id: sha}]])
+      if (path.endsWith('/issues/42/events?per_page=100')) return JSON.stringify([[]])
+      throw new Error(`Unexpected gh: ${args.join(' ')}`)
+    }
+    const env = {GITHUB_REPOSITORY: 'fro-bot/dashboard', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_RUN_ATTEMPT: '1'}
+    expect(runPending('review', env, run)).toMatch(/merged/i)
+    expect(calls.filter(call => call.cmd === 'docker').map(call => call.args)).toEqual([
+      ['buildx', 'imagetools', 'inspect', 'ghcr.io/fro-bot/dashboard:2026.11.1', '--format', '{{.Manifest.Digest}}'],
+      ['buildx', 'imagetools', 'inspect', 'ghcr.io/fro-bot/dashboard:latest', '--format', '{{.Manifest.Digest}}'],
+    ])
+    const writes = calls.filter(call => call.write)
+    expect(writes).toEqual([{cmd: 'gh', args: mergeArguments('fro-bot/dashboard', 42, sha), write: true}])
+    expect(calls.at(-2)?.args.join(' ')).toContain('/reviews?')
+    calls.length = 0
+    pr.labels = []
+    expect(runPending('review', env, run)).toMatch(/hold.*unproven/i)
+    expect(calls.some(call => call.write)).toBe(false)
+    pr.labels = [{name: 'release-hold'}]
+    calls.length = 0
+    mismatch = true
+    expect(() => runPending('review', env, run)).toThrow(/digest/i)
+    expect(calls.some(call => call.write)).toBe(false)
+    mismatch = false
+    calls.length = 0
+    refSha = main
+    expect(() => runPending('review', env, run)).toThrow(/ref/i)
+    expect(calls.some(call => call.write)).toBe(false)
+    refSha = sha
+    calls.length = 0
+    unsettled = true
+    expect(runPending('review', env, run)).toMatch(/publication|settle/i)
+    expect(calls.some(call => call.write)).toBe(false)
+    unsettled = false
+    calls.length = 0
+    ambiguous = true
+    expect(() => runPending('review', env, run)).toThrow(/ambiguous/i)
+    expect(calls.some(call => call.write)).toBe(false)
+  })
+})
+
+describe('merge decisions', () => {
+  const approval = {user: {id: 831617}, state: 'APPROVED', commit_id: sha}
+  const input = {head: sha, held: true, previousUnheld: false, holdEvents: [], reviews: [approval]}
+
+  it('requires the latest decisive owner approval on the exact head for review', () => {
+    expect(canRelease('review', input)).toBe(true)
+    expect(canRelease('review', {...input, head: other})).toBe(false)
+    expect(canRelease('review', {...input, reviews: [approval, {...approval, state: 'DISMISSED'}]})).toBe(false)
+    expect(canRelease('review', {...input, reviews: [approval, {...approval, state: 'CHANGES_REQUESTED'}]})).toBe(false)
+  })
+
+  it('fails closed on schedule without proof of hold removal', () => {
+    expect(canRelease('schedule', input)).toBe(false)
+    expect(canRelease('schedule', {...input, held: false})).toBe(false)
+    expect(canRelease('schedule', {...input, held: false, previousUnheld: true})).toBe(true)
+    expect(canRelease('schedule', {...input, held: false, holdEvents: [{event: 'unlabeled', actor: {id: 831617}}]})).toBe(true)
+    expect(canRelease('schedule', {...input, held: false, holdEvents: [{event: 'unlabeled', actor: {id: 99}}]})).toBe(false)
+    expect(canRelease('schedule', {...input, held: false, previousUnheld: true, holdEvents: [{event: 'labeled', actor: {id: 831617}}]})).toBe(false)
+  })
+
+  it('skips schedule retries and a merge already made in the slot', () => {
+    const slot = '2026-11-18T15:00:00Z'
+    expect(scheduleAttemptAllowed('1', slot, null)).toBe(true)
+    expect(scheduleAttemptAllowed('2', slot, null)).toBe(false)
+    expect(scheduleAttemptAllowed('1', slot, '2026-11-18T15:01:00Z')).toBe(false)
+    expect(scheduleAttemptAllowed('1', slot, '2026-11-18T14:59:00Z')).toBe(true)
+    expect(scheduleAttemptAllowed('1', slot, 'unknown')).toBe(false)
+  })
+
+  it('pins the exact head and squash method in the merge request', () => {
+    expect(mergeArguments('fro-bot/dashboard', 42, sha)).toEqual([
+      'api', '--method', 'PUT', 'repos/fro-bot/dashboard/pulls/42/merge', '-f', 'merge_method=squash', '-f', `sha=${sha}`,
+    ])
+    expect(() => mergeArguments('fro-bot/dashboard', 42, 'main')).toThrow()
+  })
+})

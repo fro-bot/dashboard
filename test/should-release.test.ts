@@ -261,33 +261,15 @@ describe('should-release — public/** changes trigger release', () => {
 function readPathsFilter(): string {
   const workflow = readFileSync(resolve(process.cwd(), '.github/workflows/release.yaml'), 'utf8')
   const start = workflow.indexOf('    paths:')
-  const end = workflow.indexOf('  workflow_dispatch:')
+  const end = workflow.indexOf('\nconcurrency:')
   expect(start).toBeGreaterThanOrEqual(0)
   expect(end).toBeGreaterThan(start)
   return workflow.slice(start, end)
 }
 
-describe('should-release — workflow path filter parity', () => {
-  // GitHub Actions filters on.push.paths BEFORE the guard script runs, so any
-  // directory that the guard treats as a hard-release path must also appear in
-  // the release workflow's paths filter — otherwise the workflow never starts and
-  // the guard never executes. This pins the two in sync to prevent drift.
-
-  it('release.yaml on.push.paths includes every directory-glob hard-release path', () => {
-    const filter = readPathsFilter()
-    for (const dir of ['src/**', 'web/**', 'public/**']) {
-      expect(filter).toContain(`'${dir}'`)
-    }
-  })
-
-  it('release.yaml on.push.paths includes the Bun lockfile and config', () => {
-    const filter = readPathsFilter()
-    expect(filter).toMatch(/^\s+- bun\.lock$/m)
-    expect(filter).toMatch(/^\s+- bunfig\.toml$/m)
-  })
-
-  it('release.yaml on.push.paths does not list the pnpm lockfile', () => {
-    expect(readPathsFilter()).not.toContain('pnpm-lock.yaml')
+describe('should-release — classifier and publisher are separate', () => {
+  it('publisher listens for batch notes rather than runtime classifier paths', () => {
+    expect(readPathsFilter().trim()).toBe('paths:\n      - docs/releases/batch.md')
   })
 })
 
