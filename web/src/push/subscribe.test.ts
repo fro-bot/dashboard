@@ -742,7 +742,25 @@ describe('unsubscribeOptOut', () => {
     })
 
     expect(result).toEqual({gatewayUnsubscribeCalled: false})
+    expect(pushClient.refreshCsrf).not.toHaveBeenCalled()
     expect(pushClient.unsubscribePush).not.toHaveBeenCalled()
+  })
+
+  it('reports an inconclusive local read without cleanup and allows a successful retry', async () => {
+    const subscription = fakeSubscription()
+    const getLocalSubscription = vi.fn().mockRejectedValueOnce(new Error('read failed')).mockResolvedValueOnce(subscription)
+    const pushClient = fakePushClient()
+    const deps = {getLocalSubscription, pushClient}
+
+    expect(await unsubscribeOptOut(deps)).toEqual({gatewayUnsubscribeCalled: false, localReadFailed: true})
+    expect(subscription.unsubscribeMock).not.toHaveBeenCalled()
+    expect(pushClient.refreshCsrf).not.toHaveBeenCalled()
+    expect(pushClient.unsubscribePush).not.toHaveBeenCalled()
+
+    expect(await unsubscribeOptOut(deps)).toEqual({gatewayUnsubscribeCalled: true})
+    expect(subscription.unsubscribeMock).toHaveBeenCalledTimes(1)
+    expect(pushClient.refreshCsrf).toHaveBeenCalledTimes(1)
+    expect(pushClient.unsubscribePush).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -751,6 +769,33 @@ describe('runReconcileSweep', () => {
 
   beforeEach(() => {
     cache = INITIAL_RECONCILE_SWEEP_CACHE
+  })
+
+  it('skips an inconclusive local read without changing cache and retries on the next sweep', async () => {
+    const subscription = fakeSubscription()
+    const getLocalSubscription = vi.fn().mockRejectedValueOnce(new Error('read failed')).mockResolvedValueOnce(subscription)
+    const pushClient = fakePushClient()
+    const seededCache: ReconcileSweepCache = {
+      permission: 'granted',
+      subscriptionPresent: true,
+      handoffState: 'subscribed',
+      lastActionAt: 1,
+    }
+    const deps = {getLocalSubscription, getPermission: () => 'denied' as const, pushClient, now: () => 1_000_000}
+
+    const result = await runReconcileSweep(deps, seededCache)
+    expect(result).toEqual({skipped: true, action: undefined, uiState: undefined, nextCache: seededCache})
+    expect(result.nextCache).toBe(seededCache)
+    expect(pushClient.getPushSubscriptionMetadata).not.toHaveBeenCalled()
+    expect(pushClient.refreshCsrf).not.toHaveBeenCalled()
+    expect(pushClient.unsubscribePush).not.toHaveBeenCalled()
+    expect(subscription.unsubscribeMock).not.toHaveBeenCalled()
+
+    const retry = await runReconcileSweep(deps, result.nextCache)
+    expect(retry.skipped).toBe(false)
+    expect(pushClient.getPushSubscriptionMetadata).toHaveBeenCalledTimes(1)
+    expect(retry.nextCache.permission).toBe('denied')
+    expect(retry.nextCache.subscriptionPresent).toBe(true)
   })
 
   it('guard: repeated sweep with unchanged permission/subscription/handoff state performs no Gateway GET or action', async () => {

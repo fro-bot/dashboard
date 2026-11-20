@@ -7,7 +7,7 @@
  */
 
 import {describe, expect, it} from 'vitest'
-import {getNotificationCopy, type NotificationUiState} from './notifications-copy.ts'
+import {DISABLE_FAILED_HINT, getNotificationCopy, type NotificationUiState} from './notifications-copy.ts'
 
 const ALL_STATES: NotificationUiState[] = [
   'not-requested',
@@ -57,6 +57,12 @@ describe('copy security checks', () => {
     /\bp256dh\b/i,      // p256dh key material
     /\bauth\b/i,        // auth key material/credential
   ]
+
+  it('DISABLE_FAILED_HINT does not match any sensitive pattern', () => {
+    for (const pattern of sensitivePatterns) {
+      expect(DISABLE_FAILED_HINT).not.toMatch(pattern)
+    }
+  })
 
   for (const state of ALL_STATES) {
     const copy = getNotificationCopy(state)
