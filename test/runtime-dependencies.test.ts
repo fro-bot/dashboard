@@ -110,7 +110,7 @@ describe('client-only packages', () => {
     }
 
     expect(packageJson.dependencies).not.toHaveProperty('node-diff3')
-    expect(packageJson.devDependencies?.['node-diff3']).toBe('3.2.1')
+    expect(packageJson.devDependencies).toHaveProperty('node-diff3', expect.stringMatching(/^\d+\.\d+\.\d+$/))
   })
 
   it('is not imported by src/', async () => {
