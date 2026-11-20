@@ -7,7 +7,7 @@
 #   recovery (`true` for an owner recovery of an existing authorization, else `false`),
 #   original-digest/-run-id/-attempt/-verified (for `gate`; `-verified` is `true` only once the
 #   CLI has authenticated that original attempt). All are empty when nothing is eligible.
-# Release notes are read from `docs/releases/batch.md` at `source` in the trusted checkout.
+# Release notes are read from `docs/releases/batch.md` at `source`, the squash the controller proved.
 name: Held Release
 
 on:
@@ -33,9 +33,25 @@ env:
 permissions:
   contents: read
 
-# One lock for controller and publisher. Pending runs are re-read from live state, never trusted.
+# One lock for controller and publisher, for accepted events only. GitHub assigns the group before
+# any job `if`, so a rejected event takes its own per-run key and cannot replace a waiting run.
+# Pending runs are re-read from live state, never trusted.
 concurrency:
-  group: held-release
+  group: >-
+    ${{ github.ref == 'refs/heads/main' &&
+    (github.event_name == 'push' ||
+    github.event_name == 'schedule' ||
+    (github.event_name == 'workflow_dispatch' && github.actor_id == '831617' && github.run_attempt == '1') ||
+    (github.event_name == 'workflow_run' &&
+    github.event.workflow_run.conclusion == 'success' &&
+    github.event.workflow_run.event == 'pull_request_review' &&
+    github.event.workflow_run.path == '.github/workflows/held-release-review.yaml' &&
+    github.event.workflow_run.head_branch == 'release/pending' &&
+    github.event.workflow_run.head_repository.full_name == github.repository &&
+    github.event.workflow_run.actor.id == 831617 &&
+    github.event.workflow_run.run_attempt == 1))
+    && 'held-release' ||
+    format('held-release-rejected-{0}-{1}', github.run_id, github.run_attempt) }}
   cancel-in-progress: false
 
 defaults:
@@ -45,7 +61,21 @@ defaults:
 jobs:
   controller:
     name: Release source controller
-    if: ${{ github.repository == 'fro-bot/dashboard' && github.ref == 'refs/heads/main' }}
+    # Same acceptance as the lock group: a rejected event skips before any credential.
+    if: >-
+      ${{ github.repository == 'fro-bot/dashboard' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && github.actor_id == '831617' && github.run_attempt == '1') ||
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request_review' &&
+      github.event.workflow_run.path == '.github/workflows/held-release-review.yaml' &&
+      github.event.workflow_run.head_branch == 'release/pending' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.actor.id == 831617 &&
+      github.event.workflow_run.run_attempt == 1)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -862,9 +892,9 @@ jobs:
           [ "$SEAL_DIGEST" = "$CANDIDATE_DIGEST" ] || fail "sealed evidence is for another digest"
           [ "$SEAL_RUN_ID" = "$CANDIDATE_RUN_ID" ] && [ "$SEAL_ATTEMPT" = "$CANDIDATE_ATTEMPT" ] || fail "sealed evidence is for another candidate run"
           umask 077
-          # Notes are data read from the proved commit in the trusted history; no squash code is run.
+          # Notes are data read from the squash the controller proved (CTRL_SOURCE); no squash code is run.
           notes="$RUNNER_TEMP/release-notes.md"
-          git cat-file -e "$CTRL_SOURCE^{commit}" 2> /dev/null || fail "the proved source is not in the trusted history"
+          git cat-file -e "$CTRL_SOURCE^{commit}" 2> /dev/null || fail "the proved source is not in the fetched history"
           git show "$CTRL_SOURCE:docs/releases/batch.md" > "$notes" 2> /dev/null || fail "no release notes at the proved source"
           grep -q '[^[:space:]]' "$notes" || fail "release notes are empty"
           input="$RUNNER_TEMP/publish-input.json"

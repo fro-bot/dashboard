@@ -399,7 +399,7 @@ describe('scheduled authority', () => {
     expect(result?.hold.state).not.toBe('clear')
   })
 
-  it.each(['empty', 'rival', 'unavailable', 'review', 'early'])('consumes a slot only after a complete rival scan: %s', async kind => {
+  it.each(['empty', 'own-authorization', 'rival', 'unavailable', 'review', 'early'])('consumes a slot only after a complete rival scan: %s', async kind => {
     const {api, io, mocks} = fixture()
     const scheduled = {...config, event: 'schedule' as const, schedule: '0 15 * * 3'}
     const workflow = '.github/workflows/held-release.yaml'
@@ -413,8 +413,10 @@ describe('scheduled authority', () => {
     mocks.pages.mockImplementation(async path => {
       if (path.includes('/actions/workflows/')) {
         if (kind === 'unavailable') throw new Error('offline')
+        if (kind === 'own-authorization') return [{...run, workflow_id: 4}]
         return ['rival', 'review', 'early'].includes(kind) ? [{...run, id: 6, workflow_id: 4, event: kind === 'review' ? 'workflow_run' : 'schedule', created_at: kind === 'early' ? '2026-11-18T14:00:00Z' : run.created_at}] : []
       }
+      if (path === '/actions/runs/5/artifacts') return [{id: 98, name: 'release-authorization-5-1', expired: false}]
       if (path === '/actions/runs/6/artifacts') return [{id: 99, name: 'release-authorization-6-1', expired: false}]
       return []
     })

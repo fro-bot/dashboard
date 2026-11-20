@@ -54,7 +54,7 @@ interface HeldWorkflow {
 const heldText = readFileSync(resolve(process.cwd(), '.github/workflows/held-release.yaml'), 'utf8')
 const held = parse(heldText) as HeldWorkflow
 const reviewText = readFileSync(resolve(process.cwd(), '.github/workflows/held-release-review.yaml'), 'utf8')
-const review = parse(reviewText) as {name: string; on: Record<string, unknown>; permissions: unknown; jobs: Record<string, {permissions?: unknown; steps: {uses?: string; run?: string; env?: unknown; with?: unknown}[]}>}
+const review = parse(reviewText) as {name: string; on: Record<string, unknown>; permissions: unknown; jobs: Record<string, {if?: string; permissions?: unknown; steps: {uses?: string; run?: string; env?: unknown; with?: unknown}[]}>}
 
 const SOURCE = 'a'.repeat(40)
 const OTHER = 'b'.repeat(40)
@@ -73,11 +73,19 @@ const heldStep = (job: string, id: string): HeldStep => {
   if (step === undefined) throw new Error(`step ${id} not found in job ${job}`)
   return step
 }
-const condition = (job: HeldJob) => (job.if ?? '').replaceAll(/^\$\{\{\s*|\s*\}\}$/gu, '').trim()
+const norm = (value: unknown) => String(value ?? '').replaceAll(/\s+/gu, ' ').trim()
+const condition = (job: HeldJob) => norm(job.if).replaceAll(/^\$\{\{ | \}\}$/gu, '')
 const needsOf = (job: HeldJob): string[] => (job.needs === undefined ? [] : typeof job.needs === 'string' ? [job.needs] : [...job.needs])
 const secretsIn = (value: unknown): string[] => [...new Set([...JSON.stringify(value).matchAll(/secrets\.(\w+)/gu)].map(match => match[1] ?? ''))].sort()
 const permissionKeys = (step: HeldStep) => Object.keys(step.with ?? {}).filter(name => name.startsWith('permission-'))
 const downstream = Object.keys(held.jobs).filter(name => name !== 'controller')
+
+// The one predicate behind both the lock group and the controller condition: a review wake is routed
+// only by GitHub's own run metadata. Any other event takes a private per-run key and skips the controller.
+const WAKE_RUN = ['conclusion == \'success\'', 'event == \'pull_request_review\'', 'path == \'.github/workflows/held-release-review.yaml\'', 'head_branch == \'release/pending\'', 'head_repository.full_name == github.repository', 'actor.id == 831617', 'run_attempt == 1']
+  .map(term => `github.event.workflow_run.${term}`)
+  .join(' && ')
+const ACCEPT = `github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.actor_id == '831617' && github.run_attempt == '1') || (github.event_name == 'workflow_run' && ${WAKE_RUN}))`
 
 function closure(name: string, seen = new Set<string>()): Set<string> {
   for (const need of needsOf(heldJob(name))) {
@@ -141,8 +149,11 @@ describe('held release workflow — triggers and startup', () => {
     expect(heldText).not.toMatch(/\bvars\./u)
   })
 
-  it('serializes the controller and the publisher under one group without cancelling', () => {
-    expect(held.concurrency).toEqual({group: 'held-release', 'cancel-in-progress': false})
+  it('shares one lock only for accepted events, without cancelling; every other run gets its own key', () => {
+    expect({...held.concurrency, group: norm(held.concurrency?.group)}).toEqual({
+      group: `\${{ ${ACCEPT} && 'held-release' || format('held-release-rejected-{0}-{1}', github.run_id, github.run_attempt) }}`,
+      'cancel-in-progress': false,
+    })
     for (const [name, job] of Object.entries(held.jobs)) expect(JSON.stringify(job), name).not.toContain('concurrency')
   })
 
@@ -158,13 +169,15 @@ describe('held release workflow — triggers and startup', () => {
 
   it('takes no source, version, window or approval from the event or any input but the rehearsal flag', () => {
     expect(heldText.replaceAll('inputs.prepare-only', '')).not.toMatch(/\binputs\./u)
-    expect(heldText).not.toMatch(/github\.(?:sha|ref_name|head_ref|base_ref|event\.(?:inputs|client_payload|pull_request|review|workflow_run|head_commit|before|after|schedule))/u)
+    expect(heldText).not.toMatch(/github\.(?:sha|ref_name|head_ref|base_ref|event\.(?:inputs|client_payload|pull_request|review|head_commit|before|after|schedule))/u)
     // Only the controller reads the ref, to refuse anything but main.
     for (const name of downstream) expect(JSON.stringify(heldJob(name)), name).not.toMatch(/github\.ref\b/u)
   })
 
-  it('ignores everything the triggering run carried', () => {
-    expect(heldText).not.toMatch(/download-artifact|actions\/cache|workflow_run\./u)
+  it('ignores everything the triggering run carried but its routing metadata', () => {
+    expect(heldText).not.toMatch(/download-artifact|actions\/cache/u)
+    const outside = {...held, concurrency: undefined, jobs: {...held.jobs, controller: {...heldJob('controller'), if: undefined}}}
+    expect(JSON.stringify(outside)).not.toMatch(/workflow_run\./u)
   })
 })
 
@@ -175,8 +188,12 @@ describe('held release workflow — review signal', () => {
     expect(review.on.pull_request_review).toEqual({types: ['submitted', 'dismissed']})
     expect(review.permissions).toEqual({})
     expect(Object.keys(review.jobs)).toHaveLength(1)
+    expect(norm(review.jobs.signal?.if)).toBe(
+      ["github.event.pull_request.head.ref == 'release/pending'", 'github.event.pull_request.head.repo.full_name == github.repository', "github.event.pull_request.base.ref == 'main'", 'github.event.review.user.id == 831617', "github.actor_id == '831617'"].join(' && '),
+    )
     for (const job of Object.values(review.jobs)) {
       expect(job.permissions).toEqual({})
+      expect(job.steps).toHaveLength(1)
       for (const step of job.steps) {
         expect(step.uses).toBeUndefined()
         expect(step.env).toBeUndefined()
@@ -193,7 +210,7 @@ describe('held release workflow — controller', () => {
 
   it('runs only for this repository on main, with read access and nothing more', () => {
     const controller = heldJob('controller')
-    expect(condition(controller)).toBe("github.repository == 'fro-bot/dashboard' && github.ref == 'refs/heads/main'")
+    expect(condition(controller)).toBe(`github.repository == 'fro-bot/dashboard' && ${ACCEPT}`)
     expect(controller.permissions).toEqual({contents: 'read', actions: 'read', checks: 'read', statuses: 'read', 'pull-requests': 'read', issues: 'read', packages: 'read'})
     expect(ids()).toEqual(['trusted', 'trusted-head', 'mode', 'node', 'app-token', 'inspect', 'upload', 'finish', 'emit'])
   })

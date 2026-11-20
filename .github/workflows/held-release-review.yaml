@@ -1,6 +1,6 @@
 ---
-# Wake-only signal for Held Release. It holds no context beyond the event, and the controller
-# ignores everything about this run; it re-reads live GitHub state.
+# Signal an owner review of the same-repository release/pending PR. The controller reads live
+# review state before authorizing a release.
 name: Held Release Review
 
 on:
@@ -12,6 +12,12 @@ permissions: {}
 jobs:
   signal:
     name: Signal a review change
+    if: >-
+      github.event.pull_request.head.ref == 'release/pending' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.review.user.id == 831617 &&
+      github.actor_id == '831617'
     runs-on: ubuntu-24.04
     timeout-minutes: 1
     permissions: {}
