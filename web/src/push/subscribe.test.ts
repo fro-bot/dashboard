@@ -718,6 +718,259 @@ describe('resubscribeStaleKey', () => {
   })
 })
 
+describe('abort cleanup during subscription', () => {
+  const flows = [['opt-in', subscribeOptIn], ['stale-key', resubscribeStaleKey]] as const
+
+  it.each(flows)('%s releases a subscription acquired after abort without a gateway write', async (_name, flow) => {
+    const controller = new AbortController()
+    const subscription = fakeSubscription()
+    const registration = fakeRegistration(subscription)
+    registration.subscribeMock.mockImplementation(async () => {
+      controller.abort()
+      return subscription
+    })
+    const pushClient = fakePushClient()
+    const outcome = await flow({
+      serviceWorkerReady: async () => registration,
+      getSupport: () => ({supported: true, needsInstall: false}),
+      getPermission: () => 'granted',
+      requestPermission: async () => 'granted',
+      pushClient,
+      signal: controller.signal,
+    })
+    expect(outcome).toEqual({kind: 'aborted'})
+    expect(subscription.unsubscribeMock).toHaveBeenCalledTimes(1)
+    expect(pushClient.subscribePush).not.toHaveBeenCalled()
+    expect(pushClient.unsubscribePush).not.toHaveBeenCalled()
+  })
+
+  it.each(['existing', 'read failure'] as const)('opt-in preserves a subscription after %s on abort', async state => {
+    const controller = new AbortController()
+    const subscription = fakeSubscription()
+    const registration = fakeRegistration(subscription)
+    registration.pushManager.getSubscription = state === 'existing'
+      ? vi.fn().mockResolvedValue(fakeSubscription(subscription.endpoint))
+      : vi.fn().mockRejectedValue(new Error('read failed'))
+    registration.subscribeMock.mockImplementation(async () => {
+      controller.abort()
+      return subscription
+    })
+    const pushClient = fakePushClient()
+    expect(await subscribeOptIn({
+      serviceWorkerReady: async () => registration,
+      getSupport: () => ({supported: true, needsInstall: false}),
+      getPermission: () => 'granted',
+      requestPermission: async () => 'granted',
+      pushClient,
+      signal: controller.signal,
+    })).toEqual({kind: 'aborted'})
+    expect(subscription.unsubscribeMock).not.toHaveBeenCalled()
+    expect(pushClient.subscribePush).not.toHaveBeenCalled()
+    expect(pushClient.unsubscribePush).not.toHaveBeenCalled()
+  })
+
+  it('opt-in still subscribes normally if the ownership read fails', async () => {
+    const subscription = fakeSubscription()
+    const registration = fakeRegistration(subscription)
+    registration.pushManager.getSubscription = vi.fn().mockRejectedValue(new Error('read failed'))
+    const pushClient = fakePushClient()
+    expect(await subscribeOptIn({
+      serviceWorkerReady: async () => registration,
+      getSupport: () => ({supported: true, needsInstall: false}),
+      getPermission: () => 'granted',
+      requestPermission: async () => 'granted',
+      pushClient,
+    })).toEqual({kind: 'subscribed'})
+    expect(pushClient.subscribePush).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['existing', 'read failure'] as const)('stale-key preserves a possibly reused subscription after %s', async state => {
+    const controller = new AbortController()
+    const old = fakeSubscription()
+    const reused = fakeSubscription(old.endpoint)
+    const registration = fakeRegistration(reused)
+    const read = vi.fn().mockResolvedValueOnce(old)
+    if (state === 'existing') read.mockResolvedValueOnce(fakeSubscription(old.endpoint))
+    else read.mockRejectedValueOnce(new Error('read failed'))
+    registration.pushManager.getSubscription = read
+    registration.subscribeMock.mockImplementation(async () => {
+      controller.abort()
+      return reused
+    })
+    const pushClient = fakePushClient()
+    expect(await resubscribeStaleKey({serviceWorkerReady: async () => registration, requestPermission: async () => 'granted', pushClient, signal: controller.signal})).toEqual({kind: 'aborted'})
+    expect(old.unsubscribeMock).toHaveBeenCalledTimes(1)
+    expect(reused.unsubscribeMock).not.toHaveBeenCalled()
+    expect(pushClient.subscribePush).not.toHaveBeenCalled()
+    expect(pushClient.unsubscribePush).not.toHaveBeenCalled()
+  })
+
+  it('stale-key cleans up the replacement after removing the old subscription and aborting', async () => {
+    const controller = new AbortController()
+    const old = fakeSubscription('https://push.example/old')
+    const replacement = fakeSubscription('https://push.example/new')
+    let current: MinimalPushSubscription | null = old
+    old.unsubscribeMock.mockImplementation(async () => {
+      current = null
+      return true
+    })
+    const registration = fakeRegistration(replacement)
+    registration.pushManager.getSubscription = vi.fn().mockImplementation(async () => current)
+    registration.subscribeMock.mockImplementation(async () => {
+      current = replacement
+      controller.abort()
+      return replacement
+    })
+    const pushClient = fakePushClient()
+
+    expect(await resubscribeStaleKey({serviceWorkerReady: async () => registration, requestPermission: async () => 'granted', pushClient, signal: controller.signal})).toEqual({kind: 'aborted'})
+    expect(registration.pushManager.getSubscription).toHaveBeenCalledTimes(2)
+    expect(old.unsubscribeMock).toHaveBeenCalledTimes(1)
+    expect(replacement.unsubscribeMock).toHaveBeenCalledTimes(1)
+    expect(pushClient.subscribePush).not.toHaveBeenCalled()
+    expect(pushClient.unsubscribePush).not.toHaveBeenCalled()
+  })
+
+  it.each(['absent', 'existing', 'read failure'] as const)(
+    'stale-key retry uses the %s ownership read when aborting during acquisition',
+    async state => {
+      const controller = new AbortController()
+      const subscription = fakeSubscription()
+      const registration = fakeRegistration(subscription)
+      const read = vi.fn().mockResolvedValueOnce(null)
+      if (state === 'absent') read.mockResolvedValueOnce(null)
+      else if (state === 'existing') read.mockResolvedValueOnce(fakeSubscription(subscription.endpoint))
+      else read.mockRejectedValueOnce(new Error('read failed'))
+      registration.pushManager.getSubscription = read
+      registration.subscribeMock.mockRejectedValueOnce(new Error('subscribe failed')).mockImplementationOnce(async () => {
+        controller.abort()
+        return subscription
+      })
+      const pushClient = fakePushClient()
+
+      expect(await resubscribeStaleKey({serviceWorkerReady: async () => registration, requestPermission: async () => 'granted', pushClient, signal: controller.signal})).toEqual({kind: 'aborted'})
+      expect(read).toHaveBeenCalledTimes(2)
+      expect(registration.subscribeMock).toHaveBeenCalledTimes(2)
+      expect(subscription.unsubscribeMock).toHaveBeenCalledTimes(state === 'absent' ? 1 : 0)
+      expect(pushClient.subscribePush).not.toHaveBeenCalled()
+      expect(pushClient.unsubscribePush).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(flows)('%s releases on abort during CSRF even if refresh fails', async (_name, flow) => {
+    const controller = new AbortController()
+    const subscription = fakeSubscription()
+    const pushClient = fakePushClient({refreshCsrf: vi.fn().mockImplementation(async () => {
+      controller.abort()
+      return err({kind: 'network'})
+    })})
+    expect(await flow({
+      serviceWorkerReady: async () => fakeRegistration(subscription),
+      getSupport: () => ({supported: true, needsInstall: false}),
+      getPermission: () => 'granted',
+      requestPermission: async () => 'granted',
+      pushClient,
+      signal: controller.signal,
+    })).toEqual({kind: 'aborted'})
+    expect(subscription.unsubscribeMock).toHaveBeenCalledTimes(1)
+    expect(pushClient.subscribePush).not.toHaveBeenCalled()
+    expect(pushClient.unsubscribePush).not.toHaveBeenCalled()
+  })
+
+  it.each(flows)('%s releases when a successful initial POST races abort', async (_name, flow) => {
+    const controller = new AbortController()
+    const subscription = fakeSubscription()
+    const pushClient = fakePushClient({subscribePush: vi.fn().mockImplementation(async () => {
+      controller.abort()
+      return ok(undefined)
+    })})
+    expect(await flow({
+      serviceWorkerReady: async () => fakeRegistration(subscription),
+      getSupport: () => ({supported: true, needsInstall: false}),
+      getPermission: () => 'granted',
+      requestPermission: async () => 'granted',
+      pushClient,
+      signal: controller.signal,
+    })).toEqual({kind: 'aborted'})
+    expect(subscription.unsubscribeMock).toHaveBeenCalledTimes(1)
+    expect(pushClient.subscribePush).toHaveBeenCalledTimes(1)
+    expect(pushClient.unsubscribePush).not.toHaveBeenCalled()
+  })
+
+  it('stale-key preserves the old subscription if VAPID lookup aborts', async () => {
+    const controller = new AbortController()
+    const old = fakeSubscription()
+    const registration = fakeRegistration(fakeSubscription())
+    registration.pushManager.getSubscription = vi.fn().mockResolvedValue(old)
+    const pushClient = fakePushClient({getVapidKey: vi.fn().mockImplementation(async () => {
+      controller.abort()
+      return ok({pushDisabled: false, vapidKey: VAPID})
+    })})
+    expect(await resubscribeStaleKey({serviceWorkerReady: async () => registration, requestPermission: async () => 'granted', pushClient, signal: controller.signal})).toEqual({kind: 'aborted'})
+    expect(old.unsubscribeMock).not.toHaveBeenCalled()
+    expect(registration.subscribeMock).not.toHaveBeenCalled()
+    expect(pushClient.unsubscribePush).not.toHaveBeenCalled()
+  })
+
+  it('stale-key abort during retry CSRF does not retry POST', async () => {
+    const controller = new AbortController()
+    const subscription = fakeSubscription()
+    const refreshCsrf = vi.fn().mockResolvedValueOnce(ok('csrf')).mockImplementationOnce(async () => {
+      controller.abort()
+      return err({kind: 'network'})
+    })
+    const pushClient = fakePushClient({refreshCsrf, subscribePush: vi.fn().mockResolvedValue(err({kind: 'http', status: 400}))})
+    expect(await resubscribeStaleKey({serviceWorkerReady: async () => fakeRegistration(subscription), requestPermission: async () => 'granted', pushClient, signal: controller.signal})).toEqual({kind: 'aborted'})
+    expect(subscription.unsubscribeMock).toHaveBeenCalledTimes(1)
+    expect(pushClient.subscribePush).toHaveBeenCalledTimes(1)
+    expect(pushClient.unsubscribePush).not.toHaveBeenCalled()
+  })
+
+  it('browser client does not issue a retry POST when abort arrives during CSRF refresh', async () => {
+    const controller = new AbortController()
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(null, {status: 400})).mockImplementationOnce(async () => {
+      controller.abort()
+      return new Response(JSON.stringify({csrfToken: 'fresh'}), {status: 200})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const result = await buildPushClient().subscribePush({}, 'csrf', 'key', controller.signal)
+      expect(result.success).toBe(false)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('browser client does not issue an initial POST for an already aborted signal', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, {status: 200}))
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const result = await buildPushClient().subscribePush({}, 'csrf', 'key', controller.signal)
+      expect(result.success).toBe(false)
+      expect(fetchMock).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('stale-key abort on successful retry POST releases the new subscription', async () => {
+    const controller = new AbortController()
+    const subscription = fakeSubscription()
+    const subscribePush = vi.fn().mockResolvedValueOnce(err({kind: 'network'})).mockImplementationOnce(async () => {
+      controller.abort()
+      return ok(undefined)
+    })
+    const pushClient = fakePushClient({subscribePush})
+    expect(await resubscribeStaleKey({serviceWorkerReady: async () => fakeRegistration(subscription), requestPermission: async () => 'granted', pushClient, signal: controller.signal})).toEqual({kind: 'aborted'})
+    expect(subscription.unsubscribeMock).toHaveBeenCalledTimes(1)
+    expect(subscribePush).toHaveBeenCalledTimes(2)
+    expect(pushClient.unsubscribePush).not.toHaveBeenCalled()
+  })
+})
+
 describe('unsubscribeOptOut', () => {
   it('local unsubscribe + Gateway unsubscribe when an endpoint is available', async () => {
     const subscription = fakeSubscription()
