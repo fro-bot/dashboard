@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   bareToolName,
@@ -1007,33 +1007,44 @@ describe('fast skip while the warm-up is pending (createHook)', () => {
   }
 
   it('skips at once, without waiting or spawning, on every call after one has seen the warm-up pending', async () => {
-    const warm = deferred<boolean>()
-    const calls: unknown[][] = []
-    const hook = createHook({
-      runDetector: fakeRunner(ok(envelope('found')), calls),
-      worktree: '/repo',
-      warmEngine: () => warm.promise,
-      engineReadyWaitMs: 300,
-    })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const warm = deferred<boolean>()
+      const calls: unknown[][] = []
+      const hook = createHook({
+        runDetector: fakeRunner(ok(envelope('found')), calls),
+        worktree: '/repo',
+        warmEngine: () => warm.promise,
+        engineReadyWaitMs: 300,
+      })
 
-    const first = makeOutput()
-    const firstMs = await timed(() => hook(makeInput(), first))
-    expect(firstMs).toBeGreaterThanOrEqual(250)
-    expect(first.output).toContain('still downloading')
+      const first = makeOutput()
+      const firstCall = hook(makeInput(), first)
+      await vi.advanceTimersByTimeAsync(300)
+      await firstCall
+      expect(first.output).toContain('still downloading')
 
-    for (let i = 0; i < 2; i += 1) {
-      const output = makeOutput()
-      const elapsedMs = await timed(() => hook(makeInput(), output))
-      expect(elapsedMs).toBeLessThan(50)
-      expect(output.output).toBe('ok')
+      for (let i = 0; i < 2; i += 1) {
+        const output = makeOutput()
+        let settled = false
+        const repeat = hook(makeInput(), output).then(() => { settled = true })
+        await vi.advanceTimersByTimeAsync(0)
+        expect(settled).toBe(true)
+        await repeat
+        expect(output.output).toBe('ok')
+      }
+      expect(calls).toHaveLength(0)
+
+      warm.resolve(true)
+      await vi.advanceTimersByTimeAsync(0)
+      const after = makeOutput()
+      await hook(makeInput(), after)
+      expect(calls).toHaveLength(1)
+      expect(after.output).toContain('found')
     }
-    expect(calls).toHaveLength(0)
-
-    warm.resolve(true)
-    const after = makeOutput()
-    await hook(makeInput(), after)
-    expect(calls).toHaveLength(1)
-    expect(after.output).toContain('found')
+    finally {
+      vi.useRealTimers()
+    }
   })
 
   it('applies the engine-unavailable and retry logic when a warm-up that was seen pending then fails', async () => {
