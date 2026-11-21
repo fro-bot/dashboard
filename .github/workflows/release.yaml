@@ -144,8 +144,11 @@ jobs:
           IMG="ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}"
           docker network create smoke-net
           COOKIE_KEY=$(openssl rand -hex 32)
+          DASHBOARD_LISTENER_INGEST_KEY=$(openssl rand -hex 32)
+          export DASHBOARD_LISTENER_INGEST_KEY
           docker run -d --name dashboard-smoke --network smoke-net \
             -e DASHBOARD_COOKIE_KEY="$COOKIE_KEY" -e DASHBOARD_OPERATOR_LOGIN=smoke-test \
+            -e DASHBOARD_LISTENER_DB=:memory: -e DASHBOARD_LISTENER_INGEST_KEY \
             -p 127.0.0.1:8080:3000 "$IMG"
           # poll host-published port (catches 127.0.0.1 bind regression)
           ok=0
@@ -163,6 +166,17 @@ jobs:
               >/dev/null 2>&1; then sib=1; fi
           if [ "$ok" != 1 ] || [ "$sib" != 1 ]; then
             echo "SMOKE FAILED (host_port_ok=$ok sibling_ok=$sib)"
+            docker logs dashboard-smoke || true
+            exit 1
+          fi
+          # An unsigned request must reach the enabled listener and be rejected.
+          if ! listener_status=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8080/api/listener/ingest); then
+            echo "SMOKE FAILED: listener ingest request failed"
+            docker logs dashboard-smoke || true
+            exit 1
+          fi
+          if [ "$listener_status" != 401 ]; then
+            echo "SMOKE FAILED: listener ingest returned $listener_status, expected 401"
             docker logs dashboard-smoke || true
             exit 1
           fi
