@@ -24,16 +24,22 @@ tags: [caddy, reverse-proxy, rewrite, public-route, extensionless, false-green, 
 
 # A reverse proxy in another repo rewrote every extensionless path, so a correct public route was unreachable
 
+## Current routing
+
+The [Caddyfile in infra](https://github.com/marcusrbrown/infra/blob/main/apps/dashboard/config/Caddyfile) forwards `/operator/*` to the gateway. It forwards all other paths to `dashboard:3000` without rewriting them. The dashboard owns access and path handling for those requests. A new public URL outside `/operator/*` does not need a Caddy rule just because it has no file extension.
+
+The [infra routing change](https://github.com/marcusrbrown/infra/pull/1564) removed both the rewrite and the `/privacy` exception described below.
+
 ## Problem
 
 A public, unauthenticated privacy policy page shipped at `/privacy` ([#238](https://github.com/fro-bot/dashboard/issues/238), [#496](https://github.com/fro-bot/dashboard/pull/496), release `2026.09.13`). The route was correct in the application, passed every gate, and deployed cleanly — and returned `302` to the operator login in production.
 
-The cause was not in this repository. Caddy, configured in `marcusrbrown/infra`, rewrites every extensionless path to `/` before proxying. `GET /privacy` arrived at the dashboard as `GET /`, which is correctly behind auth.
+The cause was not in this repository. At the time, Caddy's fallback rewrote requests such as `/privacy` to `/` before forwarding them. The dashboard received `GET /` and correctly redirected it to login.
 
-## Symptoms
+## Incident symptoms
 
 - `GET /privacy` → `302` to `/operator/auth/github/start?return_to=/operator` in production; `200` locally.
-- `GET /privacy.html` → `302`, while `/sw.js`, `/manifest.webmanifest` and `/assets/*.css` → `200`. The asymmetry is the clue: paths **with** a file extension work.
+- `GET /privacy.html` → `302`, while `/sw.js`, `/manifest.webmanifest` and `/assets/*.css` → `200`. The old proxy let requests with a file extension through unchanged. That did not make every such path public in the app.
 - All CI gates green. Deploy green, digest matched, container healthy.
 - The production service worker contained the new `/privacy` navigation denylist, and the CSS chunk had renamed `index-*.css` → `src-*.css` — a fingerprint that only appears once the Vite build has two HTML entries. The client half of the image was provably current.
 
@@ -49,9 +55,9 @@ Four wrong turns, in order. The invalid inferences cost more than the fix did.
 
 - **Overclaimed an earlier browser verification.** A real-browser check had confirmed the service worker did not intercept the route — against a **local dev server with no proxy in front**. It was recorded as end-to-end proof when it only ever covered two of three layers.
 
-## Solution
+## Historical fix
 
-The fix is in `marcusrbrown/infra` → `apps/dashboard/config/Caddyfile`, added **before** the catch-all:
+The fix at the time added an exact path exception before the fallback rule in `apps/dashboard/config/Caddyfile`:
 
 ```caddyfile
 @privacy path /privacy /privacy/
@@ -60,9 +66,9 @@ handle @privacy {
 }
 ```
 
-Exact paths, not `/privacy*`. A prefix match would also pass `/privacy-anything` through unrewritten, widening the public surface beyond what the app's own allowlist permits.
+The exception matched only `/privacy` and `/privacy/`. A prefix match such as `/privacy*` also matches unrelated paths, and the app still controls which paths are public.
 
-The offending catch-all, for reference:
+The old rules that caused the incident:
 
 ```caddyfile
 @assets path_regexp \.[A-Za-z0-9]+$
@@ -73,7 +79,7 @@ handle {
 }
 ```
 
-### The diagnostic that actually worked
+## Diagnosis
 
 Probe the app **from inside the container**, bypassing the proxy entirely:
 
@@ -82,7 +88,7 @@ docker exec "$(docker compose ps -q dashboard)" node -e \
   "fetch('http://127.0.0.1:3000/privacy').then(r => console.log(r.status))"
 ```
 
-`200` inside and `302` outside localises the fault to the edge in one step. This should be the second move, not the seventh.
+In this incident, the direct request returned `200` and the request through Caddy returned `302`. That difference pointed to the proxy path rather than the app route.
 
 To prove the shipped artifact itself is correct without a local Docker daemon, read it straight out of the registry:
 
@@ -93,34 +99,31 @@ tar -xf flat.tar app/src/server.ts app/web/dist/privacy.html
 
 Read the Caddyfile on the **running host**, not the copy in the repo — they can differ.
 
-## Why This Works
+## Layers to check
 
-Three interception layers sit between a visitor and this application, and each can independently make a route non-public:
+Three layers affect whether a visitor can reach a public route:
 
 | Layer | Where | Owned by |
 |---|---|---|
 | Auth allowlist (`isPublicPath`) | `src/server.ts` | this repo |
 | Service worker navigation denylist | `web/src/sw.ts` | this repo |
-| Reverse-proxy path rewrite | `apps/dashboard/config/Caddyfile` | `marcusrbrown/infra` |
+| Reverse-proxy routing | `apps/dashboard/config/Caddyfile` | `marcusrbrown/infra` |
 
-A public extensionless route needs a change at all three. This repository can only test the first two, so nothing here could have caught the third.
+The old `@assets` rule let URLs with an extension through unchanged. Working assets did not prove that `/privacy` reached the app unchanged. The current proxy does not make that distinction. App and browser checks run without Caddy cannot prove that the deployed proxy sends the request to the right service.
 
-The trap stays invisible until someone adds a clean URL: any public path **with** a file extension satisfies the `@assets` regex and reaches the app unrewritten, so layers 1 and 2 alone are sufficient for it. Extensionless paths are the only ones that reach the rewrite.
-
-One asymmetry is worth knowing when verifying: an **unauthenticated** visitor never registers the service worker at all, because `/` redirects to GitHub before any dashboard document loads — `navigator.serviceWorker.getRegistrations()` returns `[]` on production for a fresh visitor. Layer 2 therefore only binds for an operator who has authenticated and has an active worker. A public page can be confirmed reachable for anonymous visitors without ever exercising the service-worker layer, so confirming one says nothing about the other.
+A service worker can serve the cached app shell instead of passing a navigation request to the server. A fresh anonymous browser tests public access. A browser with an active service worker tests whether the worker passes the request through. Test both when the route must work in both states.
 
 ## Prevention
 
 - **Verify the public URL, not the local one.** The acceptance check for a public route is `curl` against the deployed origin with no session, plus a real browser. A local dev server has no proxy in front of it and cannot prove reachability.
 - **Bisect app versus edge before theorising.** In-container probe first. It is one command and it eliminates half the search space.
 - **Never infer the upstream from response headers.** Two Hono services behind one proxy emit near-identical security headers. Identify the upstream by routing config or by probing each directly.
-- **Treat a clean URL as a cross-repo change.** Adding an extensionless public path requires a Caddyfile handle in `marcusrbrown/infra`, landed and deployed, or the route is dead on arrival.
-- **Prefer exact-match path rules at the edge**, mirroring the app's own allowlist discipline. A prefix rule silently widens the public surface.
-- There are currently **no routing assertions on the Caddyfile**. `apps/dashboard/docker-compose.test.ts` references the file but asserts nothing about `handle` or `rewrite`, so this class of gap produces no signal. Tracked at [marcusrbrown/infra#1378](https://github.com/marcusrbrown/infra/issues/1378).
+- Keep the app's public path rules exact. If local and deployed results differ, compare the deployed Caddyfile with the source before adding an exception.
+- The [infra routing tests](https://github.com/marcusrbrown/infra/blob/main/apps/dashboard/config/Caddyfile.test.ts) cover the gateway split, the dashboard fallback, and the absence of a `rewrite` directive. These tests inspect the source file, not the running proxy.
 
 ## Related Issues
 
-- [marcusrbrown/infra#1378](https://github.com/marcusrbrown/infra/issues/1378) — the Caddy rewrite and the missing routing assertions.
+- [marcusrbrown/infra#1378](https://github.com/marcusrbrown/infra/issues/1378) — the closed incident for the original Caddy rewrite.
 - [fro-bot/dashboard#238](https://github.com/fro-bot/dashboard/issues/238) — the privacy policy this surfaced through.
 - `docs/solutions/workflow-issues/pwa-service-worker-registration-invisible-to-unit-tests-2026-06-25.md` — same false-green family. Its lesson that browser verification is required still holds; this narrows it, because browser verification only covers repo-owned layers.
 - `docs/solutions/workflow-issues/unit-green-is-not-feature-done-verify-the-assembled-surface-2026-06-23.md` — the umbrella lesson. The assembled surface now has to mean the deployed surface, including layers another repository owns.
