@@ -43,6 +43,32 @@ function permissionInputs(step: Step): Record<string, unknown> {
   return Object.fromEntries(Object.entries(step.with ?? {}).filter(([name]) => name.startsWith('permission-')))
 }
 
+describe('release workflow — shell expressions', () => {
+  const directStepExpression = /\$\{\{\s*steps\b/iu
+
+  it('detects direct step output expressions with dot and bracket access', () => {
+    const expression = (access: string) => `\${{ ${access} }}`
+    const expressions = [
+      'steps.build.outputs.digest',
+      "steps['build'].outputs.digest",
+      "steps.build['outputs'].digest",
+      "steps.build.outputs['digest']",
+      "steps['build']['outputs']['digest']",
+    ].map(expression)
+    expect(expressions.filter(expression => !directStepExpression.test(expression))).toEqual([])
+    expect(directStepExpression.test(expression('github.sha'))).toBe(false)
+  })
+
+  it('does not interpolate the steps context directly into release shell scripts', () => {
+    const release = workflow.jobs.release
+    if (release === undefined) throw new Error('release job not found')
+    const offending = release.steps
+      .filter(step => directStepExpression.test(step.run ?? ''))
+      .map(step => step.name ?? step.id)
+    expect(offending).toEqual([])
+  })
+})
+
 describe('release workflow — listener smoke test', () => {
   it('enables the listener and requires an unsigned ingest request to return 401', () => {
     const step = workflow.jobs.release?.steps.find(candidate => candidate.name === '🧪 Smoke-test candidate image by digest')
