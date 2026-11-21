@@ -172,10 +172,12 @@ jobs:
           # An unsigned request must reach the enabled listener and be rejected.
           if ! listener_status=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8080/api/listener/ingest); then
             echo "SMOKE FAILED: listener ingest request failed"
+            docker logs dashboard-smoke || true
             exit 1
           fi
           if [ "$listener_status" != 401 ]; then
             echo "SMOKE FAILED: listener ingest returned $listener_status, expected 401"
+            docker logs dashboard-smoke || true
             exit 1
           fi
           # Verify the SPA web/dist/ was built into the image and is served.
