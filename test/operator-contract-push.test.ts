@@ -1,7 +1,11 @@
-import {describe, expect, it} from 'vitest'
+import type {PushInactiveReason} from '../src/gateway/operator-contract/index.ts'
+import type {PushInactiveReason as BrowserPushInactiveReason} from '../web/src/push/push-types.ts'
+import {describe, expect, expectTypeOf, it} from 'vitest'
 import {parsePushSubscriptionListResponse} from '../src/gateway/operator-contract/index.ts'
+import {VALID_PUSH_INACTIVE_REASONS} from '../web/src/push/push-types.ts'
 
 const HASH = 'a'.repeat(64)
+const INACTIVE_REASONS = ['unsubscribed', 'dead', 'revoked', 'session-revoked'] as const
 
 function wireRecord(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -52,7 +56,13 @@ describe('parsePushSubscriptionListResponse', () => {
     expect(result.success && result.data.subscriptions).toEqual([valid])
   })
 
-  it.each(['unsubscribed', 'dead', 'revoked', 'session-revoked'])('keeps inactiveReason %s', reason => {
+  it('keeps browser and server inactive reasons in sync', () => {
+    expectTypeOf<(typeof INACTIVE_REASONS)[number]>().toEqualTypeOf<PushInactiveReason>()
+    expectTypeOf<BrowserPushInactiveReason>().toEqualTypeOf<PushInactiveReason>()
+    expect(VALID_PUSH_INACTIVE_REASONS).toEqual(new Set(INACTIVE_REASONS))
+  })
+
+  it.each(INACTIVE_REASONS)('keeps inactiveReason %s', reason => {
     const record = wireRecord({active: false, inactiveReason: reason})
     const result = parsePushSubscriptionListResponse({subscriptions: [record]})
 
