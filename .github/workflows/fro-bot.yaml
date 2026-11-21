@@ -330,6 +330,38 @@ jobs:
         )
       )
     steps:
+      - name: Resolve trusted PR comment head
+        id: prehead
+        if: ${{ github.event_name == 'issue_comment' && github.event.issue.pull_request != null }}
+        env:
+          GH_TOKEN: ${{ secrets.FRO_BOT_PAT }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          COMMENTER: ${{ github.event.comment.user.login }}
+          COMMENTER_TYPE: ${{ github.event.comment.user.type }}
+        run: |
+          set -euo pipefail
+          [[ "$EVENT_NAME" == issue_comment && "$PR_NUMBER" =~ ^[1-9][0-9]*$ && "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && -n "$DEFAULT_BRANCH" ]] || exit 0
+          [[ "$COMMENTER_TYPE" == User && "$COMMENTER" =~ ^[A-Za-z0-9-]+$ && ! "$COMMENTER" =~ ^[Ff][Rr][Oo]-[Bb][Oo][Tt]$ ]] || exit 0
+          permission=$(gh api "repos/$REPOSITORY/collaborators/$COMMENTER/permission" 2>/dev/null) || { echo '::warning::Permission lookup failed; using reply-only fallback'; exit 0; }
+          jq -se 'length == 1 and (.[0].permission == "admin" or .[0].permission == "write")' <<< "$permission" >/dev/null 2>&1 || exit 0
+          pr=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" 2>/dev/null) || { echo '::warning::PR lookup failed; using reply-only fallback'; exit 0; }
+          sha=$(jq -ser --arg repo "$REPOSITORY" --arg base "$DEFAULT_BRANCH" '
+            select(length == 1) | .[0] |
+            select(.state == "open" and .user.type == "User" and
+              (.user.login | type == "string" and length > 0) and
+              (.user.login | ascii_downcase != "fro-bot" and (endswith("[bot]") | not)) and
+              .head.repo.fork == false and .head.repo.full_name == $repo and
+              .base.repo.full_name == $repo and .base.ref == $base and
+              (.head.ref | type == "string" and length > 0) and
+              .head.ref != $base and .head.ref != "release/pending" and
+              (.head.sha | type == "string" and length == 40 and test("^[0-9a-f]{40}$"))) | .head.sha
+          ' <<< "$pr" 2>/dev/null) || exit 0
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || exit 0
+          printf 'ref=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -337,14 +369,20 @@ jobs:
           # The agent never gets the checkout credential; with isolate-agent it pushes through the
           # Action's gh-backed credential helper.
           persist-credentials: false
-          # Always check out the default/workflow ref — never PR-head code. On
-          # issue_comment the fork guard cannot see PR fork status (the event has
-          # no github.event.pull_request), so checking out refs/pull/<n>/head would
-          # run fork-controlled code with FRO_BOT_PAT present. Default checkout
-          # closes that secret-exfiltration vector.
+          # Empty ref preserves the normal default checkout for all other routes.
+          ref: ${{ steps.prehead.outputs.ref }}
           token: ${{ secrets.FRO_BOT_PAT }}
 
+      - name: Verify trusted checkout
+        id: verify-head
+        if: ${{ steps.prehead.outputs.ref != '' }}
+        env:
+          TRUSTED_HEAD_SHA: ${{ steps.prehead.outputs.ref }}
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$TRUSTED_HEAD_SHA" ]] || { echo '::error::Trusted checkout HEAD mismatch'; exit 1; }
+
       - name: 📦 Setup
+        if: ${{ steps.prehead.outputs.ref == '' }}
         uses: ./.github/actions/setup
 
       - name: Run Fro Bot
@@ -361,6 +399,8 @@ jobs:
             }}
         with:
           isolate-agent: 'true'
+          trusted-head-sha: ${{ steps.prehead.outputs.ref }}
+          brokered-push-extra-paths: web/src,test
           github-token: ${{ secrets.FRO_BOT_PAT }}
           # Scheduled runs need branch-pr; this workflow has no caller-side PR step.
           # Scope it to those triggers so other events stay on auto.
