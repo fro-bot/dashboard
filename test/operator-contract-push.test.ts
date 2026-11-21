@@ -1,4 +1,5 @@
 import type {PushInactiveReason} from '../src/gateway/operator-contract/index.ts'
+import type {PushInactiveReason as BrowserPushInactiveReason} from '../web/src/push/push-types.ts'
 import {describe, expect, expectTypeOf, it} from 'vitest'
 import {parsePushSubscriptionListResponse} from '../src/gateway/operator-contract/index.ts'
 import {VALID_PUSH_INACTIVE_REASONS} from '../web/src/push/push-types.ts'
@@ -57,6 +58,7 @@ describe('parsePushSubscriptionListResponse', () => {
 
   it('keeps browser and server inactive reasons in sync', () => {
     expectTypeOf<(typeof INACTIVE_REASONS)[number]>().toEqualTypeOf<PushInactiveReason>()
+    expectTypeOf<BrowserPushInactiveReason>().toEqualTypeOf<PushInactiveReason>()
     expect(VALID_PUSH_INACTIVE_REASONS).toEqual(new Set(INACTIVE_REASONS))
   })
 
