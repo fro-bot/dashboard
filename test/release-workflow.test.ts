@@ -1,5 +1,5 @@
 /**
- * Pins the token scoping and ref gating in .github/workflows/release.yaml.
+ * Pins token scoping, ref gating, and listener smoke coverage in .github/workflows/release.yaml.
  *
  * The publication token is minted from a GitHub App whose installation is broader than the
  * release needs, so the mint-time `permission-*` and `repositories` inputs are the only thing
@@ -14,6 +14,7 @@ import {describe, expect, it} from 'vitest'
 import {parse} from 'yaml'
 
 interface Step {
+  readonly name?: string
   readonly id?: string
   readonly uses?: string
   readonly with?: Record<string, unknown>
@@ -41,6 +42,24 @@ function mintStep(job: string, id: string): Step {
 function permissionInputs(step: Step): Record<string, unknown> {
   return Object.fromEntries(Object.entries(step.with ?? {}).filter(([name]) => name.startsWith('permission-')))
 }
+
+describe('release workflow — listener smoke test', () => {
+  it('enables the listener and requires an unsigned ingest request to return 401', () => {
+    const step = workflow.jobs.release?.steps.find(candidate => candidate.name === '🧪 Smoke-test candidate image by digest')
+    const script = step?.run ?? ''
+    const request = script.split('\n').find(line => line.includes('/api/listener/ingest')) ?? ''
+    expect(script).toMatch(/DASHBOARD_LISTENER_INGEST_KEY=\$\(openssl rand -hex 32\)/u)
+    expect(script).toMatch(/export DASHBOARD_LISTENER_INGEST_KEY/u)
+    expect(script).toMatch(/-e DASHBOARD_LISTENER_DB=:memory:/u)
+    expect(script).toMatch(/-e DASHBOARD_LISTENER_INGEST_KEY(?:\s|\\)/u)
+    expect(request).toContain('curl ')
+    expect(request).toContain('--max-time 5')
+    expect(request).toContain('-X POST')
+    expect(request).toContain("-d '{}'")
+    expect(request).toContain('http://127.0.0.1:8080/api/listener/ingest')
+    expect(script).toMatch(/\[ "\$listener_status" != 401 \]/u)
+  })
+})
 
 describe('release workflow — publication token', () => {
   const step = mintStep('release', 'app-token')
