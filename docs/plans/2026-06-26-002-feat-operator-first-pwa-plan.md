@@ -1,5 +1,5 @@
 ---
-title: feat: Make dashboard operator-first PWA
+title: 'feat: Make dashboard operator-first PWA'
 type: feat
 status: active
 date: 2026-06-26

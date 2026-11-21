@@ -1,5 +1,5 @@
 ---
-title: feat: De-mock operator run index
+title: 'feat: De-mock operator run index'
 type: feat
 status: active
 date: 2026-06-26
