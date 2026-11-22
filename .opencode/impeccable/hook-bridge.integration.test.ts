@@ -703,10 +703,10 @@ interface StalledDownload {
 /**
  * Runs `body` against a launcher whose first-use engine download never
  * finishes: the server accepts the request and never answers, so the
- * launcher's curl waits. Only the launcher and its VERSION file are copied, so
- * the sibling engine binary is absent and the launcher takes its download
- * path. HOME and the cache root are temporary so a cached engine on this
- * machine is not used.
+ * launcher's curl waits. The launcher, VERSION, and checksum manifest are
+ * copied without the sibling engine binary, so the launcher takes its verified
+ * download path. HOME and the cache root are temporary so a cached engine on
+ * this machine is not used.
  */
 async function withStalledDownload(body: (download: StalledDownload) => Promise<void>): Promise<void> {
   const marker = `cold-download-${randomUUID()}`
@@ -721,8 +721,11 @@ async function withStalledDownload(body: (download: StalledDownload) => Promise<
   const scriptsDir = join(worktree(), 'cold-skill', 'scripts')
   mkdirSync(scriptsDir, { recursive: true })
   const launcher = join(scriptsDir, 'impeccable')
-  copyFileSync(join(REPO_ROOT, HOOK_LAUNCHER_RELATIVE_PATH), launcher)
-  writeFileSync(join(scriptsDir, 'VERSION'), '0.0.0\n', 'utf-8')
+  const vendoredScriptsDir = dirname(join(REPO_ROOT, HOOK_LAUNCHER_RELATIVE_PATH))
+  copyFileSync(join(vendoredScriptsDir, 'impeccable'), launcher)
+  copyFileSync(join(vendoredScriptsDir, 'VERSION'), join(scriptsDir, 'VERSION'))
+  copyFileSync(join(vendoredScriptsDir, 'engine-checksums.txt'), join(scriptsDir, 'engine-checksums.txt'))
+  const version = readFileSync(join(scriptsDir, 'VERSION'), 'utf-8').trim()
   const home = join(worktree(), 'cold-home')
   mkdirSync(home, { recursive: true })
 
@@ -737,7 +740,7 @@ async function withStalledDownload(body: (download: StalledDownload) => Promise<
 
   try {
     await withEnv(overrides, () =>
-      body({ launcher, marker, requests: () => requestCount, stagingDir: join(home, '.impeccable', 'bin', '0.0.0') }),
+      body({ launcher, marker, requests: () => requestCount, stagingDir: join(home, '.impeccable', 'bin', version) }),
     )
   } finally {
     server.closeAllConnections()
