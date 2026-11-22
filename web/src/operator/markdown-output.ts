@@ -117,6 +117,7 @@ function labelIsUrl(label: string, url: URL): boolean {
 /** Whether the host a label shows is written with non-ASCII characters. The label is the text as typed. */
 function labelHostIsNonAscii(label: string): boolean {
   const authority = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(label.trim())?.[1] ?? ''
+  // eslint-disable-next-line no-control-regex -- The complete ASCII interval is intentional.
   return /[^\u0000-\u007F]/.test(authority)
 }
 

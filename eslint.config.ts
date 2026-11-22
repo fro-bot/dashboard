@@ -1,13 +1,14 @@
+import type {Linter} from 'eslint'
 import {defineConfig} from '@bfra.me/eslint-config'
 import tseslint from 'typescript-eslint'
 
-export default defineConfig(
+const narrowTrees = ['web/**', '.opencode/**']
+
+const backendConfig = await defineConfig(
   {
     name: '@fro-bot/dashboard',
     // AI-authored planning/solution docs (docs/plans, docs/solutions, docs/brainstorms)
     // are generated artifacts, not hand-authored source — exclude them from linting.
-    // web/ is a Vite+React workspace with its own tsconfig — exclude it from the
-    // backend's erasableSyntaxOnly config (full TS is valid there via Vite build).
     // .agents/ is a vendored shared-skill bundle (e.g. .agents/skills/impeccable) of
     // third-party .mjs/.md files — not our source; linting it reports tens of thousands
     // of errors.
@@ -15,9 +16,7 @@ export default defineConfig(
       'docs/plans/**',
       'docs/solutions/**',
       'docs/brainstorms/**',
-      'web/**',
       '.agents/**',
-      '.opencode/**',
     ],
     typescript: {
       tsconfigPath: './tsconfig.json',
@@ -41,3 +40,29 @@ export default defineConfig(
     },
   },
 )
+
+const config: Linter.Config[] = [
+  // Keep global ignores global; scope every other inherited config away from the
+  // Vite and OpenCode trees, which must not inherit backend type/style rules.
+  ...backendConfig.map(config =>
+    Object.keys(config).every(key => key === 'name' || key === 'ignores')
+      ? config
+      : {...config, ignores: [...(config.ignores ?? []), ...narrowTrees]},
+  ),
+  {
+    name: '@fro-bot/dashboard/narrow-correctness',
+    files: ['{web,.opencode}/**/*.?([cm])[jt]s?(x)'],
+    languageOptions: {parser: tseslint.parser},
+    rules: {
+      'no-debugger': 'error',
+      'no-unreachable': 'error',
+      'no-unsafe-finally': 'error',
+      'no-dupe-keys': 'error',
+      'no-duplicate-case': 'error',
+      'no-constant-binary-expression': 'error',
+      'no-control-regex': 'error',
+    },
+  },
+]
+
+export default config
