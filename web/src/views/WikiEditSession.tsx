@@ -599,7 +599,6 @@ export function WikiEditSession(props: WikiEditSessionProps) {
   useEffect(() => {
     setConfirmOpen(current => (current !== null && !sameSnapshot(current, snapshot) ? null : current))
     setConfirmed(current => (current !== null && !sameSnapshot(current, snapshot) ? null : current))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snapshotKey])
 
   // Read the question out: focus goes to its heading when it opens.
@@ -764,7 +763,6 @@ export function WikiEditSession(props: WikiEditSessionProps) {
       setDoc(next)
       scheduleDraftWrite()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page.corrections])
 
   // -------------------------------------------------------------------------
@@ -1153,7 +1151,6 @@ export function WikiEditSession(props: WikiEditSessionProps) {
     openLookupRef.current = true
     void store.markPendingUnknown(pageId)
     void checkStatus()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // -------------------------------------------------------------------------
