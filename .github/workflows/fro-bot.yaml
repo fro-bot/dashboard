@@ -79,6 +79,17 @@ env:
       (untrusted input in run: blocks or shell eval); minimal permissions; no
       secrets in logs.
 
+    Do NOT run build, lint, or type-check commands at any scope, or repository-wide
+    or directory-wide test commands in any form; dedicated CI jobs (`main.yaml`) own
+    those gates for this PR. This includes aliases such as `bun run check-types`,
+    `bun run lint`, `bun run test`, `bun run build:web`, `bunx vitest run <directory>`,
+    `bunx eslint`, and `bunx tsc --noEmit`, even if
+    repository instructions list them. The Test coverage rule above is a check on the diff, not
+    a run: inspect the diff, relevant code, and test files, and derive `### Missing
+    tests` from that evidence, not by running a suite. You may run one named test file
+    or a minimal empirical probe only to validate a concrete finding, not merely to show
+    tests pass. State the command and the claim it tested.
+
     Hard boundaries:
     - Review only. Do NOT push commits, modify files, create branches, or open PRs.
     - Do NOT use labels, assignments, or milestone changes.
