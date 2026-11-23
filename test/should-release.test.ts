@@ -215,6 +215,17 @@ describe('should-release — web/** changes trigger release', () => {
     expect(stdout).toMatch(/^skip:/)
   })
 
+  it.each(['web/src/runtime.test.js', 'web/src/runtime.test.mjs'])(
+    'skips when only %s changes',
+    path => {
+      const base = writePkg(tmpDir, 'base.json', BASE_PKG)
+      const head = writePkg(tmpDir, 'head.json', BASE_PKG)
+      const {exitCode, stdout} = runGuard(path, base, head)
+      expect(exitCode).toBe(1)
+      expect(stdout).toMatch(/^skip:/)
+    },
+  )
+
   it('releases when a web/ test file changes alongside a non-test web/ source file', () => {
     const base = writePkg(tmpDir, 'base.json', BASE_PKG)
     const head = writePkg(tmpDir, 'head.json', BASE_PKG)
