@@ -5,7 +5,7 @@
 FROM oven/bun:1.4.5@sha256:3aa040e5445efa09d75bb428a64ba50db13e2b3ac9b6b0c7f145615f62b2ee18 AS bun
 
 # ── Builder stage ─────────────────────────────────────────────────────────────
-FROM node:24-trixie-slim@sha256:fe9b16c1666f3b5c89aa27efb5a1233e29767d135bbd3c7afb167b58387c9e7f AS builder
+FROM node:24-trixie-slim@sha256:4d00acb4bcc42c454c4eb801526f7ad7f772ea3bd4fd168c5cc2e384abcbb9d4 AS builder
 
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 
@@ -26,7 +26,7 @@ ENV VITE_DASHBOARD_VERSION=$DASHBOARD_VERSION
 RUN bun run build:web
 
 # ── Production dependency stage ───────────────────────────────────────────────
-FROM node:24-trixie-slim@sha256:fe9b16c1666f3b5c89aa27efb5a1233e29767d135bbd3c7afb167b58387c9e7f AS prod-deps
+FROM node:24-trixie-slim@sha256:4d00acb4bcc42c454c4eb801526f7ad7f772ea3bd4fd168c5cc2e384abcbb9d4 AS prod-deps
 
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 
@@ -40,7 +40,7 @@ COPY package.json bun.lock bunfig.toml ./
 RUN bun install --production --frozen-lockfile --ignore-scripts
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-FROM node:24-trixie-slim@sha256:fe9b16c1666f3b5c89aa27efb5a1233e29767d135bbd3c7afb167b58387c9e7f
+FROM node:24-trixie-slim@sha256:4d00acb4bcc42c454c4eb801526f7ad7f772ea3bd4fd168c5cc2e384abcbb9d4
 
 # The pinned base still ships zlib1g 1.3.1-1+b1 (CVE-2026-85091, CVE-2026-76844). Remove this once a node digest
 # with 1:1.3.dfsg+really1.3.1-1+deb13u1 or later lands.
