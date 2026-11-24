@@ -254,3 +254,22 @@ describe('fro-bot workflow — daily report', () => {
     expect(prompt).toMatch(/real (?:code|scoped).+remediation/iu)
   })
 })
+
+describe('fro-bot workflow — PR review leaves the gates to CI', () => {
+  // A review that runs the build, typecheck, lint and test gates spends its run on work dedicated CI jobs already do.
+  const review = squash(workflow.env.PR_REVIEW_PROMPT ?? '')
+
+  it('forbids the gate commands, names the repository aliases and allows one named probe', () => {
+    expect(review).toContain('Do NOT run build, lint, or type-check commands at any scope')
+    expect(review).toContain('repository-wide or directory-wide test commands in any form')
+    expect(review).toContain('dedicated CI jobs (`main.yaml`) own those gates for this PR')
+    for (const alias of ['bun run check-types', 'bun run lint', 'bun run test']) {
+      expect(review, alias).toContain(`\`${alias}\``)
+    }
+    expect(review).toContain('even if repository instructions list them')
+    expect(review).toContain(
+      'You may run one named test file or a minimal empirical probe only to validate a concrete finding',
+    )
+    expect(review).toContain('State the command and the claim it tested.')
+  })
+})
