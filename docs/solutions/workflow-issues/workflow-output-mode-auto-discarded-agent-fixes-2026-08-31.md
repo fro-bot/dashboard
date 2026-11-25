@@ -286,6 +286,36 @@ consumer. The caller-side conditional works but requires each workflow to
 hand-maintain a copy of the trigger classification, and drift there fails
 silently in the unsafe direction.
 
+## Residual: the scheduled-run token is readable by the model
+
+The capability boundary on `schedule` and `workflow_dispatch` runs is the credential, and that credential reaches the model's shell. `isolate-agent` does not change that.
+
+Current workflow, `.github/workflows/fro-bot.yaml`:
+
+- `:401` pins `fro-bot/agent@e6386cadf0854fa6ff9bf91f8e52252813264959` (v0.147.2).
+- `:412` sets `isolate-agent: 'true'`.
+- `:415` passes `github-token: ${{ secrets.FRO_BOT_PAT }}`.
+- `:382` sets `persist-credentials: false` on the checkout for every trigger; `isolate-agent` refuses a checkout that persisted one. The conditional in "The fix" above is the form that predates isolation; delivery now goes through the Action's `gh`-backed credential helper (`:380-381`).
+
+What `isolate-agent` withholds at that pin, and what it does not:
+
+| Reachable by the model's shell? | Credential | Source at the pin |
+| --- | --- | --- |
+| No | The Action's own `INPUT_GITHUB-TOKEN` in `/proc/<pid>/environ`, `$GITHUB_ENV`, `$GITHUB_OUTPUT`, private `RUNNER_TEMP` | [README "Credential limits"](https://github.com/fro-bot/agent/blob/e6386cadf0854fa6ff9bf91f8e52252813264959/README.md?plain=1#L117) |
+| No | The provider key (held by a key proxy) | [README `isolate-agent` input](https://github.com/fro-bot/agent/blob/e6386cadf0854fa6ff9bf91f8e52252813264959/README.md?plain=1#L205) |
+| **Yes** | The GitHub token the trigger provisions, as the `gh` config (`hosts.yml`) | below |
+
+Only `schedule` and `workflow_dispatch` provision the credential ([`response-delivery.ts:12-25`](https://github.com/fro-bot/agent/blob/e6386cadf0854fa6ff9bf91f8e52252813264959/packages/runtime/src/agent/response-delivery.ts#L12-L25)). For those, `gh auth login --with-token` writes the token into a per-run `GH_CONFIG_DIR/hosts.yml`, and the upstream source calls the result an honest residual: readable by the model's same-user shell through `cat "$GH_CONFIG_DIR/hosts.yml"` or `gh auth token`, and it does not close deliberate exfiltration ([`gh-auth.ts:145-149`](https://github.com/fro-bot/agent/blob/e6386cadf0854fa6ff9bf91f8e52252813264959/src/services/setup/gh-auth.ts#L145-L149)). Under `isolate-agent` that directory is handed to the sandbox user and named in its environment ([`sandbox-lifecycle.ts:1054`](https://github.com/fro-bot/agent/blob/e6386cadf0854fa6ff9bf91f8e52252813264959/src/harness/phases/sandbox-lifecycle.ts#L1054), [`:1150`](https://github.com/fro-bot/agent/blob/e6386cadf0854fa6ff9bf91f8e52252813264959/src/harness/phases/sandbox-lifecycle.ts#L1150)). The upstream docs say the same: provisioned credentials stay readable by the model ([wiki](https://github.com/fro-bot/agent/blob/e6386cadf0854fa6ff9bf91f8e52252813264959/docs/wiki/Setup%20and%20Configuration.md?plain=1#L292)).
+
+So on a scheduled or dispatched `branch-pr` run, a model with shell access can read `FRO_BOT_PAT`, and anything that PAT can do, the model can do. This document does not record the PAT's scopes.
+
+The remedy is open. Two options, with no choice recorded:
+
+- **Fine-grained token.** Give the agent step a short-lived, narrowly scoped token so there is little to steal. Upstream calls this credential minimization and prefers it for credentials ([`same-job-phase-split-not-a-security-boundary`](https://github.com/fro-bot/agent/blob/e6386cadf0854fa6ff9bf91f8e52252813264959/docs/solutions/best-practices/same-job-phase-split-not-a-security-boundary-2026-07-04.md)).
+- **Draft-and-publish split.** The agent job holds no write credential and hands its changes over; a separate job holds the credential and publishes. Upstream's README names this for the case where the agent job's token is not one you would accept the model holding ([`README.md:117`](https://github.com/fro-bot/agent/blob/e6386cadf0854fa6ff9bf91f8e52252813264959/README.md?plain=1#L117)).
+
+Either one changes how scheduled runs deliver, so the choice needs a verified `workflow_dispatch` run that produces a `fro-bot`-authored PR, as above.
+
 ## Related
 
 - `docs/solutions/workflow-issues/unit-green-is-not-feature-done-verify-the-assembled-surface-2026-06-23.md`
