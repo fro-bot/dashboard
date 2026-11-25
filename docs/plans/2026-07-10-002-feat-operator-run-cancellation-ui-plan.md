@@ -389,5 +389,5 @@ runId, or internal detail in the DOM; no console errors; screenshots captured.
 ## Sources & References
 
 - **Origin document:** `docs/brainstorms/2026-07-10-operator-run-cancellation-ui-requirements.md`
-- Canonical contract: `.slim/clonedeps/repos/fro-bot__agent/packages/gateway/src/operator-contract/responses.ts` (`OperatorCancelResponse`), `parse.ts`, `run-status.ts` (`PHASE_TO_WEB_STATUS`)
+- Canonical contract, read at `fro-bot/agent` `v0.83.1` (the release the 1.6.0 bump targets): `packages/gateway/src/operator-contract/responses.ts` (`OperatorCancelResponse`), `parse.ts`, `run-status.ts` (`PHASE_TO_WEB_STATUS`). Read it with `git -C .slim/clonedeps/repos/fro-bot__agent show v0.83.1:<path>`, and use the clone's working tree only if `git describe --tags --exact-match HEAD` reports `v0.83.1` (see `docs/solutions/best-practices/check-a-dependency-clone-ref-before-citing-it-as-canonical-2026-11-24.md`).
 - Related issue: #179
