@@ -115,7 +115,10 @@ A mutating route's error responses are an information surface. Collapse them:
   returns `{success: false, error: {kind: 'policy-unavailable'}}`, and `fetchRunIndex` in
   `public/operator-run-index.js` returns `{kind: 'policy-unavailable'}`. Any other `503`
   (an unreadable body, or a different `error`) stays an ordinary non-2xx: the repo picker shows
-  "Repository list unavailable." and the run index takes its unavailable state. In the
+  "Repository list unavailable." and the run index takes its unavailable state, except that a
+  picker already in the policy state keeps showing the policy copy through a later non-policy
+  failure (401 and 403 included); only a `policy-unavailable` response or a successful listing,
+  empty or not, replaces it and ends the 30-second retry. In the
   `policy-unavailable` state both surfaces render the fixed copy "Operator policy unavailable"
   with "Listings are hidden because the gateway can't load its redaction policy. This page
   retries automatically." (`LISTING_FAILURE_COPY` in `web/src/operator/copy.ts`). The run index
@@ -180,7 +183,9 @@ error). Make it a real reducer state that does not overwrite `not-found`/`failed
   reintroduces an oracle — review it as a security change, not a UX tweak. The one
   allowed distinction is `policy-unavailable`: it reveals only gateway-wide policy
   state. The gateway decides it from a process-wide policy-availability check, after
-  authentication and the rate limit and before any binding is read, so every caller
+  authentication and the rate limit and before any binding is read (Gate 3,
+  `deps.isPolicyAvailable()`, in the `fro-bot/agent` files
+  `packages/gateway/src/web/operator/repos-route.ts` and `runs-route.ts`), so every caller
   who passes those gets the same answer whatever repo or account they hold, and the
   body names no repository.
 
