@@ -127,11 +127,13 @@ inlined boundary types for RunPhase/Surface/RunState).
 
 `GET /operator/repos` and `GET /operator/runs` answer `503 {error: 'redaction-policy-unavailable'}` while the
 gateway holds no usable redaction policy, where they used to answer an empty `200`. The change is a new status
-on existing routes, with no field changes, and it is part of the pinned contract. The dashboard adds no code
-for it: the server client's `listRepos` and the browser's `listRepos` and `fetchRunIndex` already treat any
-non-2xx as a failure and never read the body. The repo picker shows its generic unavailable copy and the run
-index shows its unavailable state, so neither renders an empty list for a gateway that has no policy. Tests
-pin the server client's `listRepos` and the browser's `fetchRunIndex`. (This README carries no version literal; the conformance test enforces that.)
+on existing routes, with no field changes, and it is part of the pinned contract. The server client's
+`listRepos` treats it as an ordinary non-2xx and never reads the body. The browser's `listRepos` and
+`fetchRunIndex` read `body.error` for that status only: `redaction-policy-unavailable` routes to a distinct
+`policy-unavailable` state with fixed copy, and any other 503 stays a generic failure. Neither renders an empty
+list for a gateway that has no policy. Tests pin the server client's `listRepos`
+(`test/operator-client.test.ts`) and the browser's policy state (`web/src/operator/listing-policy.test.ts`,
+`test/operator-run-index-core.test.js`). (This README carries no version literal; the conformance test enforces that.)
 
 ## Omissions vs upstream
 
