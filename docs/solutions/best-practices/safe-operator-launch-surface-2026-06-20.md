@@ -109,13 +109,19 @@ A mutating route's error responses are an information surface. Collapse them:
   count/ordering/timing/per-item-denial inference (denied repos are simply absent).
 - As of operator contract 1.15.0, `GET /operator/repos` and `GET /operator/runs` answer
   `503 {error: 'redaction-policy-unavailable'}` while the gateway holds no usable redaction
-  policy, where they used to answer an empty `200`. No dashboard code reads that body. The
-  `503` is an ordinary non-2xx: the repo picker shows "Repository list unavailable." (the
-  same copy as a `500`), and the run index takes its unavailable state without an auth signal.
-  Neither path renders "No repositories configured." or the empty-runs state, so a gateway
-  with no policy is never mistaken for an empty account. Keep it that way: do not add a
-  branch that reads this body or special-cases the status. The gateway and dashboard pins
-  move together.
+  policy (not an empty `200`). Both browser clients read that body, for that status only, and
+  route it to a distinct `policy-unavailable` state: `listRepos` in `public/operator-launch.js`
+  returns `{success: false, error: {kind: 'policy-unavailable'}}`, and `fetchRunIndex` in
+  `public/operator-run-index.js` returns `{kind: 'policy-unavailable'}`. Any other `503`
+  (an unreadable body, or a different `error`) stays an ordinary non-2xx: the repo picker shows
+  "Repository list unavailable." and the run index takes its unavailable state. In the
+  `policy-unavailable` state both surfaces render the fixed copy "Operator policy unavailable"
+  with "Listings are hidden because the gateway can't load its redaction policy. This page
+  retries automatically." (`LISTING_FAILURE_COPY` in `web/src/operator/copy.ts`). The run index
+  drops every card not owned by a live stream or pending launch. Neither path renders "No
+  repositories configured." or the empty-runs state, so a gateway with no policy is never
+  mistaken for an empty account. The body is read only to compare `error` to that one string;
+  it is never rendered. The gateway and dashboard pins move together.
 
 ### 4. The browser operator-client pattern
 
