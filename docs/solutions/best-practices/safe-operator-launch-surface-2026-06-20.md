@@ -118,7 +118,7 @@ A mutating route's error responses are an information surface. Collapse them:
   "Repository list unavailable." and the run index takes its unavailable state, except that a
   picker already in the policy state keeps showing the policy copy through a later non-policy
   failure (401 and 403 included); only a `policy-unavailable` response or a successful listing,
-  empty or not, replaces it and ends the 30-second retry. In the
+  empty or not, replaces it and ends the 30-second retry (tearing down the launch UI also clears the timer). In the
   `policy-unavailable` state both surfaces render the fixed copy "Operator policy unavailable"
   with "Listings are hidden because the gateway can't load its redaction policy. This page
   retries automatically." (`LISTING_FAILURE_COPY` in `web/src/operator/copy.ts`). The run index
