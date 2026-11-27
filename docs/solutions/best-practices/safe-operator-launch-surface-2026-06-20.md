@@ -25,7 +25,8 @@ issue: fro-bot/dashboard#47
 The dashboard's GitHub data path is read-only, and its one GitHub write
 capability is the scoped wiki write under `/api/wiki`. The operator surface needed
 a single write action of its own: launch a run (`POST /operator/runs`) plus a repo
-picker (`GET /operator/repos`), against the released gateway operator contract 1.2.0.
+picker (`GET /operator/repos`), against the gateway operator contract pinned in
+`src/gateway/operator-contract/version.ts` (`OPERATOR_CONTRACT_VERSION`, currently 1.15.0).
 This was the dashboard's first mutating-route consumer and first client-side
 operator client. Introducing write capability into a read-mostly app — safely — is
 the load-bearing problem, and several decisions are non-obvious.
@@ -175,8 +176,13 @@ error). Make it a real reducer state that does not overwrite `not-found`/`failed
 - Keep the SSE client's `PINNED_CONTRACT_VERSION` equal to the vendored contract
   version with a test, so a bump can't drift one without the other.
 - Any new error-state distinction on the launch/repos path (per-repo 400 copy, a
-  timing or count difference in the picker) reintroduces an oracle — review it as a
-  security change, not a UX tweak.
+  timing or count difference in the picker, any state that varies by repo or account)
+  reintroduces an oracle — review it as a security change, not a UX tweak. The one
+  allowed distinction is `policy-unavailable`: it reveals only gateway-wide policy
+  state. The gateway decides it from a process-wide policy-availability check, after
+  authentication and the rate limit and before any binding is read, so every caller
+  who passes those gets the same answer whatever repo or account they hold, and the
+  body names no repository.
 
 ## Examples
 
